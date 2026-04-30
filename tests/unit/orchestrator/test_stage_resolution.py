@@ -112,12 +112,12 @@ class TestRuntimeProfileConfig:
         config = OrchestratorConfig(
             runtime_profile=RuntimeProfileConfig(
                 default="codex",
-                stages={"evaluate": "claude_code"},
+                stages={"evaluate": "claude"},
             )
         )
         assert config.runtime_profile is not None
         assert config.runtime_profile.default == "codex"
-        assert config.runtime_profile.stages == {"evaluate": "claude_code"}
+        assert config.runtime_profile.stages == {"evaluate": "claude"}
 
     def test_unknown_stage_key_rejected_at_validation(self) -> None:
         # Pydantic wraps validator-raised exceptions in its own
@@ -155,3 +155,23 @@ class TestRuntimeProfileConfig:
             fallback=legacy.runtime_backend,
         )
         assert runtime == "codex"
+
+    def test_invalid_runtime_profile_default_backend_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as info:
+            RuntimeProfileConfig(default="cluade")
+        msg = str(info.value)
+        assert "runtime_profile.default" in msg
+        assert "claude" in msg
+        assert "codex" in msg
+
+    def test_invalid_runtime_profile_stage_backend_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as info:
+            RuntimeProfileConfig(stages={"execute": ""})
+        msg = str(info.value)
+        assert "runtime_profile.stages['execute']" in msg
+        assert "claude" in msg
+        assert "codex" in msg
