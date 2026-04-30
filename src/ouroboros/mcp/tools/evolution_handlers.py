@@ -29,6 +29,7 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
     build_evolve_subagent,
     build_subagent_result,
@@ -100,12 +101,19 @@ def _resolve_evolve_verification_working_dir(
 
 
 @dataclass
-class EvolveStepHandler:
+class EvolveStepHandler(BridgeAwareMixin):
     """Handler for the ouroboros_evolve_step tool.
 
     Runs exactly ONE generation of the evolutionary loop.
     Designed for Ralph integration: stateless between calls,
     all state reconstructed from events.
+
+    Inherits :class:`BridgeAwareMixin` (#475) so the composition
+    root's loop-injection automatically populates ``mcp_manager`` and
+    ``mcp_tool_prefix`` when an MCP bridge is configured. The bridge
+    is forwarded into the inner ``EvolutionaryLoop`` runner whenever it
+    is available so dynamic external MCP servers reach the evolution
+    pipeline without per-handler explicit wiring.
     """
 
     evolutionary_loop: Any | None = field(default=None, repr=False)
