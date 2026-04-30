@@ -51,7 +51,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   "schema_version": 1,
   "contract_id": "01HXAB...",            // ULID, 26 chars, sortable, no extra dependency
   "correlation_id": "01HXAC...",         // monotonic per chain
-  "target_type": "lineage",              // values declared in events/control.py: session | execution | lineage | agent_process
+  "target_type": "lineage",              // open string; known values live in events/control.py
   "target_id": "ralph-...-v3",
   "directive": "evaluate",               // core.directive.Directive.value (lowercase)
   "emitted_by": "orchestrator",
@@ -96,7 +96,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 
 **Risks.**
 - A single long-running stream ties up one connection per in-flight contract. Mitigation: `deadline_ms` is enforced server-side as a relative timeout from request receipt; abandoned streams are closed when the timeout expires regardless of client behavior.
-- Reconnect semantics. Mitigation: the Coordinator reconnects to the same runtime endpoint with the same `(contract_id, correlation_id)`; D6 stream replay and Coordinator-side duplicate suppression make reconnection safe.
+- Reconnect semantics. Mitigation: the Coordinator reconnects to the same runtime endpoint with the same `(contract_id, correlation_id)` after ordinary transport drops; D6 stream replay and Coordinator-side duplicate suppression make reconnection safe. Runtime process death is a separate D7 terminal failure.
 
 ### D4 — Coordinator topology: embedded with abstract interface
 
@@ -171,7 +171,8 @@ on_timeout = "retry"        # "retry" or "cancel"
 | Failure mode | Directive | Notes |
 |---|---|---|
 | Runtime exceeded `deadline_ms` | `retry` while budget remains, then `cancel` | Budget owned by the existing resilience layer |
-| Runtime crash / connection drop | `cancel` immediately | Cooperative trust: do not assume retry safety after process death; this is not the D6 retry path |
+| Transport connection drop while runtime remains alive | no new directive; reconnect via D6 | Coordinator replays cached prefix and resumes the in-flight stream for the same `(contract_id, correlation_id)` |
+| Runtime process crash / lost runtime identity | `cancel` immediately | Cooperative trust: do not assume retry safety after process death; this is not the D6 reconnect path |
 | Schema validation failure on result envelope | `cancel` | Malformed envelope is not retryable |
 | Runtime explicitly returned `wait` | propagate `wait` | External input dependency surfaced to operator |
 
@@ -206,7 +207,7 @@ sequenceDiagram
 | `contract_id = ULID` | this RFC, D2 | Inherited by [#513](https://github.com/Q00/ouroboros/issues/513) |
 | `artifact_ref = "sha256:..."` | [#512](https://github.com/Q00/ouroboros/issues/512) C2 | Used in result envelope (D2) |
 | Replay does not re-execute LLM calls | #476 M3 + #518 | Honored by D6 idempotency cache |
-| `target_type` vocabulary | events/control.py (#492) | Authoritative in this RFC's D2 |
+| `target_type` vocabulary | events/control.py (#492) | Open string with known values documented there; this RFC must not close the set |
 | `policy.capabilities.changed` invariant | #476 Q4 | Reused verbatim in D5 |
 
 ## Pre-merge checklist
