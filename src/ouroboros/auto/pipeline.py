@@ -101,12 +101,15 @@ class AutoPipeline:
         if state.phase == AutoPhase.SEED_GENERATION:
             try:
                 seed = await self.seed_generator(state.interview_session_id or "")
+                if not isinstance(seed, Seed):
+                    msg = f"seed generator returned {type(seed).__name__}, expected Seed"
+                    raise TypeError(msg)
+                state.seed_id = seed.metadata.seed_id
+                state.seed_artifact = seed.to_dict()
             except Exception as exc:
                 state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
                 self._save(state)
                 return self._result(state, ledger, blocker=state.last_error)
-            state.seed_id = seed.metadata.seed_id
-            state.seed_artifact = seed.to_dict()
             state.mark_progress("Seed generated", tool_name="seed_generator")
             self._save(state)
             state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
@@ -170,12 +173,15 @@ class AutoPipeline:
             self._save(state)
         try:
             run_meta = await self.run_starter(seed)
+            if not isinstance(run_meta, dict):
+                msg = f"run starter returned {type(run_meta).__name__}, expected dict"
+                raise TypeError(msg)
+            state.job_id = _optional_str(run_meta.get("job_id"))
+            state.execution_id = _optional_str(run_meta.get("execution_id"))
         except Exception as exc:
             state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
-        state.job_id = run_meta.get("job_id")
-        state.execution_id = run_meta.get("execution_id")
         if not any((state.job_id, state.execution_id)):
             state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
             self._save(state)
@@ -209,3 +215,7 @@ class AutoPipeline:
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
             self.store.save(state)
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None

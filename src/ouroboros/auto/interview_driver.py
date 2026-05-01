@@ -73,18 +73,22 @@ class AutoInterviewDriver:
                         session_id=state.interview_session_id,
                     )
                 else:
-                    turn = await self._with_timeout(
-                        self.backend.resume(state.interview_session_id),
-                        state,
-                        tool_name="interview.resume",
+                    turn = _validate_turn(
+                        await self._with_timeout(
+                            self.backend.resume(state.interview_session_id),
+                            state,
+                            tool_name="interview.resume",
+                        )
                     )
                     state.pending_question = turn.question
                     self._save(state)
             else:
-                turn = await self._with_timeout(
-                    self.backend.start(state.goal, cwd=state.cwd),
-                    state,
-                    tool_name="interview.start",
+                turn = _validate_turn(
+                    await self._with_timeout(
+                        self.backend.start(state.goal, cwd=state.cwd),
+                        state,
+                        tool_name="interview.start",
+                    )
                 )
                 state.interview_session_id = turn.session_id
                 state.pending_question = turn.question
@@ -130,10 +134,12 @@ class AutoInterviewDriver:
             self._save(state)
 
             try:
-                turn = await self._with_timeout(
-                    self.backend.answer(turn.session_id, answer.prefixed_text),
-                    state,
-                    tool_name="interview.answer",
+                turn = _validate_turn(
+                    await self._with_timeout(
+                        self.backend.answer(turn.session_id, answer.prefixed_text),
+                        state,
+                        tool_name="interview.answer",
+                    )
                 )
             except TimeoutError as exc:
                 state.mark_blocked(str(exc), tool_name="interview.answer")
@@ -268,3 +274,19 @@ def _gap_prompt(gap: Gap) -> str:
         "runtime_context": "Which runtime stack, repo, and project patterns should be used?",
     }
     return prompts.get(gap.section, gap.message)
+
+
+def _validate_turn(value: object) -> InterviewTurn:
+    if not isinstance(value, InterviewTurn):
+        msg = f"interview backend returned {type(value).__name__}, expected InterviewTurn"
+        raise TypeError(msg)
+    if not isinstance(value.question, str):
+        msg = "interview backend returned non-string question"
+        raise TypeError(msg)
+    if not isinstance(value.session_id, str) or not value.session_id:
+        msg = "interview backend returned invalid session_id"
+        raise TypeError(msg)
+    if type(value.seed_ready) is not bool or type(value.completed) is not bool:
+        msg = "interview backend returned non-boolean completion flags"
+        raise TypeError(msg)
+    return value

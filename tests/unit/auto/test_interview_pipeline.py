@@ -731,3 +731,77 @@ async def test_pipeline_blocks_completed_interview_with_unresolved_ledger(tmp_pa
 
     assert result.status == "blocked"
     assert "unresolved ledger gaps" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marks_malformed_seed_generator_result_failed(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not restart")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not answer")
+
+    async def generate_seed(session_id: str):  # noqa: ANN202, ARG001
+        return {"not": "a seed"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.interview_completed = True
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "expected Seed" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marks_malformed_run_starter_result_failed(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed):  # noqa: ANN202, ARG001
+        return ["not", "metadata"]
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "expected dict" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_malformed_backend_turn(tmp_path) -> None:
+    async def start(goal: str, cwd: str):  # noqa: ANN202, ARG001
+        return {"question": "not a turn"}
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("malformed start should not answer")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "expected InterviewTurn" in (result.blocker or "")
