@@ -442,3 +442,40 @@ def test_auto_answerer_non_goals_respect_explicit_goal_scope() -> None:
     for goal, forbidden_non_goal in cases:
         answer = AutoAnswerer().answer("What are the non-goals?", SeedDraftLedger.from_goal(goal))
         assert forbidden_non_goal not in answer.text.lower()
+
+
+def test_ledger_assumptions_use_latest_resolved_facts_for_risk() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    _fill_minimal_ready_ledger(ledger)
+    for value in ("CLI user", "CLI user", "CLI user"):
+        ledger.add_entry(
+            "actors",
+            LedgerEntry(
+                key="actors.primary",
+                value=value,
+                source=LedgerSource.ASSUMPTION,
+                confidence=0.72,
+                status=LedgerStatus.INFERRED,
+            ),
+        )
+
+    assert ledger.assumptions().count("CLI user") == 1
+    assert GradeGate().grade_ledger(ledger).scores["risk"] <= 0.25
+
+
+def test_auto_answerer_non_goals_use_latest_resolved_goal() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    ledger.add_entry(
+        "goal",
+        LedgerEntry(
+            key="goal.primary",
+            value="Add authentication to the app",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.95,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+
+    answer = AutoAnswerer().answer("What are the non-goals?", ledger)
+
+    assert "authentication" not in answer.text.lower()

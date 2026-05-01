@@ -161,7 +161,17 @@ class SeedDraftLedger:
             for existing in same_key_entries
             if _normalize_conflict_value(existing.value) == entry_value
         ]
-        if matching_prior:
+        if (
+            same_key_entries
+            and entry.source == LedgerSource.USER_GOAL
+            and entry.status == LedgerStatus.CONFIRMED
+        ):
+            for existing in same_key_entries:
+                existing.status = LedgerStatus.WEAK
+                existing.rationale = (
+                    existing.rationale or "Superseded by a later user-confirmed answer."
+                )
+        elif matching_prior:
             for existing in same_key_entries:
                 if entry.status == LedgerStatus.BLOCKED:
                     continue
@@ -283,12 +293,23 @@ class SeedDraftLedger:
         return ledger
 
     def _values_for_sources(self, sources: set[LedgerSource]) -> list[str]:
-        return [
-            entry.value
-            for section in self.sections.values()
-            for entry in section.entries
-            if entry.source in sources
-        ]
+        resolved: dict[tuple[str, str], str] = {}
+        inactive = {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+        for section in self.sections.values():
+            for entry in section.entries:
+                if entry.source not in sources or entry.status in inactive:
+                    continue
+                resolved[(section.name, entry.key)] = entry.value
+
+        values: list[str] = []
+        seen: set[str] = set()
+        for value in resolved.values():
+            normalized = _normalize_conflict_value(value)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            values.append(value)
+        return values
 
 
 def _normalize_conflict_value(value: str) -> str:

@@ -118,11 +118,7 @@ class AutoAnswerer:
             ledger.add_entry(section, entry)
 
     def _non_goal_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
-        goal_text = (
-            ledger.sections.get("goal").entries[0].value.lower()
-            if ledger.sections.get("goal") and ledger.sections["goal"].entries
-            else ""
-        )
+        goal_text = _latest_resolved_goal(ledger).lower()
         excluded = ["cloud sync", "paid services"]
         if not re.search(r"\b(auth|authentication|login|sign[- ]?in|signup|password)\b", goal_text):
             excluded.append("authentication")
@@ -284,6 +280,17 @@ def _is_actor_or_io_question(lowered: str) -> bool:
         return True
     return bool(re.search(r"\b(who|which)\s+(is|are)\s+the\s+users?\b", lowered))
 
+
+
+def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
+    section = ledger.sections.get("goal")
+    if section is None:
+        return ""
+    inactive = {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+    for entry in reversed(section.entries):
+        if entry.status not in inactive and entry.value.strip():
+            return entry.value
+    return ""
 
 def _blocker_for(question: str) -> AutoBlocker | None:
     lowered = question.lower()
