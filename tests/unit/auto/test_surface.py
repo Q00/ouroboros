@@ -117,3 +117,76 @@ def test_auto_handler_normalizes_injected_plugin_authoring_handlers() -> None:
     assert normalized_seed.opencode_mode == "subprocess"
     assert normalized_interview.agent_runtime_backend == "opencode"
     assert normalized_seed.agent_runtime_backend == "opencode"
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_forwards_run_subagent_envelope(monkeypatch) -> None:
+    async def fake_run(self, arguments):  # noqa: ARG001
+        from ouroboros.auto.pipeline import AutoPipelineResult
+
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+            run_session_id="session_1",
+            run_subagent={"tool_name": "ouroboros_execute_seed", "context": {"x": "y"}},
+        )
+
+    monkeypatch.setattr(AutoHandler, "_run", fake_run)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI"})
+
+    assert result.is_ok
+    assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_execute_seed"
+    assert '"_subagent"' in result.value.content[0].text
+
+
+def test_cli_opencode_plugin_uses_subprocess_authoring(monkeypatch) -> None:
+    from ouroboros.cli.commands import auto as auto_command
+
+    captured: dict[str, str | None] = {}
+
+    class FakeInterviewHandler:
+        def __init__(self, **kwargs):
+            captured["interview_mode"] = kwargs.get("opencode_mode")
+
+    class FakeGenerateSeedHandler:
+        def __init__(self, **kwargs):
+            captured["seed_mode"] = kwargs.get("opencode_mode")
+
+    class FakeExecuteSeedHandler:
+        def __init__(self, **kwargs):
+            captured["execute_mode"] = kwargs.get("opencode_mode")
+
+    class FakeStartExecuteSeedHandler:
+        def __init__(self, **kwargs):
+            captured["start_mode"] = kwargs.get("opencode_mode")
+
+    monkeypatch.setattr(auto_command, "get_opencode_mode", lambda: "plugin")
+    monkeypatch.setattr(auto_command, "InterviewHandler", FakeInterviewHandler)
+    monkeypatch.setattr(auto_command, "GenerateSeedHandler", FakeGenerateSeedHandler)
+    monkeypatch.setattr(auto_command, "ExecuteSeedHandler", FakeExecuteSeedHandler)
+    monkeypatch.setattr(auto_command, "StartExecuteSeedHandler", FakeStartExecuteSeedHandler)
+
+    # Instantiate the dependency block without running the whole pipeline.
+    opencode_mode = auto_command.get_opencode_mode()
+    authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
+    auto_command.InterviewHandler(
+        agent_runtime_backend="opencode", opencode_mode=authoring_opencode_mode
+    )
+    auto_command.GenerateSeedHandler(
+        agent_runtime_backend="opencode", opencode_mode=authoring_opencode_mode
+    )
+    execute_seed = auto_command.ExecuteSeedHandler(
+        agent_runtime_backend="opencode", opencode_mode=opencode_mode
+    )
+    auto_command.StartExecuteSeedHandler(
+        execute_handler=execute_seed, agent_runtime_backend="opencode", opencode_mode=opencode_mode
+    )
+
+    assert captured == {
+        "interview_mode": "subprocess",
+        "seed_mode": "subprocess",
+        "execute_mode": "plugin",
+        "start_mode": "plugin",
+    }

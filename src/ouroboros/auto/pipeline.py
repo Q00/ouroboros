@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.interview_driver import AutoInterviewDriver
@@ -15,7 +16,7 @@ from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import Seed
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
-RunStarter = Callable[[Seed], Awaitable[dict[str, str | None]]]
+RunStarter = Callable[[Seed], Awaitable[dict[str, Any]]]
 SeedSaver = Callable[[Seed], str]
 SeedLoader = Callable[[str], Seed]
 
@@ -33,6 +34,7 @@ class AutoPipelineResult:
     execution_id: str | None = None
     job_id: str | None = None
     run_session_id: str | None = None
+    run_subagent: dict[str, Any] | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -250,13 +252,16 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
         state.run_session_id = _optional_str(run_meta.get("session_id"))
+        run_subagent = (
+            run_meta.get("_subagent") if isinstance(run_meta.get("_subagent"), dict) else None
+        )
         if not any((state.job_id, state.execution_id, state.run_session_id)):
             state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
         state.transition(AutoPhase.COMPLETE, "execution started for A-grade Seed")
         self._save(state)
-        return self._result(state, ledger, review=review)
+        return self._result(state, ledger, review=review, run_subagent=run_subagent)
 
     def _result(
         self,
@@ -265,6 +270,7 @@ class AutoPipeline:
         *,
         review: SeedReview | None = None,
         blocker: str | None = None,
+        run_subagent: dict[str, Any] | None = None,
     ) -> AutoPipelineResult:
         return AutoPipelineResult(
             status=state.phase.value,
@@ -276,6 +282,7 @@ class AutoPipeline:
             execution_id=state.execution_id,
             job_id=state.job_id,
             run_session_id=state.run_session_id,
+            run_subagent=run_subagent,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -90,23 +91,28 @@ class AutoHandler:
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
+        meta: dict[str, Any] = {
+            "status": result.status,
+            "auto_session_id": result.auto_session_id,
+            "phase": result.phase,
+            "grade": result.grade,
+            "seed_path": result.seed_path,
+            "interview_session_id": result.interview_session_id,
+            "execution_id": result.execution_id,
+            "job_id": result.job_id,
+            "run_session_id": result.run_session_id,
+            "resume_command": f"ooo auto --resume {result.auto_session_id}",
+            "blocker": result.blocker,
+        }
+        text = _format_result(result)
+        if result.run_subagent is not None:
+            meta["_subagent"] = result.run_subagent
+            text = json.dumps({**meta, "message": text})
         return Result.ok(
             MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text=_format_result(result)),),
+                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=result.status in {"blocked", "failed"},
-                meta={
-                    "status": result.status,
-                    "auto_session_id": result.auto_session_id,
-                    "phase": result.phase,
-                    "grade": result.grade,
-                    "seed_path": result.seed_path,
-                    "interview_session_id": result.interview_session_id,
-                    "execution_id": result.execution_id,
-                    "job_id": result.job_id,
-                    "run_session_id": result.run_session_id,
-                    "resume_command": f"ooo auto --resume {result.auto_session_id}",
-                    "blocker": result.blocker,
-                },
+                meta=meta,
             )
         )
 

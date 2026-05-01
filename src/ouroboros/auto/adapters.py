@@ -84,7 +84,7 @@ class HandlerRunStarter:
         self.handler = handler
         self.cwd = cwd
 
-    async def __call__(self, seed: Seed) -> dict[str, str | None]:
+    async def __call__(self, seed: Seed) -> dict[str, object]:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )
@@ -93,11 +93,14 @@ class HandlerRunStarter:
             tool_name="ouroboros_start_execute_seed",
         )
         meta = result.meta or {}
-        return {
+        run_meta: dict[str, object] = {
             "job_id": _optional_str(meta.get("job_id")),
             "session_id": _optional_str(meta.get("session_id")),
             "execution_id": _optional_str(meta.get("execution_id")),
         }
+        if isinstance(meta.get("_subagent"), dict):
+            run_meta["_subagent"] = meta["_subagent"]
+        return run_meta
 
 
 def load_seed(path: str | Path) -> Seed:

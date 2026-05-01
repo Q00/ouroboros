@@ -22,6 +22,7 @@ from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 
@@ -103,11 +104,17 @@ async def _run_auto(
     state = (
         store.load(resume) if resume else AutoPipelineState(goal=goal or "", cwd=str(Path.cwd()))
     )
-    interview = InterviewHandler(agent_runtime_backend=runtime)
-    generate_seed = GenerateSeedHandler(agent_runtime_backend=runtime)
-    execute_seed = ExecuteSeedHandler(agent_runtime_backend=runtime)
+    opencode_mode = get_opencode_mode() if runtime == "opencode" else None
+    authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
+    interview = InterviewHandler(
+        agent_runtime_backend=runtime, opencode_mode=authoring_opencode_mode
+    )
+    generate_seed = GenerateSeedHandler(
+        agent_runtime_backend=runtime, opencode_mode=authoring_opencode_mode
+    )
+    execute_seed = ExecuteSeedHandler(agent_runtime_backend=runtime, opencode_mode=opencode_mode)
     start_execute = StartExecuteSeedHandler(
-        execute_handler=execute_seed, agent_runtime_backend=runtime
+        execute_handler=execute_seed, agent_runtime_backend=runtime, opencode_mode=opencode_mode
     )
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
