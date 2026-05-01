@@ -128,7 +128,13 @@ class AutoPipeline:
         else:
             review = None
 
-        if state.phase == AutoPhase.RUN and not any((state.job_id, state.execution_id)):
+        if state.phase == AutoPhase.RUN:
+            if any((state.job_id, state.execution_id)):
+                state.transition(
+                    AutoPhase.COMPLETE, "execution already started; using persisted run handle"
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review)
             state.mark_blocked(
                 "Run start status is unknown; refusing to start a duplicate execution",
                 tool_name="run_starter",
