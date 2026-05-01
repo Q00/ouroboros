@@ -172,6 +172,8 @@ def auto_handler(
     *,
     llm_backend: str | None = None,
     runtime_backend: str | None = None,
+    mcp_manager: object | None = None,
+    mcp_tool_prefix: str = "",
     opencode_mode: str | None = None,
 ) -> object:
     """Create an AutoHandler instance without adding it to legacy static tool tuples."""
@@ -181,6 +183,8 @@ def auto_handler(
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
+        mcp_manager=mcp_manager,
+        mcp_tool_prefix=mcp_tool_prefix,
     )
 
 
@@ -347,6 +351,8 @@ def get_ouroboros_tools(
             auto_handler(
                 llm_backend=llm_backend,
                 runtime_backend=runtime_backend,
+                mcp_manager=mcp_manager,
+                mcp_tool_prefix=mcp_tool_prefix,
                 opencode_mode=opencode_mode,
             ),
         )

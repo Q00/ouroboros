@@ -43,6 +43,8 @@ class AutoHandler:
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    mcp_manager: object | None = field(default=None, repr=False)
+    mcp_tool_prefix: str = ""
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -145,19 +147,14 @@ class AutoHandler:
             agent_runtime_backend=self.agent_runtime_backend,
             opencode_mode=authoring_opencode_mode,
         )
-        if self.start_execute_seed_handler is not None:
-            start_execute = self.start_execute_seed_handler
-        else:
-            execute_seed = ExecuteSeedHandler(
-                llm_backend=self.llm_backend,
-                agent_runtime_backend=self.agent_runtime_backend,
-                opencode_mode=self.opencode_mode,
-            )
-            start_execute = StartExecuteSeedHandler(
-                execute_handler=execute_seed,
-                agent_runtime_backend=self.agent_runtime_backend,
-                opencode_mode=self.opencode_mode,
-            )
+        start_execute = _execution_start_handler(
+            self.start_execute_seed_handler,
+            llm_backend=self.llm_backend,
+            agent_runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            mcp_manager=self.mcp_manager,
+            mcp_tool_prefix=self.mcp_tool_prefix,
+        )
 
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
@@ -226,6 +223,31 @@ def _authoring_seed_handler(
         event_store=handler.event_store,
         data_dir=handler.data_dir,
         agent_runtime_backend=handler.agent_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+
+
+def _execution_start_handler(
+    handler: StartExecuteSeedHandler | None,
+    *,
+    llm_backend: str | None,
+    agent_runtime_backend: str | None,
+    opencode_mode: str | None,
+    mcp_manager: object | None,
+    mcp_tool_prefix: str,
+) -> StartExecuteSeedHandler:
+    if handler is not None:
+        return handler
+    execute_seed = ExecuteSeedHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=agent_runtime_backend,
+        opencode_mode=opencode_mode,
+        mcp_manager=mcp_manager,
+        mcp_tool_prefix=mcp_tool_prefix,
+    )
+    return StartExecuteSeedHandler(
+        execute_handler=execute_seed,
+        agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
     )
 

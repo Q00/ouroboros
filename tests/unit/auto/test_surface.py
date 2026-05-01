@@ -13,6 +13,7 @@ from ouroboros.mcp.tools.auto_handler import (
     AutoHandler,
     _authoring_interview_handler,
     _authoring_seed_handler,
+    _execution_start_handler,
 )
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
@@ -117,6 +118,35 @@ def test_auto_handler_normalizes_injected_plugin_authoring_handlers() -> None:
     assert normalized_seed.opencode_mode == "subprocess"
     assert normalized_interview.agent_runtime_backend == "opencode"
     assert normalized_seed.agent_runtime_backend == "opencode"
+
+
+def test_auto_handler_fresh_execution_preserves_bridge_wiring() -> None:
+    manager = object()
+
+    start = _execution_start_handler(
+        None,
+        llm_backend="anthropic",
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+        mcp_manager=manager,
+        mcp_tool_prefix="bridge__",
+    )
+
+    assert start.execute_handler is not None
+    assert start.execute_handler.mcp_manager is manager
+    assert start.execute_handler.mcp_tool_prefix == "bridge__"
+
+
+def test_get_ouroboros_tools_forwards_bridge_wiring_to_auto_handler() -> None:
+    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+
+    manager = object()
+    handlers = get_ouroboros_tools(mcp_manager=manager, mcp_tool_prefix="bridge__")
+    auto = next(handler for handler in handlers if handler.definition.name == "ouroboros_auto")
+
+    assert isinstance(auto, AutoHandler)
+    assert auto.mcp_manager is manager
+    assert auto.mcp_tool_prefix == "bridge__"
 
 
 @pytest.mark.asyncio
