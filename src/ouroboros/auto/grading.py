@@ -183,7 +183,9 @@ class GradeGate:
         non_goals = []
         if ledger is not None:
             non_goal_section = ledger.sections.get("non_goals")
-            non_goals = [entry.value for entry in non_goal_section.entries] if non_goal_section else []
+            non_goals = (
+                [entry.value for entry in non_goal_section.entries] if non_goal_section else []
+            )
         if ledger is not None and not non_goals:
             findings.append(
                 GradeFinding(
@@ -215,7 +217,9 @@ class GradeGate:
             "ambiguity": min(1.0, 0.05 + 0.08 * len(findings) + 0.2 * len(blockers)),
             "testability": max(0.0, 0.95 - 0.25 * untestable_count),
             "execution_feasibility": 0.85 if not blockers else 0.4,
-            "risk": min(1.0, 0.05 * len(findings) + 0.3 * len(blockers) + 0.2 * high_risk_assumptions),
+            "risk": min(
+                1.0, 0.05 * len(findings) + 0.3 * len(blockers) + 0.2 * high_risk_assumptions
+            ),
         }
         return self._result(scores=scores, findings=findings, blockers=blockers)
 

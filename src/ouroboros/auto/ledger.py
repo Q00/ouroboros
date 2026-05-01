@@ -156,7 +156,10 @@ class SeedDraftLedger:
 
     def section_statuses(self) -> dict[str, LedgerStatus]:
         """Return aggregate statuses for required sections."""
-        return {name: self.sections.get(name, LedgerSection(name)).status() for name in REQUIRED_SECTIONS}
+        return {
+            name: self.sections.get(name, LedgerSection(name)).status()
+            for name in REQUIRED_SECTIONS
+        }
 
     def open_gaps(self) -> list[str]:
         """Return required sections that are not Seed-ready."""
@@ -184,8 +187,12 @@ class SeedDraftLedger:
                 for name, status in statuses.items()
                 if status in {LedgerStatus.CONFIRMED, LedgerStatus.DEFAULTED, LedgerStatus.INFERRED}
             ],
-            "weak_sections": [name for name, status in statuses.items() if status == LedgerStatus.WEAK],
-            "defaulted_sections": [name for name, status in statuses.items() if status == LedgerStatus.DEFAULTED],
+            "weak_sections": [
+                name for name, status in statuses.items() if status == LedgerStatus.WEAK
+            ],
+            "defaulted_sections": [
+                name for name, status in statuses.items() if status == LedgerStatus.DEFAULTED
+            ],
             "assumptions": [_truncate(value) for value in self.assumptions()],
             "non_goals": [_truncate(value) for value in self.non_goals()],
             "open_gaps": self.open_gaps(),

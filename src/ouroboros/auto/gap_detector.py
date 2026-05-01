@@ -59,7 +59,12 @@ class GapDetector:
         gaps: list[Gap] = []
         for section in REQUIRED_SECTIONS:
             status = statuses[section]
-            if status in {LedgerStatus.MISSING, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED, LedgerStatus.WEAK}:
+            if status in {
+                LedgerStatus.MISSING,
+                LedgerStatus.CONFLICTING,
+                LedgerStatus.BLOCKED,
+                LedgerStatus.WEAK,
+            }:
                 gaps.append(
                     Gap(
                         section=section,

@@ -41,7 +41,13 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.FAILED,
     },
     AutoPhase.SEED_GENERATION: {AutoPhase.REVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
-    AutoPhase.REVIEW: {AutoPhase.REPAIR, AutoPhase.RUN, AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED},
+    AutoPhase.REVIEW: {
+        AutoPhase.REPAIR,
+        AutoPhase.RUN,
+        AutoPhase.COMPLETE,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    },
     AutoPhase.REPAIR: {AutoPhase.REVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.RUN: {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.COMPLETE: set(),
@@ -178,7 +184,9 @@ class AutoStore:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(state.auto_session_id)
         tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.write_text(
+            json.dumps(state.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         tmp_path.replace(path)
         return path
 

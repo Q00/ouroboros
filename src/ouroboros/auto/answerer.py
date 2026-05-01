@@ -92,7 +92,9 @@ class AutoAnswerer:
             status=LedgerStatus.DEFAULTED,
             rationale="Conservative auto policy bounds MVP scope.",
         )
-        return AutoAnswer(value, AutoAnswerSource.NON_GOAL, 0.86, [("non_goals", entry)], non_goals=[value])
+        return AutoAnswer(
+            value, AutoAnswerSource.NON_GOAL, 0.86, [("non_goals", entry)], non_goals=[value]
+        )
 
     def _verification_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
         value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
