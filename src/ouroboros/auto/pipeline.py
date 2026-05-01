@@ -65,7 +65,7 @@ class AutoPipeline:
                 return self._result(state, ledger, blocker=interview.blocker)
             state.transition(AutoPhase.SEED_GENERATION, "generating Seed from auto interview")
             self._save(state)
-        elif state.phase != AutoPhase.SEED_GENERATION:
+        elif state.phase not in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
                 tool_name="auto_pipeline",
@@ -73,44 +73,62 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
-        try:
-            seed = await self.seed_generator(state.interview_session_id or "")
-        except Exception as exc:
-            state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
+        if state.phase == AutoPhase.SEED_GENERATION:
+            try:
+                seed = await self.seed_generator(state.interview_session_id or "")
+            except Exception as exc:
+                state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
+            state.seed_id = seed.metadata.seed_id
+            state.seed_artifact = seed.to_dict()
+            state.mark_progress("Seed generated", tool_name="seed_generator")
+            self._save(state)
+            state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
+            self._save(state)
+        elif state.seed_artifact:
+            seed = Seed.from_dict(state.seed_artifact)
+        else:
+            state.mark_blocked(
+                f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
+                tool_name="auto_pipeline",
+            )
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
-        state.seed_id = seed.metadata.seed_id
-        state.mark_progress("Seed generated", tool_name="seed_generator")
-        self._save(state)
 
-        state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
-        self._save(state)
-        reviewer = self.reviewer or SeedReviewer(self.grade_gate)
-        repairer = self.repairer or SeedRepairer(reviewer=reviewer)
-        seed, review, repairs = repairer.converge(seed, ledger=ledger)
-        state.repair_round = len(repairs)
-        state.last_grade = review.grade_result.grade.value
-        state.findings = [asdict(finding) for finding in review.findings]
-        state.ledger = ledger.to_dict()
-        self._save(state)
-
-        if not review.may_run:
-            state.mark_blocked("Seed did not reach A-grade", tool_name="grade_gate")
+        if state.phase == AutoPhase.REVIEW:
+            reviewer = self.reviewer or SeedReviewer(self.grade_gate)
+            repairer = self.repairer or SeedRepairer(reviewer=reviewer)
+            seed, review, repairs = repairer.converge(seed, ledger=ledger)
+            state.seed_artifact = seed.to_dict()
+            state.repair_round = len(repairs)
+            state.last_grade = review.grade_result.grade.value
+            state.findings = [asdict(finding) for finding in review.findings]
+            state.ledger = ledger.to_dict()
             self._save(state)
-            return self._result(state, ledger, review=review, blocker="Seed did not reach A-grade")
 
-        if self.skip_run:
-            state.transition(AutoPhase.COMPLETE, "A-grade Seed ready; skip-run requested")
-            self._save(state)
-            return self._result(state, ledger, review=review)
+            if not review.may_run:
+                state.mark_blocked("Seed did not reach A-grade", tool_name="grade_gate")
+                self._save(state)
+                return self._result(
+                    state, ledger, review=review, blocker="Seed did not reach A-grade"
+                )
+
+            if self.skip_run:
+                state.transition(AutoPhase.COMPLETE, "A-grade Seed ready; skip-run requested")
+                self._save(state)
+                return self._result(state, ledger, review=review)
+        else:
+            review = None
 
         if self.run_starter is None:
             state.mark_blocked("No run starter configured", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker="No run starter configured")
 
-        state.transition(AutoPhase.RUN, "starting execution for A-grade Seed")
-        self._save(state)
+        if state.phase != AutoPhase.RUN:
+            state.transition(AutoPhase.RUN, "starting execution for A-grade Seed")
+            self._save(state)
         try:
             run_meta = await self.run_starter(seed)
         except Exception as exc:
