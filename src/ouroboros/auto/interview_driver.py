@@ -92,7 +92,9 @@ class AutoInterviewDriver:
         except TimeoutError as exc:
             state.mark_blocked(str(exc), tool_name="interview.start")
             self._save(state)
-            return AutoInterviewResult("blocked", state.interview_session_id, ledger, state.current_round, str(exc))
+            return AutoInterviewResult(
+                "blocked", state.interview_session_id, ledger, state.current_round, str(exc)
+            )
 
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
             state.current_round = round_number
@@ -127,7 +129,9 @@ class AutoInterviewDriver:
             except TimeoutError as exc:
                 state.mark_blocked(str(exc), tool_name="interview.answer")
                 self._save(state)
-                return AutoInterviewResult("blocked", state.interview_session_id, ledger, round_number, str(exc))
+                return AutoInterviewResult(
+                    "blocked", state.interview_session_id, ledger, round_number, str(exc)
+                )
 
             state.interview_session_id = turn.session_id
             state.pending_question = turn.question
@@ -140,10 +144,16 @@ class AutoInterviewDriver:
             blocker = f"auto interview reached max rounds with unresolved gaps: {gaps}"
             state.mark_blocked(blocker, tool_name="interview_driver")
             self._save(state)
-            return AutoInterviewResult("blocked", state.interview_session_id, ledger, self.max_rounds, blocker)
-        return AutoInterviewResult("seed_ready", state.interview_session_id, ledger, self.max_rounds)
+            return AutoInterviewResult(
+                "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
+            )
+        return AutoInterviewResult(
+            "seed_ready", state.interview_session_id, ledger, self.max_rounds
+        )
 
-    async def _with_timeout(self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str) -> InterviewTurn:
+    async def _with_timeout(
+        self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str
+    ) -> InterviewTurn:
         try:
             return await asyncio.wait_for(awaitable, timeout=self.timeout_seconds)
         except TimeoutError as exc:

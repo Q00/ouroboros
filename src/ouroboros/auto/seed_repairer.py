@@ -59,10 +59,14 @@ class SeedRepairer:
                     acceptance.append(replacement)
                 applied.append(finding.fingerprint)
             elif finding.code == "missing_acceptance_criteria":
-                acceptance.append("A command/API check returns stable observable output or artifacts proving the task goal.")
+                acceptance.append(
+                    "A command/API check returns stable observable output or artifacts proving the task goal."
+                )
                 applied.append(finding.fingerprint)
             elif finding.code == "missing_constraints":
-                constraints.append("Use existing project patterns and avoid new dependencies unless required by acceptance criteria.")
+                constraints.append(
+                    "Use existing project patterns and avoid new dependencies unless required by acceptance criteria."
+                )
                 applied.append(finding.fingerprint)
             elif finding.code == "missing_non_goals" and ledger is not None:
                 ledger.add_entry(
@@ -87,9 +91,16 @@ class SeedRepairer:
                 "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
             }
         )
-        return RepairResult(changed=changed, seed=updated_seed, applied_repairs=tuple(applied), unresolved_findings=tuple(unresolved))
+        return RepairResult(
+            changed=changed,
+            seed=updated_seed,
+            applied_repairs=tuple(applied),
+            unresolved_findings=tuple(unresolved),
+        )
 
-    def converge(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> tuple[Seed, SeedReview, list[RepairResult]]:
+    def converge(
+        self, seed: Seed, *, ledger: SeedDraftLedger | None = None
+    ) -> tuple[Seed, SeedReview, list[RepairResult]]:
         """Review/repair until A-grade or bounded stop."""
         history: list[RepairResult] = []
         previous_high_fingerprints: set[str] = set()
@@ -98,7 +109,9 @@ class SeedRepairer:
         for _ in range(self.max_repair_rounds):
             if review.grade_result.grade == SeedGrade.A and review.may_run:
                 return current, review, history
-            high = {finding.fingerprint for finding in review.findings if finding.severity == "high"}
+            high = {
+                finding.fingerprint for finding in review.findings if finding.severity == "high"
+            }
             repair = self.repair_once(current, review, ledger=ledger)
             history.append(repair)
             if repair.blocker or not repair.changed:
