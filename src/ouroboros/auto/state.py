@@ -231,8 +231,13 @@ class AutoPipelineState:
         )
         for field_name in optional_string_fields:
             value = getattr(self, field_name)
-            if value is not None and not isinstance(value, str):
+            if value is None:
+                continue
+            if not isinstance(value, str):
                 msg = f"{field_name} must be a string or null"
+                raise ValueError(msg)
+            if not value.strip():
+                msg = f"{field_name} must be a non-empty string or null"
                 raise ValueError(msg)
         if type(self.interview_completed) is not bool:
             msg = "interview_completed must be a boolean"

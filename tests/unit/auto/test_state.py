@@ -123,6 +123,30 @@ def test_store_load_wraps_malformed_container_and_counter_fields(tmp_path) -> No
             store.load(state.auto_session_id)
 
 
+def test_store_load_rejects_empty_optional_resume_identifiers(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    path = store.path_for(state.auto_session_id)
+
+    for field_name in (
+        "interview_session_id",
+        "seed_id",
+        "seed_path",
+        "execution_id",
+        "job_id",
+        "last_grade",
+        "pending_question",
+        "last_tool_name",
+        "last_error",
+    ):
+        data = state.to_dict()
+        data[field_name] = ""
+        path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Auto session state is invalid"):
+            store.load(state.auto_session_id)
+
+
 def test_store_load_wraps_malformed_seed_artifact(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
