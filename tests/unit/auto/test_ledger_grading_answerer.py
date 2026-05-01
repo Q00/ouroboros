@@ -286,3 +286,22 @@ def test_auto_answerer_does_not_route_feature_semantics_to_io_actor_defaults() -
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a habit tracker"))
         updated_sections = {section for section, _entry in answer.ledger_updates}
         assert not {"actors", "inputs", "outputs"} & updated_sections
+
+
+def test_auto_answerer_avoids_generic_defaults_for_feature_semantics() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "What output should the export command write?",
+        "What input format does the config file use?",
+        "Should completed tasks be marked done?",
+        "What should users be able to edit?",
+        "Which users can delete projects?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a task app"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert (
+            not {"actors", "inputs", "outputs", "verification_plan", "acceptance_criteria"}
+            & updated_sections
+        )

@@ -72,7 +72,13 @@ class AutoAnswerer:
             return self._non_goal_answer(question)
         if _matches_any(
             lowered,
-            (r"\btests?\b", r"\bverify\b", r"\bvalidation\b", r"\bacceptance\b", r"\bdone\b"),
+            (
+                r"\btests?\b",
+                r"\bverify\b",
+                r"\bvalidation\b",
+                r"\bacceptance\b",
+                r"\bdefinition of done\b",
+            ),
         ):
             return self._verification_answer(question)
         if _matches_any(
@@ -247,16 +253,17 @@ def _matches_any(value: str, patterns: tuple[str, ...]) -> bool:
 
 
 def _is_actor_or_io_question(lowered: str) -> bool:
-    if re.search(r"\b(inputs?|outputs?)\b", lowered):
+    if re.search(
+        r"\b(what|which)\s+(are|inputs? are|outputs? are)\s+.+\b(inputs|outputs)\b", lowered
+    ):
         return True
-    if not re.search(r"\b(actors?|users?|personas?|stakeholders?)\b", lowered):
-        return False
-    return bool(
-        re.search(
-            r"\b(who|which|what|primary|role|roles|persona|personas|stakeholder|stakeholders|actor|actors)\b",
-            lowered,
-        )
-    )
+    if re.search(r"\b(what|which)\s+(inputs|outputs)\s+(are|should be)\b", lowered):
+        return True
+    if re.search(
+        r"\b(who|which|what)\s+(is|are)\s+.+\b(actors?|personas?|stakeholders?)\b", lowered
+    ):
+        return True
+    return bool(re.search(r"\b(who|which)\s+(is|are)\s+the\s+users?\b", lowered))
 
 
 def _blocker_for(question: str) -> AutoBlocker | None:
