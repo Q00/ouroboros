@@ -282,11 +282,15 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "credential or secret value required",
         ),
         (
-            r"\b(which|what|provide|enter|use|choose|select|configure|set)\b.+\b(credential|credentials)\b",
+            r"\b(provide|enter|use|choose|select|configure|set)\b.+\b(credential|credentials)\b",
             "credential or secret value required",
         ),
         (
-            r"\b(which|what|provide|enter|use|choose|select|configure|set)\b.+\b(api keys?|passwords?)\b",
+            r"\b(provide|enter|use|configure|set)\b.+\b(api keys?|passwords?)\b.+\b(value|secret|token|credential|env|environment|workflow|ci|production|prod)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(which|what)\b.+\b(api keys?|passwords?)\b.+\b(value|secret|token|credential|env|environment|workflow|ci|production|prod)\b",
             "credential or secret value required",
         ),
         (
@@ -294,7 +298,11 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "credential or secret value required",
         ),
         (
-            r"\b(which|what|provide|enter|use|choose|select|configure|set|charge|purchase|subscribe)\b.+\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b",
+            r"\b(charge|purchase|subscribe|provide|enter|use|configure|set)\b.+\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b",
+            "paid service or financial decision required",
+        ),
+        (
+            r"\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b.+\b(charge|purchase|subscribe|pay)\b",
             "paid service or financial decision required",
         ),
         (

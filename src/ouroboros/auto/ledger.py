@@ -147,19 +147,42 @@ class SeedDraftLedger:
         return ledger
 
     def add_entry(self, section_name: str, entry: LedgerEntry) -> None:
-        """Append ``entry`` to a section, marking same-key contradictions explicit."""
+        """Append ``entry`` to a section, marking same-key contradictions explicit.
+
+        A later same-key answer that returns to a previously seen value is treated
+        as a correction: older contradictory entries become weak historical facts
+        instead of keeping the section permanently conflicting.
+        """
         section = self.sections.setdefault(section_name, LedgerSection(section_name))
-        for existing in section.entries:
-            if existing.key != entry.key:
-                continue
-            if _normalize_conflict_value(existing.value) == _normalize_conflict_value(entry.value):
-                continue
-            if LedgerStatus.BLOCKED in {existing.status, entry.status}:
-                continue
-            existing.status = LedgerStatus.CONFLICTING
-            entry.status = LedgerStatus.CONFLICTING
-            existing.rationale = existing.rationale or "Conflicts with another auto ledger answer."
-            entry.rationale = entry.rationale or "Conflicts with another auto ledger answer."
+        same_key_entries = [existing for existing in section.entries if existing.key == entry.key]
+        entry_value = _normalize_conflict_value(entry.value)
+        matching_prior = [
+            existing
+            for existing in same_key_entries
+            if _normalize_conflict_value(existing.value) == entry_value
+        ]
+        if matching_prior:
+            for existing in same_key_entries:
+                if LedgerStatus.BLOCKED in {existing.status, entry.status}:
+                    continue
+                if _normalize_conflict_value(existing.value) == entry_value:
+                    if existing.status == LedgerStatus.CONFLICTING:
+                        existing.status = entry.status
+                    continue
+                existing.status = LedgerStatus.WEAK
+                existing.rationale = (
+                    existing.rationale or "Superseded by a later same-key correction."
+                )
+        else:
+            for existing in same_key_entries:
+                if LedgerStatus.BLOCKED in {existing.status, entry.status}:
+                    continue
+                existing.status = LedgerStatus.CONFLICTING
+                entry.status = LedgerStatus.CONFLICTING
+                existing.rationale = (
+                    existing.rationale or "Conflicts with another auto ledger answer."
+                )
+                entry.rationale = entry.rationale or "Conflicts with another auto ledger answer."
         section.entries.append(entry)
 
     def record_qa(self, question: str, answer: str) -> None:

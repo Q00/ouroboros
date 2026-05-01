@@ -374,3 +374,33 @@ def test_auto_answerer_blocks_production_environment_selection_variants() -> Non
         answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"))
         assert answer.blocker is not None
         assert answer.source == AutoAnswerSource.BLOCKER
+
+
+def test_ledger_later_same_key_correction_resolves_conflict() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    for value in ("Write a JSON report", "Display an HTML dashboard", "Write a JSON report"):
+        ledger.add_entry(
+            "outputs",
+            LedgerEntry(
+                key="outputs.primary",
+                value=value,
+                source=LedgerSource.CONSERVATIVE_DEFAULT,
+                confidence=0.8,
+                status=LedgerStatus.DEFAULTED,
+            ),
+        )
+
+    assert ledger.sections["outputs"].status() == LedgerStatus.DEFAULTED
+    assert "outputs" not in ledger.open_gaps()
+
+
+def test_auto_answerer_allows_product_security_and_billing_requirement_questions() -> None:
+    questions = (
+        "Which password rules should the signup form enforce?",
+        "Which API keys should users be able to rotate?",
+        "Which billing provider integrations should the app support?",
+    )
+
+    for question in questions:
+        answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Build a SaaS app"))
+        assert answer.blocker is None
