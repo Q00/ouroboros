@@ -49,3 +49,15 @@ def test_terminal_state_is_not_stale() -> None:
 
     future = datetime.now(UTC) + timedelta(days=1)
     assert not state.is_stale(future)
+
+
+def test_run_phase_uses_run_timeout_key_for_staleness() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "starting")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+
+    future = datetime.fromisoformat(state.last_progress_at) + timedelta(seconds=61)
+    assert state.timeout_seconds_by_phase[AutoPhase.RUN.value] == 60
+    assert state.is_stale(future)

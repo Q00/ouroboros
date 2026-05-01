@@ -93,7 +93,7 @@ class AutoPipelineState:
             AutoPhase.SEED_GENERATION.value: 120,
             AutoPhase.REVIEW.value: 90,
             AutoPhase.REPAIR.value: 90,
-            "run_start": 60,
+            AutoPhase.RUN.value: 60,
         }
     )
 
