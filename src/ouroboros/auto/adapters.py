@@ -46,6 +46,13 @@ class HandlerInterviewBackend(InterviewBackend):
         )
         return _turn_from_result(result, fallback_session_id=session_id)
 
+    async def resume(self, session_id: str) -> InterviewTurn:
+        result = _unwrap(
+            await self.handler.handle({"session_id": session_id}),
+            tool_name="ouroboros_interview",
+        )
+        return _turn_from_result(result, fallback_session_id=session_id)
+
 
 class HandlerSeedGenerator:
     """Callable seed generator backed by ``ouroboros_generate_seed``."""
@@ -87,7 +94,7 @@ class HandlerRunStarter:
         }
 
 
-def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> Path:
+def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
     """Persist an auto-generated Seed in the standard seed directory."""
     directory = seeds_dir or (Path.home() / ".ouroboros" / "seeds")
     directory.mkdir(parents=True, exist_ok=True)
@@ -96,7 +103,7 @@ def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> Path:
         yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    return path
+    return str(path)
 
 
 def _turn_from_result(result: MCPToolResult, *, fallback_session_id: str | None = None) -> InterviewTurn:

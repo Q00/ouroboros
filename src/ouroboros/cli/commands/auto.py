@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from ouroboros.auto.adapters import HandlerInterviewBackend, HandlerRunStarter, HandlerSeedGenerator
+from ouroboros.auto.adapters import (
+    HandlerInterviewBackend,
+    HandlerRunStarter,
+    HandlerSeedGenerator,
+    save_seed,
+)
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
@@ -78,7 +84,7 @@ async def _run_auto(
     skip_run: bool,
 ) -> AutoPipelineResult:
     store = AutoStore()
-    state = store.load(resume) if resume else AutoPipelineState(goal=goal or "", cwd=".")
+    state = store.load(resume) if resume else AutoPipelineState(goal=goal or "", cwd=str(Path.cwd()))
     interview = InterviewHandler(agent_runtime_backend=runtime)
     generate_seed = GenerateSeedHandler(agent_runtime_backend=runtime)
     execute_seed = ExecuteSeedHandler(agent_runtime_backend=runtime)
@@ -94,6 +100,7 @@ async def _run_auto(
         run_starter=HandlerRunStarter(start_execute, cwd=state.cwd),
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
+        seed_saver=save_seed,
         skip_run=skip_run,
     )
     result = await pipeline.run(state)
@@ -113,6 +120,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"Seed grade: [bold]{result.grade}[/]")
     if result.interview_session_id:
         console.print(f"Interview session: {result.interview_session_id}")
+    if result.seed_path:
+        console.print(f"Seed: {result.seed_path}")
     if result.job_id or result.execution_id:
         console.print("Execution started:")
         console.print(f"  Job ID: {result.job_id}")

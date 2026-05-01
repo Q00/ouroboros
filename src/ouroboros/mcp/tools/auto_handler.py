@@ -6,10 +6,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ouroboros.auto.adapters import HandlerInterviewBackend, HandlerRunStarter, HandlerSeedGenerator
+from ouroboros.auto.adapters import (
+    HandlerInterviewBackend,
+    HandlerRunStarter,
+    HandlerSeedGenerator,
+    save_seed,
+)
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
@@ -53,7 +60,7 @@ class AutoHandler:
             ),
         )
 
-    async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:  # type: ignore[name-defined]
+    async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
         try:
             result = await self._run(arguments)
         except Exception as exc:
@@ -123,6 +130,8 @@ class AutoHandler:
             HandlerSeedGenerator(generate_seed_handler),
             run_starter=HandlerRunStarter(start_execute, cwd=cwd),
             store=store,
+            repairer=SeedRepairer(max_repair_rounds=int(arguments.get("max_repair_rounds") or 5)),
+            seed_saver=save_seed,
             skip_run=bool(arguments.get("skip_run", False)),
         )
         return await pipeline.run(state)
@@ -152,6 +161,3 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Blocker: {result.blocker}")
     lines.append(f"Resume: ooo auto --resume {result.auto_session_id}")
     return "\n".join(lines)
-
-
-from ouroboros.core.types import Result  # noqa: E402  (keeps public handler imports grouped above)

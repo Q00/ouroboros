@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+from ouroboros.auto.adapters import HandlerInterviewBackend
 from ouroboros.cli.main import app
+from ouroboros.core.types import Result
 from ouroboros.mcp.tools.auto_handler import AutoHandler
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 
 def test_cli_auto_help_is_registered() -> None:
@@ -31,3 +35,23 @@ def test_auto_handler_schema_contains_hang_safe_options() -> None:
     assert definition.name == "ouroboros_auto"
     names = {param.name for param in definition.parameters}
     assert {"goal", "resume", "max_interview_rounds", "max_repair_rounds", "skip_run"} <= names
+
+
+class _FakeInterviewHandler:
+    async def handle(self, arguments):
+        assert arguments == {"session_id": "interview_1"}
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="Pending question?"),),
+                is_error=False,
+                meta={"session_id": "interview_1"},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_handler_interview_backend_resume_fetches_pending_question() -> None:
+    turn = await HandlerInterviewBackend(_FakeInterviewHandler(), cwd=".").resume("interview_1")
+
+    assert turn.session_id == "interview_1"
+    assert turn.question == "Pending question?"

@@ -891,3 +891,39 @@ async def test_pipeline_resumes_prepared_run_before_first_attempt(tmp_path) -> N
     assert result.status == "complete"
     assert result.job_id == "job_after_resume"
     assert state.run_start_attempted is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_persists_seed_path_before_skip_run(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    saved: list[str] = []
+
+    def save(seed: Seed) -> str:
+        path = str(tmp_path / f"{seed.metadata.seed_id}.yaml")
+        saved.append(path)
+        return path
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver, generate_seed, store=AutoStore(tmp_path), seed_saver=save, skip_run=True
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.seed_path == saved[0]
+    assert state.seed_path == saved[0]
