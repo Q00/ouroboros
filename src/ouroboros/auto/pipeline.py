@@ -61,6 +61,13 @@ class AutoPipeline:
 
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
             if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
+                if not state.interview_session_id:
+                    state.mark_blocked(
+                        "Completed interview is missing interview_session_id",
+                        tool_name="auto_pipeline",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
                 state.transition(
                     AutoPhase.SEED_GENERATION, "resuming Seed generation after completed interview"
                 )
@@ -72,6 +79,9 @@ class AutoPipeline:
                 state.interview_completed = True
                 state.transition(AutoPhase.SEED_GENERATION, "generating Seed from auto interview")
                 self._save(state)
+        elif state.phase == AutoPhase.REPAIR:
+            state.transition(AutoPhase.REVIEW, "resuming review after repair checkpoint")
+            self._save(state)
         elif state.phase not in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
