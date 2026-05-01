@@ -69,7 +69,7 @@ class AutoAnswerer:
         if _matches_any(
             lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
         ):
-            return self._non_goal_answer(question)
+            return self._non_goal_answer(question, ledger)
         if _matches_any(
             lowered,
             (
@@ -117,8 +117,20 @@ class AutoAnswerer:
         for section, entry in answer.ledger_updates:
             ledger.add_entry(section, entry)
 
-    def _non_goal_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
-        value = "For auto MVP scope, cloud sync, authentication, paid services, and production deployment are non-goals unless explicitly requested."
+    def _non_goal_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
+        goal_text = (
+            ledger.sections.get("goal").entries[0].value.lower()
+            if ledger.sections.get("goal") and ledger.sections["goal"].entries
+            else ""
+        )
+        excluded = ["cloud sync", "paid services"]
+        if not re.search(r"\b(auth|authentication|login|sign[- ]?in|signup|password)\b", goal_text):
+            excluded.append("authentication")
+        if not re.search(r"\b(production|prod|deploy|deployment|release|publish)\b", goal_text):
+            excluded.append("production deployment")
+        value = (
+            f"For auto MVP scope, {', '.join(excluded)} are non-goals unless explicitly requested."
+        )
         entry = LedgerEntry(
             key="non_goals.mvp_scope",
             value=value,

@@ -404,3 +404,41 @@ def test_auto_answerer_allows_product_security_and_billing_requirement_questions
     for question in questions:
         answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Build a SaaS app"))
         assert answer.blocker is None
+
+
+def test_ledger_later_answer_can_clear_same_key_blocker() -> None:
+    ledger = SeedDraftLedger.from_goal("Deploy a service")
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="blocker.auto_answer",
+            value="production credential required",
+            source=LedgerSource.BLOCKER,
+            confidence=1.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="blocker.auto_answer",
+            value="Use staging-only dry run; no production credential is needed",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.95,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+
+    assert ledger.sections["constraints"].status() == LedgerStatus.CONFIRMED
+    assert "constraints" not in ledger.open_gaps()
+
+
+def test_auto_answerer_non_goals_respect_explicit_goal_scope() -> None:
+    cases = (
+        ("Deploy this service to production", "production deployment"),
+        ("Add authentication to the app", "authentication"),
+    )
+
+    for goal, forbidden_non_goal in cases:
+        answer = AutoAnswerer().answer("What are the non-goals?", SeedDraftLedger.from_goal(goal))
+        assert forbidden_non_goal not in answer.text.lower()

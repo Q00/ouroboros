@@ -163,7 +163,13 @@ class SeedDraftLedger:
         ]
         if matching_prior:
             for existing in same_key_entries:
-                if LedgerStatus.BLOCKED in {existing.status, entry.status}:
+                if entry.status == LedgerStatus.BLOCKED:
+                    continue
+                if existing.status == LedgerStatus.BLOCKED:
+                    existing.status = LedgerStatus.WEAK
+                    existing.rationale = (
+                        existing.rationale or "Superseded by a later same-key answer."
+                    )
                     continue
                 if _normalize_conflict_value(existing.value) == entry_value:
                     if existing.status == LedgerStatus.CONFLICTING:
@@ -175,7 +181,13 @@ class SeedDraftLedger:
                 )
         else:
             for existing in same_key_entries:
-                if LedgerStatus.BLOCKED in {existing.status, entry.status}:
+                if entry.status == LedgerStatus.BLOCKED:
+                    continue
+                if existing.status == LedgerStatus.BLOCKED:
+                    existing.status = LedgerStatus.WEAK
+                    existing.rationale = (
+                        existing.rationale or "Superseded by a later same-key answer."
+                    )
                     continue
                 existing.status = LedgerStatus.CONFLICTING
                 entry.status = LedgerStatus.CONFLICTING
