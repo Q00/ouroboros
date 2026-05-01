@@ -305,6 +305,7 @@ async def test_cli_resume_rejects_runtime_mismatch(monkeypatch, tmp_path) -> Non
             skip_run=False,
         )
 
+
 def test_static_ouroboros_tools_exports_auto_handler() -> None:
     from ouroboros.mcp.tools.definitions import OUROBOROS_TOOLS
 
