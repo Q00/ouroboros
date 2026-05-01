@@ -299,17 +299,163 @@ def _minimum_completion_confidence(fixture: Mapping[str, Any]) -> float:
 
 def _completion_evidence_chunk_ids(completion_json: Mapping[str, Any]) -> tuple[str, ...]:
     """Return chunk IDs cited through the completion evidence list."""
+    evidence_references = _completion_evidence_references(completion_json)
+    chunk_ids: list[str] = []
+    for reference in evidence_references:
+        chunk_id = _fact_entry_chunk_id(reference)
+        if chunk_id is not None:
+            chunk_ids.append(chunk_id)
+    return _ordered_unique(chunk_ids)
+
+
+def _completion_evidence_references(
+    completion_json: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Return structured evidence references from a completion."""
     evidence_references = completion_json.get("evidence_references")
     if not isinstance(evidence_references, Sequence) or isinstance(evidence_references, str):
         return ()
 
-    chunk_ids: list[str] = []
+    references: list[Mapping[str, Any]] = []
     for reference in evidence_references:
-        reference_mapping = reference if isinstance(reference, Mapping) else {}
-        chunk_id = reference_mapping.get("chunk_id")
-        if isinstance(chunk_id, str) and chunk_id:
-            chunk_ids.append(chunk_id)
-    return _ordered_unique(chunk_ids)
+        if isinstance(reference, Mapping):
+            references.append(reference)
+    return tuple(references)
+
+
+def _fact_entry_chunk_id(entry: Mapping[str, Any]) -> str | None:
+    """Return the source chunk ID from a structured fact/evidence entry."""
+    for key in ("chunk_id", "evidence_chunk_id", "source_chunk_id"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _fact_entry_text(entry: Mapping[str, Any]) -> str:
+    """Return claim-bearing text from a fact or evidence entry."""
+    values: list[str] = []
+    for key in ("quoted_evidence", "text", "statement", "claim", "summary"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return "\n".join(values)
+
+
+def _completion_fact_entries(completion_json: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    """Return structured fact entries that assert observed or retained facts."""
+    result = completion_json.get("result")
+    if not isinstance(result, Mapping):
+        return ()
+
+    entries: list[Mapping[str, Any]] = []
+    for key in (
+        "retained_facts",
+        "observed_facts",
+        "facts",
+        "retained_evidence",
+        "observed_evidence",
+    ):
+        value = result.get(key)
+        if isinstance(value, Mapping):
+            entries.append(value)
+        elif isinstance(value, Sequence) and not isinstance(value, str):
+            entries.extend(item for item in value if isinstance(item, Mapping))
+
+    if isinstance(result.get("fact_id"), str):
+        entries.append(result)
+    return tuple(entries)
+
+
+def _completion_result_claim_texts(completion_json: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return top-level result text that can make an assertive claim."""
+    result = completion_json.get("result")
+    if not isinstance(result, Mapping):
+        return ()
+
+    texts: list[str] = []
+    for key in ("summary", "answer", "final_answer"):
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            texts.append(value)
+    return tuple(texts)
+
+
+def _supported_fact_ids(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return fact IDs explicitly supported by a fact or evidence entry."""
+    fact_ids: list[str] = []
+    for key in ("fact_id", "supports_fact_id"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            fact_ids.append(value)
+    for key in ("fact_ids", "supports_fact_ids", "supported_fact_ids"):
+        fact_ids.extend(_string_tuple(entry.get(key)))
+    return _ordered_unique(fact_ids)
+
+
+def _normalized_claim_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _text_negates_or_qualifies_fact(text: str) -> bool:
+    """Return whether text mentions a fact only as unavailable or unclaimed."""
+    normalized = _normalized_claim_text(text)
+    guarded_phrases = (
+        "cannot be claimed",
+        "cannot claim",
+        "not be claimed",
+        "not claimed",
+        "no facts from omitted",
+        "not available",
+        "not asserted",
+        "not supplied",
+        "outside the retained context",
+        "outside retained context",
+        "outside the supplied context",
+        "outside supplied context",
+        "omitted chunks were outside",
+        "if present",
+        "if any",
+        "not observed",
+        "not cited",
+        "do not claim",
+        "does not claim",
+    )
+    return any(phrase in normalized for phrase in guarded_phrases)
+
+
+def _text_mentions_fact(text: str, fact_id: str, fact_text: object) -> bool:
+    if fact_id in text:
+        return True
+    if isinstance(fact_text, str) and fact_text:
+        return _normalized_claim_text(fact_text) in _normalized_claim_text(text)
+    return False
+
+
+def _text_asserts_fact(text: str, fact_id: str, fact_text: object) -> bool:
+    """Return whether text positively asserts a fixture fact."""
+    return _text_mentions_fact(text, fact_id, fact_text) and not _text_negates_or_qualifies_fact(
+        text
+    )
+
+
+def _entry_supports_fact(
+    entry: Mapping[str, Any],
+    *,
+    fact_id: str,
+    fact: Mapping[str, Any],
+    require_chunk_match: bool,
+) -> bool:
+    """Return whether a structured entry supports a fixture fact claim."""
+    fact_chunk_id = fact.get("chunk_id")
+    entry_chunk_id = _fact_entry_chunk_id(entry)
+    if require_chunk_match and isinstance(fact_chunk_id, str) and fact_chunk_id:
+        if entry_chunk_id != fact_chunk_id:
+            return False
+
+    if fact_id in _supported_fact_ids(entry):
+        return True
+    return _text_asserts_fact(_fact_entry_text(entry), fact_id, fact.get("text"))
 
 
 def _fact_lookup_by_id(
@@ -448,6 +594,9 @@ def score_vanilla_truncation_baseline_completion(
         confidence_score = confidence / minimum_confidence
 
     completion_text = json.dumps(parsed_completion, sort_keys=True)
+    evidence_references = _completion_evidence_references(parsed_completion)
+    fact_entries = _completion_fact_entries(parsed_completion)
+    result_claim_texts = _completion_result_claim_texts(parsed_completion)
     cited_chunk_ids = _completion_evidence_chunk_ids(parsed_completion)
     cited_selected_chunk_ids = tuple(
         chunk_id for chunk_id in selected_chunk_ids if chunk_id in cited_chunk_ids
@@ -459,12 +608,14 @@ def score_vanilla_truncation_baseline_completion(
     missing_retained_fact_ids: list[str] = []
     for fact_id in required_fact_ids:
         fact = retained_facts.get(fact_id, {})
-        fact_chunk_id = fact.get("chunk_id")
-        fact_text = fact.get("text")
-        cites_fact = fact_id in completion_text
-        cites_fact = cites_fact or (isinstance(fact_text, str) and fact_text in completion_text)
-        cites_fact = cites_fact or (
-            isinstance(fact_chunk_id, str) and fact_chunk_id in cited_chunk_ids
+        cites_fact = any(
+            _entry_supports_fact(
+                entry,
+                fact_id=fact_id,
+                fact=fact,
+                require_chunk_match=True,
+            )
+            for entry in (*fact_entries, *evidence_references)
         )
         if cites_fact:
             cited_retained_fact_ids.append(fact_id)
@@ -477,8 +628,19 @@ def score_vanilla_truncation_baseline_completion(
 
     claimed_omitted_fact_ids: list[str] = []
     for fact_id, fact in omitted_facts.items():
-        fact_text = fact.get("text")
-        if fact_id in completion_text or (isinstance(fact_text, str) and fact_text in completion):
+        claims_fact = any(
+            _entry_supports_fact(
+                entry,
+                fact_id=fact_id,
+                fact=fact,
+                require_chunk_match=False,
+            )
+            for entry in (*fact_entries, *evidence_references)
+        )
+        claims_fact = claims_fact or any(
+            _text_asserts_fact(text, fact_id, fact.get("text")) for text in result_claim_texts
+        )
+        if claims_fact:
             claimed_omitted_fact_ids.append(fact_id)
 
     reports_truncation_boundary = _completion_reports_truncation_boundary(

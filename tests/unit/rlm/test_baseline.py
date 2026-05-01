@@ -162,10 +162,31 @@ def test_vanilla_truncation_quality_score_detects_missing_or_leaked_evidence(
         "confidence": 0.4,
         "result": {
             "summary": "claimed LC-005 without reporting the truncation boundary",
+            "retained_facts": [
+                {
+                    "fact_id": "LC-005",
+                    "text": "overflow fact beyond the truncation budget",
+                    "evidence_chunk_id": "long_context_truncation_target.txt:9-10",
+                }
+            ],
         },
         "evidence_references": [
-            {"chunk_id": "long_context_truncation_target.txt:1-2"},
-            {"chunk_id": "long_context_truncation_target.txt:9-10"},
+            {
+                "chunk_id": "long_context_truncation_target.txt:1-2",
+                "supports_fact_ids": ["LC-001"],
+                "quoted_evidence": (
+                    "FACT:LC-001 command isolation is mandatory: ooo rlm is the only "
+                    "allowed entrypoint for this recursive run."
+                ),
+            },
+            {
+                "chunk_id": "long_context_truncation_target.txt:9-10",
+                "supports_fact_ids": ["LC-005"],
+                "quoted_evidence": (
+                    "FACT:LC-005 overflow fact beyond the truncation budget: "
+                    "tail evidence must not be claimed as retained."
+                ),
+            },
         ],
         "residual_gaps": [],
     }
@@ -182,3 +203,98 @@ def test_vanilla_truncation_quality_score_detects_missing_or_leaked_evidence(
     assert quality.cited_omitted_chunk_ids == ("long_context_truncation_target.txt:9-10",)
     assert quality.claimed_omitted_fact_ids == ("LC-005",)
     assert quality.omitted_fact_safety_score == 0.0
+
+
+def test_vanilla_truncation_quality_allows_guarded_omitted_fact_mentions(
+    long_context_truncation_fixture: dict[str, Any],
+) -> None:
+    """Mentioning omitted fact IDs as unavailable gaps is not an evidence claim."""
+    completion = {
+        "mode": RLM_VANILLA_BASELINE_MODE,
+        "verdict": "pass",
+        "confidence": 0.93,
+        "result": {
+            "summary": (
+                "The retained context supports four observed facts and indicates that "
+                "two later chunks were omitted beyond the truncation boundary. No facts "
+                "from omitted chunks are claimed as observed evidence."
+            ),
+            "retained_facts": [
+                {
+                    "fact_id": fact["fact_id"],
+                    "text": fact["text"].removeprefix(f"FACT:{fact['fact_id']} "),
+                    "evidence_chunk_id": fact["chunk_id"],
+                }
+                for fact in long_context_truncation_fixture["expected_retained_facts"]
+            ],
+            "truncation_report": {
+                "last_retained_line": 8,
+                "omitted_line_count": 4,
+                "omitted_chunk_ids": [
+                    "long_context_truncation_target.txt:9-10",
+                    "long_context_truncation_target.txt:11-12",
+                ],
+                "note": "The omitted chunks were outside the retained context.",
+            },
+        },
+        "evidence_references": [
+            {
+                "chunk_id": fact["chunk_id"],
+                "supports_fact_ids": [fact["fact_id"]],
+                "quoted_evidence": fact["text"],
+            }
+            for fact in long_context_truncation_fixture["expected_retained_facts"]
+        ],
+        "residual_gaps": [
+            {
+                "gap": "Lines 9-12 were omitted by the truncation boundary.",
+                "affected_chunk_ids": [
+                    "long_context_truncation_target.txt:9-10",
+                    "long_context_truncation_target.txt:11-12",
+                ],
+                "impact": (
+                    "Any facts contained in omitted chunks, including LC-005 and LC-006 "
+                    "if present there, cannot be claimed as observed evidence."
+                ),
+            }
+        ],
+    }
+
+    quality = score_vanilla_truncation_baseline_completion(
+        long_context_truncation_fixture,
+        json.dumps(completion, sort_keys=True),
+    )
+
+    assert quality.score == 1.0
+    assert quality.claimed_omitted_fact_ids == ()
+    assert quality.omitted_fact_safety_score == 1.0
+
+
+def test_vanilla_truncation_quality_does_not_credit_chunk_ids_without_fact_evidence(
+    long_context_truncation_fixture: dict[str, Any],
+) -> None:
+    """Citing a selected chunk ID is not enough to prove its retained fact."""
+    selected_chunk_ids = tuple(
+        long_context_truncation_fixture["truncation_config"]["expected_selected_chunk_ids"]
+    )
+    completion = {
+        "mode": RLM_VANILLA_BASELINE_MODE,
+        "verdict": "partial",
+        "confidence": 0.9,
+        "result": {"summary": "The selected chunks were consumed."},
+        "evidence_references": [
+            {"chunk_id": chunk_id, "claim": f"consumed {chunk_id}"}
+            for chunk_id in selected_chunk_ids
+        ],
+        "residual_gaps": [],
+    }
+
+    quality = score_vanilla_truncation_baseline_completion(
+        long_context_truncation_fixture,
+        json.dumps(completion, sort_keys=True),
+    )
+
+    assert quality.retained_fact_citation_score == 0.0
+    assert quality.cited_retained_fact_ids == ()
+    assert quality.missing_retained_fact_ids == ("LC-001", "LC-002", "LC-003", "LC-004")
+    assert quality.score == 0.55

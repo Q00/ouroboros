@@ -21,6 +21,25 @@ from ouroboros.rlm import (
     score_vanilla_truncation_baseline_completion,
 )
 
+_FACTS_BY_CHUNK = {
+    "long_context_truncation_target.txt:1-2": (
+        "LC-001",
+        "FACT:LC-001 command isolation is mandatory: ooo rlm is the only allowed entrypoint for this recursive run.",
+    ),
+    "long_context_truncation_target.txt:3-4": (
+        "LC-002",
+        "FACT:LC-002 Hermes must be invoked through execute_task_to_result with an empty tools list.",
+    ),
+    "long_context_truncation_target.txt:5-6": (
+        "LC-003",
+        "FACT:LC-003 the AC tree depth cap is 5 and the ambiguity threshold is 0.2.",
+    ),
+    "long_context_truncation_target.txt:7-8": (
+        "LC-004",
+        "FACT:LC-004 trace replay must link rlm_node_id, ac_node_id, call_id, and parent_call_id.",
+    ),
+}
+
 
 def _completion(selected_chunk_ids: tuple[str, ...]) -> str:
     return json.dumps(
@@ -28,9 +47,29 @@ def _completion(selected_chunk_ids: tuple[str, ...]) -> str:
             "mode": RLM_HERMES_SYNTHESIZE_PARENT_MODE,
             "verdict": "passed",
             "confidence": 0.9,
-            "result": {"summary": "synthesized retained evidence"},
+            "result": {
+                "summary": "synthesized retained evidence",
+                "retained_facts": [
+                    {
+                        "fact_id": _FACTS_BY_CHUNK[chunk_id][0],
+                        "text": _FACTS_BY_CHUNK[chunk_id][1],
+                        "evidence_chunk_id": chunk_id,
+                    }
+                    for chunk_id in selected_chunk_ids
+                    if chunk_id in _FACTS_BY_CHUNK
+                ],
+            },
             "evidence_references": [
-                {"chunk_id": chunk_id, "claim": f"retained {chunk_id}"}
+                {
+                    "chunk_id": chunk_id,
+                    "claim": f"retained {chunk_id}",
+                    "supports_fact_ids": [_FACTS_BY_CHUNK[chunk_id][0]]
+                    if chunk_id in _FACTS_BY_CHUNK
+                    else [],
+                    "quoted_evidence": _FACTS_BY_CHUNK[chunk_id][1]
+                    if chunk_id in _FACTS_BY_CHUNK
+                    else "",
+                }
                 for chunk_id in selected_chunk_ids
             ],
             "residual_gaps": [],

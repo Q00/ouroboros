@@ -29,6 +29,47 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     return tuple(item for item in value if isinstance(item, str))
 
 
+def _chunk_fact_entries(envelope: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Extract FACT-prefixed fixture facts from the supplied prompt context."""
+    context = _mapping(envelope.get("context"))
+    facts_by_id: dict[str, dict[str, Any]] = {}
+
+    retained_facts = context.get("retained_facts")
+    if isinstance(retained_facts, Sequence) and not isinstance(retained_facts, str):
+        for fact in retained_facts:
+            fact_mapping = _mapping(fact)
+            fact_id = fact_mapping.get("fact_id")
+            chunk_id = fact_mapping.get("chunk_id")
+            text = fact_mapping.get("text")
+            if isinstance(fact_id, str) and isinstance(chunk_id, str) and isinstance(text, str):
+                facts_by_id[fact_id] = {
+                    "fact_id": fact_id,
+                    "chunk_id": chunk_id,
+                    "text": text,
+                }
+
+    chunks = context.get("chunks") or context.get("retained_chunks")
+    if isinstance(chunks, Sequence) and not isinstance(chunks, str):
+        for chunk in chunks:
+            chunk_mapping = _mapping(chunk)
+            chunk_id = chunk_mapping.get("chunk_id")
+            content = chunk_mapping.get("content")
+            if not isinstance(chunk_id, str) or not isinstance(content, str):
+                continue
+            for line in content.splitlines():
+                if not line.startswith("FACT:"):
+                    continue
+                fact_id = line.split(maxsplit=1)[0].removeprefix("FACT:")
+                if fact_id:
+                    facts_by_id[fact_id] = {
+                        "fact_id": fact_id,
+                        "chunk_id": chunk_id,
+                        "text": line,
+                    }
+
+    return tuple(facts_by_id[fact_id] for fact_id in sorted(facts_by_id))
+
+
 def _task_result(value: TaskResult | str) -> TaskResult:
     if isinstance(value, TaskResult):
         return value
@@ -209,6 +250,11 @@ class DeterministicRLMHermesRuntime:
                 if isinstance(child_call_id, str):
                     child_call_ids.append(child_call_id)
 
+        fact_entries = _chunk_fact_entries(envelope)
+        facts_by_chunk: dict[str, list[dict[str, Any]]] = {}
+        for fact in fact_entries:
+            facts_by_chunk.setdefault(fact["chunk_id"], []).append(fact)
+
         payload = {
             "schema_version": "rlm.hermes.output.v1",
             "mode": mode,
@@ -224,11 +270,26 @@ class DeterministicRLMHermesRuntime:
                 "selected_chunk_ids": list(selected_chunk_ids),
                 "generated_child_ac_node_ids": list(generated_child_ac_node_ids),
                 "child_call_ids": child_call_ids,
+                "retained_facts": [
+                    {
+                        "fact_id": fact["fact_id"],
+                        "text": fact["text"],
+                        "evidence_chunk_id": fact["chunk_id"],
+                    }
+                    for fact in fact_entries
+                    if not selected_chunk_ids or fact["chunk_id"] in selected_chunk_ids
+                ],
             },
             "evidence_references": [
                 {
                     "chunk_id": chunk_id,
                     "claim": f"{call_id} consumed {chunk_id}",
+                    "supports_fact_ids": [
+                        fact["fact_id"] for fact in facts_by_chunk.get(chunk_id, [])
+                    ],
+                    "quoted_evidence": "\n".join(
+                        fact["text"] for fact in facts_by_chunk.get(chunk_id, [])
+                    ),
                 }
                 for chunk_id in selected_chunk_ids
             ],
