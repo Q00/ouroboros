@@ -202,6 +202,13 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=state.last_error)
+            if state.last_grade != "A":
+                state.mark_blocked(
+                    "Cannot start execution without a persisted A-grade review",
+                    tool_name="grade_gate",
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
 
         if self.run_starter is None:
             state.mark_blocked("No run starter configured", tool_name="run_starter")
