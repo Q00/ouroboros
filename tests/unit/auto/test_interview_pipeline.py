@@ -959,7 +959,7 @@ async def test_pipeline_resumes_blocked_seed_generation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_refuses_replay_blocked_run_start_from_seed_path(tmp_path) -> None:
+async def test_pipeline_recovers_blocked_run_start_from_seed_path(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -970,11 +970,14 @@ async def test_pipeline_refuses_replay_blocked_run_start_from_seed_path(tmp_path
         raise AssertionError("unknown run resume should not generate seed")
 
     async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
-        raise AssertionError("unknown run resume should not start another run")
+        return {"job_id": "job_recovered"}
 
     seed = _seed()
     seed_path = str(tmp_path / "seed.yaml")
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
     state.seed_path = seed_path
     state.last_grade = "A"
     state.transition(AutoPhase.INTERVIEW, "interview")
@@ -995,10 +998,8 @@ async def test_pipeline_refuses_replay_blocked_run_start_from_seed_path(tmp_path
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
-    assert "run start timed out" in (result.blocker or "")
-    assert result.run_session_id is None
-    assert result.job_id is None
+    assert result.status == "complete"
+    assert result.job_id == "job_recovered"
 
 
 @pytest.mark.asyncio

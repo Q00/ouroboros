@@ -64,6 +64,8 @@ class AutoPipeline:
             if state.ledger
             else SeedDraftLedger.from_goal(state.goal)
         )
+        if self.skip_run and not state.skip_run:
+            state.skip_run = True
         self._save(state)
 
         if state.phase == AutoPhase.COMPLETE:
@@ -160,7 +162,7 @@ class AutoPipeline:
                 self._save(state)
         elif state.seed_artifact:
             seed = Seed.from_dict(state.seed_artifact)
-        elif state.phase == AutoPhase.RUN and self.seed_loader is not None and state.seed_path:
+        elif self.seed_loader is not None and state.seed_path:
             try:
                 seed = self.seed_loader(state.seed_path)
             except Exception as exc:
@@ -200,7 +202,7 @@ class AutoPipeline:
                     state, ledger, review=review, blocker="Seed did not reach A-grade"
                 )
 
-            if self.skip_run:
+            if self.skip_run or state.skip_run:
                 state.transition(AutoPhase.COMPLETE, "A-grade Seed ready; skip-run requested")
                 self._save(state)
                 return self._result(state, ledger, review=review)
@@ -298,7 +300,7 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
-    if tool_name == "seed_saver":
+    if tool_name in {"seed_saver", "grade_gate"}:
         return AutoPhase.REVIEW
     return None
 

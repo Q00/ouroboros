@@ -86,6 +86,9 @@ class AutoPipelineState:
     phase: AutoPhase = AutoPhase.CREATED
     policy: AutoPolicy = AutoPolicy.CONSERVATIVE
     required_grade: str = "A"
+    runtime_backend: str | None = None
+    opencode_mode: str | None = None
+    skip_run: bool = False
     interview_session_id: str | None = None
     interview_completed: bool = False
     seed_id: str | None = None
@@ -231,6 +234,8 @@ class AutoPipelineState:
                 msg = f"{field_name} must be an object"
                 raise ValueError(msg)
         optional_string_fields = (
+            "runtime_backend",
+            "opencode_mode",
             "interview_session_id",
             "seed_id",
             "seed_path",
@@ -252,7 +257,7 @@ class AutoPipelineState:
             if not value.strip():
                 msg = f"{field_name} must be a non-empty string or null"
                 raise ValueError(msg)
-        for field_name in ("interview_completed", "run_start_attempted"):
+        for field_name in ("interview_completed", "skip_run", "run_start_attempted"):
             if type(getattr(self, field_name)) is not bool:
                 msg = f"{field_name} must be a boolean"
                 raise ValueError(msg)

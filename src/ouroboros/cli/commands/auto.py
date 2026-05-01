@@ -101,10 +101,29 @@ async def _run_auto(
     skip_run: bool,
 ) -> AutoPipelineResult:
     store = AutoStore()
-    state = (
-        store.load(resume) if resume else AutoPipelineState(goal=goal or "", cwd=str(Path.cwd()))
-    )
-    opencode_mode = get_opencode_mode() if runtime == "opencode" else None
+    if resume:
+        state = store.load(resume)
+        if runtime is not None and state.runtime_backend not in {None, runtime}:
+            msg = (
+                f"resume runtime mismatch: session uses {state.runtime_backend}, "
+                f"but --runtime {runtime} was requested"
+            )
+            raise ValueError(msg)
+        runtime = runtime or state.runtime_backend
+        skip_run = skip_run or state.skip_run
+    else:
+        state = AutoPipelineState(goal=goal or "", cwd=str(Path.cwd()))
+        state.runtime_backend = runtime
+        state.skip_run = skip_run
+
+    if runtime == "opencode":
+        opencode_mode = state.opencode_mode or get_opencode_mode()
+    else:
+        opencode_mode = None
+    state.runtime_backend = runtime
+    state.opencode_mode = opencode_mode
+    state.skip_run = skip_run
+
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     interview = InterviewHandler(
         agent_runtime_backend=runtime, opencode_mode=authoring_opencode_mode

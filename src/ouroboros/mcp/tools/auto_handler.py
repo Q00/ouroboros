@@ -123,36 +123,44 @@ class AutoHandler:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_cwd = str(arguments.get("cwd") or _safe_default_cwd())
+        requested_skip_run = bool(arguments.get("skip_run", False))
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
+            runtime_backend = state.runtime_backend or self.agent_runtime_backend
+            opencode_mode = state.opencode_mode or self.opencode_mode
+            skip_run = requested_skip_run or state.skip_run
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
                 raise ValueError("goal is required when not resuming")
             cwd = requested_cwd
+            runtime_backend = self.agent_runtime_backend
+            opencode_mode = self.opencode_mode
+            skip_run = requested_skip_run
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
+        state.runtime_backend = runtime_backend
+        state.opencode_mode = opencode_mode
+        state.skip_run = skip_run
 
-        authoring_opencode_mode = (
-            "subprocess" if self.opencode_mode == "plugin" else self.opencode_mode
-        )
+        authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
         interview_handler = _authoring_interview_handler(
             self.interview_handler,
             llm_backend=self.llm_backend,
-            agent_runtime_backend=self.agent_runtime_backend,
+            agent_runtime_backend=runtime_backend,
             opencode_mode=authoring_opencode_mode,
         )
         generate_seed_handler = _authoring_seed_handler(
             self.generate_seed_handler,
             llm_backend=self.llm_backend,
-            agent_runtime_backend=self.agent_runtime_backend,
+            agent_runtime_backend=runtime_backend,
             opencode_mode=authoring_opencode_mode,
         )
         start_execute = _execution_start_handler(
             self.start_execute_seed_handler,
             llm_backend=self.llm_backend,
-            agent_runtime_backend=self.agent_runtime_backend,
-            opencode_mode=self.opencode_mode,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
             mcp_manager=self.mcp_manager,
             mcp_tool_prefix=self.mcp_tool_prefix,
         )
@@ -170,7 +178,7 @@ class AutoHandler:
             repairer=SeedRepairer(max_repair_rounds=int(arguments.get("max_repair_rounds") or 5)),
             seed_saver=save_seed,
             seed_loader=load_seed,
-            skip_run=bool(arguments.get("skip_run", False)),
+            skip_run=skip_run,
         )
         return await pipeline.run(state)
 
