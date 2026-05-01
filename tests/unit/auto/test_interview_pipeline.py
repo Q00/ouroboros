@@ -1193,3 +1193,29 @@ async def test_interview_driver_does_not_send_synthetic_gap_answer_to_specific_p
     assert answers
     assert "single local user" not in answers[0].lower()
     assert "non-goals" not in answers[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_accepts_initial_completed_turn_without_answering(tmp_path) -> None:
+    answered = False
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("already complete", "interview_done", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        nonlocal answered
+        answered = True
+        raise AssertionError("completed initial turn should not be answered")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert result.rounds == 0
+    assert state.interview_completed is True
+    assert state.pending_question is None
+    assert not answered

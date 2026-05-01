@@ -108,6 +108,9 @@ class AutoInterviewDriver:
                 "blocked", state.interview_session_id, ledger, state.current_round, blocker
             )
 
+        if turn.seed_ready or turn.completed:
+            return self._handle_completed_turn(state, ledger, turn, state.current_round)
+
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
             state.current_round = round_number
             state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
@@ -159,19 +162,7 @@ class AutoInterviewDriver:
 
             state.interview_session_id = turn.session_id
             if turn.seed_ready or turn.completed:
-                if ledger.is_seed_ready():
-                    state.interview_completed = True
-                    state.pending_question = None
-                    self._save(state)
-                    return AutoInterviewResult("seed_ready", turn.session_id, ledger, round_number)
-                gaps = ", ".join(ledger.open_gaps())
-                blocker = f"interview backend completed before auto ledger was ready: {gaps}"
-                state.pending_question = None
-                state.mark_blocked(blocker, tool_name="interview_driver")
-                self._save(state)
-                return AutoInterviewResult(
-                    "blocked", state.interview_session_id, ledger, round_number, blocker
-                )
+                return self._handle_completed_turn(state, ledger, turn, round_number)
             state.pending_question = turn.question
             self._save(state)
 
@@ -215,6 +206,21 @@ class AutoInterviewDriver:
                 blocker=blocker,
             )
         return self.answerer.answer(_gap_prompt(next_gap), ledger)
+
+    def _handle_completed_turn(
+        self, state: AutoPipelineState, ledger: SeedDraftLedger, turn: InterviewTurn, rounds: int
+    ) -> AutoInterviewResult:
+        state.interview_session_id = turn.session_id
+        state.pending_question = None
+        if ledger.is_seed_ready():
+            state.interview_completed = True
+            self._save(state)
+            return AutoInterviewResult("seed_ready", turn.session_id, ledger, rounds)
+        gaps = ", ".join(ledger.open_gaps())
+        blocker = f"interview backend completed before auto ledger was ready: {gaps}"
+        state.mark_blocked(blocker, tool_name="interview_driver")
+        self._save(state)
+        return AutoInterviewResult("blocked", state.interview_session_id, ledger, rounds, blocker)
 
     async def _with_timeout(
         self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str
