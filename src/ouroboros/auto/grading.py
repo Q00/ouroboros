@@ -142,6 +142,16 @@ class GradeGate:
 
         if not seed.goal.strip():
             blockers.append(GradeFinding("missing_goal", "high", "Seed goal is empty", "goal"))
+        if seed.metadata.ambiguity_score > 0.20:
+            blockers.append(
+                GradeFinding(
+                    "high_ambiguity_score",
+                    "high",
+                    f"Seed ambiguity score is too high for auto execution: {seed.metadata.ambiguity_score:.2f}",
+                    "metadata.ambiguity_score",
+                    "Continue interview or repair until ambiguity_score <= 0.20.",
+                )
+            )
         if not seed.constraints:
             findings.append(
                 GradeFinding(
