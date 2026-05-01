@@ -621,3 +621,27 @@ def test_auto_answerer_preserves_output_behavior_questions() -> None:
     assert (
         GradeGate().grade_seed(_seed(ac=(acceptance[0].value,)), ledger=ledger).grade == SeedGrade.A
     )
+
+
+def test_auto_answerer_allows_credential_auth_product_questions() -> None:
+    answer = AutoAnswerer().answer(
+        "Should the app use credential-based authentication?",
+        SeedDraftLedger.from_goal("Build an auth app"),
+    )
+
+    assert answer.blocker is None
+    assert "credential-based authentication" in answer.text.lower()
+
+
+def test_auto_answerer_allows_user_managed_secret_and_integration_deletion() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Should users be able to delete an API key?",
+        "Should users be able to delete a secret?",
+        "Should users be able to remove a repo integration?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build settings UI"))
+        assert answer.blocker is None
+        assert "product behavior" in answer.text.lower()
