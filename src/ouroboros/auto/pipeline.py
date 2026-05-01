@@ -73,7 +73,12 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
-        seed = await self.seed_generator(state.interview_session_id or "")
+        try:
+            seed = await self.seed_generator(state.interview_session_id or "")
+        except Exception as exc:
+            state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
         state.seed_id = seed.metadata.seed_id
         state.mark_progress("Seed generated", tool_name="seed_generator")
         self._save(state)
@@ -106,7 +111,12 @@ class AutoPipeline:
 
         state.transition(AutoPhase.RUN, "starting execution for A-grade Seed")
         self._save(state)
-        run_meta = await self.run_starter(seed)
+        try:
+            run_meta = await self.run_starter(seed)
+        except Exception as exc:
+            state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
         state.job_id = run_meta.get("job_id")
         state.execution_id = run_meta.get("execution_id")
         state.transition(AutoPhase.COMPLETE, "execution started for A-grade Seed")
