@@ -67,6 +67,17 @@ class AutoPipeline:
         if self.skip_run and not state.skip_run:
             state.skip_run = True
         resume_tool_name = state.last_tool_name
+        if state.seed_artifact:
+            try:
+                Seed.from_dict(state.seed_artifact)
+            except Exception as exc:
+                state.seed_artifact = None
+                state.mark_failed(
+                    f"persisted Seed artifact is invalid: {exc}",
+                    tool_name="auto_pipeline",
+                )
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
         self._save(state)
 
         if state.phase == AutoPhase.COMPLETE:
