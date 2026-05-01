@@ -281,7 +281,6 @@ def _is_actor_or_io_question(lowered: str) -> bool:
     return bool(re.search(r"\b(who|which)\s+(is|are)\s+the\s+users?\b", lowered))
 
 
-
 def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
     section = ledger.sections.get("goal")
     if section is None:
@@ -291,6 +290,7 @@ def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
         if entry.status not in inactive and entry.value.strip():
             return entry.value
     return ""
+
 
 def _blocker_for(question: str) -> AutoBlocker | None:
     lowered = question.lower()
