@@ -97,6 +97,8 @@ class AutoAnswerer:
             return self._runtime_answer(question)
         if _is_actor_or_io_question(lowered):
             return self._io_actor_answer(question)
+        if _is_product_behavior_question(lowered):
+            return self._product_behavior_answer(question)
 
         return self._default_answer(question, ledger)
 
@@ -269,6 +271,39 @@ class AutoAnswerer:
         ]
         return AutoAnswer(value, AutoAnswerSource.ASSUMPTION, 0.76, updates, assumptions=[value])
 
+    def _product_behavior_answer(self, question: str) -> AutoAnswer:
+        subject = _acceptance_subject(question)
+        value = (
+            f"Treat this requested product behavior as in scope for the MVP: {subject}. "
+            "Implement it directly and make the resulting state, output, or API response observable."
+        )
+        key = _slug_key(subject)
+        updates = [
+            (
+                "constraints",
+                LedgerEntry(
+                    key=f"constraints.behavior.{key}",
+                    value=f"Preserve the product behavior requested by the interview question: {subject}",
+                    source=LedgerSource.CONSERVATIVE_DEFAULT,
+                    confidence=0.8,
+                    status=LedgerStatus.DEFAULTED,
+                    rationale="Safe product-semantics questions should not be collapsed into a generic MVP policy.",
+                ),
+            ),
+            (
+                "acceptance_criteria",
+                LedgerEntry(
+                    key=f"acceptance.behavior.{key}",
+                    value=f"The requested behavior is observable: {subject} produces a verifiable output, status, or persisted state change.",
+                    source=LedgerSource.CONSERVATIVE_DEFAULT,
+                    confidence=0.78,
+                    status=LedgerStatus.DEFAULTED,
+                    rationale="Feature semantics from the interview question must remain visible in the Seed contract.",
+                ),
+            ),
+        ]
+        return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.8, updates)
+
     def _default_answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:  # noqa: ARG002
         value = "Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria."
         updates = [
@@ -332,6 +367,27 @@ def _acceptance_subject(question: str) -> str:
 def _slug_key(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     return slug[:64] or "requested_behavior"
+
+
+def _is_product_behavior_question(lowered: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(should|must|can|will|do|does|is|are)\b.+\b(mark|marked|show|display|write|return|create|update|edit|delete|store|save|send|generate|filter|sort|search|export|import|notify|report|use)\b",
+            lowered,
+        )
+        or re.search(r"\bwhat\s+(output|input)\b.+\b(should|does|do|format|write|use)\b", lowered)
+        or re.search(
+            r"\bwhat\s+should\b.+\b(write|return|display|show|create|store|generate|edit|delete)\b",
+            lowered,
+        )
+        or re.search(
+            r"\bhow\s+should\b.+\b(behave|work|display|return|write|store|mark)\b", lowered
+        )
+        or re.search(
+            r"\b(which|what)\b.+\b(can|should)\b.+\b(edit|delete|update|create|view|access)\b",
+            lowered,
+        )
+    )
 
 
 def _matches_any(value: str, patterns: tuple[str, ...]) -> bool:

@@ -302,6 +302,7 @@ class AutoStore:
 
     def save(self, state: AutoPipelineState) -> Path:
         """Persist ``state`` atomically and return the written path."""
+        state._validate_loaded()
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(state.auto_session_id)
         tmp_path = path.with_suffix(".json.tmp")

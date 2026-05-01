@@ -212,3 +212,14 @@ def test_store_load_rejects_malformed_optional_strings(tmp_path) -> None:
 
         with pytest.raises(ValueError, match="Auto session state is invalid"):
             store.load(state.auto_session_id)
+
+
+def test_store_save_rejects_invalid_state_before_writing(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.timeout_seconds_by_phase = {AutoPhase.RUN.value: 60}
+
+    with pytest.raises(ValueError, match="missing required phases"):
+        store.save(state)
+
+    assert not store.path_for(state.auto_session_id).exists()
