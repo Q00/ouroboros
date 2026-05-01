@@ -83,6 +83,7 @@ class AutoPipelineState:
     seed_artifact: dict[str, Any] = field(default_factory=dict)
     execution_id: str | None = None
     job_id: str | None = None
+    run_start_attempted: bool = False
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -239,9 +240,10 @@ class AutoPipelineState:
             if not value.strip():
                 msg = f"{field_name} must be a non-empty string or null"
                 raise ValueError(msg)
-        if type(self.interview_completed) is not bool:
-            msg = "interview_completed must be a boolean"
-            raise ValueError(msg)
+        for field_name in ("interview_completed", "run_start_attempted"):
+            if type(getattr(self, field_name)) is not bool:
+                msg = f"{field_name} must be a boolean"
+                raise ValueError(msg)
         for field_name in ("findings",):
             value = getattr(self, field_name)
             if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):

@@ -479,3 +479,25 @@ def test_auto_answerer_non_goals_use_latest_resolved_goal() -> None:
     answer = AutoAnswerer().answer("What are the non-goals?", ledger)
 
     assert "authentication" not in answer.text.lower()
+
+
+def test_grade_seed_allows_safe_product_delete_assumptions() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a task app")
+    _fill_minimal_ready_ledger(ledger)
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="assumption.safe_delete",
+            value="Users can delete their own tasks after confirmation",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.72,
+            status=LedgerStatus.INFERRED,
+        ),
+    )
+
+    result = GradeGate().grade_seed(
+        _seed(ac=("`task delete` prints stable stdout confirming deletion",)), ledger=ledger
+    )
+
+    assert result.grade == SeedGrade.A
+    assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)

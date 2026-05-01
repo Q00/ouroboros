@@ -283,7 +283,7 @@ def _is_observable(value: str) -> bool:
 
 
 def _high_risk_assumption_count(ledger: SeedDraftLedger) -> int:
-    risky_terms = ("credential", "api key", "production", "delete", "payment", "legal", "medical")
+    risky_terms = ("credential", "api key", "production", "payment", "legal", "medical")
     return sum(
         1
         for section in ledger.sections.values()

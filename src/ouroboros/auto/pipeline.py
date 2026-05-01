@@ -169,12 +169,13 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review)
-            state.mark_blocked(
-                "Run start status is unknown; refusing to start a duplicate execution",
-                tool_name="run_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
+            if state.run_start_attempted:
+                state.mark_blocked(
+                    "Run start status is unknown; refusing to start a duplicate execution",
+                    tool_name="run_starter",
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
 
         if self.run_starter is None:
             state.mark_blocked("No run starter configured", tool_name="run_starter")
@@ -182,8 +183,11 @@ class AutoPipeline:
             return self._result(state, ledger, review=review, blocker="No run starter configured")
 
         if state.phase != AutoPhase.RUN:
+            state.run_start_attempted = False
             state.transition(AutoPhase.RUN, "starting execution for A-grade Seed")
             self._save(state)
+        state.run_start_attempted = True
+        self._save(state)
         try:
             run_meta = await self.run_starter(seed)
             if not isinstance(run_meta, dict):
