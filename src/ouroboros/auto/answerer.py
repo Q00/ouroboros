@@ -280,15 +280,15 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "credential or secret value required",
         ),
         (
-            r"\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|charge|purchase|subscribe|production|live)\b",
+            r"\b(which|what|provide|enter|use|choose|select|configure|set|charge|purchase|subscribe)\b.+\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|production|live)\b",
             "paid service or financial decision required",
         ),
         (
-            r"\b(legal|compliance|license|contract)\b.+\b(advice|judgment|review|approval|liability|risk|interpretation)\b",
+            r"\b(which|what|provide|obtain|get|use|choose|select)\b.+\b(legal|compliance|license|contract)\b.+\b(advice|judgment|review|approval|liability|risk|interpretation)\b",
             "legal judgment required",
         ),
         (
-            r"\b(medical|clinical|diagnosis|treatment|health)\b.+\b(advice|judgment|diagnose|prescribe|triage|recommendation)\b",
+            r"\b(which|what|provide|use|choose|select)\b.+\b(medical|clinical|diagnosis|treatment|health)\b.+\b(advice|judgment|diagnose|prescribe|triage|recommendation)\b",
             "medical judgment required",
         ),
         (
