@@ -226,6 +226,19 @@ class AutoPipelineState:
             msg = "timeout_seconds_by_phase must be an object"
             raise ValueError(msg)
         valid_phases = {phase.value for phase in AutoPhase}
+        required_timeout_phases = {
+            AutoPhase.INTERVIEW.value,
+            AutoPhase.SEED_GENERATION.value,
+            AutoPhase.REVIEW.value,
+            AutoPhase.REPAIR.value,
+            AutoPhase.RUN.value,
+        }
+        missing_timeout_phases = sorted(
+            required_timeout_phases - self.timeout_seconds_by_phase.keys()
+        )
+        if missing_timeout_phases:
+            msg = f"timeout_seconds_by_phase is missing required phases: {', '.join(missing_timeout_phases)}"
+            raise ValueError(msg)
         for phase, timeout in self.timeout_seconds_by_phase.items():
             if not isinstance(phase, str) or phase not in valid_phases:
                 msg = "timeout_seconds_by_phase keys must be known phase strings"

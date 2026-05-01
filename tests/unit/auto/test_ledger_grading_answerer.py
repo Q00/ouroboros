@@ -546,3 +546,23 @@ def test_auto_answerer_preserves_open_ended_feature_acceptance_semantics() -> No
     assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
     assert "webhook delivery flow" in answer.text.lower()
     assert "stdout" not in answer.text.lower()
+
+
+def test_grade_gate_ignores_inactive_high_risk_assumptions() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a local task app")
+    _fill_minimal_ready_ledger(ledger)
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="assumption.old_production",
+            value="Use production credential",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.2,
+            status=LedgerStatus.WEAK,
+        ),
+    )
+
+    result = GradeGate().grade_seed(_seed(ac=("`task list` prints stable stdout",)), ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
