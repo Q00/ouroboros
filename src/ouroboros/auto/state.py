@@ -223,6 +223,18 @@ class AutoPipelineState:
                 msg = f"{field_name} must be a non-negative integer"
                 raise ValueError(msg)
 
+        if self.seed_artifact:
+            if not isinstance(self.seed_artifact, dict):
+                msg = "seed_artifact must be an object"
+                raise ValueError(msg)
+            try:
+                from ouroboros.core.seed import Seed
+
+                Seed.from_dict(self.seed_artifact)
+            except Exception as exc:
+                msg = "seed_artifact must be a valid Seed artifact"
+                raise ValueError(msg) from exc
+
 
 class AutoStore:
     """JSON file store for ``AutoPipelineState`` records."""
