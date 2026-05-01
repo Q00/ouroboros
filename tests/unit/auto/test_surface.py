@@ -55,3 +55,27 @@ async def test_handler_interview_backend_resume_fetches_pending_question() -> No
 
     assert turn.session_id == "interview_1"
     assert turn.question == "Pending question?"
+
+
+class _FakeErrorInterviewHandler:
+    async def handle(self, arguments):  # noqa: ARG002
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="recoverable failure"),),
+                is_error=True,
+                meta={"recoverable": True},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_handler_interview_backend_rejects_mcp_error_payloads() -> None:
+    with pytest.raises(RuntimeError, match="recoverable failure"):
+        await HandlerInterviewBackend(_FakeErrorInterviewHandler(), cwd=".").start("goal", cwd=".")
+
+
+def test_auto_handler_uses_synchronous_authoring_mode_for_opencode_plugin() -> None:
+    handler = AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+
+    assert handler.agent_runtime_backend == "opencode"
+    assert handler.opencode_mode == "plugin"

@@ -124,15 +124,18 @@ class AutoHandler:
             cwd = requested_cwd
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
 
+        authoring_opencode_mode = (
+            "subprocess" if self.opencode_mode == "plugin" else self.opencode_mode
+        )
         interview_handler = self.interview_handler or InterviewHandler(
             llm_backend=self.llm_backend,
             agent_runtime_backend=self.agent_runtime_backend,
-            opencode_mode=self.opencode_mode,
+            opencode_mode=authoring_opencode_mode,
         )
         generate_seed_handler = self.generate_seed_handler or GenerateSeedHandler(
             llm_backend=self.llm_backend,
             agent_runtime_backend=self.agent_runtime_backend,
-            opencode_mode=self.opencode_mode,
+            opencode_mode=authoring_opencode_mode,
         )
         if self.start_execute_seed_handler is not None:
             start_execute = self.start_execute_seed_handler

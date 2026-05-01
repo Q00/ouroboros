@@ -22,7 +22,11 @@ def _unwrap(result, *, tool_name: str) -> MCPToolResult:
     if result.is_err:
         error: MCPServerError = result.error
         raise HandlerError(f"{tool_name} failed: {error}")
-    return result.value
+    value = result.value
+    if value.is_error:
+        text = value.content[0].text if value.content else "handler returned error"
+        raise HandlerError(f"{tool_name} failed: {text}")
+    return value
 
 
 class HandlerInterviewBackend(InterviewBackend):
