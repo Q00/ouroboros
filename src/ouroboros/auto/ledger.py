@@ -127,16 +127,21 @@ class SeedDraftLedger:
     def from_goal(cls, goal: str) -> SeedDraftLedger:
         """Create a ledger initialized with a user goal."""
         ledger = cls(sections={name: LedgerSection(name) for name in REQUIRED_SECTIONS})
+        clean_goal = goal.strip()
         ledger.add_entry(
             "goal",
             LedgerEntry(
                 key="goal.primary",
-                value=goal,
+                value=clean_goal,
                 source=LedgerSource.USER_GOAL,
-                confidence=0.95,
-                status=LedgerStatus.CONFIRMED,
+                confidence=0.95 if clean_goal else 0.0,
+                status=LedgerStatus.CONFIRMED if clean_goal else LedgerStatus.WEAK,
                 reversible=False,
-                rationale="Initial user-provided auto task.",
+                rationale=(
+                    "Initial user-provided auto task."
+                    if clean_goal
+                    else "Auto task goal is blank and must be clarified before Seed generation."
+                ),
             ),
         )
         return ledger

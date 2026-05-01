@@ -66,13 +66,21 @@ class AutoAnswerer:
                 blocker=blocker,
             )
 
-        if any(word in lowered for word in ("non-goal", "out of scope", "exclude", "not do")):
+        if _matches_any(
+            lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
+        ):
             return self._non_goal_answer(question)
-        if any(word in lowered for word in ("test", "verify", "validation", "acceptance", "done")):
+        if _matches_any(
+            lowered,
+            (r"\btests?\b", r"\bverify\b", r"\bvalidation\b", r"\bacceptance\b", r"\bdone\b"),
+        ):
             return self._verification_answer(question)
-        if any(word in lowered for word in ("runtime", "stack", "repo", "project", "framework")):
+        if _matches_any(
+            lowered,
+            (r"\bruntime\b", r"\bstack\b", r"\brepo\b", r"\bproject\b", r"\bframework\b"),
+        ):
             return self._runtime_answer(question)
-        if any(word in lowered for word in ("input", "output", "user", "actor")):
+        if _is_actor_or_io_question(lowered):
             return self._io_actor_answer(question)
 
         return self._default_answer(question, ledger)
@@ -232,6 +240,23 @@ class AutoAnswerer:
             ),
         ]
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
+
+
+def _matches_any(value: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, value) for pattern in patterns)
+
+
+def _is_actor_or_io_question(lowered: str) -> bool:
+    if re.search(r"\b(inputs?|outputs?)\b", lowered):
+        return True
+    if not re.search(r"\b(actors?|users?|personas?|stakeholders?)\b", lowered):
+        return False
+    return bool(
+        re.search(
+            r"\b(who|which|what|primary|role|roles|persona|personas|stakeholder|stakeholders|actor|actors)\b",
+            lowered,
+        )
+    )
 
 
 def _blocker_for(question: str) -> AutoBlocker | None:

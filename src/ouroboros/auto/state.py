@@ -185,10 +185,13 @@ class AutoPipelineState:
                 msg = f"{field_name} must be an ISO timestamp string"
                 raise ValueError(msg)
             try:
-                datetime.fromisoformat(value)
+                parsed = datetime.fromisoformat(value)
             except ValueError as exc:
                 msg = f"{field_name} must be an ISO timestamp string"
                 raise ValueError(msg) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                msg = f"{field_name} must include timezone information"
+                raise ValueError(msg)
 
         if not isinstance(self.timeout_seconds_by_phase, dict):
             msg = "timeout_seconds_by_phase must be an object"

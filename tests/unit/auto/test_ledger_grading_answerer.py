@@ -253,3 +253,24 @@ def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
         assert answer.blocker is not None
         assert answer.source == AutoAnswerSource.BLOCKER
+
+
+def test_blank_goal_remains_open_gap() -> None:
+    ledger = SeedDraftLedger.from_goal("   ")
+    _fill_minimal_ready_ledger(ledger)
+
+    assert "goal" in ledger.open_gaps()
+    assert not ledger.is_seed_ready()
+
+
+def test_auto_answerer_does_not_route_feature_semantics_to_io_actor_defaults() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Should users be able to delete habits?",
+        "Should users see payment history?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a habit tracker"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert not {"actors", "inputs", "outputs"} & updated_sections
