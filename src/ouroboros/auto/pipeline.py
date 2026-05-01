@@ -298,6 +298,8 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
+    if tool_name == "seed_saver":
+        return AutoPhase.REVIEW
     return None
 
 

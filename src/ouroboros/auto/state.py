@@ -51,8 +51,18 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.REPAIR: {AutoPhase.REVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.RUN: {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.COMPLETE: set(),
-    AutoPhase.BLOCKED: {AutoPhase.INTERVIEW, AutoPhase.SEED_GENERATION, AutoPhase.RUN},
-    AutoPhase.FAILED: {AutoPhase.INTERVIEW, AutoPhase.SEED_GENERATION, AutoPhase.RUN},
+    AutoPhase.BLOCKED: {
+        AutoPhase.INTERVIEW,
+        AutoPhase.SEED_GENERATION,
+        AutoPhase.REVIEW,
+        AutoPhase.RUN,
+    },
+    AutoPhase.FAILED: {
+        AutoPhase.INTERVIEW,
+        AutoPhase.SEED_GENERATION,
+        AutoPhase.REVIEW,
+        AutoPhase.RUN,
+    },
 }
 
 
