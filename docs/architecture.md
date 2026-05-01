@@ -4,6 +4,12 @@
 
 Ouroboros is a **specification-first AI workflow engine** that transforms vague ideas into validated specifications before execution. Built on event sourcing with a rich TUI interface, it provides complete lifecycle management from requirements to evaluation.
 
+Agent OS terminology is intentionally locked so kernel-level PRs do not blur
+runtime context, control contracts, transport, and observability. See
+[Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md)
+for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
+`ControlContract`, `Directive`, `ControlBus`, and `IOJournal`.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                 OUROBOROS ARCHITECTURE                                               │
