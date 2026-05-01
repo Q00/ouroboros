@@ -1166,3 +1166,30 @@ async def test_pipeline_review_resume_marks_malformed_seed_artifact_failed(tmp_p
 
     assert result.status == "failed"
     assert "persisted Seed artifact is invalid" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_does_not_send_synthetic_gap_answer_to_specific_prompt(
+    tmp_path,
+) -> None:
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What output format should the export command write?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        return InterviewTurn("done", session_id, completed=True)
+
+    state = AutoPipelineState(goal="Build an export command", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert answers
+    assert "single local user" not in answers[0].lower()
+    assert "non-goals" not in answers[0].lower()

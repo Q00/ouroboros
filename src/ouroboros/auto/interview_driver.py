@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+import re
 from typing import Protocol
 
 from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerSource, AutoBlocker
@@ -200,6 +201,8 @@ class AutoInterviewDriver:
         if any(gap.section in updated_sections for gap in gaps):
             return answer
         next_gap = gaps[0]
+        if not _can_steer_with_gap_prompt(question):
+            return answer
         if next_gap.section == "goal" or next_gap.state in {
             LedgerStatus.CONFLICTING,
             LedgerStatus.BLOCKED,
@@ -259,6 +262,16 @@ class FunctionInterviewBackend:
             msg = "interview resume is unavailable because no pending question is persisted"
             raise RuntimeError(msg)
         return await self._resume(session_id)
+
+
+def _can_steer_with_gap_prompt(question: str) -> bool:
+    lowered = question.lower()
+    return bool(
+        re.search(
+            r"\b(what else|anything else|additional context|more context|what should we know|clarify further)\b",
+            lowered,
+        )
+    )
 
 
 def _gap_prompt(gap: Gap) -> str:

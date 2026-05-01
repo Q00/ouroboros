@@ -524,5 +524,3 @@ def test_auto_answerer_preserves_feature_specific_acceptance_semantics() -> None
     assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
     assert "delete endpoint" in answer.text.lower()
     assert "stdout" not in answer.text.lower()
-
-
