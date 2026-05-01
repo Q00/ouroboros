@@ -301,10 +301,11 @@ def test_auto_answerer_avoids_generic_defaults_for_feature_semantics() -> None:
     for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a task app"))
         updated_sections = {section for section, _entry in answer.ledger_updates}
-        assert (
-            not {"actors", "inputs", "outputs", "verification_plan", "acceptance_criteria"}
-            & updated_sections
-        )
+        assert answer.blocker is None
+        assert "conservative mvp" not in answer.text.lower()
+        assert "product behavior" in answer.text.lower()
+        assert {"constraints", "acceptance_criteria"} <= updated_sections
+        assert not {"actors", "inputs", "outputs", "verification_plan"} & updated_sections
 
 
 def test_auto_answerer_allows_safe_production_and_project_feature_questions() -> None:
@@ -566,3 +567,41 @@ def test_grade_gate_ignores_inactive_high_risk_assumptions() -> None:
 
     assert result.grade == SeedGrade.A
     assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
+
+
+def test_grade_gate_blocks_high_ambiguity_seed() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(ac=("`task list` prints stable stdout",)).model_copy(
+        update={"metadata": SeedMetadata(ambiguity_score=0.45)}
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.C
+    assert not result.may_run
+    assert any(blocker.code == "high_ambiguity_score" for blocker in result.blockers)
+
+
+def test_auto_answerer_preserves_safe_product_behavior_questions() -> None:
+    answer = AutoAnswerer().answer(
+        "Should completed tasks be marked done?",
+        SeedDraftLedger.from_goal("Build a task app"),
+    )
+
+    assert answer.blocker is None
+    assert "marked done" in answer.text.lower()
+    assert "conservative mvp" not in answer.text.lower()
+    assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
+
+
+def test_auto_answerer_preserves_output_behavior_questions() -> None:
+    answer = AutoAnswerer().answer(
+        "What output should the export command write?",
+        SeedDraftLedger.from_goal("Build an export command"),
+    )
+
+    assert answer.blocker is None
+    assert "export command write" in answer.text.lower()
+    assert "conservative mvp" not in answer.text.lower()
+    assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
