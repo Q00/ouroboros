@@ -79,6 +79,7 @@ class AutoPipelineState:
     interview_session_id: str | None = None
     seed_id: str | None = None
     seed_path: str | None = None
+    seed_artifact: dict[str, Any] = field(default_factory=dict)
     execution_id: str | None = None
     job_id: str | None = None
     ledger: dict[str, Any] = field(default_factory=dict)

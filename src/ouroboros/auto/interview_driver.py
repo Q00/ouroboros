@@ -161,8 +161,11 @@ class AutoInterviewDriver:
             return AutoInterviewResult(
                 "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
             )
+        blocker = "auto interview reached max rounds before backend marked the Seed ready"
+        state.mark_blocked(blocker, tool_name="interview_driver")
+        self._save(state)
         return AutoInterviewResult(
-            "seed_ready", state.interview_session_id, ledger, self.max_rounds
+            "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
         )
 
     async def _with_timeout(
