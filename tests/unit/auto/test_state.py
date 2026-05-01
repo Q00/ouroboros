@@ -134,6 +134,7 @@ def test_store_load_rejects_empty_optional_resume_identifiers(tmp_path) -> None:
         "seed_path",
         "execution_id",
         "job_id",
+        "run_session_id",
         "last_grade",
         "pending_question",
         "last_tool_name",
