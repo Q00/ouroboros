@@ -987,7 +987,7 @@ async def test_pipeline_seed_generation_resume_requires_interview_session_id(tmp
 
 
 @pytest.mark.asyncio
-async def test_pipeline_retries_recoverable_run_start_from_seed_path(tmp_path) -> None:
+async def test_pipeline_refuses_blocked_run_start_replay_from_seed_path(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -995,11 +995,10 @@ async def test_pipeline_retries_recoverable_run_start_from_seed_path(tmp_path) -
         raise AssertionError("resume should not answer interview")
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
-        raise AssertionError("run resume should not generate seed")
+        raise AssertionError("unknown run resume should not generate seed")
 
-    async def run_seed(seed_arg: Seed) -> dict[str, str | None]:
-        assert seed_arg.metadata.seed_id == seed.metadata.seed_id
-        return {"job_id": "job_retry", "execution_id": None}
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("ambiguous run start resume should not start another run")
 
     seed = _seed()
     seed_path = str(tmp_path / "seed.yaml")
@@ -1028,9 +1027,9 @@ async def test_pipeline_retries_recoverable_run_start_from_seed_path(tmp_path) -
 
     result = await pipeline.run(state)
 
-    assert result.status == "complete"
-    assert result.job_id == "job_retry"
-    assert state.run_start_attempted is True
+    assert result.status == "blocked"
+    assert "run start timed out" in (result.blocker or "")
+    assert result.job_id is None
 
 
 @pytest.mark.asyncio

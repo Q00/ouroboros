@@ -91,8 +91,6 @@ class AutoPipeline:
                 resume_phase,
                 f"resuming {resume_phase.value} after {previous_phase.value}: {state.last_error or 'no error recorded'}",
             )
-            if resume_phase == AutoPhase.RUN:
-                state.run_start_attempted = False
             self._save(state)
 
         review: SeedReview | None = None
@@ -343,8 +341,6 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.SEED_GENERATION
     if tool_name in {"seed_saver", "grade_gate"}:
         return AutoPhase.REVIEW
-    if tool_name == "run_starter":
-        return AutoPhase.RUN
     return None
 
 
