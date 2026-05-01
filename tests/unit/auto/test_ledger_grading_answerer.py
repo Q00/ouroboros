@@ -645,3 +645,16 @@ def test_auto_answerer_allows_user_managed_secret_and_integration_deletion() -> 
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build settings UI"))
         assert answer.blocker is None
         assert "product behavior" in answer.text.lower()
+
+
+def test_auto_answerer_allows_user_managed_token_and_key_product_questions() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Should users be able to rotate private keys?",
+        "Should the app display access tokens?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build identity settings"))
+        assert answer.blocker is None
+        assert "product behavior" in answer.text.lower()
