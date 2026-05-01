@@ -455,6 +455,12 @@ async def _render_job_snapshot_inner(
                 lines.append(
                     f"**Current Step**: Gen {latest.data.get('generation_number')} failed at {latest.data.get('phase')}"
                 )
+            elif latest.type == "lineage.generation.watchdog_decision":
+                lines.append(
+                    f"**Current Step**: Gen {latest.data.get('generation_number')} watchdog {latest.data.get('action', 'decision')}"
+                )
+                if latest.data.get("reason"):
+                    lines.append(f"**Reason**: {latest.data.get('reason')}")
             elif latest.type in {"lineage.converged", "lineage.stagnated", "lineage.exhausted"}:
                 lines.append(f"**Current Step**: {latest.type.split('.', 1)[1]}")
                 if latest.data.get("reason"):

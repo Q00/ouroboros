@@ -312,6 +312,9 @@ class JobManager:
                     return f"Generation {gen} completed"
                 if latest.type == "lineage.generation.failed":
                     return f"Generation {gen} failed | {phase}"
+                if latest.type == "lineage.generation.watchdog_decision":
+                    action = data.get("action", "decision")
+                    return f"Generation {gen} watchdog {action} | {reason or ''}".strip()
                 if latest.type == "lineage.generation.interrupted":
                     gen = data.get("generation_number", "?")
                     last_phase = data.get("last_completed_phase", "unknown")

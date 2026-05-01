@@ -15,14 +15,15 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+import inspect
 import json
 import logging
-import os
 import signal
 from typing import Any
 
+from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.lineage import (
     EvaluationSummary,
@@ -50,11 +51,22 @@ from ouroboros.events.lineage import (
 from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
+from ouroboros.evolution.watchdog import (
+    GenerationProgressWatchdog,
+    GenerationWatchdogTimeout,
+)
 from ouroboros.evolution.wonder import WonderEngine, WonderOutput
 from ouroboros.observability.drift import DriftMeasuredEvent, DriftMeasurement
 from ouroboros.persistence.event_store import EventStore
 
 logger = logging.getLogger(__name__)
+
+
+def _default_runtime_controls() -> RuntimeControlsConfig:
+    """Load runtime controls through the config/env compatibility layer."""
+    from ouroboros.config.loader import get_runtime_controls_config
+
+    return get_runtime_controls_config()
 
 
 @dataclass
@@ -65,12 +77,21 @@ class EvolutionaryLoopConfig:
     convergence_threshold: float = 0.95
     stagnation_window: int = 3
     min_generations: int = 3
-    generation_timeout_seconds: int = int(
-        os.environ.get("OUROBOROS_GENERATION_TIMEOUT", "0")
-    )  # 0 = no timeout
+    generation_timeout_seconds: int = 0  # Deprecated: use runtime_controls.
+    runtime_controls: RuntimeControlsConfig = field(default_factory=_default_runtime_controls)
     enable_oscillation_detection: bool = True
     eval_gate_enabled: bool = True
     eval_min_score: float = 0.7
+
+    def __post_init__(self) -> None:
+        """Map legacy generation_timeout_seconds onto no-progress detection."""
+        if self.generation_timeout_seconds > 0:
+            self.runtime_controls = RuntimeControlsConfig.model_validate(
+                {
+                    **self.runtime_controls.model_dump(),
+                    "generation_no_progress_timeout_seconds": (self.generation_timeout_seconds),
+                }
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +301,7 @@ class EvolutionaryLoop:
     ) -> Result[EvolutionaryResult, OuroborosError]:
         """Inner loop extracted for SIGINT handler bracket."""
         generation_number = 0
+        failure_error: OuroborosError | None = None
 
         while True:
             generation_number += 1
@@ -292,32 +314,27 @@ class EvolutionaryLoop:
                 },
             )
 
-            # Run generation with timeout
-            loop_timeout = self.config.generation_timeout_seconds or None
-            try:
-                gen_result = await asyncio.wait_for(
-                    self._run_generation(
-                        lineage=lineage,
-                        generation_number=generation_number,
-                        current_seed=current_seed,
-                    ),
-                    timeout=loop_timeout,
-                )
-            except TimeoutError:
-                # Note: asyncio.wait_for cancels the task first, so
-                # _run_generation's CancelledError handler already emitted
-                # a generation.failed event. We only log here — no duplicate emit.
+            # Run generation with progress-aware liveness controls.
+            gen_result = await self._run_generation_with_watchdog(
+                lineage=lineage,
+                generation_number=generation_number,
+                current_seed=current_seed,
+            )
+            if gen_result.is_err and isinstance(gen_result.error, GenerationWatchdogTimeout):
+                failure_error = gen_result.error
                 logger.error(
-                    "evolution.generation.timeout",
+                    "evolution.generation.watchdog_timeout",
                     extra={
                         "lineage_id": lineage.lineage_id,
                         "generation": generation_number,
-                        "timeout": self.config.generation_timeout_seconds,
+                        "timeout_kind": gen_result.error.timeout_kind,
+                        "details": gen_result.error.details,
                     },
                 )
                 break
 
             if gen_result.is_err:
+                failure_error = gen_result.error
                 logger.error(
                     "evolution.generation.failed",
                     extra={
@@ -450,7 +467,9 @@ class EvolutionaryLoop:
         completed_results = [r for r in generation_results if r.phase == GenerationPhase.COMPLETED]
         has_interrupted = any(r.phase == GenerationPhase.INTERRUPTED for r in generation_results)
         if not completed_results and not has_interrupted:
-            return Result.err(OuroborosError("No generations completed before failure"))
+            return Result.err(
+                failure_error or OuroborosError("No generations completed before failure")
+            )
 
         # Partial results available — return best-so-far (lineage stays ACTIVE for resume)
         # total_generations counts only completed generations to avoid overstating progress
@@ -627,25 +646,19 @@ class EvolutionaryLoop:
             interrupted_at_phase if last_phase == GenerationPhase.INTERRUPTED else None
         )
         self._install_sigint_handler()
-        timeout = self.config.generation_timeout_seconds or None  # 0 = no timeout
         try:
-            gen_result = await asyncio.wait_for(
-                self._run_generation(
-                    lineage=lineage,
-                    generation_number=generation_number,
-                    current_seed=current_seed,
-                    execute=execute,
-                    parallel=parallel,
-                    resume_after_phase=resume_after_phase,
-                ),
-                timeout=timeout,
+            gen_result = await self._run_generation_with_watchdog(
+                lineage=lineage,
+                generation_number=generation_number,
+                current_seed=current_seed,
+                execute=execute,
+                parallel=parallel,
+                resume_after_phase=resume_after_phase,
             )
-        except TimeoutError:
-            # Note: _run_generation's CancelledError handler already emits
-            # generation.failed (asyncio.wait_for cancels the task before
-            # raising TimeoutError). No duplicate event emission needed here.
+        finally:
+            self._uninstall_sigint_handler()
 
-            # Return FAILED step result
+        if gen_result.is_err and isinstance(gen_result.error, GenerationWatchdogTimeout):
             failed_gen = GenerationResult(
                 generation_number=generation_number,
                 seed=current_seed,
@@ -654,7 +667,7 @@ class EvolutionaryLoop:
             )
             conv_signal = ConvergenceSignal(
                 converged=False,
-                reason=f"Generation timed out after {self.config.generation_timeout_seconds}s",
+                reason=gen_result.error.message,
                 ontology_similarity=0.0,
                 generation=generation_number,
             )
@@ -667,8 +680,6 @@ class EvolutionaryLoop:
                     next_generation=generation_number,
                 )
             )
-        finally:
-            self._uninstall_sigint_handler()
 
         if gen_result.is_err:
             # Note: _run_generation_phases already emits a phase-specific
@@ -821,6 +832,7 @@ class EvolutionaryLoop:
         execute: bool = True,
         parallel: bool = True,
         resume_after_phase: str | None = None,
+        execution_id: str | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
@@ -839,6 +851,7 @@ class EvolutionaryLoop:
                 execute=execute,
                 parallel=parallel,
                 resume_after_phase=resume_after_phase,
+                execution_id=execution_id,
             )
         except asyncio.CancelledError:
             # MCP transport disconnect, timeout, or external task cancellation.
@@ -863,6 +876,73 @@ class EvolutionaryLoop:
             except Exception:
                 logger.warning("evolution.generation.cancelled_event_failed", exc_info=True)
             raise
+
+    async def _run_generation_with_watchdog(
+        self,
+        lineage: OntologyLineage,
+        generation_number: int,
+        current_seed: Seed,
+        execute: bool = True,
+        parallel: bool = True,
+        resume_after_phase: str | None = None,
+    ) -> Result[GenerationResult, OuroborosError]:
+        """Run one generation under progress-aware liveness controls."""
+        execution_id = self._generation_execution_id(lineage.lineage_id, generation_number)
+        watchdog = GenerationProgressWatchdog(
+            event_store=self.event_store,
+            lineage_id=lineage.lineage_id,
+            generation_number=generation_number,
+            execution_id=execution_id,
+            controls=self.config.runtime_controls,
+        )
+        try:
+            return await watchdog.watch(
+                self._run_generation(
+                    lineage=lineage,
+                    generation_number=generation_number,
+                    current_seed=current_seed,
+                    execute=execute,
+                    parallel=parallel,
+                    resume_after_phase=resume_after_phase,
+                    execution_id=execution_id,
+                )
+            )
+        except GenerationWatchdogTimeout as exc:
+            return Result.err(exc)
+
+    @staticmethod
+    def _generation_execution_id(lineage_id: str, generation_number: int) -> str:
+        """Build the deterministic execution ID for an evolve generation."""
+        return f"evolve:{lineage_id}:generation:{generation_number}"
+
+    async def _call_executor(
+        self,
+        seed: Seed,
+        *,
+        parallel: bool,
+        execution_id: str | None,
+    ) -> Any:
+        """Call the configured executor with optional execution_id support."""
+        kwargs: dict[str, Any] = {"parallel": parallel}
+        if execution_id is not None and self._callable_accepts_keyword(
+            self.executor,
+            "execution_id",
+        ):
+            kwargs["execution_id"] = execution_id
+        return await self.executor(seed, **kwargs)
+
+    @staticmethod
+    def _callable_accepts_keyword(callable_obj: Any, keyword: str) -> bool:
+        """Return True when *callable_obj* accepts *keyword*."""
+        try:
+            signature = inspect.signature(callable_obj)
+        except (TypeError, ValueError):
+            return False
+
+        for parameter in signature.parameters.values():
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+        return keyword in signature.parameters
 
     async def _check_shutdown(
         self,
@@ -959,6 +1039,7 @@ class EvolutionaryLoop:
         execute: bool = True,
         parallel: bool = True,
         resume_after_phase: str | None = None,
+        execution_id: str | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Inner implementation of _run_generation with all phase logic.
 
@@ -1294,7 +1375,11 @@ class EvolutionaryLoop:
             )
         elif execute and self.executor:
             try:
-                exec_result = await self.executor(current_seed, parallel=parallel)
+                exec_result = await self._call_executor(
+                    current_seed,
+                    parallel=parallel,
+                    execution_id=execution_id,
+                )
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
                     orch_result = exec_result.value
                     summary = getattr(orch_result, "summary", {})

@@ -19,6 +19,7 @@ from ouroboros.config.models import (
     PersistenceConfig,
     ProviderCredentials,
     ResilienceConfig,
+    RuntimeControlsConfig,
     TierConfig,
     get_config_dir,
     get_default_config,
@@ -269,6 +270,41 @@ class TestResilienceConfig:
             ResilienceConfig(lateral_temperature=2.5)
 
 
+class TestRuntimeControlsConfig:
+    """Test RuntimeControlsConfig for long-running workflow controls."""
+
+    def test_runtime_controls_defaults_are_progress_aware(self) -> None:
+        """Defaults avoid fixed MCP wall-clock timeout for evolve_step."""
+        config = RuntimeControlsConfig()
+        assert config.mcp_tool_timeout_seconds == 0
+        assert config.generation_idle_timeout_seconds == 7200
+        assert config.generation_no_progress_timeout_seconds == 14400
+        assert config.generation_safety_timeout_seconds == 0
+        assert config.watchdog_poll_seconds == 15.0
+
+    def test_runtime_controls_allow_simple_tuning(self) -> None:
+        """Runtime controls are obvious non-negative second values."""
+        config = RuntimeControlsConfig(
+            mcp_tool_timeout_seconds=30,
+            generation_idle_timeout_seconds=120,
+            generation_no_progress_timeout_seconds=600,
+            generation_safety_timeout_seconds=3600,
+            watchdog_poll_seconds=2.5,
+        )
+        assert config.mcp_tool_timeout_seconds == 30
+        assert config.generation_idle_timeout_seconds == 120
+        assert config.generation_no_progress_timeout_seconds == 600
+        assert config.generation_safety_timeout_seconds == 3600
+        assert config.watchdog_poll_seconds == 2.5
+
+    def test_runtime_controls_reject_invalid_values(self) -> None:
+        """Invalid runtime-control values fail validation clearly."""
+        with pytest.raises(ValidationError):
+            RuntimeControlsConfig(generation_idle_timeout_seconds=-1)
+        with pytest.raises(ValidationError):
+            RuntimeControlsConfig(watchdog_poll_seconds=0)
+
+
 class TestEvaluationConfig:
     """Test EvaluationConfig for Phase 4 settings."""
 
@@ -426,6 +462,7 @@ class TestOuroborosConfig:
         assert config.consensus is not None
         assert config.persistence is not None
         assert config.drift is not None
+        assert config.runtime_controls is not None
         assert config.logging is not None
 
     def test_ouroboros_config_is_frozen(self) -> None:

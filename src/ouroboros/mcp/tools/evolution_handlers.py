@@ -15,6 +15,7 @@ from typing import Any
 import structlog
 import yaml
 
+from ouroboros.config import get_runtime_controls_config
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
@@ -121,9 +122,14 @@ class EvolveStepHandler(BridgeAwareMixin):
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
 
-    TIMEOUT_SECONDS: int = int(
-        os.environ.get("OUROBOROS_GENERATION_TIMEOUT", "7200")
-    )  # Override MCP adapter's default 30s
+    @property
+    def TIMEOUT_SECONDS(self) -> float:
+        """MCP adapter timeout for evolve_step.
+
+        Defaults to 0 so the generation watchdog, not adapter wall-clock,
+        decides whether long-running work is still productive.
+        """
+        return get_runtime_controls_config().mcp_tool_timeout_seconds
 
     @property
     def definition(self) -> MCPToolDefinition:

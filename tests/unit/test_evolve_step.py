@@ -1,11 +1,13 @@
 """Unit tests for evolve_step() — single-generation stepping API."""
 
+import inspect
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.lineage import (
     EvaluationSummary,
@@ -40,6 +42,20 @@ from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifac
 from ouroboros.persistence.event_store import EventStore
 
 # -- Helpers --
+
+_RUNTIME_CONTROL_ENV_KEYS = (
+    "OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS",
+    "OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS",
+    "OUROBOROS_GENERATION_NO_PROGRESS_TIMEOUT_SECONDS",
+    "OUROBOROS_GENERATION_SAFETY_TIMEOUT_SECONDS",
+    "OUROBOROS_WATCHDOG_POLL_SECONDS",
+    "OUROBOROS_GENERATION_TIMEOUT",
+)
+
+
+def _clear_runtime_control_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for env_key in _RUNTIME_CONTROL_ENV_KEYS:
+        monkeypatch.delenv(env_key, raising=False)
 
 
 def make_seed(
@@ -174,6 +190,57 @@ async def seed_events_for_gen1(
 # -- Test Classes --
 
 
+class TestEvolutionaryLoopConfig:
+    """Test evolutionary loop config compatibility behavior."""
+
+    def test_default_runtime_controls_honor_legacy_generation_timeout_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _clear_runtime_control_env(monkeypatch)
+        monkeypatch.setenv("OUROBOROS_GENERATION_TIMEOUT", "43200")
+
+        config = EvolutionaryLoopConfig()
+
+        assert config.runtime_controls.generation_no_progress_timeout_seconds == 43200
+
+    def test_explicit_generation_timeout_overrides_runtime_controls(self) -> None:
+        config = EvolutionaryLoopConfig(
+            generation_timeout_seconds=123,
+            runtime_controls=RuntimeControlsConfig(
+                generation_no_progress_timeout_seconds=456,
+            ),
+        )
+
+        assert config.runtime_controls.generation_no_progress_timeout_seconds == 123
+
+    def test_explicit_runtime_controls_are_preserved(self) -> None:
+        controls = RuntimeControlsConfig(
+            generation_idle_timeout_seconds=77,
+            generation_no_progress_timeout_seconds=88,
+            watchdog_poll_seconds=2,
+        )
+
+        config = EvolutionaryLoopConfig(runtime_controls=controls)
+
+        assert config.runtime_controls == controls
+
+    def test_non_introspectable_executor_preserves_legacy_call_shape(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executor = object()
+
+        def raise_for_executor(callable_obj: object) -> inspect.Signature:
+            if callable_obj is executor:
+                raise ValueError("no signature")
+            return inspect.Signature()
+
+        monkeypatch.setattr("ouroboros.evolution.loop.inspect.signature", raise_for_executor)
+
+        assert EvolutionaryLoop._callable_accepts_keyword(executor, "execution_id") is False
+
+
 class TestStepTypes:
     """Test StepAction and StepResult types."""
 
@@ -273,6 +340,49 @@ class TestEvolveStepGen1:
         reconstructed = Seed.from_dict(json.loads(completed.data["seed_json"]))
         assert reconstructed.goal == seed.goal
         assert reconstructed.metadata.seed_id == seed.metadata.seed_id
+
+    @pytest.mark.asyncio
+    async def test_gen1_executor_receives_deterministic_execution_id(self) -> None:
+        """Evolve execution events are scoped so the watchdog can monitor them."""
+        store = await create_event_store()
+        seed = make_seed()
+        observed: dict[str, object] = {}
+
+        async def executor(
+            received_seed: Seed,
+            *,
+            parallel: bool = True,
+            execution_id: str | None = None,
+        ) -> str:
+            observed["seed"] = received_seed
+            observed["parallel"] = parallel
+            observed["execution_id"] = execution_id
+            return "Execution complete"
+
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(
+                min_generations=1,
+                runtime_controls=RuntimeControlsConfig(
+                    generation_idle_timeout_seconds=0,
+                    generation_no_progress_timeout_seconds=0,
+                    watchdog_poll_seconds=0.01,
+                ),
+            ),
+            executor=executor,
+        )
+
+        result = await loop.evolve_step(
+            lineage_id="lin_exec_scope",
+            initial_seed=seed,
+            execute=True,
+            parallel=False,
+        )
+
+        assert result.is_ok
+        assert observed["seed"] == seed
+        assert observed["parallel"] is False
+        assert observed["execution_id"] == "evolve:lin_exec_scope:generation:1"
 
     @pytest.mark.asyncio
     async def test_gen1_records_depth_warning_as_seed_quality_canary_feedback(self) -> None:

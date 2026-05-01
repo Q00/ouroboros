@@ -33,6 +33,7 @@ from ouroboros.config.loader import (
     get_opencode_cli_path,
     get_qa_model,
     get_reflect_model,
+    get_runtime_controls_config,
     get_semantic_model,
     get_wonder_model,
     load_config,
@@ -48,6 +49,7 @@ from ouroboros.config.models import (
     OrchestratorConfig,
     OuroborosConfig,
     ResilienceConfig,
+    RuntimeControlsConfig,
 )
 from ouroboros.core.errors import ConfigError
 
@@ -609,6 +611,82 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_agent_permission_mode(backend="opencode") == "bypassPermissions"
+
+    def test_get_runtime_controls_reads_config(self) -> None:
+        """Runtime controls are tunable through config.yaml."""
+        controls = RuntimeControlsConfig(
+            mcp_tool_timeout_seconds=0,
+            generation_idle_timeout_seconds=120,
+            generation_no_progress_timeout_seconds=600,
+            generation_safety_timeout_seconds=3600,
+            watchdog_poll_seconds=2.0,
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(runtime_controls=controls),
+            ),
+        ):
+            loaded = get_runtime_controls_config()
+
+        assert loaded.generation_idle_timeout_seconds == 120
+        assert loaded.generation_no_progress_timeout_seconds == 600
+        assert loaded.generation_safety_timeout_seconds == 3600
+        assert loaded.watchdog_poll_seconds == 2.0
+
+    def test_get_runtime_controls_env_overrides_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dedicated env vars override the config values."""
+        monkeypatch.setenv("OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS", "90")
+        monkeypatch.setenv("OUROBOROS_WATCHDOG_POLL_SECONDS", "1.5")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(
+                runtime_controls=RuntimeControlsConfig(
+                    generation_idle_timeout_seconds=120,
+                    watchdog_poll_seconds=2.0,
+                )
+            ),
+        ):
+            loaded = get_runtime_controls_config()
+
+        assert loaded.generation_idle_timeout_seconds == 90
+        assert loaded.watchdog_poll_seconds == 1.5
+
+    def test_get_runtime_controls_legacy_generation_timeout_maps_to_no_progress(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The legacy env var no longer controls MCP wall-clock timeout."""
+        monkeypatch.setenv("OUROBOROS_GENERATION_TIMEOUT", "43200")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(runtime_controls=RuntimeControlsConfig()),
+        ):
+            loaded = get_runtime_controls_config()
+
+        assert loaded.mcp_tool_timeout_seconds == 0
+        assert loaded.generation_no_progress_timeout_seconds == 43200
+
+    def test_get_runtime_controls_rejects_invalid_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid runtime-control env values fail clearly."""
+        monkeypatch.setenv("OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS", "-1")
+        with (
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(runtime_controls=RuntimeControlsConfig()),
+            ),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_runtime_controls_config()
+
+        assert exc_info.value.config_key == "OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS"
 
     def test_get_max_parallel_workers_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for max parallel workers."""

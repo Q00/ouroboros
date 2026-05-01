@@ -149,6 +149,33 @@ def lineage_generation_interrupted(
     )
 
 
+def lineage_generation_watchdog_decision(
+    lineage_id: str,
+    generation_number: int,
+    action: str,
+    reason: str,
+    *,
+    execution_id: str | None = None,
+    details: dict | None = None,
+) -> BaseEvent:
+    """Create event when the generation watchdog makes a control decision."""
+    data: dict = {
+        "generation_number": generation_number,
+        "action": action,
+        "reason": reason,
+    }
+    if execution_id is not None:
+        data["execution_id"] = execution_id
+    if details:
+        data["details"] = details
+    return BaseEvent(
+        type="lineage.generation.watchdog_decision",
+        aggregate_type="lineage",
+        aggregate_id=lineage_id,
+        data=data,
+    )
+
+
 def lineage_ontology_evolved(
     lineage_id: str,
     generation_number: int,
