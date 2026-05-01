@@ -83,6 +83,10 @@ class AutoAnswerer:
             ),
         ):
             return self._verification_answer(question)
+        if _is_actor_or_io_question(lowered):
+            return self._io_actor_answer(question)
+        if _is_product_behavior_question(lowered):
+            return self._product_behavior_answer(question)
         if _matches_any(
             lowered,
             (
@@ -95,10 +99,6 @@ class AutoAnswerer:
             ),
         ):
             return self._runtime_answer(question)
-        if _is_actor_or_io_question(lowered):
-            return self._io_actor_answer(question)
-        if _is_product_behavior_question(lowered):
-            return self._product_behavior_answer(question)
 
         return self._default_answer(question, ledger)
 
@@ -372,7 +372,7 @@ def _slug_key(value: str) -> str:
 def _is_product_behavior_question(lowered: str) -> bool:
     return bool(
         re.search(
-            r"\b(should|must|can|will|do|does|is|are)\b.+\b(mark|marked|show|display|write|return|create|update|edit|delete|store|save|send|generate|filter|sort|search|export|import|notify|report|use)\b",
+            r"\b(should|must|can|will|do|does|is|are)\b.+\b(mark|marked|show|display|write|return|create|update|edit|delete|remove|store|save|send|generate|filter|sort|search|export|import|notify|report|use)\b",
             lowered,
         )
         or re.search(r"\bwhat\s+(output|input)\b.+\b(should|does|do|format|write|use)\b", lowered)
@@ -384,7 +384,7 @@ def _is_product_behavior_question(lowered: str) -> bool:
             r"\bhow\s+should\b.+\b(behave|work|display|return|write|store|mark)\b", lowered
         )
         or re.search(
-            r"\b(which|what)\b.+\b(can|should)\b.+\b(edit|delete|update|create|view|access)\b",
+            r"\b(which|what)\b.+\b(can|should)\b.+\b(edit|delete|remove|update|create|view|access)\b",
             lowered,
         )
     )
@@ -428,7 +428,11 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "credential or secret value required",
         ),
         (
-            r"\b(provide|enter|use|choose|select|configure|set)\b.+\b(credential|credentials)\b",
+            r"\b(provide|enter|paste|supply|configure|set)\b.+\b(credentials?)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci|production|prod)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(which|what)\s+credentials?\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
             "credential or secret value required",
         ),
         (
@@ -476,7 +480,7 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "production deployment or irreversible external action required",
         ),
         (
-            r"\b(delete|drop|erase|wipe|remove)\b.+\b(database|db|repo|branch|production|prod|secret|api key|credential)\b",
+            r"\b(delete|drop|erase|wipe|remove)\b.+\b(database|db|branch|production|prod)\b",
             "destructive external operation requires human authority",
         ),
         (
