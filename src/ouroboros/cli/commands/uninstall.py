@@ -3,7 +3,7 @@
 Cleanly reverses everything `ouroboros setup` did:
   1. MCP server registration  (~/.claude/mcp.json, ~/.codex/config.toml)
   2. CLAUDE.md integration block (<!-- ooo:START --> … <!-- ooo:END -->)
-  3. Codex artifacts          (~/.codex/rules/ouroboros.md, ~/.codex/skills/ouroboros/)
+  3. Codex artifacts          (~/.codex/rules/ouroboros*.md, ~/.codex/skills/ouroboros-*/)
   4. Data directory           (~/.ouroboros/)
 
 Does NOT remove:
@@ -33,6 +33,7 @@ from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry,
     opencode_config_dir,
 )
+from ouroboros.codex import CODEX_RULE_FILENAME, CODEX_SKILL_NAMESPACE
 
 app = typer.Typer(
     name="uninstall",
@@ -140,12 +141,31 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
     Returns True only if ALL existing artifacts were removed successfully.
     Returns False if any artifact could not be removed.
     """
-    rules_path = Path.home() / ".codex" / "rules" / "ouroboros.md"
-    skills_path = Path.home() / ".codex" / "skills" / "ouroboros"
+    codex_dir = Path.home() / ".codex"
+    rules_root = codex_dir / "rules"
+    skills_root = codex_dir / "skills"
+    rule_paths = []
+    if rules_root.exists():
+        rule_paths = [
+            path
+            for path in rules_root.iterdir()
+            if path.is_file()
+            and (
+                path.name == CODEX_RULE_FILENAME
+                or (path.name.startswith("ouroboros-") and path.suffix == ".md")
+            )
+        ]
+    skill_paths = []
+    if skills_root.exists():
+        skill_paths = [
+            path
+            for path in skills_root.iterdir()
+            if path.name == "ouroboros" or path.name.startswith(CODEX_SKILL_NAMESPACE)
+        ]
     had_work = False
     all_ok = True
 
-    if rules_path.exists():
+    for rules_path in rule_paths:
         had_work = True
         if dry_run:
             print_info(f"[dry-run] Would remove {rules_path}")
@@ -157,7 +177,7 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
                 print_warning(f"Could not remove {rules_path} — skipping.")
                 all_ok = False
 
-    if skills_path.exists():
+    for skills_path in skill_paths:
         had_work = True
         if dry_run:
             print_info(f"[dry-run] Would remove {skills_path}/")
@@ -430,9 +450,21 @@ def uninstall(
     except (json.JSONDecodeError, OSError):
         targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
 
-    codex_rules = Path.home() / ".codex" / "rules" / "ouroboros.md"
-    codex_skills = Path.home() / ".codex" / "skills" / "ouroboros"
-    if codex_rules.exists() or codex_skills.exists():
+    codex_rules_root = Path.home() / ".codex" / "rules"
+    codex_skills_root = Path.home() / ".codex" / "skills"
+    has_codex_rules = codex_rules_root.exists() and any(
+        path.is_file()
+        and (
+            path.name == CODEX_RULE_FILENAME
+            or (path.name.startswith("ouroboros-") and path.suffix == ".md")
+        )
+        for path in codex_rules_root.iterdir()
+    )
+    has_codex_skills = codex_skills_root.exists() and any(
+        path.name == "ouroboros" or path.name.startswith(CODEX_SKILL_NAMESPACE)
+        for path in codex_skills_root.iterdir()
+    )
+    if has_codex_rules or has_codex_skills:
         targets.append("Codex rules and skills (~/.codex/)")
 
     cwd = Path.cwd()

@@ -20,6 +20,7 @@ from ouroboros.cli.commands.setup import (
     _scan_and_register_repos,
     _set_default_repo,
 )
+from ouroboros.codex import CodexArtifactInstallResult
 
 # ── Codex setup tests ────────────────────────────────────────────
 
@@ -83,21 +84,91 @@ class TestCodexSetup:
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
 
+    def test_register_codex_mcp_server_preserves_url_config_by_default(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """URL-based Codex MCP configs are user-managed and preserved in auto mode."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        assert 'url = "http://127.0.0.1:12000/mcp"' in contents
+        assert 'command = "uvx"' not in contents
+        assert "[mcp_servers.ouroboros.env]" not in contents
+
+    def test_register_codex_mcp_server_preserves_custom_command_by_default(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Custom command-based Codex MCP configs are preserved in auto mode."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "/tmp/ouroboros/.venv/bin/ouroboros"\n'
+            'args = ["mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        assert 'command = "/tmp/ouroboros/.venv/bin/ouroboros"' in contents
+        assert 'command = "uvx"' not in contents
+
+    def test_register_codex_mcp_server_stdio_mode_replaces_url_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit stdio mode replaces a user-managed URL config."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_mcp_server(mode="stdio")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        assert 'url = "http://127.0.0.1:12000/mcp"' not in contents
+        assert 'command = "uvx"' in contents
+        assert "[mcp_servers.ouroboros.env]" in contents
+
+    def test_register_codex_mcp_server_preserve_mode_does_not_create_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Preserve mode skips MCP config changes entirely."""
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_mcp_server(mode="preserve")
+
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
     def test_install_codex_artifacts_installs_rules_and_skills(self, tmp_path: Path) -> None:
         """Codex setup should install both managed rules and managed skills."""
         rules_path = tmp_path / ".codex" / "rules"
         skill_paths = [tmp_path / ".codex" / "skills" / "evaluate"]
+        result = CodexArtifactInstallResult(rules_path, tuple(skill_paths))
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.codex.install_codex_rules", return_value=rules_path) as mock_rules,
-            patch("ouroboros.codex.install_codex_skills", return_value=skill_paths) as mock_skills,
+            patch("ouroboros.codex.install_codex_artifacts", return_value=result) as mock_install,
             patch("ouroboros.cli.commands.setup.print_success") as mock_success,
         ):
             setup_cmd._install_codex_artifacts()
 
-        mock_rules.assert_called_once()
-        mock_skills.assert_called_once()
+        mock_install.assert_called_once()
         success_messages = [call.args[0] for call in mock_success.call_args_list]
         assert any("Installed Codex rules" in message for message in success_messages)
         assert any("Installed 1 Codex skills" in message for message in success_messages)
@@ -127,7 +198,7 @@ class TestCodexSetup:
         assert config_dict["orchestrator"]["codex_cli_path"] == "/usr/local/bin/codex"
         assert config_dict["llm"]["backend"] == "codex"
         mock_install.assert_called_once_with()
-        mock_register.assert_called_once_with()
+        mock_register.assert_called_once_with(mode="auto")
 
         info_messages = [call.args[0] for call in mock_info.call_args_list]
         assert any("Config saved to" in message for message in info_messages)
