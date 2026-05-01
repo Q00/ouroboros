@@ -14,6 +14,7 @@ from ouroboros.mcp.tools.auto_handler import (
     _authoring_interview_handler,
     _authoring_seed_handler,
     _execution_start_handler,
+    _safe_default_cwd,
 )
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
@@ -220,3 +221,10 @@ def test_cli_opencode_plugin_uses_subprocess_authoring(monkeypatch) -> None:
         "execute_mode": "plugin",
         "start_mode": "plugin",
     }
+
+
+def test_auto_handler_default_cwd_avoids_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(Path, "cwd", lambda: Path("/"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    assert _safe_default_cwd() == tmp_path

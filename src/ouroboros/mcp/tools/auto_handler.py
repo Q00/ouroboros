@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -121,7 +122,7 @@ class AutoHandler:
     async def _run(self, arguments: dict[str, Any]) -> AutoPipelineResult:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
-        requested_cwd = str(arguments.get("cwd") or Path.cwd())
+        requested_cwd = str(arguments.get("cwd") or _safe_default_cwd())
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -172,6 +173,13 @@ class AutoHandler:
             skip_run=bool(arguments.get("skip_run", False)),
         )
         return await pipeline.run(state)
+
+
+def _safe_default_cwd() -> Path:
+    cwd = Path.cwd()
+    if cwd == Path("/") or not os.access(cwd, os.W_OK):
+        return Path.home()
+    return cwd
 
 
 def _authoring_interview_handler(
