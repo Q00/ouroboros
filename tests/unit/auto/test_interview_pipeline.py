@@ -622,3 +622,24 @@ async def test_pipeline_resumes_repair_phase_through_review(tmp_path) -> None:
 
     assert result.status == "complete"
     assert result.grade == "A"
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_when_backend_completes_before_ledger_ready(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=3
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "completed before auto ledger was ready" in (result.blocker or "")
+    assert state.phase == AutoPhase.BLOCKED

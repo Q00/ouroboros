@@ -152,11 +152,19 @@ class AutoInterviewDriver:
             state.interview_session_id = turn.session_id
             state.pending_question = turn.question
             self._save(state)
-            if (turn.seed_ready or turn.completed) and ledger.is_seed_ready():
-                state.interview_completed = True
-                state.pending_question = None
+            if turn.seed_ready or turn.completed:
+                if ledger.is_seed_ready():
+                    state.interview_completed = True
+                    state.pending_question = None
+                    self._save(state)
+                    return AutoInterviewResult("seed_ready", turn.session_id, ledger, round_number)
+                gaps = ", ".join(ledger.open_gaps())
+                blocker = f"interview backend completed before auto ledger was ready: {gaps}"
+                state.mark_blocked(blocker, tool_name="interview_driver")
                 self._save(state)
-                return AutoInterviewResult("seed_ready", turn.session_id, ledger, round_number)
+                return AutoInterviewResult(
+                    "blocked", state.interview_session_id, ledger, round_number, blocker
+                )
 
         if not ledger.is_seed_ready():
             gaps = ", ".join(ledger.open_gaps())
