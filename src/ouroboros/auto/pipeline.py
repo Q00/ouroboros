@@ -112,8 +112,15 @@ class AutoPipeline:
                 state.transition(AutoPhase.REVIEW, "resuming review from persisted Seed")
                 self._save(state)
             else:
+                if not state.interview_session_id:
+                    state.mark_failed(
+                        "seed generation cannot resume without interview_session_id",
+                        tool_name="seed_generator",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
                 try:
-                    seed = await self.seed_generator(state.interview_session_id or "")
+                    seed = await self.seed_generator(state.interview_session_id)
                     if not isinstance(seed, Seed):
                         msg = f"seed generator returned {type(seed).__name__}, expected Seed"
                         raise TypeError(msg)
@@ -128,7 +135,15 @@ class AutoPipeline:
                 state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
                 self._save(state)
         elif state.seed_artifact:
-            seed = Seed.from_dict(state.seed_artifact)
+            try:
+                seed = Seed.from_dict(state.seed_artifact)
+            except Exception as exc:
+                state.mark_failed(
+                    f"persisted Seed artifact is invalid: {exc}",
+                    tool_name="auto_pipeline",
+                )
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
         else:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",

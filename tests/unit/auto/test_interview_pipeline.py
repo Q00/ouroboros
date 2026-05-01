@@ -891,3 +891,55 @@ async def test_pipeline_resumes_prepared_run_before_first_attempt(tmp_path) -> N
     assert result.status == "complete"
     assert result.job_id == "job_after_resume"
     assert state.run_start_attempted is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_generation_resume_requires_interview_session_id(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("seed resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("seed resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("missing interview session should fail before generator")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_completed = True
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "interview_session_id" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_review_resume_marks_malformed_seed_artifact_failed(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("review resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("review resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("review resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.seed_artifact = {"goal": "missing required fields"}
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "persisted Seed artifact is invalid" in (result.blocker or "")

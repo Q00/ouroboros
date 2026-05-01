@@ -524,4 +524,3 @@ def test_grade_seed_allows_safe_product_delete_assumptions() -> None:
 
     assert result.grade == SeedGrade.A
     assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
-
