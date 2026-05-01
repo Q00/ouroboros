@@ -187,7 +187,17 @@ Backfill uses one precedence rule so rerunning it over the same historical journ
 
 Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key` / `extra.backfill_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
 
-Backfill is idempotent by key, not by event UUID. Before appending any synthetic `contract.*` event, the command queries for an existing synthetic event with the same `type`, `contract_id`, and `extra.backfill_key`; if present it skips the append. Synthetic envelope rows use backfill-time append timestamps because the current EventStore cannot insert a deterministic cursor before historical rows. Their payload must carry `historical_started_at` / `historical_finished_at` (and edge source timestamps for dependency events) so Layer 1/2 projectors can render historical order without pretending Layer 0 raw ordering brackets old rows. The journal remains append-only, and repeated backfill runs do not create duplicate synthetic envelopes for the same historical boundary.
+Backfill is idempotent by key, not by event UUID. Before appending any synthetic `contract.*` event, the command derives an event-specific idempotency key and queries for an existing synthetic event with the same `type`, `contract_id`, and `extra.backfill_event_key`; if present it skips the append. `extra.backfill_key=<synthetic_contract_key>` remains the boundary-level key shared by all synthetic events for the contract; it is **not** sufficient by itself to dedupe dependency edges.
+
+Event-specific keys are deterministic:
+
+- `contract.created`: `created:<synthetic_contract_key>:<first_source_event_id>`
+- `contract.completed` / `contract.failed`: `<terminal_type>:<synthetic_contract_key>:<terminal_source_event_id>`
+- `contract.dependency.recorded`: `dependency:<synthetic_contract_key>:<from_contract_id>:<to_contract_id>:<edge_type>:<dependency_source_event_id_or_timestamp>`
+
+Dependency-event dedupe therefore includes the edge identity (`from_contract_id`, `to_contract_id`, `edge_type`) plus the stable source evidence that caused the edge. A contract with multiple `parent_ac` or `result_input` dependencies appends one synthetic dependency event per distinct edge/source, and rerunning backfill skips only the matching edge event rather than collapsing all dependency history for that contract.
+
+Synthetic envelope rows use backfill-time append timestamps because the current EventStore cannot insert a deterministic cursor before historical rows. Their payload must carry `historical_started_at` / `historical_finished_at` (and edge source timestamps for dependency events) so Layer 1/2 projectors can render historical order without pretending Layer 0 raw ordering brackets old rows. The journal remains append-only, and repeated backfill runs do not create duplicate synthetic envelopes or dependency edges for the same historical boundary.
 
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
