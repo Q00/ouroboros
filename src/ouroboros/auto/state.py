@@ -173,10 +173,31 @@ class AutoPipelineState:
 
     def _validate_loaded(self) -> None:
         """Validate fields whose bad values would otherwise fail later during resume."""
-        for field_name in ("goal", "cwd", "auto_session_id", "required_grade"):
+        for field_name in (
+            "goal",
+            "cwd",
+            "auto_session_id",
+            "required_grade",
+            "last_progress_message",
+        ):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 msg = f"{field_name} must be a non-empty string"
+                raise ValueError(msg)
+
+        for field_name in (
+            "interview_session_id",
+            "seed_id",
+            "seed_path",
+            "execution_id",
+            "job_id",
+            "last_grade",
+            "last_tool_name",
+            "last_error",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                msg = f"{field_name} must be null or a non-empty string"
                 raise ValueError(msg)
 
         for field_name in (
@@ -202,6 +223,19 @@ class AutoPipelineState:
             msg = "timeout_seconds_by_phase must be an object"
             raise ValueError(msg)
         valid_phases = {phase.value for phase in AutoPhase}
+        required_timeout_phases = {
+            AutoPhase.INTERVIEW.value,
+            AutoPhase.SEED_GENERATION.value,
+            AutoPhase.REVIEW.value,
+            AutoPhase.REPAIR.value,
+            AutoPhase.RUN.value,
+        }
+        missing_timeout_phases = sorted(
+            required_timeout_phases - self.timeout_seconds_by_phase.keys()
+        )
+        if missing_timeout_phases:
+            msg = f"timeout_seconds_by_phase is missing required phases: {', '.join(missing_timeout_phases)}"
+            raise ValueError(msg)
         for phase, timeout in self.timeout_seconds_by_phase.items():
             if not isinstance(phase, str) or phase not in valid_phases:
                 msg = "timeout_seconds_by_phase keys must be known phase strings"

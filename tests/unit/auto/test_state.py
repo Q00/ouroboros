@@ -145,3 +145,34 @@ def test_store_load_rejects_session_id_mismatch(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="session id mismatch"):
         store.load(state.auto_session_id)
+
+
+def test_store_load_rejects_partial_timeout_map(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["timeout_seconds_by_phase"] = {AutoPhase.RUN.value: 60}
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing required phases"):
+        store.load(state.auto_session_id)
+
+
+def test_store_load_rejects_malformed_optional_strings(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    path = store.path_for(state.auto_session_id)
+
+    for field_name, value in (
+        ("seed_path", {"path": "seed.json"}),
+        ("seed_id", ""),
+        ("execution_id", []),
+        ("last_progress_message", []),
+    ):
+        data = state.to_dict()
+        data[field_name] = value
+        path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Auto session state is invalid"):
+            store.load(state.auto_session_id)
