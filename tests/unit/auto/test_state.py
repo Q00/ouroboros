@@ -102,3 +102,22 @@ def test_store_load_wraps_naive_timestamps(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="Auto session state is invalid"):
         store.load(state.auto_session_id)
+
+
+def test_store_load_wraps_malformed_container_and_counter_fields(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    path = store.path_for(state.auto_session_id)
+
+    for field_name, value in (
+        ("ledger", []),
+        ("findings", "oops"),
+        ("repair_round", "1"),
+        ("current_round", -1),
+    ):
+        data = state.to_dict()
+        data[field_name] = value
+        path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Auto session state is invalid"):
+            store.load(state.auto_session_id)

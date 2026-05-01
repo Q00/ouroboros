@@ -232,6 +232,8 @@ def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:
         "Should legal documents be editable?",
         "Should medical records be exportable?",
         "Should users see payment history?",
+        "Should users be able to rotate API keys?",
+        "Should the app support password reset?",
     )
 
     for question in benign_questions:
@@ -247,6 +249,8 @@ def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
         "Which payment provider account should we charge?",
         "What legal approval is needed for liability risk?",
         "What medical advice should the app recommend?",
+        "What API key should the workflow use?",
+        "Which password should CI configure?",
     )
 
     for question in blocking_questions:
@@ -268,6 +272,8 @@ def test_auto_answerer_does_not_route_feature_semantics_to_io_actor_defaults() -
     questions = (
         "Should users be able to delete habits?",
         "Should users see payment history?",
+        "Should users be able to rotate API keys?",
+        "Should the app support password reset?",
     )
 
     for question in questions:

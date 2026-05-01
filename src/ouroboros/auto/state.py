@@ -205,6 +205,21 @@ class AutoPipelineState:
                 msg = "timeout_seconds_by_phase values must be positive integers"
                 raise ValueError(msg)
 
+        for field_name in ("ledger",):
+            if not isinstance(getattr(self, field_name), dict):
+                msg = f"{field_name} must be an object"
+                raise ValueError(msg)
+        for field_name in ("findings",):
+            value = getattr(self, field_name)
+            if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+                msg = f"{field_name} must be a list of objects"
+                raise ValueError(msg)
+        for field_name in ("repair_round", "current_round"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                msg = f"{field_name} must be a non-negative integer"
+                raise ValueError(msg)
+
 
 class AutoStore:
     """JSON file store for ``AutoPipelineState`` records."""

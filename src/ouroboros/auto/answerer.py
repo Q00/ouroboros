@@ -264,11 +264,15 @@ def _blocker_for(question: str) -> AutoBlocker | None:
 
     external_action_patterns = (
         (
-            r"\b(api key|access token|auth token|private key|password|credential value|credential secret)\b",
+            r"\b(access token|auth token|private key|credential value|credential secret)\b",
             "credential or secret value required",
         ),
         (
             r"\b(which|what|provide|enter|use|choose|select|configure|set)\b.+\b(credential|credentials)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(which|what|provide|enter|use|choose|select|configure|set)\b.+\b(api keys?|passwords?)\b",
             "credential or secret value required",
         ),
         (
