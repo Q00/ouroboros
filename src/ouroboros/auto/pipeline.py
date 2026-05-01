@@ -54,6 +54,17 @@ class AutoPipeline:
             if state.ledger
             else SeedDraftLedger.from_goal(state.goal)
         )
+        if state.seed_artifact:
+            try:
+                Seed.from_dict(state.seed_artifact)
+            except Exception as exc:
+                state.seed_artifact = None
+                state.mark_failed(
+                    f"persisted Seed artifact is invalid: {exc}",
+                    tool_name="auto_pipeline",
+                )
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
         self._save(state)
 
         if state.phase in {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}:
