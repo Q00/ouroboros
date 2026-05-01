@@ -419,6 +419,7 @@ async def analyze_ontologically(
 
     config = CompletionConfig(
         model=model or get_ontology_analysis_model(),
+        role="ontology_analysis",
         temperature=temperature,
         max_tokens=max_tokens,
     )

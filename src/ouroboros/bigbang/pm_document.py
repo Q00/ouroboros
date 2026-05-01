@@ -288,6 +288,7 @@ class PMDocumentGenerator:
 
         config = CompletionConfig(
             model=self.model,
+            role="pm_document",
             temperature=0.3,
             max_tokens=8192,
         )

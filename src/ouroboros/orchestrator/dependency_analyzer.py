@@ -515,6 +515,7 @@ class DependencyAnalyzer:
             messages=[Message(role=MessageRole.USER, content=prompt)],
             config=CompletionConfig(
                 model=self._model,
+                role="dependency_analysis",
                 temperature=0.0,
                 max_tokens=1000,
             ),

@@ -20,6 +20,7 @@ from ouroboros.providers.base import (
     Message,
     UsageInfo,
 )
+from ouroboros.providers.profiles import resolve_completion_profile
 
 log = structlog.get_logger()
 _CREDENTIALS_UNSET = object()
@@ -326,6 +327,7 @@ class LiteLLMAdapter:
         Returns:
             Result containing either the completion response or a ProviderError.
         """
+        config = resolve_completion_profile(config, backend="litellm").config
 
         # Create the retry-decorated function with instance's max_retries
         @retry_async(

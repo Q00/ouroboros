@@ -106,6 +106,7 @@ class AssertionExtractor:
 
         config = CompletionConfig(
             model=self.model,
+            role="assertion_extraction",
             temperature=0.0,
             max_tokens=4096,
         )

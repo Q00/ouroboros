@@ -415,6 +415,7 @@ class ConsensusEvaluator:
 
         config = CompletionConfig(
             model="",  # Use adapter's default model
+            role="consensus_perspective",
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
@@ -498,6 +499,7 @@ class ConsensusEvaluator:
         """
         config = CompletionConfig(
             model=model,
+            role="consensus_vote",
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
@@ -798,6 +800,7 @@ class DeliberativeConsensus:
 
             config = CompletionConfig(
                 model=model,
+                role="consensus_advocate",
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
                 response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
@@ -939,6 +942,7 @@ Based on both positions above, make your final judgment."""
 
         config = CompletionConfig(
             model=self._config.judge_model,
+            role="consensus_judge",
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={"type": "json_schema", "json_schema": JUDGMENT_SCHEMA},

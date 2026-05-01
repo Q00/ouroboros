@@ -36,6 +36,7 @@ For Codex-backed Ouroboros workflows:
 - Put persistent Ouroboros role overrides in `~/.ouroboros/config.yaml`.
 - Use `~/.codex/config.toml` only for the Codex MCP/env hookup written by `ouroboros setup --runtime codex`.
 - The Codex-aware loader does **not** hardcode a mini model when these keys are left at their shipped defaults. It resolves Codex-backed lookups to Codex's `default` sentinel unless you set an explicit model string.
+- Use `llm_profiles` and `llm_role_profiles` when you want portable task profiles that can map to Codex CLI profiles or to ordinary model settings for other providers.
 
 ### Codex Role Override Map
 
@@ -47,7 +48,91 @@ For Codex-backed Ouroboros workflows:
 | Consensus simple voting | `consensus.models` |
 | Consensus deliberative roles | `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model` |
 
-> **Recommended documented baseline:** use GPT-5.4 with medium reasoning effort in Codex CLI, then pin specific Ouroboros roles in `config.yaml` when you want deterministic per-role model selection.
+> **Recommended documented baseline:** use GPT-5.4 with medium reasoning effort in Codex CLI for standard work. `ouroboros setup --runtime codex` also creates cheaper fast defaults on GPT-5.4 Mini and deeper GPT-5.5 defaults for users whose ChatGPT plan exposes those models.
+
+### Portable Task Profiles
+
+`llm_profiles` are top-level, provider-neutral task profiles. `llm_role_profiles` maps logical Ouroboros roles to those profiles. For Codex, a provider mapping can use `profile`, which is passed as `codex exec --profile <name>`. For other backends, profiles resolve to supported fields such as `model`, `temperature`, `max_tokens`, `top_p`, and `max_turns`.
+
+```yaml
+llm_profiles:
+  fast:
+    max_turns: 1
+    temperature: 0.2
+    providers:
+      codex:
+        profile: ouroboros-fast
+      litellm:
+        model: openrouter/openai/gpt-5.3-codex-spark
+
+  standard:
+    max_turns: 3
+    temperature: 0.3
+    providers:
+      codex:
+        profile: ouroboros-standard
+
+  deep:
+    max_turns: 5
+    temperature: 0.4
+    providers:
+      codex:
+        profile: ouroboros-deep
+      claude_code:
+        model: claude-opus-4-6
+      gemini:
+        model: gemini-2.5-pro
+      opencode:
+        model: openai/gpt-5.4
+      litellm:
+        model: openrouter/anthropic/claude-opus-4-6
+
+  frontier:
+    max_turns: 8
+    temperature: 0.4
+    providers:
+      codex:
+        profile: ouroboros-frontier
+
+llm_role_profiles:
+  ambiguity: fast
+  assertion_extraction: fast
+  mechanical_detection: fast
+  question_classification: fast
+  qa: fast
+  clarification: standard
+  seed_generation: standard
+  dependency_analysis: standard
+  semantic_evaluation: deep
+  wonder: deep
+  reflect: deep
+  consensus_vote: deep
+  consensus_judge: frontier
+```
+
+Resolution order is: role mapping, profile provider mapping for the active backend, existing `*_model` field, then backend default behavior.
+
+For Codex, setup creates flat profile anchors in `~/.codex/config.toml`:
+
+```toml
+[profiles.ouroboros-fast]
+model = "gpt-5.4-mini"
+model_reasoning_effort = "low"
+
+[profiles.ouroboros-standard]
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+[profiles.ouroboros-deep]
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+
+[profiles.ouroboros-frontier]
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+```
+
+These are intentionally sparse, flat Codex profiles. Codex currently exposes a single `--profile <name>` selector; setup does not depend on unsupported profile-to-profile inheritance. Edit these anchors if your local Codex account does not expose a listed model.
 
 ---
 
@@ -63,6 +148,8 @@ For Codex-backed Ouroboros workflows:
 | `resilience` | `ResilienceConfig` | Phase 3 — Stagnation detection and lateral thinking |
 | `evaluation` | `EvaluationConfig` | Phase 4 — 3-stage evaluation pipeline settings |
 | `consensus` | `ConsensusConfig` | Phase 5 — Multi-model consensus settings |
+| `llm_profiles` | `dict[str, LLMTaskProfileConfig]` | Provider-neutral LLM task profiles |
+| `llm_role_profiles` | `dict[str, str]` | Logical role to LLM task profile mapping |
 | `persistence` | `PersistenceConfig` | SQLite event store settings |
 | `drift` | `DriftConfig` | Drift monitoring thresholds |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
@@ -122,6 +209,27 @@ llm:
 | `dependency_analysis_model` | `string` | `"claude-opus-4-6"` | Model used for AC dependency analysis. Overridable via `OUROBOROS_DEPENDENCY_ANALYSIS_MODEL`. |
 | `ontology_analysis_model` | `string` | `"claude-opus-4-6"` | Model used for ontological analysis. Overridable via `OUROBOROS_ONTOLOGY_ANALYSIS_MODEL`. |
 | `context_compression_model` | `string` | `"gpt-4"` | Model used for workflow context compression. Overridable via `OUROBOROS_CONTEXT_COMPRESSION_MODEL`. |
+
+---
+
+## `llm_profiles` and `llm_role_profiles`
+
+`llm_profiles` define reusable task profiles outside any single provider. `llm_role_profiles` chooses which profile a logical Ouroboros task role should use.
+
+Common role keys include `clarification`, `seed_generation`, `assertion_extraction`, `qa`, `semantic_evaluation`, `wonder`, `reflect`, `consensus_vote`, `consensus_advocate`, `consensus_judge`, `dependency_analysis`, `context_compression`, `ontology_analysis`, `atomicity`, `decomposition`, `double_diamond`, and `mechanical_detection`.
+
+Profile fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | `string \| null` | Portable model override used when no provider-specific model is set. |
+| `temperature` | `float \| null` | Portable temperature override. |
+| `max_tokens` | `int \| null` | Portable token limit override. |
+| `top_p` | `float \| null` | Portable nucleus sampling override. |
+| `max_turns` | `int \| null` | Portable CLI-agent turn budget where supported. |
+| `providers` | `dict` | Backend-specific overrides keyed by `codex`, `claude_code`, `gemini`, `opencode`, `litellm`, or provider aliases such as `openrouter`. |
+
+Provider-specific fields use the same keys plus `profile`. `profile` is currently backend-native metadata; Codex maps it to `codex exec --profile <name>`, while non-Codex adapters ignore it unless they add native profile support later. `ouroboros setup --runtime codex` installs missing default profiles and role mappings but preserves existing profile definitions and skips role mappings where explicit legacy model overrides are already configured.
 
 ---
 

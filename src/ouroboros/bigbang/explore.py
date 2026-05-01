@@ -454,6 +454,7 @@ Output a structured summary with sections: Tech Stack, Key Types, Patterns, Conv
 
         config = CompletionConfig(
             model=self.model,
+            role="brownfield_explore",
             temperature=0.2,
             max_tokens=1024,
         )

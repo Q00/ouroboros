@@ -83,6 +83,61 @@ class TestCodexSetup:
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
 
+    def test_register_codex_default_profiles_writes_profile_anchors(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Codex setup should create sparse profile anchors for Ouroboros roles."""
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_default_profiles()
+
+        config_path = tmp_path / ".codex" / "config.toml"
+        contents = config_path.read_text(encoding="utf-8")
+
+        assert "[profiles.ouroboros-fast]" in contents
+        assert 'model = "gpt-5.4-mini"' in contents
+        assert 'model_reasoning_effort = "low"' in contents
+        assert "[profiles.ouroboros-standard]" in contents
+        assert 'model = "gpt-5.4"' in contents
+        assert "[profiles.ouroboros-deep]" in contents
+        assert "[profiles.ouroboros-frontier]" in contents
+        assert 'model = "gpt-5.5"' in contents
+        assert 'model_reasoning_effort = "xhigh"' in contents
+
+    def test_register_codex_default_profiles_preserves_existing_profile(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Setup should not overwrite user-customized Codex profile anchors."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[profiles.ouroboros-fast]",
+                    'model = "custom-cheap-model"',
+                    'model_reasoning_effort = "medium"',
+                    "",
+                    "[profiles.user-profile]",
+                    'model = "custom-model"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_default_profiles()
+
+        contents = codex_config.read_text(encoding="utf-8")
+
+        assert contents.count("[profiles.ouroboros-fast]") == 1
+        assert 'model = "custom-cheap-model"' in contents
+        assert "[profiles.user-profile]" in contents
+        assert "[profiles.ouroboros-standard]" in contents
+        assert "[profiles.ouroboros-deep]" in contents
+        assert "[profiles.ouroboros-frontier]" in contents
+
     def test_install_codex_artifacts_installs_rules_and_skills(self, tmp_path: Path) -> None:
         """Codex setup should install both managed rules and managed skills."""
         rules_path = tmp_path / ".codex" / "rules"
@@ -117,6 +172,9 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts") as mock_install,
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server") as mock_register,
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_default_profiles"
+            ) as mock_profiles,
             patch("ouroboros.cli.commands.setup.print_info") as mock_info,
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
@@ -126,13 +184,23 @@ class TestCodexSetup:
         assert config_dict["orchestrator"]["runtime_backend"] == "codex"
         assert config_dict["orchestrator"]["codex_cli_path"] == "/usr/local/bin/codex"
         assert config_dict["llm"]["backend"] == "codex"
+        assert config_dict["llm_profiles"]["fast"]["providers"]["codex"]["profile"] == (
+            "ouroboros-fast"
+        )
+        assert config_dict["llm_profiles"]["frontier"]["providers"]["codex"]["profile"] == (
+            "ouroboros-frontier"
+        )
+        assert config_dict["llm_role_profiles"]["qa"] == "fast"
+        assert config_dict["llm_role_profiles"]["semantic_evaluation"] == "deep"
+        assert config_dict["llm_role_profiles"]["consensus_judge"] == "frontier"
         mock_install.assert_called_once_with()
         mock_register.assert_called_once_with()
+        mock_profiles.assert_called_once_with()
 
         info_messages = [call.args[0] for call in mock_info.call_args_list]
         assert any("Config saved to" in message for message in info_messages)
         assert any("Configure Ouroboros runtime" in message for message in info_messages)
-        assert any("Codex MCP/env hookup" in message for message in info_messages)
+        assert any("Codex profile anchors" in message for message in info_messages)
 
     def test_setup_codex_preserves_existing_role_overrides(self, tmp_path: Path) -> None:
         """Re-running Codex setup should not wipe role-specific model overrides."""
@@ -172,6 +240,7 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
@@ -187,6 +256,11 @@ class TestCodexSetup:
         assert config_dict["consensus"]["advocate_model"] == "gpt-5.4"
         assert config_dict["consensus"]["devil_model"] == "gpt-5.4"
         assert config_dict["consensus"]["judge_model"] == "gpt-5.4"
+        assert "qa" not in config_dict["llm_role_profiles"]
+        assert "clarification" not in config_dict["llm_role_profiles"]
+        assert "semantic_evaluation" not in config_dict["llm_role_profiles"]
+        assert "consensus_advocate" not in config_dict["llm_role_profiles"]
+        assert "consensus_judge" not in config_dict["llm_role_profiles"]
 
     def test_setup_codex_does_not_register_claude_integration(self, tmp_path: Path) -> None:
         """Codex setup should stay scoped to Codex even when Claude is installed."""
@@ -203,11 +277,37 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
             patch("ouroboros.cli.commands.setup._ensure_claude_mcp_entry") as mock_claude,
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
         mock_claude.assert_not_called()
+
+    def test_setup_codex_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
+        """Codex setup should recover from malformed scalar config.yaml contents."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("just_a_string\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
+        ):
+            setup_cmd._setup_codex("/usr/local/bin/codex")
+
+        result = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert isinstance(result, dict)
+        assert result["orchestrator"]["runtime_backend"] == "codex"
+        assert result["orchestrator"]["codex_cli_path"] == "/usr/local/bin/codex"
+        assert result["llm"]["backend"] == "codex"
+        assert result["llm_profiles"]["fast"]["providers"]["codex"]["profile"] == (
+            "ouroboros-fast"
+        )
 
 
 class TestClaudeSetup:

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
@@ -210,6 +211,62 @@ class TestCodexCliLLMAdapter:
         assert "--sandbox" in command
         assert "read-only" in command
 
+    def test_build_command_prefers_profile_over_model(self) -> None:
+        """Codex task profiles use --profile and avoid a conflicting --model."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model="gpt-5.4",
+            profile="ouroboros-deep",
+        )
+
+        assert "--profile" in command
+        assert "ouroboros-deep" in command
+        assert "--model" not in command
+
+    @pytest.mark.asyncio
+    async def test_complete_resolves_codex_profile_from_task_role(self) -> None:
+        """Role profile resolution reaches the Codex CLI command line."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+        task_config = OuroborosConfig(
+            llm_profiles={
+                "fast": {
+                    "providers": {
+                        "codex": {
+                            "profile": "ouroboros-fast",
+                            "model": "gpt-5.3-codex-spark",
+                        },
+                    },
+                },
+            },
+            llm_role_profiles={"qa": "fast"},
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Profiled answer", encoding="utf-8")
+            assert "--profile" in command
+            assert "ouroboros-fast" in command
+            assert "--model" not in command
+            return _FakeProcess(returncode=0)
+
+        with (
+            patch(
+                "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch("ouroboros.providers.profiles.load_config", return_value=task_config),
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return a QA verdict.")],
+                CompletionConfig(model="default", role="qa"),
+            )
+
+        assert result.is_ok
+        assert result.value.content == "Profiled answer"
+
     def test_build_command_uses_full_auto_for_accept_edits(self) -> None:
         """acceptEdits maps to Codex full-auto mode."""
         adapter = CodexCliLLMAdapter(cli_path="codex", permission_mode="acceptEdits")
@@ -244,7 +301,7 @@ class TestCodexCliLLMAdapter:
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Final answer", encoding="utf-8")
             assert "--model" not in command
-            assert kwargs["cwd"] == "/tmp/project"
+            assert Path(kwargs["cwd"]) == Path("/tmp/project")
             # Prompt is now fed via stdin, not as a positional argument
             assert kwargs.get("stdin") is not None
             return _FakeProcess(

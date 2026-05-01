@@ -91,6 +91,7 @@ class WonderEngine:
 
         config = CompletionConfig(
             model=self.model,
+            role="wonder",
             temperature=0.7,
             max_tokens=2048,
         )

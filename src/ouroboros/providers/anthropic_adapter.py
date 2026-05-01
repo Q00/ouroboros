@@ -20,6 +20,7 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+from ouroboros.providers.profiles import resolve_completion_profile
 
 log = structlog.get_logger()
 
@@ -141,6 +142,7 @@ class AnthropicAdapter:
                 )
             )
 
+        config = resolve_completion_profile(config, backend="anthropic").config
         model = self._resolve_model(config.model)
 
         # Separate system messages from conversation messages.

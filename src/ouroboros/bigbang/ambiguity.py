@@ -365,6 +365,7 @@ class AmbiguityScorer:
 
             config = CompletionConfig(
                 model=self.model,
+                role="ambiguity",
                 temperature=self.temperature,
                 max_tokens=current_max_tokens,
             )

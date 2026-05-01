@@ -1025,6 +1025,7 @@ class PMInterviewEngine:
 
         config = CompletionConfig(
             model=self.model,
+            role="pm_interview",
             temperature=0.2,
             max_tokens=4096,
         )

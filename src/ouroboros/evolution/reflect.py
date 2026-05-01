@@ -112,6 +112,7 @@ class ReflectEngine:
 
         config = CompletionConfig(
             model=self.model,
+            role="reflect",
             temperature=0.5,
             max_tokens=3000,
         )

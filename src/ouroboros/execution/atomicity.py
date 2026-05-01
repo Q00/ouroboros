@@ -374,6 +374,7 @@ async def check_atomicity(
 
     config = CompletionConfig(
         model=model or get_atomicity_model(),
+        role="atomicity",
         temperature=0.3,  # Lower for consistent analysis
         max_tokens=500,
     )

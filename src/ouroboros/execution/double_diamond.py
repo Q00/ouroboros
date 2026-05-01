@@ -755,6 +755,7 @@ class DoubleDiamond:
 
         config = CompletionConfig(
             model=self._default_model,
+            role="double_diamond",
             temperature=self._temperature,
             max_tokens=self._max_tokens,
         )

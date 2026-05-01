@@ -332,6 +332,7 @@ async def generate_desc(
     ]
     config = CompletionConfig(
         model=model,
+        role="brownfield",
         temperature=0.0,
         max_tokens=60,
     )

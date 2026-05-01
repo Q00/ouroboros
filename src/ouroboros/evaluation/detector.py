@@ -378,6 +378,7 @@ async def _ask_llm(
     ]
     config = CompletionConfig(
         model=model,
+        role="mechanical_detection",
         temperature=0.0,
         max_tokens=512,
         response_format={"type": "json_object"},

@@ -316,6 +316,7 @@ class SemanticEvaluator:
         # Call LLM with structured JSON output to ensure valid JSON
         completion_config = CompletionConfig(
             model=self._config.model,
+            role="semantic_evaluation",
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={

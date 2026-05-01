@@ -238,6 +238,7 @@ class QuestionClassifier:
 
         config = CompletionConfig(
             model=self.model,
+            role="question_classification",
             temperature=self.temperature,
             max_tokens=512,
         )

@@ -324,6 +324,7 @@ class SeedGenerator:
 
         config = CompletionConfig(
             model=self.model,
+            role="seed_generation",
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )

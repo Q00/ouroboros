@@ -48,6 +48,7 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 from ouroboros.providers.codex_cli_stream import iter_stream_lines, terminate_process
+from ouroboros.providers.profiles import resolve_completion_profile
 
 log = structlog.get_logger()
 
@@ -189,6 +190,7 @@ class GeminiCLIAdapter:
             :class:`~ouroboros.providers.base.CompletionResponse` or a
             :class:`~ouroboros.core.errors.ProviderError`.
         """
+        config = resolve_completion_profile(config, backend="gemini").config
         prompt = self._build_prompt(messages)
         model = self._resolve_model(config.model)
 

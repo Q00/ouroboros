@@ -99,6 +99,79 @@ consensus:
 
 When these keys are left at their shipped defaults, the Codex-aware loader resolves them to Codex's `default` sentinel rather than hardcoding a mini model. In practice, Codex then uses its active global default/profile. Explicit `config.yaml` values always win.
 
+For more control, use provider-neutral Ouroboros task profiles and map Codex-specific entries to Codex CLI profiles:
+
+```yaml
+# ~/.ouroboros/config.yaml
+llm_profiles:
+  fast:
+    max_turns: 1
+    temperature: 0.2
+    providers:
+      codex:
+        profile: ouroboros-fast
+
+  standard:
+    max_turns: 3
+    temperature: 0.3
+    providers:
+      codex:
+        profile: ouroboros-standard
+
+  deep:
+    max_turns: 5
+    temperature: 0.4
+    providers:
+      codex:
+        profile: ouroboros-deep
+
+  frontier:
+    max_turns: 8
+    temperature: 0.4
+    providers:
+      codex:
+        profile: ouroboros-frontier
+
+llm_role_profiles:
+  ambiguity: fast
+  assertion_extraction: fast
+  mechanical_detection: fast
+  question_classification: fast
+  qa: fast
+  clarification: standard
+  seed_generation: standard
+  dependency_analysis: standard
+  semantic_evaluation: deep
+  wonder: deep
+  reflect: deep
+  consensus_vote: deep
+  consensus_judge: frontier
+```
+
+When a Codex provider profile is resolved, Ouroboros invokes `codex exec --profile <name>` instead of passing `--model`. If a role has no task profile, the existing `*_model` fields and Codex's default behavior are unchanged.
+
+`ouroboros setup --runtime codex` creates matching flat Codex profile anchors:
+
+```toml
+[profiles.ouroboros-fast]
+model = "gpt-5.4-mini"
+model_reasoning_effort = "low"
+
+[profiles.ouroboros-standard]
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+[profiles.ouroboros-deep]
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+
+[profiles.ouroboros-frontier]
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+```
+
+These are sparse anchors rather than nested/inherited Codex profiles. They keep global Codex settings in place and give Ouroboros stable profile names to target. Edit `deep` or `frontier` if your ChatGPT plan does not expose GPT-5.5.
+
 ## Command Surface
 
 From the user's perspective, the Codex integration behaves like a **session-oriented Ouroboros runtime** — the same specification-first workflow harness that drives the Claude runtime.
@@ -109,12 +182,14 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 
 - Detects the `codex` binary on your `PATH`
 - Writes `orchestrator.runtime_backend: codex` and `llm.backend: codex` to `~/.ouroboros/config.yaml`
+- Adds missing provider-neutral `llm_profiles` and `llm_role_profiles` defaults for Codex
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
 - Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml`
+- Adds missing `profiles.ouroboros-*` Codex profile anchors without overwriting existing profiles
 
-`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, and `consensus` model settings in `~/.ouroboros/config.yaml`.
+`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, `consensus`, `llm_profiles`, and `llm_role_profiles` settings in `~/.ouroboros/config.yaml`.
 
 ### `ooo` Skill Availability on Codex
 

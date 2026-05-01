@@ -408,6 +408,7 @@ class InterviewEngine:
 
         config = CompletionConfig(
             model=self.model,
+            role="clarification",
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )

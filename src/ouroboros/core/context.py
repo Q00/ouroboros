@@ -272,6 +272,7 @@ Keep the summary focused and factual. Omit unnecessary details."""
     messages = [Message(role=MessageRole.USER, content=prompt)]
     config = CompletionConfig(
         model=resolved_model,
+        role="context_compression",
         temperature=0.3,  # Lower temperature for more consistent summaries
         max_tokens=2000,  # Limit summary size
     )
