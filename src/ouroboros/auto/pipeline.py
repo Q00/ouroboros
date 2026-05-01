@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.interview_driver import AutoInterviewDriver
@@ -90,7 +90,7 @@ class AutoPipeline:
         seed, review, repairs = repairer.converge(seed, ledger=ledger)
         state.repair_round = len(repairs)
         state.last_grade = review.grade_result.grade.value
-        state.findings = [finding.__dict__ for finding in review.findings]
+        state.findings = [asdict(finding) for finding in review.findings]
         state.ledger = ledger.to_dict()
         self._save(state)
 

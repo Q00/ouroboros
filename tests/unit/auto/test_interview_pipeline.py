@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -11,6 +12,7 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
+from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -309,3 +311,62 @@ async def test_pipeline_run_starter_error_marks_failed(tmp_path) -> None:
 
     assert result.status == "failed"
     assert "run start failed" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_serializes_blocking_review_findings(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed(ac=("The command uses clean architecture",))
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+
+    class BlockingRepairer:
+        def converge(
+            self, seed: Seed, *, ledger: SeedDraftLedger
+        ) -> tuple[Seed, SeedReview, list[object]]:  # noqa: ARG002
+            finding = ReviewFinding.from_parts(
+                code="still_vague",
+                target="acceptance_criteria[0]",
+                severity="high",
+                message="Still not observable",
+                repair_instruction="Make it observable.",
+            )
+            review = SeedReview(
+                grade_result=GradeResult(
+                    grade=SeedGrade.B,
+                    scores={
+                        "coverage": 0.8,
+                        "ambiguity": 0.3,
+                        "testability": 0.4,
+                        "execution_feasibility": 0.8,
+                        "risk": 0.2,
+                    },
+                    findings=[],
+                    blockers=[],
+                    may_run=False,
+                ),
+                findings=(finding,),
+            )
+            return seed, review, []
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver, generate_seed, store=AutoStore(tmp_path), repairer=BlockingRepairer(), skip_run=True
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.findings
+    assert "fingerprint" in state.findings[0]
