@@ -12,7 +12,9 @@ Also provides brownfield repository management subcommands:
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import shutil
 from typing import Annotated
@@ -718,6 +720,21 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
 # this file keeps its historic `_BRIDGE_PLUGIN_*` naming.
 
 
+@contextmanager
+def _temporary_opencode_cli_path(opencode_path: str):
+    """Expose the setup-selected OpenCode CLI path to config-dir discovery."""
+    key = "OUROBOROS_OPENCODE_CLI_PATH"
+    previous = os.environ.get(key)
+    os.environ[key] = opencode_path
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 def _bridge_plugin_source_text() -> str | None:
     """Return the bridge plugin TypeScript source, or ``None`` when missing.
 
@@ -778,7 +795,7 @@ def _install_opencode_bridge_plugin() -> bool:
     Writes to the platform-appropriate OpenCode plugins directory:
 
     * Linux:   ``~/.config/opencode/plugins/ouroboros-bridge/``
-    * macOS:   ``~/Library/Application Support/OpenCode/plugins/ouroboros-bridge/``
+    * macOS:   ``~/.config/opencode/plugins/ouroboros-bridge/`` (or the directory reported by ``opencode debug paths``)
     * Windows: ``%APPDATA%\\OpenCode\\plugins\\ouroboros-bridge\\``
 
     Robustness:
@@ -1003,7 +1020,8 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
 
         # Mutual-exclusion cleanup: remove plugin-mode artifacts so both
         # paths are not active simultaneously (duplicate dispatch).
-        _cleanup_plugin_artifacts()
+        with _temporary_opencode_cli_path(opencode_path):
+            _cleanup_plugin_artifacts()
 
         print_success(f"Configured OpenCode subprocess runtime (CLI: {opencode_path})")
         print_info(f"Config saved to: {config_path}")
@@ -1013,9 +1031,10 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     # if ALL steps succeed (fail-closed).  Without this, a failed bridge install
     # leaves the user in plugin mode without a working bridge — subsequent runs
     # take the plugin dispatch path and silently break.
-    _install_ok = _install_opencode_bridge_plugin()
-    _mcp_ok = _ensure_opencode_mcp_entry()
-    _plugin_ok = _ensure_opencode_plugin_entry()
+    with _temporary_opencode_cli_path(opencode_path):
+        _install_ok = _install_opencode_bridge_plugin()
+        _mcp_ok = _ensure_opencode_mcp_entry()
+        _plugin_ok = _ensure_opencode_plugin_entry()
 
     if not (_install_ok and _mcp_ok and _plugin_ok):
         failed = []
