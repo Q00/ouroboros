@@ -123,7 +123,6 @@ def test_store_load_wraps_malformed_container_and_counter_fields(tmp_path) -> No
             store.load(state.auto_session_id)
 
 
-
 def test_store_load_rejects_empty_optional_resume_identifiers(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
