@@ -389,5 +389,14 @@ def get_ouroboros_tools(
     )
 
 
+def __getattr__(name: str) -> object:
+    """Lazily re-export handlers that would otherwise create import cycles."""
+    if name == "AutoHandler":
+        from ouroboros.mcp.tools.auto_handler import AutoHandler
+
+        return AutoHandler
+    raise AttributeError(name)
+
+
 # List of all Ouroboros tools for registration
 OUROBOROS_TOOLS: OuroborosToolHandlers = get_ouroboros_tools()

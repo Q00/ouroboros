@@ -479,6 +479,7 @@ class TestCreateOuroborosServer:
     EXPECTED_OUROBOROS_SERVER_TOOLS = {
         "ouroboros_ac_dashboard",
         "ouroboros_ac_tree_hud",
+        "ouroboros_auto",
         "ouroboros_brownfield",
         "ouroboros_cancel_execution",
         "ouroboros_cancel_job",
