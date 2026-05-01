@@ -239,7 +239,6 @@ def _blocker_for(question: str) -> AutoBlocker | None:
     blockers = {
         "credential": "credential or secret value required",
         "api key": "credential or API key required",
-        "secret": "credential or secret value required",
         "payment": "paid service or financial decision required",
         "legal": "legal judgment required",
         "medical": "medical judgment required",
@@ -258,8 +257,16 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "production deployment or irreversible external action required",
         ),
         (
-            r"\b(delete|drop|erase|wipe|remove)\b.+\b(database|db|file|repo|branch|production|prod|secret|api key|credential)\b",
+            r"\b(delete|drop|erase|wipe|remove)\b.+\b(database|db|repo|branch|production|prod|secret|api key|credential)\b",
             "destructive external operation requires human authority",
+        ),
+        (
+            r"\bsecret\b.+\b(value|key|token|credential|env|environment|workflow|ci|production|prod)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(value|key|token|credential|env|environment|workflow|ci|production|prod)\b.+\bsecret\b",
+            "credential or secret value required",
         ),
     )
     for pattern, reason in external_action_patterns:
