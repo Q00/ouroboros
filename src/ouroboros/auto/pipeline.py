@@ -49,7 +49,11 @@ class AutoPipeline:
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
-        ledger = SeedDraftLedger.from_dict(state.ledger) if state.ledger else SeedDraftLedger.from_goal(state.goal)
+        ledger = (
+            SeedDraftLedger.from_dict(state.ledger)
+            if state.ledger
+            else SeedDraftLedger.from_goal(state.goal)
+        )
         self._save(state)
 
         if state.phase in {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}:

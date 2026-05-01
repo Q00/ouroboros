@@ -34,7 +34,9 @@ def _fill_ready(ledger: SeedDraftLedger) -> None:
         "failure_modes": "Invalid input exits non-zero",
         "runtime_context": "Existing repository runtime",
     }.items():
-        source = LedgerSource.NON_GOAL if section == "non_goals" else LedgerSource.CONSERVATIVE_DEFAULT
+        source = (
+            LedgerSource.NON_GOAL if section == "non_goals" else LedgerSource.CONSERVATIVE_DEFAULT
+        )
         ledger.add_entry(
             section,
             LedgerEntry(
@@ -47,7 +49,9 @@ def _fill_ready(ledger: SeedDraftLedger) -> None:
         )
 
 
-def _seed(ac: tuple[str, ...] = ("`habit list` prints stable stdout containing created habits",)) -> Seed:
+def _seed(
+    ac: tuple[str, ...] = ("`habit list` prints stable stdout containing created habits",),
+) -> Seed:
     return Seed(
         goal="Build a local CLI",
         constraints=("Use existing project patterns",),
@@ -57,9 +61,15 @@ def _seed(ac: tuple[str, ...] = ("`habit list` prints stable stdout containing c
             description="CLI task ontology",
             fields=(OntologyField(name="command", field_type="string", description="Command"),),
         ),
-        evaluation_principles=(EvaluationPrinciple(name="testability", description="Observable behavior"),),
+        evaluation_principles=(
+            EvaluationPrinciple(name="testability", description="Observable behavior"),
+        ),
         exit_conditions=(
-            ExitCondition(name="verified", description="Checks pass", evaluation_criteria="All acceptance criteria pass"),
+            ExitCondition(
+                name="verified",
+                description="Checks pass",
+                evaluation_criteria="All acceptance criteria pass",
+            ),
         ),
         metadata=SeedMetadata(ambiguity_score=0.12),
     )
@@ -161,7 +171,9 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
     state.ledger = ledger.to_dict()
-    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
     pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
 
     result = await pipeline.run(state)
@@ -169,6 +181,7 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     assert result.status == "complete"
     assert result.grade == "A"
     assert result.job_id is None
+
 
 @pytest.mark.asyncio
 async def test_interview_resume_uses_persisted_pending_question(tmp_path) -> None:
@@ -187,7 +200,9 @@ async def test_interview_resume_uses_persisted_pending_question(tmp_path) -> Non
     state.pending_question = "What should we verify?"
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
-    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
 
     result = await driver.run(state, ledger)
 
