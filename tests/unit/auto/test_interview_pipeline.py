@@ -996,7 +996,7 @@ async def test_pipeline_refuses_replay_blocked_run_start_from_seed_path(tmp_path
     result = await pipeline.run(state)
 
     assert result.status == "blocked"
-    assert "duplicate execution" in (result.blocker or "")
+    assert "run start timed out" in (result.blocker or "")
     assert result.run_session_id is None
     assert result.job_id is None
 

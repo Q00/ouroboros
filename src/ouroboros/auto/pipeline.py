@@ -204,7 +204,7 @@ class AutoPipeline:
                 return self._result(state, ledger, review=review)
 
         if state.phase == AutoPhase.RUN:
-            if any((state.job_id, state.execution_id)):
+            if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.transition(
                     AutoPhase.COMPLETE, "execution already started; using persisted run handle"
                 )
