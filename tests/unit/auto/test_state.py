@@ -182,5 +182,3 @@ def test_store_load_rejects_session_id_mismatch(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="session id mismatch"):
         store.load(state.auto_session_id)
-
-        store.load(state.auto_session_id)
