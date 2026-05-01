@@ -959,7 +959,7 @@ async def test_pipeline_resumes_blocked_seed_generation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_resumes_blocked_run_start_from_seed_path(tmp_path) -> None:
+async def test_pipeline_refuses_replay_blocked_run_start_from_seed_path(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -967,10 +967,10 @@ async def test_pipeline_resumes_blocked_run_start_from_seed_path(tmp_path) -> No
         raise AssertionError("resume should not answer interview")
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
-        raise AssertionError("resume should load persisted seed")
+        raise AssertionError("unknown run resume should not generate seed")
 
     async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
-        return {"job_id": None, "execution_id": None, "session_id": "session_2"}
+        raise AssertionError("unknown run resume should not start another run")
 
     seed = _seed()
     seed_path = str(tmp_path / "seed.yaml")
@@ -995,8 +995,9 @@ async def test_pipeline_resumes_blocked_run_start_from_seed_path(tmp_path) -> No
 
     result = await pipeline.run(state)
 
-    assert result.status == "complete"
-    assert result.run_session_id == "session_2"
+    assert result.status == "blocked"
+    assert "duplicate execution" in (result.blocker or "")
+    assert result.run_session_id is None
     assert result.job_id is None
 
 
