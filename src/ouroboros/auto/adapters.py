@@ -81,7 +81,9 @@ class HandlerRunStarter:
         self.cwd = cwd
 
     async def __call__(self, seed: Seed) -> dict[str, str | None]:
-        seed_yaml = yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False)
+        seed_yaml = yaml.dump(
+            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
         result = _unwrap(
             await self.handler.handle({"seed_content": seed_yaml, "cwd": self.cwd}),
             tool_name="ouroboros_start_execute_seed",
@@ -106,7 +108,9 @@ def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
     return str(path)
 
 
-def _turn_from_result(result: MCPToolResult, *, fallback_session_id: str | None = None) -> InterviewTurn:
+def _turn_from_result(
+    result: MCPToolResult, *, fallback_session_id: str | None = None
+) -> InterviewTurn:
     meta = result.meta or {}
     session_id = _optional_str(meta.get("session_id")) or fallback_session_id
     if not session_id:

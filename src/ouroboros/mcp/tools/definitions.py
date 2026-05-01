@@ -168,8 +168,6 @@ def interview_handler(
     )
 
 
-
-
 def auto_handler(
     *,
     llm_backend: str | None = None,

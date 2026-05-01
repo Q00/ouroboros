@@ -51,12 +51,34 @@ class AutoHandler:
                 "and start execution only after the A-grade gate passes. All loops are bounded."
             ),
             parameters=(
-                MCPToolParameter("goal", ToolInputType.STRING, "Goal/task for ooo auto", required=False),
+                MCPToolParameter(
+                    "goal", ToolInputType.STRING, "Goal/task for ooo auto", required=False
+                ),
                 MCPToolParameter("cwd", ToolInputType.STRING, "Working directory", required=False),
-                MCPToolParameter("resume", ToolInputType.STRING, "Auto session id to resume", required=False),
-                MCPToolParameter("max_interview_rounds", ToolInputType.INTEGER, "Max interview rounds", required=False, default=12),
-                MCPToolParameter("max_repair_rounds", ToolInputType.INTEGER, "Max repair rounds", required=False, default=5),
-                MCPToolParameter("skip_run", ToolInputType.BOOLEAN, "Stop after A-grade Seed", required=False, default=False),
+                MCPToolParameter(
+                    "resume", ToolInputType.STRING, "Auto session id to resume", required=False
+                ),
+                MCPToolParameter(
+                    "max_interview_rounds",
+                    ToolInputType.INTEGER,
+                    "Max interview rounds",
+                    required=False,
+                    default=12,
+                ),
+                MCPToolParameter(
+                    "max_repair_rounds",
+                    ToolInputType.INTEGER,
+                    "Max repair rounds",
+                    required=False,
+                    default=5,
+                ),
+                MCPToolParameter(
+                    "skip_run",
+                    ToolInputType.BOOLEAN,
+                    "Stop after A-grade Seed",
+                    required=False,
+                    default=False,
+                ),
             ),
         )
 
@@ -64,7 +86,9 @@ class AutoHandler:
         try:
             result = await self._run(arguments)
         except Exception as exc:
-            return Result.err(MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto"))
+            return Result.err(
+                MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
+            )
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=_format_result(result)),),
@@ -150,7 +174,13 @@ def _format_result(result: AutoPipelineResult) -> str:
     if result.seed_path:
         lines.append(f"Seed: {result.seed_path}")
     if result.job_id or result.execution_id:
-        lines.extend(["Execution started:", f"  job_id: {result.job_id}", f"  execution_id: {result.execution_id}"])
+        lines.extend(
+            [
+                "Execution started:",
+                f"  job_id: {result.job_id}",
+                f"  execution_id: {result.execution_id}",
+            ]
+        )
     if result.assumptions:
         lines.append("Assumptions:")
         lines.extend(f"- {item}" for item in result.assumptions)

@@ -33,18 +33,33 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     OPENCODE = "opencode"
 
 
-app = typer.Typer(name="auto", help="Run bounded full-quality ooo auto pipeline.", no_args_is_help=False)
+app = typer.Typer(
+    name="auto", help="Run bounded full-quality ooo auto pipeline.", no_args_is_help=False
+)
 
 
 @app.callback(invoke_without_command=True)
 def auto_command(
     goal: Annotated[str | None, typer.Argument(help="Goal/task for ooo auto.")] = None,
-    resume: Annotated[str | None, typer.Option("--resume", help="Resume an auto session id.")] = None,
-    runtime: Annotated[AgentRuntimeBackend | None, typer.Option("--runtime", help="Execution runtime backend.", case_sensitive=False)] = None,
-    max_interview_rounds: Annotated[int, typer.Option("--max-interview-rounds", min=1, help="Maximum auto interview rounds.")] = 12,
-    max_repair_rounds: Annotated[int, typer.Option("--max-repair-rounds", min=1, help="Maximum Seed repair rounds.")] = 5,
-    skip_run: Annotated[bool, typer.Option("--skip-run", help="Stop after A-grade Seed creation.")] = False,
-    show_ledger: Annotated[bool, typer.Option("--show-ledger", help="Print assumptions and non-goals.")] = False,
+    resume: Annotated[
+        str | None, typer.Option("--resume", help="Resume an auto session id.")
+    ] = None,
+    runtime: Annotated[
+        AgentRuntimeBackend | None,
+        typer.Option("--runtime", help="Execution runtime backend.", case_sensitive=False),
+    ] = None,
+    max_interview_rounds: Annotated[
+        int, typer.Option("--max-interview-rounds", min=1, help="Maximum auto interview rounds.")
+    ] = 12,
+    max_repair_rounds: Annotated[
+        int, typer.Option("--max-repair-rounds", min=1, help="Maximum Seed repair rounds.")
+    ] = 5,
+    skip_run: Annotated[
+        bool, typer.Option("--skip-run", help="Stop after A-grade Seed creation.")
+    ] = False,
+    show_ledger: Annotated[
+        bool, typer.Option("--show-ledger", help="Print assumptions and non-goals.")
+    ] = False,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -84,11 +99,15 @@ async def _run_auto(
     skip_run: bool,
 ) -> AutoPipelineResult:
     store = AutoStore()
-    state = store.load(resume) if resume else AutoPipelineState(goal=goal or "", cwd=str(Path.cwd()))
+    state = (
+        store.load(resume) if resume else AutoPipelineState(goal=goal or "", cwd=str(Path.cwd()))
+    )
     interview = InterviewHandler(agent_runtime_backend=runtime)
     generate_seed = GenerateSeedHandler(agent_runtime_backend=runtime)
     execute_seed = ExecuteSeedHandler(agent_runtime_backend=runtime)
-    start_execute = StartExecuteSeedHandler(execute_handler=execute_seed, agent_runtime_backend=runtime)
+    start_execute = StartExecuteSeedHandler(
+        execute_handler=execute_seed, agent_runtime_backend=runtime
+    )
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
