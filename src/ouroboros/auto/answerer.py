@@ -301,23 +301,16 @@ class AutoAnswerer:
 def _is_feature_acceptance_question(lowered: str) -> bool:
     if not re.search(r"\b(acceptance|criteria)\b", lowered):
         return False
-    feature_terms = (
-        "endpoint",
-        "api",
-        "command",
-        "delete",
-        "remove",
-        "create",
-        "update",
-        "edit",
-        "export",
-        "import",
-        "login",
-        "signup",
-        "upload",
-        "download",
+    if re.search(
+        r"\b(general|overall|test strategy|verification plan|definition of done)\b", lowered
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(for|when|where|should|must|feature|flow|integration|endpoint|api|command|report|webhook|billing|search|generator|users?|user)\b",
+            lowered,
+        )
     )
-    return any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in feature_terms)
 
 
 def _acceptance_subject(question: str) -> str:
@@ -431,11 +424,11 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "destructive external operation requires human authority",
         ),
         (
-            r"\bsecret\b.+\b(value|key|token|credential|env|environment|workflow|ci|production|prod)\b",
+            r"\b(provide|enter|paste|supply|use|configure|set)\b.+\bsecret\b.+\b(value|key|token|credential|env|environment|workflow|ci|production|prod)\b",
             "credential or secret value required",
         ),
         (
-            r"\b(value|key|token|credential|env|environment|workflow|ci|production|prod)\b.+\bsecret\b",
+            r"\b(which|what)\s+secret\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
             "credential or secret value required",
         ),
     )
