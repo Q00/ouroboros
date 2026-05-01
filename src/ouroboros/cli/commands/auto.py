@@ -118,6 +118,8 @@ async def _run_auto(
 
     if runtime == "opencode":
         opencode_mode = state.opencode_mode or get_opencode_mode()
+        if opencode_mode == "plugin":
+            opencode_mode = "subprocess"
     else:
         opencode_mode = None
     state.runtime_backend = runtime

@@ -172,7 +172,7 @@ async def test_auto_handler_forwards_run_subagent_envelope(monkeypatch) -> None:
     assert '"_subagent"' in result.value.content[0].text
 
 
-def test_cli_opencode_plugin_uses_subprocess_authoring(monkeypatch) -> None:
+def test_cli_opencode_plugin_uses_subprocess_for_plain_cli(monkeypatch) -> None:
     from ouroboros.cli.commands import auto as auto_command
 
     captured: dict[str, str | None] = {}
@@ -201,6 +201,8 @@ def test_cli_opencode_plugin_uses_subprocess_authoring(monkeypatch) -> None:
 
     # Instantiate the dependency block without running the whole pipeline.
     opencode_mode = auto_command.get_opencode_mode()
+    if opencode_mode == "plugin":
+        opencode_mode = "subprocess"
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     auto_command.InterviewHandler(
         agent_runtime_backend="opencode", opencode_mode=authoring_opencode_mode
@@ -218,8 +220,8 @@ def test_cli_opencode_plugin_uses_subprocess_authoring(monkeypatch) -> None:
     assert captured == {
         "interview_mode": "subprocess",
         "seed_mode": "subprocess",
-        "execute_mode": "plugin",
-        "start_mode": "plugin",
+        "execute_mode": "subprocess",
+        "start_mode": "subprocess",
     }
 
 
