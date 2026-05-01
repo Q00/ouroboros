@@ -70,6 +70,8 @@ class AutoAnswerer:
             lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
         ):
             return self._non_goal_answer(question, ledger)
+        if _is_feature_acceptance_question(lowered):
+            return self._feature_acceptance_answer(question)
         if _matches_any(
             lowered,
             (
@@ -167,6 +169,39 @@ class AutoAnswerer:
         ]
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.84, updates)
 
+    def _feature_acceptance_answer(self, question: str) -> AutoAnswer:
+        subject = _acceptance_subject(question)
+        value = (
+            f"Acceptance for {subject} must cover the requested behavior directly: "
+            "a successful operation returns an observable status/output, invalid input fails "
+            "with a non-zero/error status, and any persisted artifact or state change can be verified."
+        )
+        updates = [
+            (
+                "acceptance_criteria",
+                LedgerEntry(
+                    key=f"acceptance.{_slug_key(subject)}",
+                    value=value,
+                    source=LedgerSource.CONSERVATIVE_DEFAULT,
+                    confidence=0.82,
+                    status=LedgerStatus.DEFAULTED,
+                    rationale="Preserves feature-specific acceptance semantics from the interview question.",
+                ),
+            ),
+            (
+                "verification_plan",
+                LedgerEntry(
+                    key=f"verification.{_slug_key(subject)}",
+                    value=f"Verify {subject} with command/API checks for success, failure, and persisted state or output.",
+                    source=LedgerSource.CONSERVATIVE_DEFAULT,
+                    confidence=0.8,
+                    status=LedgerStatus.DEFAULTED,
+                    rationale="Feature-specific acceptance requires observable verification.",
+                ),
+            ),
+        ]
+        return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
+
     def _runtime_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
         value = "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria."
         updates = [
@@ -261,6 +296,49 @@ class AutoAnswerer:
             ),
         ]
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
+
+
+def _is_feature_acceptance_question(lowered: str) -> bool:
+    if not re.search(r"\b(acceptance|criteria)\b", lowered):
+        return False
+    feature_terms = (
+        "endpoint",
+        "api",
+        "command",
+        "delete",
+        "remove",
+        "create",
+        "update",
+        "edit",
+        "export",
+        "import",
+        "login",
+        "signup",
+        "upload",
+        "download",
+    )
+    return any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in feature_terms)
+
+
+def _acceptance_subject(question: str) -> str:
+    cleaned = re.sub(r"\s+", " ", question.strip().rstrip("?"))
+    patterns = (
+        r"acceptance criteria should (?P<subject>.+?) satisfy$",
+        r"criteria should (?P<subject>.+?) satisfy$",
+        r"should (?P<subject>.+?) do$",
+        r"for (?P<subject>.+)$",
+    )
+    lowered = cleaned.lower()
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            return match.group("subject").strip() or "the requested behavior"
+    return cleaned or "the requested behavior"
+
+
+def _slug_key(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return slug[:64] or "requested_behavior"
 
 
 def _matches_any(value: str, patterns: tuple[str, ...]) -> bool:
