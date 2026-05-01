@@ -33,24 +33,8 @@ class TestCodexRefresh:
             cli_result = runner.invoke(app, ["refresh"])
 
         assert cli_result.exit_code == 0
-        mock_install.assert_called_once_with(codex_dir=tmp_path / ".codex", prune=True)
+        mock_install.assert_called_once_with(codex_dir=tmp_path / ".codex", prune=False)
         assert "Installed Codex rules" in cli_result.output
         assert "Installed 2 Codex skills" in cli_result.output
         assert not (tmp_path / ".codex" / "config.toml").exists()
         assert not (tmp_path / ".ouroboros" / "config.yaml").exists()
-
-    def test_refresh_can_skip_prune(self, tmp_path: Path) -> None:
-        result = CodexArtifactInstallResult(
-            rules_path=tmp_path / ".codex" / "rules" / "ouroboros.md",
-            skill_paths=(),
-        )
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.codex.install_codex_artifacts", return_value=result
-            ) as mock_install,
-        ):
-            cli_result = runner.invoke(app, ["refresh", "--no-prune"])
-
-        assert cli_result.exit_code == 0
-        mock_install.assert_called_once_with(codex_dir=tmp_path / ".codex", prune=False)

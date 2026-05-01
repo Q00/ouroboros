@@ -216,7 +216,7 @@ class TestRemoveCodexArtifacts:
 
         assert result is True
         assert not (rules_dir / "ouroboros.md").exists()
-        assert not (rules_dir / "ouroboros-extra.md").exists()
+        assert (rules_dir / "ouroboros-extra.md").exists()
         assert (rules_dir / "other.md").exists()
         assert not (skills_dir / "ouroboros-interview").exists()
         assert not (skills_dir / "ouroboros-run").exists()

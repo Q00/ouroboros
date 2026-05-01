@@ -435,12 +435,9 @@ Refresh the packaged Codex-side Ouroboros rules and skills without changing MCP 
 
 ```bash
 ouroboros codex refresh
-
-# Keep stale managed artifacts instead of pruning them
-ouroboros codex refresh --no-prune
 ```
 
-This command updates `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*`. It does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`.
+This command updates packaged `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*` artifacts. It does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. It intentionally does not prune extra `ouroboros-*` files because prefix ownership can include user-managed artifacts.
 
 ## `ouroboros uninstall`
 

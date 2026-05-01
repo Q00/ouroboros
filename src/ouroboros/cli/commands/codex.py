@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
 
 import typer
 
@@ -23,19 +22,11 @@ def codex() -> None:
 
 
 @app.command("refresh")
-def refresh(
-    prune: Annotated[
-        bool,
-        typer.Option(
-            "--prune/--no-prune",
-            help="Remove stale managed Ouroboros Codex artifacts while refreshing.",
-        ),
-    ] = True,
-) -> None:
+def refresh() -> None:
     """Refresh Codex rules and skills without changing MCP or Ouroboros config."""
     codex_dir = Path.home() / ".codex"
     try:
-        result = install_codex_artifacts(codex_dir=codex_dir, prune=prune)
+        result = install_codex_artifacts(codex_dir=codex_dir, prune=False)
     except FileNotFoundError as exc:
         print_error(str(exc))
         raise typer.Exit(1) from exc
