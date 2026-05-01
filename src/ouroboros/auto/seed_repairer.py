@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 
-from ouroboros.auto.grading import SeedGrade
+from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.core.seed import Seed
@@ -52,11 +53,14 @@ class SeedRepairer:
         for finding in review.findings:
             if finding.code in {"vague_acceptance_criteria", "untestable_acceptance_criteria"}:
                 index = _target_index(finding.target)
-                replacement = "A command/API check returns stable observable output or artifacts proving this requirement."
                 if index is not None and index < len(acceptance):
-                    acceptance[index] = replacement
+                    acceptance[index] = _observable_preserving_replacement(
+                        acceptance[index], index=index
+                    )
                 else:
-                    acceptance.append(replacement)
+                    acceptance.append(
+                        "A command/API check returns stable observable output or artifacts proving the task goal."
+                    )
                 applied.append(finding.fingerprint)
             elif finding.code == "missing_acceptance_criteria":
                 acceptance.append(
@@ -122,6 +126,21 @@ class SeedRepairer:
             current = repair.seed
             review = self.reviewer.review(current, ledger=ledger)
         return current, review, history
+
+
+def _observable_preserving_replacement(criterion: str, *, index: int) -> str:
+    """Make a criterion observable without erasing the original feature subject."""
+    normalized = criterion.strip().rstrip(".")
+    for term in VAGUE_TERMS:
+        normalized = re.sub(rf"\b{re.escape(term)}\b", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b(should be|is|are|be)\b", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+(and|or)\s*$", "", normalized.strip(), flags=re.IGNORECASE)
+    normalized = re.sub(r"\s{2,}", " ", normalized).strip().strip("-:;,. ").strip()
+    subject = normalized or f"acceptance criterion {index + 1}"
+    return (
+        "A command/API check returns stable observable output or artifacts "
+        f"proving the original requirement for {subject}."
+    )
 
 
 def _target_index(target: str) -> int | None:

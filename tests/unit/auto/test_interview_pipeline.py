@@ -154,6 +154,13 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
 
     assert result.status == "complete"
     assert result.grade == "A"
+    repaired_acceptance = state.seed_artifact["acceptance_criteria"][0]
+    assert "The CLI" in repaired_acceptance
+    assert "stable observable output" in repaired_acceptance
+    assert (
+        repaired_acceptance
+        != "A command/API check returns stable observable output or artifacts proving this requirement."
+    )
     assert result.job_id == "job_1"
     assert state.execution_id == "exec_1"
 
