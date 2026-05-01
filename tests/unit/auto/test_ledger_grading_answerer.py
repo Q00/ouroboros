@@ -501,3 +501,27 @@ def test_grade_seed_allows_safe_product_delete_assumptions() -> None:
 
     assert result.grade == SeedGrade.A
     assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
+
+
+def test_grade_gate_accepts_exit_status_and_http_status_criteria() -> None:
+    ledger = SeedDraftLedger.from_goal("Build health checks")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(ac=("CLI exits 0 on success", "GET /health returns 200"))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert result.may_run
+
+
+def test_auto_answerer_preserves_feature_specific_acceptance_semantics() -> None:
+    answer = AutoAnswerer().answer(
+        "What acceptance criteria should the delete endpoint satisfy?",
+        SeedDraftLedger.from_goal("Build a delete endpoint"),
+    )
+
+    assert answer.blocker is None
+    assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
+    assert "delete endpoint" in answer.text.lower()
+    assert "stdout" not in answer.text.lower()
+

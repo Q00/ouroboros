@@ -48,6 +48,10 @@ _OBSERVABLE_HINTS = (
     "non-zero",
     "stdout",
     "stderr",
+    "exits",
+    "exit code",
+    "http",
+    "200",
 )
 
 
@@ -278,6 +282,10 @@ def _is_observable(value: str) -> bool:
         r"\b(stdout|stderr|file|artifact|status|response|output|non-zero|exit code)\b.+\b(contains|equals|includes|is|exists|created|written)\b",
         r"\b(test|check)\b.+\b(passes|fails|asserts|verifies)\b",
         r"\b(api|endpoint|request)\b.+\b(returns|responds|status)\b",
+        r"\b(cli|command|process)\b.+\b(exits|returns)\b\s+(with\s+)?(exit\s+code\s+)?0\b",
+        r"\b(exit\s+code|status)\s+0\b",
+        r"\b(get|post|put|patch|delete)\b.+\b(returns|responds|status)\b\s+(with\s+)?(http\s+)?2\d\d\b",
+        r"\b(http\s+)?status\s+2\d\d\b",
     )
     return any(re.search(pattern, lowered) for pattern in observable_patterns)
 
