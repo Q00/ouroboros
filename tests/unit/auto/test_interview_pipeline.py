@@ -542,3 +542,28 @@ async def test_pipeline_resumes_run_with_persisted_handle_without_restarting(tmp
 
     assert result.status == "complete"
     assert result.job_id == "job_existing"
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_persists_blocker_ledger_entry(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What API key should the workflow use?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("blocker should stop before backend answer")
+
+    state = AutoPipelineState(goal="Deploy a service", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.ledger
+    persisted = SeedDraftLedger.from_dict(state.ledger)
+    assert any(
+        entry.status == LedgerStatus.BLOCKED for entry in persisted.sections["constraints"].entries
+    )
+    assert persisted.question_history
