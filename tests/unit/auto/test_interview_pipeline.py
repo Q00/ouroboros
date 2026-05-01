@@ -684,3 +684,25 @@ def test_auto_state_rejects_malformed_resume_optional_fields() -> None:
 
     with pytest.raises(ValueError, match="interview_completed"):
         AutoPipelineState.from_dict(base)
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_does_not_persist_completion_as_pending_question(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert state.interview_completed is True
+    assert state.pending_question is None
