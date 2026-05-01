@@ -706,3 +706,28 @@ async def test_interview_driver_does_not_persist_completion_as_pending_question(
     assert result.status == "seed_ready"
     assert state.interview_completed is True
     assert state.pending_question is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_completed_interview_with_unresolved_ledger(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not restart")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not answer")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("unresolved completed interview should not generate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.interview_completed = True
+    state.ledger = SeedDraftLedger.from_goal(state.goal).to_dict()
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "unresolved ledger gaps" in (result.blocker or "")
