@@ -502,3 +502,26 @@ def test_auto_answerer_preserves_feature_specific_acceptance_semantics() -> None
     assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
     assert "delete endpoint" in answer.text.lower()
     assert "stdout" not in answer.text.lower()
+
+
+def test_grade_seed_allows_safe_product_delete_assumptions() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a task app")
+    _fill_minimal_ready_ledger(ledger)
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="assumption.safe_delete",
+            value="Users can delete their own tasks after confirmation",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.72,
+            status=LedgerStatus.INFERRED,
+        ),
+    )
+
+    result = GradeGate().grade_seed(
+        _seed(ac=("`task delete` prints stable stdout confirming deletion",)), ledger=ledger
+    )
+
+    assert result.grade == SeedGrade.A
+    assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
+
