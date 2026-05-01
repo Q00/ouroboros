@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from ouroboros.auto.gap_detector import GapDetector
-from ouroboros.auto.ledger import LedgerSource, SeedDraftLedger
+from ouroboros.auto.ledger import LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.core.seed import Seed
 
 
@@ -292,11 +292,13 @@ def _is_observable(value: str) -> bool:
 
 def _high_risk_assumption_count(ledger: SeedDraftLedger) -> int:
     risky_terms = ("credential", "api key", "production", "payment", "legal", "medical")
+    inactive_statuses = {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
     return sum(
         1
         for section in ledger.sections.values()
         for entry in section.entries
         if entry.source == LedgerSource.ASSUMPTION
+        and entry.status not in inactive_statuses
         and any(term in entry.value.lower() for term in risky_terms)
     )
 

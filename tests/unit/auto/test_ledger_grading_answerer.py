@@ -546,3 +546,23 @@ def test_grade_seed_allows_safe_product_delete_assumptions() -> None:
 
     assert result.grade == SeedGrade.A
     assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
+
+
+def test_grade_gate_ignores_inactive_high_risk_assumptions() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a local task app")
+    _fill_minimal_ready_ledger(ledger)
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="assumption.old_production",
+            value="Use production credential",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.2,
+            status=LedgerStatus.WEAK,
+        ),
+    )
+
+    result = GradeGate().grade_seed(_seed(ac=("`task list` prints stable stdout",)), ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
