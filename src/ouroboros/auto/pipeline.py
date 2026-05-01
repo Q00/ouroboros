@@ -68,6 +68,14 @@ class AutoPipeline:
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
+                if not ledger.is_seed_ready():
+                    gaps = ", ".join(ledger.open_gaps())
+                    state.mark_blocked(
+                        f"Completed interview has unresolved ledger gaps: {gaps}",
+                        tool_name="auto_pipeline",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
                 state.transition(
                     AutoPhase.SEED_GENERATION, "resuming Seed generation after completed interview"
                 )
