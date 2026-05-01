@@ -643,3 +643,44 @@ async def test_interview_driver_blocks_when_backend_completes_before_ledger_read
     assert result.status == "blocked"
     assert "completed before auto ledger was ready" in (result.blocker or "")
     assert state.phase == AutoPhase.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_steers_generic_questions_to_open_gaps(tmp_path) -> None:
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        completed = len(answers) >= 5
+        return InterviewTurn("What else should we know?", session_id, completed=completed)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=6
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert ledger.is_seed_ready()
+    assert any("single local user" in item.lower() for item in answers)
+    assert any("non-goals" in item.lower() or "non-goal" in item.lower() for item in answers)
+    assert any("runtime" in item.lower() for item in answers)
+
+
+def test_auto_state_rejects_malformed_resume_optional_fields() -> None:
+    base = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project").to_dict()
+    base["pending_question"] = []
+
+    with pytest.raises(ValueError, match="pending_question"):
+        AutoPipelineState.from_dict(base)
+
+    base = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project").to_dict()
+    base["interview_completed"] = "yes"
+
+    with pytest.raises(ValueError, match="interview_completed"):
+        AutoPipelineState.from_dict(base)

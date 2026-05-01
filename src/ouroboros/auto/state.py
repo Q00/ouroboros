@@ -171,7 +171,13 @@ class AutoPipelineState:
 
     def _validate_loaded(self) -> None:
         """Validate fields whose bad values would otherwise fail later during resume."""
-        for field_name in ("goal", "cwd", "auto_session_id", "required_grade"):
+        for field_name in (
+            "goal",
+            "cwd",
+            "auto_session_id",
+            "required_grade",
+            "last_progress_message",
+        ):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 msg = f"{field_name} must be a non-empty string"
@@ -212,6 +218,25 @@ class AutoPipelineState:
             if not isinstance(getattr(self, field_name), dict):
                 msg = f"{field_name} must be an object"
                 raise ValueError(msg)
+        optional_string_fields = (
+            "interview_session_id",
+            "seed_id",
+            "seed_path",
+            "execution_id",
+            "job_id",
+            "last_grade",
+            "pending_question",
+            "last_tool_name",
+            "last_error",
+        )
+        for field_name in optional_string_fields:
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, str):
+                msg = f"{field_name} must be a string or null"
+                raise ValueError(msg)
+        if type(self.interview_completed) is not bool:
+            msg = "interview_completed must be a boolean"
+            raise ValueError(msg)
         for field_name in ("findings",):
             value = getattr(self, field_name)
             if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):

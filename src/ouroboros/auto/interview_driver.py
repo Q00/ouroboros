@@ -7,9 +7,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ouroboros.auto.answerer import AutoAnswerer
-from ouroboros.auto.gap_detector import GapDetector
-from ouroboros.auto.ledger import SeedDraftLedger
+from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerSource, AutoBlocker
+from ouroboros.auto.gap_detector import Gap, GapDetector
+from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 
@@ -108,7 +108,7 @@ class AutoInterviewDriver:
             state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
             self._save(state)
 
-            answer = self.answerer.answer(turn.question, ledger)
+            answer = self._answer_with_gap_steering(turn.question, ledger)
             if answer.blocker is not None:
                 self.answerer.apply(answer, ledger, question=turn.question)
                 state.ledger = ledger.to_dict()
@@ -181,6 +181,30 @@ class AutoInterviewDriver:
             "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
         )
 
+    def _answer_with_gap_steering(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:
+        answer = self.answerer.answer(question, ledger)
+        if answer.blocker is not None:
+            return answer
+        gaps = self.gap_detector.detect(ledger)
+        if not gaps:
+            return answer
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        if any(gap.section in updated_sections for gap in gaps):
+            return answer
+        next_gap = gaps[0]
+        if next_gap.section == "goal" or next_gap.state in {
+            LedgerStatus.CONFLICTING,
+            LedgerStatus.BLOCKED,
+        }:
+            blocker = AutoBlocker(reason=next_gap.message, question=question)
+            return AutoAnswer(
+                text=f"Cannot safely decide automatically: {next_gap.message}",
+                source=AutoAnswerSource.BLOCKER,
+                confidence=1.0,
+                blocker=blocker,
+            )
+        return self.answerer.answer(_gap_prompt(next_gap), ledger)
+
     async def _with_timeout(
         self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str
     ) -> InterviewTurn:
@@ -227,3 +251,19 @@ class FunctionInterviewBackend:
             msg = "interview resume is unavailable because no pending question is persisted"
             raise RuntimeError(msg)
         return await self._resume(session_id)
+
+
+def _gap_prompt(gap: Gap) -> str:
+    prompts = {
+        "goal": "Clarify the primary user goal for the Seed.",
+        "actors": "Who are the actors, inputs, and outputs for this task?",
+        "inputs": "Who are the actors, inputs, and outputs for this task?",
+        "outputs": "Who are the actors, inputs, and outputs for this task?",
+        "constraints": "What conservative constraints and failure modes should bound this MVP?",
+        "failure_modes": "What conservative constraints and failure modes should bound this MVP?",
+        "non_goals": "What non-goals should explicitly remain out of scope?",
+        "acceptance_criteria": "Which command output verifies the acceptance criteria?",
+        "verification_plan": "Which command output verifies the acceptance criteria?",
+        "runtime_context": "Which runtime stack, repo, and project patterns should be used?",
+    }
+    return prompts.get(gap.section, gap.message)
