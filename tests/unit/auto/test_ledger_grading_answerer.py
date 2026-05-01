@@ -525,3 +525,4 @@ def test_auto_answerer_preserves_feature_specific_acceptance_semantics() -> None
     assert "delete endpoint" in answer.text.lower()
     assert "stdout" not in answer.text.lower()
 
+

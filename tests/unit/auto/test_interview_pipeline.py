@@ -947,6 +947,7 @@ async def test_pipeline_resumes_blocked_seed_generation(tmp_path) -> None:
     _fill_ready(ledger)
     state.ledger = ledger.to_dict()
     state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
     state.transition(AutoPhase.SEED_GENERATION, "seed")
     state.mark_blocked("seed generation timed out", tool_name="seed_generator")
     driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
@@ -956,6 +957,33 @@ async def test_pipeline_resumes_blocked_seed_generation(tmp_path) -> None:
 
     assert result.status == "complete"
     assert result.grade == "A"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_generation_resume_requires_interview_session_id(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("seed resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("seed resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("missing interview session should fail before generator")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_completed = True
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "interview_session_id" in (result.blocker or "")
 
 
 @pytest.mark.asyncio
@@ -985,6 +1013,7 @@ async def test_pipeline_refuses_blocked_run_start_replay_from_seed_path(tmp_path
     state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.mark_blocked("run start timed out", tool_name="run_starter")
+    state.run_start_attempted = True
     driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
     pipeline = AutoPipeline(
         driver,
@@ -1112,3 +1141,28 @@ async def test_pipeline_grade_gate_resume_prefers_repaired_seed_path(tmp_path) -
     assert result.status == "complete"
     assert result.grade == "A"
     assert state.seed_artifact == repaired_seed.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_review_resume_marks_malformed_seed_artifact_failed(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("review resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("review resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("review resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.seed_artifact = {"goal": "missing required fields"}
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "persisted Seed artifact is invalid" in (result.blocker or "")

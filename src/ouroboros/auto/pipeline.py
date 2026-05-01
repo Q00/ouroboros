@@ -136,9 +136,16 @@ class AutoPipeline:
                 state.transition(AutoPhase.REVIEW, "resuming review from persisted Seed")
                 self._save(state)
             else:
+                if not state.interview_session_id:
+                    state.mark_failed(
+                        "seed generation cannot resume without interview_session_id",
+                        tool_name="seed_generator",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
                 try:
                     seed = await asyncio.wait_for(
-                        self.seed_generator(state.interview_session_id or ""),
+                        self.seed_generator(state.interview_session_id),
                         timeout=self.seed_timeout_seconds,
                     )
                     if not isinstance(seed, Seed):
@@ -174,7 +181,15 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, blocker=state.last_error)
         elif state.seed_artifact:
-            seed = Seed.from_dict(state.seed_artifact)
+            try:
+                seed = Seed.from_dict(state.seed_artifact)
+            except Exception as exc:
+                state.mark_failed(
+                    f"persisted Seed artifact is invalid: {exc}",
+                    tool_name="auto_pipeline",
+                )
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
         elif self.seed_loader is not None and state.seed_path:
             try:
                 seed = self.seed_loader(state.seed_path)
