@@ -883,6 +883,7 @@ async def test_pipeline_resumes_prepared_run_before_first_attempt(tmp_path) -> N
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
     state.transition(AutoPhase.REVIEW, "review")
+    state.last_grade = "A"
     state.transition(AutoPhase.RUN, "run prepared")
     state.run_start_attempted = False
     driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
@@ -957,6 +958,37 @@ async def test_pipeline_resumes_blocked_seed_generation(tmp_path) -> None:
 
     assert result.status == "complete"
     assert result.grade == "A"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_refuses_run_resume_without_a_grade(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("run resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("non-A run resume must not start execution")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "B"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run prepared")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "A-grade" in (result.blocker or "")
+    assert state.job_id is None
 
 
 @pytest.mark.asyncio
