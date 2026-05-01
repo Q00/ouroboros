@@ -75,6 +75,25 @@ def test_ledger_not_ready_until_required_sections_are_resolved() -> None:
     assert ledger.summary()["open_gaps"] == []
 
 
+def test_weak_required_sections_remain_open_gaps() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    ledger.sections["actors"].entries.clear()
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.weak_guess",
+            value="Maybe a local user",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.2,
+            status=LedgerStatus.WEAK,
+        ),
+    )
+
+    assert "actors" in ledger.open_gaps()
+    assert not ledger.is_seed_ready()
+
+
 def test_gap_detector_reports_missing_sections() -> None:
     gaps = GapDetector().detect(SeedDraftLedger.from_goal("Build a habit tracker"))
 
@@ -125,10 +144,16 @@ def test_auto_answerer_source_tags_and_applies_updates() -> None:
 
 
 def test_auto_answerer_returns_blocker_for_credentials() -> None:
-    answer = AutoAnswerer().answer(
-        "Which production API key should the workflow use?",
-        SeedDraftLedger.from_goal("Deploy a service"),
-    )
+    ledger = SeedDraftLedger.from_goal("Deploy a service")
+    answerer = AutoAnswerer()
+
+    answer = answerer.answer("Which production API key should the workflow use?", ledger)
+    answerer.apply(answer, ledger, question="Which production API key should the workflow use?")
 
     assert answer.blocker is not None
     assert answer.source == AutoAnswerSource.BLOCKER
+    assert "constraints" in ledger.open_gaps()
+    assert not ledger.is_seed_ready()
+    assert any(
+        entry.status == LedgerStatus.BLOCKED for entry in ledger.sections["constraints"].entries
+    )

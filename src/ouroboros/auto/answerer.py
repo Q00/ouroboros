@@ -79,6 +79,19 @@ class AutoAnswerer:
     def apply(self, answer: AutoAnswer, ledger: SeedDraftLedger, *, question: str) -> None:
         """Apply answer updates to ``ledger``."""
         ledger.record_qa(question, answer.prefixed_text)
+        if answer.blocker is not None:
+            ledger.add_entry(
+                "constraints",
+                LedgerEntry(
+                    key="blocker.auto_answer",
+                    value=answer.blocker.reason,
+                    source=LedgerSource.BLOCKER,
+                    confidence=1.0,
+                    status=LedgerStatus.BLOCKED,
+                    reversible=False,
+                    rationale=f"Auto mode cannot safely answer: {answer.blocker.question}",
+                ),
+            )
         for section, entry in answer.ledger_updates:
             ledger.add_entry(section, entry)
 

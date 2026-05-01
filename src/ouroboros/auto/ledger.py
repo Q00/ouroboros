@@ -17,6 +17,7 @@ class LedgerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     INFERENCE = "inference"
+    BLOCKER = "blocker"
 
 
 class LedgerStatus(StrEnum):
@@ -163,7 +164,12 @@ class SeedDraftLedger:
 
     def open_gaps(self) -> list[str]:
         """Return required sections that are not Seed-ready."""
-        blocked = {LedgerStatus.MISSING, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+        blocked = {
+            LedgerStatus.MISSING,
+            LedgerStatus.WEAK,
+            LedgerStatus.CONFLICTING,
+            LedgerStatus.BLOCKED,
+        }
         return [name for name, status in self.section_statuses().items() if status in blocked]
 
     def is_seed_ready(self) -> bool:
