@@ -867,6 +867,7 @@ def create_ouroboros_server(
     from ouroboros.config import (
         get_assertion_extraction_model,
         get_clarification_model,
+        get_runtime_controls_config,
         get_semantic_model,
     )
     from ouroboros.evaluation import (
@@ -1025,7 +1026,12 @@ def create_ouroboros_server(
                 await event_store.initialize()
                 evolution_store_initialized = True
 
-    async def _evolution_executor(seed: Any, *, parallel: bool = True) -> Any:
+    async def _evolution_executor(
+        seed: Any,
+        *,
+        parallel: bool = True,
+        execution_id: str | None = None,
+    ) -> Any:
         await _ensure_evolution_store_initialized()
         task_cwd = evolutionary_loop.get_project_dir()
         runner_adapter = create_agent_runtime(
@@ -1051,7 +1057,7 @@ def create_ouroboros_server(
         )
         return await evolution_runner.execute_seed(
             seed=seed,
-            execution_id=None,
+            execution_id=execution_id,
             parallel=parallel,
         )
 
@@ -1414,7 +1420,7 @@ def create_ouroboros_server(
 
     evolutionary_loop = EvolutionaryLoop(
         event_store=event_store,
-        config=EvolutionaryLoopConfig(),
+        config=EvolutionaryLoopConfig(runtime_controls=get_runtime_controls_config()),
         wonder_engine=wonder_engine,
         reflect_engine=reflect_engine,
         seed_generator=seed_generator,

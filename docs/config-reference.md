@@ -65,6 +65,7 @@ For Codex-backed Ouroboros workflows:
 | `consensus` | `ConsensusConfig` | Phase 5 — Multi-model consensus settings |
 | `persistence` | `PersistenceConfig` | SQLite event store settings |
 | `drift` | `DriftConfig` | Drift monitoring thresholds |
+| `runtime_controls` | `RuntimeControlsConfig` | Long-running workflow liveness and progress controls |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
 
 ---
@@ -364,6 +365,46 @@ drift:
 
 ---
 
+## `runtime_controls`
+
+Controls long-running MCP/evolution liveness. These defaults are intended for normal local use: complex productive generations can run for hours, silent hangs are bounded, and repeated activity without material progress is eventually stopped.
+
+```yaml
+runtime_controls:
+  mcp_tool_timeout_seconds: 0                 # 0 = no adapter wall-clock cap
+  generation_idle_timeout_seconds: 7200       # No EventStore activity for 2 hours
+  generation_no_progress_timeout_seconds: 14400  # Activity but no material progress for 4 hours
+  generation_safety_timeout_seconds: 0        # Optional final hard cap; 0 = disabled
+  watchdog_poll_seconds: 15.0
+```
+
+Material progress is stricter than liveness. Heartbeats, messages, and tool calls keep the generation from being considered idle; phase changes, workflow status changes, stage/subtask completion, and terminal execution events reset the no-progress timer.
+
+Recommended tuning examples:
+
+```yaml
+# Long-running local work
+runtime_controls:
+  generation_idle_timeout_seconds: 7200
+  generation_no_progress_timeout_seconds: 43200
+
+# Strict CI / bounded automation
+runtime_controls:
+  generation_idle_timeout_seconds: 900
+  generation_no_progress_timeout_seconds: 3600
+  generation_safety_timeout_seconds: 14400
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mcp_tool_timeout_seconds` | `float >= 0` | `0` | Adapter-level MCP timeout for progress-aware tools such as `ouroboros_evolve_step`. Keep `0` for normal use so the watchdog, not wall-clock time, decides liveness. |
+| `generation_idle_timeout_seconds` | `float >= 0` | `7200` | Timeout when no lineage/execution activity is observed. `0` disables idle detection. |
+| `generation_no_progress_timeout_seconds` | `float >= 0` | `14400` | Timeout when activity continues but material progress does not. `0` disables no-progress detection. |
+| `generation_safety_timeout_seconds` | `float >= 0` | `0` | Optional final hard cap for a generation. `0` disables the hard cap. |
+| `watchdog_poll_seconds` | `float > 0` | `15.0` | EventStore polling interval for generation watchdog decisions. |
+
+---
+
 ## `logging`
 
 Controls log output.
@@ -460,14 +501,17 @@ All environment variables have higher priority than the corresponding `config.ya
 
 ### MCP Evolution
 
-These variables are read by the MCP server adapter (`ouroboros-mcp`) and the evolutionary loop. They have **no** corresponding `config.yaml` key — env var is the only override mechanism.
-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OUROBOROS_EXECUTION_MODEL` | `null` (runtime default) | Model used for agent execution inside the MCP evolve loop. Only applicable when the Claude runtime is active. |
 | `OUROBOROS_VALIDATION_MODEL` | `null` (runtime default) | Model used for import/validation fix passes during MCP evolution. Only applicable when the Claude runtime is active. |
 | `OUROBOROS_EVOLVE_STAGE1` | `"false"` | Set to `"true"` to enable Stage 1 mechanical checks (lint/build/test) during MCP evolution. |
-| `OUROBOROS_GENERATION_TIMEOUT` | **dual-usage** — see note | Per-generation timeout in seconds. **Note:** This variable controls two independent mechanisms with different hardcoded defaults: (1) `EvolutionConfig.generation_timeout_seconds` in `evolution/loop.py` uses default `"0"` (no loop-level timeout); (2) `EvolveStepTool.TIMEOUT_SECONDS` in `mcp/tools/definitions.py` uses default `"7200"` (2-hour MCP protocol-level timeout). Setting this variable to `"0"` disables the loop-level timeout only — the MCP-level timeout is unaffected. |
+| `OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS` | `runtime_controls.mcp_tool_timeout_seconds` | Adapter-level MCP timeout for progress-aware tools. `0` disables the wall-clock cap. |
+| `OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS` | `runtime_controls.generation_idle_timeout_seconds` | Idle timeout when no generation/execution activity is observed. |
+| `OUROBOROS_GENERATION_NO_PROGRESS_TIMEOUT_SECONDS` | `runtime_controls.generation_no_progress_timeout_seconds` | Timeout when activity continues without material progress. |
+| `OUROBOROS_GENERATION_SAFETY_TIMEOUT_SECONDS` | `runtime_controls.generation_safety_timeout_seconds` | Optional final hard cap for one generation. |
+| `OUROBOROS_WATCHDOG_POLL_SECONDS` | `runtime_controls.watchdog_poll_seconds` | EventStore polling interval for watchdog decisions. |
+| `OUROBOROS_GENERATION_TIMEOUT` | legacy alias | Backwards-compatible alias for `generation_no_progress_timeout_seconds`. It no longer creates a separate hard 2-hour MCP adapter timeout. Prefer `runtime_controls` in `config.yaml` for persistent tuning. |
 
 ### Observability & Agents
 
@@ -666,6 +710,13 @@ persistence:
 drift:
   warning_threshold: 0.3
   critical_threshold: 0.5
+
+runtime_controls:
+  mcp_tool_timeout_seconds: 0
+  generation_idle_timeout_seconds: 7200
+  generation_no_progress_timeout_seconds: 14400
+  generation_safety_timeout_seconds: 0
+  watchdog_poll_seconds: 15.0
 
 logging:
   level: info

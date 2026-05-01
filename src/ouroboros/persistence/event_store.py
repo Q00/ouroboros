@@ -11,12 +11,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import and_, event, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_scope_id
 from ouroboros.persistence.schema import events_table, metadata
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,43 @@ def _looks_like_raw_subscribed_event_payload(value: object) -> bool:
         return False
 
     return bool(_RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS & normalized_keys)
+
+
+def _escape_sql_like(value: str) -> str:
+    """Escape SQL LIKE metacharacters while leaving caller wildcards explicit."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _session_related_event_conditions(
+    session_id: str,
+    execution_id: str | None,
+) -> list[Any]:
+    """Build aggregate-id predicates for a session and its execution scopes."""
+    conditions: list[Any] = [events_table.c.aggregate_id == session_id]
+    if not execution_id:
+        return conditions
+
+    conditions.append(events_table.c.aggregate_id == execution_id)
+    execution_scope = normalize_execution_scope_id(execution_id)
+    if execution_scope != execution_id:
+        conditions.append(events_table.c.aggregate_id == execution_scope)
+
+    for prefix in {execution_id, execution_scope}:
+        escaped_prefix = _escape_sql_like(prefix)
+        conditions.append(
+            events_table.c.aggregate_id.like(
+                f"{escaped_prefix}\\_%",
+                escape="\\",
+            )
+        )
+        conditions.append(
+            events_table.c.aggregate_id.like(
+                f"{escaped_prefix}:%",
+                escape="\\",
+            )
+        )
+
+    return conditions
 
 
 class EventStore:
@@ -441,6 +480,31 @@ class EventStore:
                 },
             ) from e
 
+    async def get_current_rowid(self) -> int:
+        """Return the current maximum event-store rowid.
+
+        Callers can use this as a global cursor baseline before starting work,
+        then query ``rowid > baseline`` across any aggregate discovered later.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_current_rowid",
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                result = await conn.execute(
+                    select(func.coalesce(func.max(text("rowid")), 0)).select_from(events_table)
+                )
+                return int(result.scalar_one() or 0)
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get current rowid: {e}",
+                operation="select",
+                table="events",
+            ) from e
+
     async def get_recent_events(
         self, event_type: str | None = None, limit: int = 100
     ) -> list[BaseEvent]:
@@ -729,8 +793,10 @@ class EventStore:
         Parallel execution stores activity in several aggregate families:
         - ``session/<session_id>`` for top-level session state
         - ``execution/<execution_id>`` for workflow progress
-        - ``execution/<execution_id>_*`` for AC/Sub-AC runtime scopes
+        - ``execution/<normalized_execution_id>_*`` for AC/Sub-AC runtime scopes
         - ``execution/<execution_id>:*`` for coordinator level scopes
+        - ``execution/<normalized_execution_id>_*_coordinator_*`` for persisted
+          coordinator runtime scopes
 
         Args:
             session_id: Orchestrator session ID.
@@ -753,21 +819,7 @@ class EventStore:
             session_id,
         )
 
-        conditions = [events_table.c.aggregate_id == session_id]
-        if resolved_execution_id:
-            escaped_execution_id = (
-                resolved_execution_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            )
-            conditions.extend(
-                [
-                    events_table.c.aggregate_id == resolved_execution_id,
-                    events_table.c.aggregate_id.like(
-                        f"{escaped_execution_id}\\_%",
-                        escape="\\",
-                    ),
-                    events_table.c.aggregate_id.like(f"{resolved_execution_id}:%"),
-                ]
-            )
+        conditions = _session_related_event_conditions(session_id, resolved_execution_id)
 
         try:
             async with self._engine.begin() as conn:
@@ -799,6 +851,64 @@ class EventStore:
                     "event_type": event_type,
                     "limit": limit,
                     "offset": offset,
+                },
+            ) from e
+
+    async def query_session_related_events_after(
+        self,
+        session_id: str,
+        execution_id: str | None = None,
+        event_type: str | None = None,
+        last_row_id: int = 0,
+    ) -> tuple[list[BaseEvent], int]:
+        """Incrementally query events across a session and related execution scopes.
+
+        This is the multi-aggregate equivalent of ``get_events_after``. It uses
+        the same raw and normalized execution-scope predicates as
+        ``query_session_related_events`` while advancing a single rowid cursor.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="query_session_related_events_after",
+            )
+
+        resolved_execution_id = execution_id or await self._resolve_execution_id_for_session(
+            session_id,
+        )
+        conditions = _session_related_event_conditions(session_id, resolved_execution_id)
+
+        try:
+            async with self._engine.begin() as conn:
+                rowid_col = text("rowid")
+                query = (
+                    select(events_table, rowid_col)
+                    .where(or_(*conditions))
+                    .where(text("rowid > :last_id").bindparams(last_id=last_row_id))
+                    .order_by(events_table.c.timestamp, events_table.c.id)
+                )
+
+                if event_type:
+                    query = query.where(events_table.c.event_type == event_type)
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                if not rows:
+                    return [], last_row_id
+
+                events = [BaseEvent.from_db_row(dict(row)) for row in rows]
+                max_rowid = max(row["rowid"] for row in rows)
+                return events, max_rowid
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to query session-related events after rowid {last_row_id}: {e}",
+                operation="select",
+                table="events",
+                details={
+                    "session_id": session_id,
+                    "execution_id": resolved_execution_id,
+                    "event_type": event_type,
+                    "last_row_id": last_row_id,
                 },
             ) from e
 

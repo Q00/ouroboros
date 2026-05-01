@@ -104,6 +104,11 @@ def _normalize_scope_segment(value: str, *, fallback: str) -> str:
     return normalized or fallback
 
 
+def normalize_execution_scope_id(execution_context_id: str) -> str:
+    """Normalize an execution context ID the same way runtime scopes do."""
+    return _normalize_scope_segment(execution_context_id, fallback="workflow")
+
+
 def build_ac_runtime_scope(
     ac_index: int,
     *,
@@ -115,9 +120,7 @@ def build_ac_runtime_scope(
 ) -> ExecutionRuntimeScope:
     """Build the persisted runtime scope for an AC implementation session."""
     workflow_scope = (
-        _normalize_scope_segment(execution_context_id, fallback="workflow")
-        if execution_context_id
-        else None
+        normalize_execution_scope_id(execution_context_id) if execution_context_id else None
     )
     if is_sub_ac:
         if parent_ac_index is None or sub_ac_index is None:
@@ -190,10 +193,7 @@ def build_level_coordinator_runtime_scope(
     level_number: int,
 ) -> ExecutionRuntimeScope:
     """Build the persisted runtime scope for level-scoped reconciliation work."""
-    execution_scope = _normalize_scope_segment(
-        execution_id,
-        fallback="workflow",
-    )
+    execution_scope = normalize_execution_scope_id(execution_id)
     return ExecutionRuntimeScope(
         aggregate_type="execution",
         aggregate_id=(f"{execution_scope}_level_{level_number}_coordinator_reconciliation"),
@@ -211,4 +211,5 @@ __all__ = [
     "ExecutionRuntimeScope",
     "build_ac_runtime_scope",
     "build_level_coordinator_runtime_scope",
+    "normalize_execution_scope_id",
 ]

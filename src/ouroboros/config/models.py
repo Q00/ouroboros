@@ -16,6 +16,7 @@ Classes:
     EvaluationConfig: Phase 4 configuration
     ConsensusConfig: Phase 5 configuration
     PersistenceConfig: Storage configuration
+    RuntimeControlsConfig: Long-running workflow timeout/progress controls
     LoggingConfig: Logging configuration
     OuroborosConfig: Top-level configuration combining all sections
 """
@@ -262,6 +263,32 @@ class DriftConfig(BaseModel, frozen=True):
         return v
 
 
+class RuntimeControlsConfig(BaseModel, frozen=True):
+    """Runtime liveness and progress controls for long-running work.
+
+    Attributes:
+        mcp_tool_timeout_seconds: Server-side MCP tool timeout. ``0`` disables
+            the adapter-level wall-clock timeout so progress-aware tools can
+            enforce their own liveness policy.
+        generation_idle_timeout_seconds: Seconds without any generation or
+            execution activity before the generation is considered idle.
+            ``0`` disables this guard.
+        generation_no_progress_timeout_seconds: Seconds with activity but no
+            material progress before the generation is considered stuck.
+            ``0`` disables this guard.
+        generation_safety_timeout_seconds: Optional final wall-clock safety
+            cap for a generation. ``0`` disables this guard.
+        watchdog_poll_seconds: How often the generation watchdog polls
+            EventStore for new progress.
+    """
+
+    mcp_tool_timeout_seconds: float = Field(default=0, ge=0)
+    generation_idle_timeout_seconds: float = Field(default=7200, ge=0)
+    generation_no_progress_timeout_seconds: float = Field(default=14400, ge=0)
+    generation_safety_timeout_seconds: float = Field(default=0, ge=0)
+    watchdog_poll_seconds: float = Field(default=15.0, gt=0.0)
+
+
 class LoggingConfig(BaseModel, frozen=True):
     """Logging configuration.
 
@@ -369,6 +396,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         consensus: Phase 5 configuration
         persistence: Storage configuration
         drift: Drift monitoring configuration
+        runtime_controls: Long-running workflow timeout/progress controls
         logging: Logging configuration
     """
 
@@ -381,6 +409,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     consensus: ConsensusConfig = Field(default_factory=ConsensusConfig)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     drift: DriftConfig = Field(default_factory=DriftConfig)
+    runtime_controls: RuntimeControlsConfig = Field(default_factory=RuntimeControlsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
 

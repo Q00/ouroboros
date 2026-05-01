@@ -146,6 +146,11 @@ llm:
 
 logging:
   level: info
+
+runtime_controls:
+  mcp_tool_timeout_seconds: 0                     # no fixed adapter wall-clock cap
+  generation_idle_timeout_seconds: 7200           # 2h with no activity
+  generation_no_progress_timeout_seconds: 14400  # 4h without material progress
 ```
 
 For Codex CLI, the recommended documented baseline is GPT-5.4 with medium reasoning effort. Put Ouroboros per-role overrides in `~/.ouroboros/config.yaml`, not in `~/.codex/config.toml`:

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.events.lineage import lineage_generation_watchdog_decision
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.job_handlers import (
     JobStatusHandler,
@@ -45,6 +46,70 @@ async def _cancel_manager_tasks(manager: JobManager) -> None:
 
 class TestJobManager:
     """Test background job lifecycle behavior."""
+
+    async def test_status_message_reports_generation_watchdog_decision(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            await store.append(
+                lineage_generation_watchdog_decision(
+                    "lin_watchdog",
+                    3,
+                    "timeout",
+                    "Generation had no material progress for 14400.0s",
+                )
+            )
+            now = datetime.now(UTC)
+            snapshot = JobSnapshot(
+                job_id="job_watchdog",
+                job_type="evolve_step",
+                status=JobStatus.RUNNING,
+                message="Running evolve_step",
+                created_at=now,
+                updated_at=now,
+                links=JobLinks(lineage_id="lin_watchdog"),
+            )
+
+            message = await manager._derive_status_message(snapshot)
+
+            expected = (
+                "Generation 3 watchdog timeout | Generation had no material progress for 14400.0s"
+            )
+            assert message == expected
+        finally:
+            await store.close()
+
+    async def test_render_job_snapshot_reports_generation_watchdog_decision(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+
+        try:
+            await store.append(
+                lineage_generation_watchdog_decision(
+                    "lin_watchdog_render",
+                    4,
+                    "timeout",
+                    "Generation idle for 7200.0s",
+                )
+            )
+            snapshot = JobSnapshot(
+                job_id="job_watchdog_render",
+                job_type="evolve_step",
+                status=JobStatus.RUNNING,
+                message="Running evolve_step",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                links=JobLinks(lineage_id="lin_watchdog_render"),
+            )
+
+            text, _ = await _render_job_snapshot_inner(snapshot, store)
+
+            assert "**Current Step**: Gen 4 watchdog timeout" in text
+            assert "**Reason**: Generation idle for 7200.0s" in text
+        finally:
+            await store.close()
 
     async def test_start_job_completes_and_persists_result(self, tmp_path) -> None:
         store = _build_store(tmp_path)
