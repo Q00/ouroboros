@@ -156,21 +156,62 @@ class TestOpencodeConfigDir:
         """The OpenCode CLI-reported config dir is authoritative."""
         reported = tmp_path / ".config" / "opencode"
         monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
-        monkeypatch.delenv("OUROBOROS_OPENCODE_CLI_PATH", raising=False)
+        monkeypatch.setenv("OUROBOROS_OPENCODE_CLI_PATH", "/bin/opencode")
         monkeypatch.delenv("OPENCODE_CLI_PATH", raising=False)
 
         completed = SimpleNamespace(
             returncode=0,
             stdout=f"home       {tmp_path}\nconfig     {reported}\nstate      {tmp_path / '.state'}\n",
         )
+        with patch("ouroboros.cli.opencode_config.subprocess.run", return_value=completed) as run:
+            result = opencode_config_dir()
+
+        assert result == reported
+        run.assert_called_once()
+        assert run.call_args.args[0][:3] == ["/bin/opencode", "debug", "paths"]
+
+    def test_uses_persisted_opencode_cli_path_for_debug_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Post-setup cleanup/uninstall use the configured OpenCode binary."""
+        reported = tmp_path / "active" / "opencode"
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  opencode_cli_path: /configured/bin/opencode\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("OUROBOROS_OPENCODE_CLI_PATH", raising=False)
+        monkeypatch.delenv("OPENCODE_CLI_PATH", raising=False)
+
+        completed = SimpleNamespace(returncode=0, stdout=f"config     {reported}\n")
         with (
-            patch("ouroboros.cli.opencode_config.shutil.which", return_value="/bin/opencode"),
+            patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.cli.opencode_config.subprocess.run", return_value=completed) as run,
         ):
             result = opencode_config_dir()
 
         assert result == reported
-        run.assert_called_once()
+        assert run.call_args.args[0][:3] == ["/configured/bin/opencode", "debug", "paths"]
+
+    def test_does_not_query_path_opencode_without_configured_cli(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Avoid targeting a different OpenCode install from PATH after setup."""
+        monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("OUROBOROS_OPENCODE_CLI_PATH", raising=False)
+        monkeypatch.delenv("OPENCODE_CLI_PATH", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.opencode_config.subprocess.run") as run,
+        ):
+            result = opencode_config_dir()
+
+        assert result == tmp_path / ".config" / "opencode"
+        run.assert_not_called()
 
     def test_darwin_defaults_to_xdg_config_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -180,7 +221,6 @@ class TestOpencodeConfigDir:
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
         with (
-            patch("ouroboros.cli.opencode_config.shutil.which", return_value=None),
             patch("ouroboros.cli.opencode_config.sys.platform", "darwin"),
             patch("pathlib.Path.home", return_value=tmp_path),
         ):
@@ -197,7 +237,6 @@ class TestOpencodeConfigDir:
         monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
 
         with (
-            patch("ouroboros.cli.opencode_config.shutil.which", return_value=None),
             patch("ouroboros.cli.opencode_config.sys.platform", "darwin"),
         ):
             result = opencode_config_dir()

@@ -10,14 +10,44 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
+
+import yaml
 
 
 def _expand_config_dir(raw: str) -> Path:
     """Expand an OpenCode config directory string into a :class:`Path`."""
     return Path(raw).expanduser()
+
+
+def _configured_opencode_cli_path() -> Path | None:
+    """Return the setup-selected OpenCode CLI path when one is persisted.
+
+    Path discovery must be stable across setup, cleanup, and uninstall.  Do not
+    fall back to whichever ``opencode`` happens to be on ``PATH`` here: machines
+    can have several OpenCode installs, and uninstall should target the same
+    install tree that setup recorded.
+    """
+    for key in ("OUROBOROS_OPENCODE_CLI_PATH", "OPENCODE_CLI_PATH"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            return Path(raw).expanduser()
+
+    config_path = Path.home() / ".ouroboros" / "config.yaml"
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    orchestrator = config.get("orchestrator")
+    if not isinstance(orchestrator, dict):
+        return None
+    raw = orchestrator.get("opencode_cli_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw.strip()).expanduser()
 
 
 def _debug_paths_config_dir() -> Path | None:
@@ -28,16 +58,12 @@ def _debug_paths_config_dir() -> Path | None:
     platform assumptions into Ouroboros. Any failure falls back to deterministic
     local resolution so setup still works on machines without OpenCode on PATH.
     """
-    opencode = (
-        os.environ.get("OUROBOROS_OPENCODE_CLI_PATH")
-        or os.environ.get("OPENCODE_CLI_PATH")
-        or shutil.which("opencode")
-    )
+    opencode = _configured_opencode_cli_path()
     if not opencode:
         return None
     try:
         result = subprocess.run(
-            [opencode, "debug", "paths"],
+            [str(opencode), "debug", "paths"],
             capture_output=True,
             check=False,
             text=True,
