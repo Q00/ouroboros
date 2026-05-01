@@ -475,3 +475,33 @@ async def test_pipeline_refuses_duplicate_unknown_run_resume(tmp_path) -> None:
 
     assert result.status == "blocked"
     assert "duplicate execution" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_run_start_without_tracking_handle(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        return {"job_id": None, "execution_id": None}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "tracking handle" in (result.blocker or "")
+    assert state.phase == AutoPhase.BLOCKED

@@ -152,6 +152,10 @@ class AutoPipeline:
             return self._result(state, ledger, review=review, blocker=state.last_error)
         state.job_id = run_meta.get("job_id")
         state.execution_id = run_meta.get("execution_id")
+        if not any((state.job_id, state.execution_id)):
+            state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
         state.transition(AutoPhase.COMPLETE, "execution started for A-grade Seed")
         self._save(state)
         return self._result(state, ledger, review=review)
