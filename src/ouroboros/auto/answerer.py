@@ -294,7 +294,7 @@ class AutoAnswerer:
                 "acceptance_criteria",
                 LedgerEntry(
                     key=f"acceptance.behavior.{key}",
-                    value=f"The requested behavior is observable: {subject} produces a verifiable output, status, or persisted state change.",
+                    value=f"A command or API check for {subject} returns exit code 0 or HTTP 2xx status, and stdout, response body, or a persisted file contains evidence of the requested behavior.",
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.78,
                     status=LedgerStatus.DEFAULTED,
