@@ -524,3 +524,25 @@ def test_auto_answerer_preserves_feature_specific_acceptance_semantics() -> None
     assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
     assert "delete endpoint" in answer.text.lower()
     assert "stdout" not in answer.text.lower()
+
+
+def test_auto_answerer_allows_secret_token_product_requirement_questions() -> None:
+    answer = AutoAnswerer().answer(
+        "Should users be able to store secret tokens?",
+        SeedDraftLedger.from_goal("Build a token vault"),
+    )
+
+    assert answer.blocker is None
+    assert answer.source != AutoAnswerSource.BLOCKER
+
+
+def test_auto_answerer_preserves_open_ended_feature_acceptance_semantics() -> None:
+    answer = AutoAnswerer().answer(
+        "What acceptance criteria should the webhook delivery flow satisfy?",
+        SeedDraftLedger.from_goal("Build webhook delivery"),
+    )
+
+    assert answer.blocker is None
+    assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
+    assert "webhook delivery flow" in answer.text.lower()
+    assert "stdout" not in answer.text.lower()
