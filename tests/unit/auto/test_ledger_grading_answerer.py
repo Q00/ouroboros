@@ -305,3 +305,17 @@ def test_auto_answerer_avoids_generic_defaults_for_feature_semantics() -> None:
             not {"actors", "inputs", "outputs", "verification_plan", "acceptance_criteria"}
             & updated_sections
         )
+
+
+def test_auto_answerer_allows_safe_production_and_project_feature_questions() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "What should the production deploy output on failure?",
+        "Should deleting a project also delete its tasks?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a project app"))
+        assert answer.blocker is None
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert "runtime_context" not in updated_sections

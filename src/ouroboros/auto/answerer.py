@@ -83,7 +83,14 @@ class AutoAnswerer:
             return self._verification_answer(question)
         if _matches_any(
             lowered,
-            (r"\bruntime\b", r"\bstack\b", r"\brepo\b", r"\bproject\b", r"\bframework\b"),
+            (
+                r"\bruntime\b",
+                r"\bstack\b",
+                r"\brepo\b",
+                r"\bframework\b",
+                r"\bproject structure\b",
+                r"\bproject runtime\b",
+            ),
         ):
             return self._runtime_answer(question)
         if _is_actor_or_io_question(lowered):
@@ -299,11 +306,11 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "medical judgment required",
         ),
         (
-            r"\b(deploy|release|publish)\b.+\b(production|prod|live|external)\b",
+            r"\b(should|can|may|will|do we|should we)\b.+\b(deploy|release|publish)\b.+\b(to|against|on)\s+\b(production|prod|live|external)\b",
             "deployment target requires human authority",
         ),
         (
-            r"\bproduction\b.+\b(deploy|release|publish|credential|secret|api key)\b",
+            r"\b(production|prod|live|external)\b.+\b(credential|secret|api key)\b",
             "production deployment or irreversible external action required",
         ),
         (
