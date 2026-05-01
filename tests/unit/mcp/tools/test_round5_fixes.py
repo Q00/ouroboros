@@ -212,7 +212,10 @@ class TestGetOuroborosToolsPluginWiring:
         from ouroboros.mcp.tools.definitions import get_ouroboros_tools
 
         tools = get_ouroboros_tools()
-        assert len(tools) == 23
+        names = {tool.definition.name for tool in tools}
+        assert len(tools) == 24
+        assert "ouroboros_auto" in names
+        assert "ouroboros_channel_workflow" not in names
 
 
 # ---------------------------------------------------------------------------
