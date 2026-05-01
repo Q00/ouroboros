@@ -149,7 +149,7 @@ class AutoAnswerer:
                 "acceptance_criteria",
                 LedgerEntry(
                     key="acceptance.observable_behavior",
-                    value="At least one automated or command-level check proves each acceptance criterion with observable output or artifacts.",
+                    value="A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion.",
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.82,
                     status=LedgerStatus.DEFAULTED,

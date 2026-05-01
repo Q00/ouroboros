@@ -147,8 +147,19 @@ class SeedDraftLedger:
         return ledger
 
     def add_entry(self, section_name: str, entry: LedgerEntry) -> None:
-        """Append ``entry`` to a section, creating the section when needed."""
+        """Append ``entry`` to a section, marking same-key contradictions explicit."""
         section = self.sections.setdefault(section_name, LedgerSection(section_name))
+        for existing in section.entries:
+            if existing.key != entry.key:
+                continue
+            if _normalize_conflict_value(existing.value) == _normalize_conflict_value(entry.value):
+                continue
+            if LedgerStatus.BLOCKED in {existing.status, entry.status}:
+                continue
+            existing.status = LedgerStatus.CONFLICTING
+            entry.status = LedgerStatus.CONFLICTING
+            existing.rationale = existing.rationale or "Conflicts with another auto ledger answer."
+            entry.rationale = entry.rationale or "Conflicts with another auto ledger answer."
         section.entries.append(entry)
 
     def record_qa(self, question: str, answer: str) -> None:
@@ -243,6 +254,10 @@ class SeedDraftLedger:
             for entry in section.entries
             if entry.source in sources
         ]
+
+
+def _normalize_conflict_value(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
 
 
 def _truncate(value: str, *, limit: int = 500) -> str:

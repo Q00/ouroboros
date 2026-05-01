@@ -319,3 +319,47 @@ def test_auto_answerer_allows_safe_production_and_project_feature_questions() ->
         assert answer.blocker is None
         updated_sections = {section for section, _entry in answer.ledger_updates}
         assert "runtime_context" not in updated_sections
+
+
+def test_ledger_marks_same_key_conflicting_values_as_open_gap() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    ledger.add_entry(
+        "outputs",
+        LedgerEntry(
+            key="outputs.primary",
+            value="Write a JSON report",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "outputs",
+        LedgerEntry(
+            key="outputs.primary",
+            value="Display an HTML dashboard",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    assert ledger.sections["outputs"].status() == LedgerStatus.CONFLICTING
+    assert "outputs" in ledger.open_gaps()
+
+
+def test_auto_answerer_acceptance_default_matches_grade_observability() -> None:
+    answer = AutoAnswerer().answer(
+        "Which command output verifies the acceptance criteria?",
+        SeedDraftLedger.from_goal("Build a CLI"),
+    )
+    acceptance = [
+        entry for section, entry in answer.ledger_updates if section == "acceptance_criteria"
+    ]
+
+    assert acceptance
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(ac=(acceptance[0].value,))
+
+    assert GradeGate().grade_seed(seed, ledger=ledger).grade == SeedGrade.A
