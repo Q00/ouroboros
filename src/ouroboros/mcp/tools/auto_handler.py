@@ -127,12 +127,14 @@ class AutoHandler:
         authoring_opencode_mode = (
             "subprocess" if self.opencode_mode == "plugin" else self.opencode_mode
         )
-        interview_handler = self.interview_handler or InterviewHandler(
+        interview_handler = _authoring_interview_handler(
+            self.interview_handler,
             llm_backend=self.llm_backend,
             agent_runtime_backend=self.agent_runtime_backend,
             opencode_mode=authoring_opencode_mode,
         )
-        generate_seed_handler = self.generate_seed_handler or GenerateSeedHandler(
+        generate_seed_handler = _authoring_seed_handler(
+            self.generate_seed_handler,
             llm_backend=self.llm_backend,
             agent_runtime_backend=self.agent_runtime_backend,
             opencode_mode=authoring_opencode_mode,
@@ -167,6 +169,59 @@ class AutoHandler:
             skip_run=bool(arguments.get("skip_run", False)),
         )
         return await pipeline.run(state)
+
+
+def _authoring_interview_handler(
+    handler: InterviewHandler | None,
+    *,
+    llm_backend: str | None,
+    agent_runtime_backend: str | None,
+    opencode_mode: str | None,
+) -> InterviewHandler:
+    if handler is None:
+        return InterviewHandler(
+            llm_backend=llm_backend,
+            agent_runtime_backend=agent_runtime_backend,
+            opencode_mode=opencode_mode,
+        )
+    if opencode_mode != "subprocess" or getattr(handler, "opencode_mode", None) != "plugin":
+        return handler
+    return InterviewHandler(
+        interview_engine=handler.interview_engine,
+        event_store=handler.event_store,
+        llm_adapter=handler.llm_adapter,
+        llm_backend=handler.llm_backend,
+        agent_runtime_backend=handler.agent_runtime_backend,
+        opencode_mode=opencode_mode,
+        data_dir=handler.data_dir,
+    )
+
+
+def _authoring_seed_handler(
+    handler: GenerateSeedHandler | None,
+    *,
+    llm_backend: str | None,
+    agent_runtime_backend: str | None,
+    opencode_mode: str | None,
+) -> GenerateSeedHandler:
+    if handler is None:
+        return GenerateSeedHandler(
+            llm_backend=llm_backend,
+            agent_runtime_backend=agent_runtime_backend,
+            opencode_mode=opencode_mode,
+        )
+    if opencode_mode != "subprocess" or getattr(handler, "opencode_mode", None) != "plugin":
+        return handler
+    return GenerateSeedHandler(
+        interview_engine=handler.interview_engine,
+        seed_generator=handler.seed_generator,
+        llm_adapter=handler.llm_adapter,
+        llm_backend=handler.llm_backend,
+        event_store=handler.event_store,
+        data_dir=handler.data_dir,
+        agent_runtime_backend=handler.agent_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
 def _format_result(result: AutoPipelineResult) -> str:

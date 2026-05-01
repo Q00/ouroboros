@@ -8,7 +8,12 @@ from typer.testing import CliRunner
 from ouroboros.auto.adapters import HandlerInterviewBackend
 from ouroboros.cli.main import app
 from ouroboros.core.types import Result
-from ouroboros.mcp.tools.auto_handler import AutoHandler
+from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_handler import (
+    AutoHandler,
+    _authoring_interview_handler,
+    _authoring_seed_handler,
+)
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 
@@ -87,3 +92,28 @@ def test_get_ouroboros_tools_includes_auto_for_runtime_dispatch() -> None:
     names = {handler.definition.name for handler in get_ouroboros_tools()}
 
     assert "ouroboros_auto" in names
+
+
+def test_auto_handler_normalizes_injected_plugin_authoring_handlers() -> None:
+    interview = InterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+    seed = GenerateSeedHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+
+    normalized_interview = _authoring_interview_handler(
+        interview,
+        llm_backend=None,
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+    normalized_seed = _authoring_seed_handler(
+        seed,
+        llm_backend=None,
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+
+    assert normalized_interview is not interview
+    assert normalized_seed is not seed
+    assert normalized_interview.opencode_mode == "subprocess"
+    assert normalized_seed.opencode_mode == "subprocess"
+    assert normalized_interview.agent_runtime_backend == "opencode"
+    assert normalized_seed.agent_runtime_backend == "opencode"
