@@ -95,6 +95,13 @@ class AutoInterviewDriver:
             return AutoInterviewResult(
                 "blocked", state.interview_session_id, ledger, state.current_round, str(exc)
             )
+        except Exception as exc:
+            blocker = f"interview resume/start failed: {exc}"
+            state.mark_blocked(blocker, tool_name="interview.start")
+            self._save(state)
+            return AutoInterviewResult(
+                "blocked", state.interview_session_id, ledger, state.current_round, blocker
+            )
 
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
             state.current_round = round_number
@@ -131,6 +138,13 @@ class AutoInterviewDriver:
                 self._save(state)
                 return AutoInterviewResult(
                     "blocked", state.interview_session_id, ledger, round_number, str(exc)
+                )
+            except Exception as exc:
+                blocker = f"interview answer failed: {exc}"
+                state.mark_blocked(blocker, tool_name="interview.answer")
+                self._save(state)
+                return AutoInterviewResult(
+                    "blocked", state.interview_session_id, ledger, round_number, blocker
                 )
 
             state.interview_session_id = turn.session_id

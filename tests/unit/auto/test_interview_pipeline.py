@@ -233,3 +233,79 @@ async def test_pipeline_non_interview_resume_blocks_without_seed_artifact(tmp_pa
 
     assert result.status == "blocked"
     assert "without persisted Seed artifact" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_interview_resume_backend_error_blocks_and_persists(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not start a new interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer without a question")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "resume interview")
+    state.interview_session_id = "interview_1"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    assert "resume/start failed" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_generator_error_marks_failed(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise RuntimeError("generator exploded")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "seed generation failed" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_starter_error_marks_failed(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise RuntimeError("runner exploded")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "run start failed" in (result.blocker or "")
