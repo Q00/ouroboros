@@ -372,7 +372,7 @@ def _slug_key(value: str) -> str:
 def _is_product_behavior_question(lowered: str) -> bool:
     return bool(
         re.search(
-            r"\b(should|must|can|will|do|does|is|are)\b.+\b(mark|marked|show|display|write|return|create|update|edit|delete|remove|store|save|send|generate|filter|sort|search|export|import|notify|report|use)\b",
+            r"\b(should|must|can|will|do|does|is|are)\b.+\b(mark|marked|show|display|write|return|create|update|edit|delete|remove|rotate|store|save|send|generate|filter|sort|search|export|import|notify|report|use)\b",
             lowered,
         )
         or re.search(r"\bwhat\s+(output|input)\b.+\b(should|does|do|format|write|use)\b", lowered)
@@ -424,7 +424,15 @@ def _blocker_for(question: str) -> AutoBlocker | None:
 
     external_action_patterns = (
         (
-            r"\b(access token|auth token|private key|credential value|credential secret)\b",
+            r"\b(credential value|credential secret)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(provide|enter|paste|supply|configure|set)\b.+\b(access token|auth token|private key)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(which|what)\b.+\b(access token|auth token|private key)\b.+\b(use|configure|set|env|environment|workflow|ci|production|prod)\b",
             "credential or secret value required",
         ),
         (
