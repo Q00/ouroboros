@@ -32,6 +32,9 @@ class InterviewBackend(Protocol):
     async def answer(self, session_id: str, answer: str) -> InterviewTurn:
         """Record an answer and return the next question or completion metadata."""
 
+    async def resume(self, session_id: str) -> InterviewTurn:
+        """Return the outstanding question for a persisted interview session."""
+
 
 @dataclass(frozen=True, slots=True)
 class AutoInterviewResult:
@@ -64,10 +67,19 @@ class AutoInterviewDriver:
         self._ensure_interview_phase(state)
         try:
             if state.interview_session_id:
-                turn = InterviewTurn(
-                    question="Continue from persisted auto interview state.",
-                    session_id=state.interview_session_id,
-                )
+                if state.pending_question:
+                    turn = InterviewTurn(
+                        question=state.pending_question,
+                        session_id=state.interview_session_id,
+                    )
+                else:
+                    turn = await self._with_timeout(
+                        self.backend.resume(state.interview_session_id),
+                        state,
+                        tool_name="interview.resume",
+                    )
+                    state.pending_question = turn.question
+                    self._save(state)
             else:
                 turn = await self._with_timeout(
                     self.backend.start(state.goal, cwd=state.cwd),
@@ -75,6 +87,7 @@ class AutoInterviewDriver:
                     tool_name="interview.start",
                 )
                 state.interview_session_id = turn.session_id
+                state.pending_question = turn.question
                 self._save(state)
         except TimeoutError as exc:
             state.mark_blocked(str(exc), tool_name="interview.start")
@@ -117,6 +130,7 @@ class AutoInterviewDriver:
                 return AutoInterviewResult("blocked", state.interview_session_id, ledger, round_number, str(exc))
 
             state.interview_session_id = turn.session_id
+            state.pending_question = turn.question
             self._save(state)
             if (turn.seed_ready or turn.completed) and ledger.is_seed_ready():
                 return AutoInterviewResult("seed_ready", turn.session_id, ledger, round_number)
@@ -156,12 +170,20 @@ class FunctionInterviewBackend:
         self,
         start: Callable[[str, str], Awaitable[InterviewTurn]],
         answer: Callable[[str, str], Awaitable[InterviewTurn]],
+        resume: Callable[[str], Awaitable[InterviewTurn]] | None = None,
     ) -> None:
         self._start = start
         self._answer = answer
+        self._resume = resume
 
     async def start(self, goal: str, *, cwd: str) -> InterviewTurn:
         return await self._start(goal, cwd)
 
     async def answer(self, session_id: str, answer: str) -> InterviewTurn:
         return await self._answer(session_id, answer)
+
+    async def resume(self, session_id: str) -> InterviewTurn:
+        if self._resume is None:
+            msg = "interview resume is unavailable because no pending question is persisted"
+            raise RuntimeError(msg)
+        return await self._resume(session_id)

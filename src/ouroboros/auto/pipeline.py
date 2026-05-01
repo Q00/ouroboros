@@ -52,13 +52,24 @@ class AutoPipeline:
         ledger = SeedDraftLedger.from_dict(state.ledger) if state.ledger else SeedDraftLedger.from_goal(state.goal)
         self._save(state)
 
-        interview = await self.interview_driver.run(state, ledger)
-        if interview.status == "blocked":
-            return self._result(state, ledger, blocker=interview.blocker)
+        if state.phase in {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}:
+            return self._result(state, ledger, blocker=state.last_error)
 
-        state.transition(AutoPhase.SEED_GENERATION, "generating Seed from auto interview")
-        self._save(state)
-        seed = await self.seed_generator(interview.session_id or "")
+        if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
+            interview = await self.interview_driver.run(state, ledger)
+            if interview.status == "blocked":
+                return self._result(state, ledger, blocker=interview.blocker)
+            state.transition(AutoPhase.SEED_GENERATION, "generating Seed from auto interview")
+            self._save(state)
+        elif state.phase != AutoPhase.SEED_GENERATION:
+            state.mark_blocked(
+                f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
+                tool_name="auto_pipeline",
+            )
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
+
+        seed = await self.seed_generator(state.interview_session_id or "")
         state.seed_id = seed.metadata.seed_id
         state.mark_progress("Seed generated", tool_name="seed_generator")
         self._save(state)

@@ -169,3 +169,52 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     assert result.status == "complete"
     assert result.grade == "A"
     assert result.job_id is None
+
+@pytest.mark.asyncio
+async def test_interview_resume_uses_persisted_pending_question(tmp_path) -> None:
+    calls: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not start a new interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        calls.append(text)
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "resume interview")
+    state.interview_session_id = "interview_1"
+    state.pending_question = "What should we verify?"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1)
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert calls
+    assert "Continue from persisted" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_non_interview_resume_blocks_without_seed_artifact(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("pipeline should not re-enter interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("pipeline should not re-enter interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("review resume without seed artifact should block")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "without persisted Seed artifact" in (result.blocker or "")

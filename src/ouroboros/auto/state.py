@@ -86,6 +86,7 @@ class AutoPipelineState:
     findings: list[dict[str, Any]] = field(default_factory=list)
     repair_round: int = 0
     current_round: int = 0
+    pending_question: str | None = None
     last_tool_name: str | None = None
     last_error: str | None = None
     last_progress_message: str = "created"
