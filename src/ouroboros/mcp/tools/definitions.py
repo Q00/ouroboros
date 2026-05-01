@@ -168,6 +168,24 @@ def interview_handler(
     )
 
 
+
+
+def auto_handler(
+    *,
+    llm_backend: str | None = None,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> object:
+    """Create an AutoHandler instance without adding it to legacy static tool tuples."""
+    from ouroboros.mcp.tools.auto_handler import AutoHandler
+
+    return AutoHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+
+
 def lateral_think_handler(
     *,
     runtime_backend: str | None = None,

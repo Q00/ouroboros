@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 
@@ -15,6 +16,7 @@ from ouroboros.core.seed import Seed
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
 RunStarter = Callable[[Seed], Awaitable[dict[str, str | None]]]
+SeedSaver = Callable[[Seed], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +47,10 @@ class AutoPipeline:
     reviewer: SeedReviewer | None = None
     repairer: SeedRepairer | None = None
     grade_gate: GradeGate | None = None
+    seed_saver: SeedSaver | None = None
     skip_run: bool = False
+    seed_timeout_seconds: float = 120.0
+    run_start_timeout_seconds: float = 60.0
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
@@ -113,12 +118,22 @@ class AutoPipeline:
                 self._save(state)
             else:
                 try:
-                    seed = await self.seed_generator(state.interview_session_id or "")
+                    seed = await asyncio.wait_for(
+                        self.seed_generator(state.interview_session_id or ""),
+                        timeout=self.seed_timeout_seconds,
+                    )
                     if not isinstance(seed, Seed):
                         msg = f"seed generator returned {type(seed).__name__}, expected Seed"
                         raise TypeError(msg)
                     state.seed_id = seed.metadata.seed_id
                     state.seed_artifact = seed.to_dict()
+                except TimeoutError as exc:
+                    state.mark_blocked(
+                        f"seed generation timed out after {self.seed_timeout_seconds:.0f}s",
+                        tool_name="seed_generator",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=str(exc) or state.last_error)
                 except Exception as exc:
                     state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
                     self._save(state)
@@ -146,6 +161,8 @@ class AutoPipeline:
             state.last_grade = review.grade_result.grade.value
             state.findings = [asdict(finding) for finding in review.findings]
             state.ledger = ledger.to_dict()
+            if self.seed_saver is not None:
+                state.seed_path = self.seed_saver(seed)
             self._save(state)
 
             if not review.may_run:
@@ -189,12 +206,21 @@ class AutoPipeline:
         state.run_start_attempted = True
         self._save(state)
         try:
-            run_meta = await self.run_starter(seed)
+            run_meta = await asyncio.wait_for(
+                self.run_starter(seed), timeout=self.run_start_timeout_seconds
+            )
             if not isinstance(run_meta, dict):
                 msg = f"run starter returned {type(run_meta).__name__}, expected dict"
                 raise TypeError(msg)
             state.job_id = _optional_str(run_meta.get("job_id"))
             state.execution_id = _optional_str(run_meta.get("execution_id"))
+        except TimeoutError as exc:
+            state.mark_blocked(
+                f"run start timed out after {self.run_start_timeout_seconds:.0f}s",
+                tool_name="run_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=str(exc) or state.last_error)
         except Exception as exc:
             state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
             self._save(state)
