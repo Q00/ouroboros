@@ -60,11 +60,18 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
-            interview = await self.interview_driver.run(state, ledger)
-            if interview.status == "blocked":
-                return self._result(state, ledger, blocker=interview.blocker)
-            state.transition(AutoPhase.SEED_GENERATION, "generating Seed from auto interview")
-            self._save(state)
+            if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
+                state.transition(
+                    AutoPhase.SEED_GENERATION, "resuming Seed generation after completed interview"
+                )
+                self._save(state)
+            else:
+                interview = await self.interview_driver.run(state, ledger)
+                if interview.status == "blocked":
+                    return self._result(state, ledger, blocker=interview.blocker)
+                state.interview_completed = True
+                state.transition(AutoPhase.SEED_GENERATION, "generating Seed from auto interview")
+                self._save(state)
         elif state.phase not in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
@@ -120,6 +127,14 @@ class AutoPipeline:
                 return self._result(state, ledger, review=review)
         else:
             review = None
+
+        if state.phase == AutoPhase.RUN and not any((state.job_id, state.execution_id)):
+            state.mark_blocked(
+                "Run start status is unknown; refusing to start a duplicate execution",
+                tool_name="run_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
 
         if self.run_starter is None:
             state.mark_blocked("No run starter configured", tool_name="run_starter")

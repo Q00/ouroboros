@@ -151,6 +151,9 @@ class AutoInterviewDriver:
             state.pending_question = turn.question
             self._save(state)
             if (turn.seed_ready or turn.completed) and ledger.is_seed_ready():
+                state.interview_completed = True
+                state.pending_question = None
+                self._save(state)
                 return AutoInterviewResult("seed_ready", turn.session_id, ledger, round_number)
 
         if not ledger.is_seed_ready():

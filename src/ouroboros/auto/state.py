@@ -77,6 +77,7 @@ class AutoPipelineState:
     policy: AutoPolicy = AutoPolicy.CONSERVATIVE
     required_grade: str = "A"
     interview_session_id: str | None = None
+    interview_completed: bool = False
     seed_id: str | None = None
     seed_path: str | None = None
     seed_artifact: dict[str, Any] = field(default_factory=dict)
