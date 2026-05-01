@@ -823,9 +823,7 @@ async def test_interview_driver_clears_pending_question_before_backend_answer(tm
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
-    driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer), store=store, max_rounds=1
-    )
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=store, max_rounds=1)
 
     result = await driver.run(state, ledger)
 
