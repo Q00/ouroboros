@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 import json
@@ -163,9 +163,14 @@ class AutoPipelineState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AutoPipelineState:
         """Deserialize from a dictionary and reject malformed persisted state."""
+        required_fields = {item.name for item in fields(cls)}
+        missing_fields = sorted(required_fields - data.keys())
+        if missing_fields:
+            msg = f"state is missing required fields: {', '.join(missing_fields)}"
+            raise ValueError(msg)
         payload = dict(data)
-        payload["phase"] = AutoPhase(payload.get("phase", AutoPhase.CREATED.value))
-        payload["policy"] = AutoPolicy(payload.get("policy", AutoPolicy.CONSERVATIVE.value))
+        payload["phase"] = AutoPhase(payload["phase"])
+        payload["policy"] = AutoPolicy(payload["policy"])
         state = cls(**payload)
         state._validate_loaded()
         return state
@@ -308,7 +313,11 @@ class AutoStore:
             msg = f"Auto session state must be an object: {path}"
             raise ValueError(msg)
         try:
-            return AutoPipelineState.from_dict(raw)
+            state = AutoPipelineState.from_dict(raw)
+            if state.auto_session_id != auto_session_id:
+                msg = f"Auto session id mismatch: requested {auto_session_id}, found {state.auto_session_id}"
+                raise ValueError(msg)
+            return state
         except (TypeError, ValueError) as exc:
             msg = f"Auto session state is invalid: {path}: {exc}"
             raise ValueError(msg) from exc
