@@ -451,6 +451,7 @@ class TestOuroborosTools:
 
     EXPECTED_OUROBOROS_TOOL_NAMES = {
         "ouroboros_ac_tree_hud",
+        "ouroboros_auto",
         "ouroboros_brownfield",
         "ouroboros_cancel_execution",
         "ouroboros_cancel_job",
