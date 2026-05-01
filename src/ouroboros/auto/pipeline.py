@@ -99,21 +99,34 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase == AutoPhase.SEED_GENERATION:
-            try:
-                seed = await self.seed_generator(state.interview_session_id or "")
-                if not isinstance(seed, Seed):
-                    msg = f"seed generator returned {type(seed).__name__}, expected Seed"
-                    raise TypeError(msg)
-                state.seed_id = seed.metadata.seed_id
-                state.seed_artifact = seed.to_dict()
-            except Exception as exc:
-                state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
+            if state.seed_artifact:
+                try:
+                    seed = Seed.from_dict(state.seed_artifact)
+                except Exception as exc:
+                    state.mark_failed(
+                        f"persisted Seed artifact is invalid: {exc}",
+                        tool_name="seed_generator",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
+                state.transition(AutoPhase.REVIEW, "resuming review from persisted Seed")
                 self._save(state)
-                return self._result(state, ledger, blocker=state.last_error)
-            state.mark_progress("Seed generated", tool_name="seed_generator")
-            self._save(state)
-            state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
-            self._save(state)
+            else:
+                try:
+                    seed = await self.seed_generator(state.interview_session_id or "")
+                    if not isinstance(seed, Seed):
+                        msg = f"seed generator returned {type(seed).__name__}, expected Seed"
+                        raise TypeError(msg)
+                    state.seed_id = seed.metadata.seed_id
+                    state.seed_artifact = seed.to_dict()
+                except Exception as exc:
+                    state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
+                state.mark_progress("Seed generated", tool_name="seed_generator")
+                self._save(state)
+                state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
+                self._save(state)
         elif state.seed_artifact:
             seed = Seed.from_dict(state.seed_artifact)
         else:

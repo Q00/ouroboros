@@ -127,6 +127,7 @@ class AutoInterviewDriver:
                 )
             self.answerer.apply(answer, ledger, question=turn.question)
             state.ledger = ledger.to_dict()
+            state.pending_question = None
             state.mark_progress(
                 f"answered round {round_number}/{self.max_rounds} from {answer.source.value}",
                 tool_name="auto_answerer",
