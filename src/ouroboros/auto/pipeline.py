@@ -66,6 +66,7 @@ class AutoPipeline:
         )
         if self.skip_run and not state.skip_run:
             state.skip_run = True
+        resume_tool_name = state.last_tool_name
         self._save(state)
 
         if state.phase == AutoPhase.COMPLETE:
@@ -160,6 +161,18 @@ class AutoPipeline:
                 self._save(state)
                 state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
                 self._save(state)
+        elif (
+            state.phase == AutoPhase.REVIEW
+            and resume_tool_name == "grade_gate"
+            and self.seed_loader is not None
+            and state.seed_path
+        ):
+            try:
+                seed = self.seed_loader(state.seed_path)
+            except Exception as exc:
+                state.mark_failed(f"seed load failed: {exc}", tool_name="seed_loader")
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
         elif state.seed_artifact:
             seed = Seed.from_dict(state.seed_artifact)
         elif self.seed_loader is not None and state.seed_path:

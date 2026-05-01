@@ -408,6 +408,21 @@ def get_ouroboros_tools(
     )
 
 
+class _LazyAutoHandler:
+    """Lazy static auto handler to avoid import cycles in OUROBOROS_TOOLS."""
+
+    @property
+    def definition(self):
+        from ouroboros.mcp.tools.auto_handler import AutoHandler
+
+        return AutoHandler().definition
+
+    async def handle(self, arguments):
+        from ouroboros.mcp.tools.auto_handler import AutoHandler
+
+        return await AutoHandler().handle(arguments)
+
+
 def __getattr__(name: str) -> object:
     """Lazily re-export handlers that would otherwise create import cycles."""
     if name == "AutoHandler":
@@ -418,4 +433,4 @@ def __getattr__(name: str) -> object:
 
 
 # List of all Ouroboros tools for registration
-OUROBOROS_TOOLS: OuroborosToolHandlers = get_ouroboros_tools(include_auto=False)
+OUROBOROS_TOOLS = (*get_ouroboros_tools(include_auto=False), _LazyAutoHandler())

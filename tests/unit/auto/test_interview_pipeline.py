@@ -1070,3 +1070,45 @@ async def test_pipeline_resumes_seed_saver_failure_from_review(tmp_path) -> None
 
     assert result.status == "complete"
     assert saved == [seed.metadata.seed_id]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_grade_gate_resume_prefers_repaired_seed_path(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    stale_seed = _seed(ac=("The CLI should be easy and user-friendly",))
+    repaired_seed = _seed()
+    seed_path = str(tmp_path / "seed.yaml")
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = stale_seed.to_dict()
+    state.seed_path = seed_path
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.mark_blocked("Seed did not reach A-grade", tool_name="grade_gate")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        seed_loader=lambda path: (
+            repaired_seed if path == seed_path else (_ for _ in ()).throw(AssertionError(path))
+        ),
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.grade == "A"
+    assert state.seed_artifact == repaired_seed.to_dict()
