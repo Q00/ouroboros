@@ -236,18 +236,32 @@ class AutoAnswerer:
 
 def _blocker_for(question: str) -> AutoBlocker | None:
     lowered = question.lower()
-    blockers = {
-        "credential": "credential or secret value required",
-        "api key": "credential or API key required",
-        "payment": "paid service or financial decision required",
-        "legal": "legal judgment required",
-        "medical": "medical judgment required",
-    }
-    for token, reason in blockers.items():
-        if token in lowered:
-            return AutoBlocker(reason=reason, question=question)
 
     external_action_patterns = (
+        (
+            r"\b(api key|access token|auth token|private key|password|credential value|credential secret)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(which|what|provide|enter|use|choose|select|configure|set)\b.+\b(credential|credentials)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(credential|credentials)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci|production|prod)\b",
+            "credential or secret value required",
+        ),
+        (
+            r"\b(payment|billing|paid service|credit card|bank account|invoice)\b.+\b(account|provider|key|secret|charge|purchase|subscribe|production|live)\b",
+            "paid service or financial decision required",
+        ),
+        (
+            r"\b(legal|compliance|license|contract)\b.+\b(advice|judgment|review|approval|liability|risk|interpretation)\b",
+            "legal judgment required",
+        ),
+        (
+            r"\b(medical|clinical|diagnosis|treatment|health)\b.+\b(advice|judgment|diagnose|prescribe|triage|recommendation)\b",
+            "medical judgment required",
+        ),
         (
             r"\b(deploy|release|publish)\b.+\b(production|prod|live|external)\b",
             "deployment target requires human authority",

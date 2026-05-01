@@ -71,3 +71,22 @@ def test_store_load_wraps_semantically_invalid_state(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="Auto session state is invalid"):
         store.load("auto_badstate")
+
+
+def test_store_load_wraps_invalid_timestamps_and_timeouts(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["last_progress_at"] = "not-a-timestamp"
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Auto session state is invalid"):
+        store.load(state.auto_session_id)
+
+    data = state.to_dict()
+    data["timeout_seconds_by_phase"] = {AutoPhase.RUN.value: "sixty"}
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Auto session state is invalid"):
+        store.load(state.auto_session_id)

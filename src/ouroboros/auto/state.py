@@ -158,11 +158,49 @@ class AutoPipelineState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AutoPipelineState:
-        """Deserialize from a dictionary."""
+        """Deserialize from a dictionary and reject malformed persisted state."""
         payload = dict(data)
         payload["phase"] = AutoPhase(payload.get("phase", AutoPhase.CREATED.value))
         payload["policy"] = AutoPolicy(payload.get("policy", AutoPolicy.CONSERVATIVE.value))
-        return cls(**payload)
+        state = cls(**payload)
+        state._validate_loaded()
+        return state
+
+    def _validate_loaded(self) -> None:
+        """Validate fields whose bad values would otherwise fail later during resume."""
+        for field_name in ("goal", "cwd", "auto_session_id", "required_grade"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                msg = f"{field_name} must be a non-empty string"
+                raise ValueError(msg)
+
+        for field_name in (
+            "phase_started_at",
+            "last_progress_at",
+            "created_at",
+            "updated_at",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str):
+                msg = f"{field_name} must be an ISO timestamp string"
+                raise ValueError(msg)
+            try:
+                datetime.fromisoformat(value)
+            except ValueError as exc:
+                msg = f"{field_name} must be an ISO timestamp string"
+                raise ValueError(msg) from exc
+
+        if not isinstance(self.timeout_seconds_by_phase, dict):
+            msg = "timeout_seconds_by_phase must be an object"
+            raise ValueError(msg)
+        valid_phases = {phase.value for phase in AutoPhase}
+        for phase, timeout in self.timeout_seconds_by_phase.items():
+            if not isinstance(phase, str) or phase not in valid_phases:
+                msg = "timeout_seconds_by_phase keys must be known phase strings"
+                raise ValueError(msg)
+            if type(timeout) is not int or timeout <= 0:
+                msg = "timeout_seconds_by_phase values must be positive integers"
+                raise ValueError(msg)
 
 
 class AutoStore:

@@ -223,3 +223,33 @@ def test_auto_answerer_returns_blocker_for_credentials() -> None:
     assert any(
         entry.status == LedgerStatus.BLOCKED for entry in ledger.sections["constraints"].entries
     )
+
+
+def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:
+    answerer = AutoAnswerer()
+    benign_questions = (
+        "Should the app support credential login?",
+        "Should legal documents be editable?",
+        "Should medical records be exportable?",
+        "Should users see payment history?",
+    )
+
+    for question in benign_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a document app"))
+        assert answer.blocker is None
+        assert answer.source != AutoAnswerSource.BLOCKER
+
+
+def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
+    answerer = AutoAnswerer()
+    blocking_questions = (
+        "Which credential value should production use?",
+        "Which payment provider account should we charge?",
+        "What legal approval is needed for liability risk?",
+        "What medical advice should the app recommend?",
+    )
+
+    for question in blocking_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
+        assert answer.blocker is not None
+        assert answer.source == AutoAnswerSource.BLOCKER
