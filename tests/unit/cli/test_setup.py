@@ -83,6 +83,37 @@ class TestCodexSetup:
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
 
+    def test_register_codex_mcp_server_preserves_url_based_server(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Setup should not replace a long-running URL MCP server with stdio."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[mcp_servers.ouroboros]",
+                    'url = "http://127.0.0.1:12000/mcp"',
+                    "",
+                    "[mcp_servers.other]",
+                    'command = "custom"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+
+        assert 'url = "http://127.0.0.1:12000/mcp"' in contents
+        assert "[mcp_servers.other]" in contents
+        assert 'command = "uvx"' not in contents
+        assert "[mcp_servers.ouroboros.env]" not in contents
+
     def test_register_codex_default_profiles_writes_profile_anchors(
         self,
         tmp_path: Path,

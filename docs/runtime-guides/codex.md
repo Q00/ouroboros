@@ -186,7 +186,8 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
-- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml`
+- Preserves an existing URL-based Ouroboros MCP server in `~/.codex/config.toml`
+- Registers the stdio Ouroboros MCP/env hookup in `~/.codex/config.toml` when no URL server exists
 - Adds missing `profiles.ouroboros-*` Codex profile anchors without overwriting existing profiles
 
 `~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, `consensus`, `llm_profiles`, and `llm_role_profiles` settings in `~/.ouroboros/config.yaml`.

@@ -377,6 +377,24 @@ def _upsert_codex_mcp_section(raw: str) -> tuple[str, bool]:
     return "\n".join(output_lines).rstrip() + "\n", existed_before
 
 
+def _codex_mcp_server_uses_url(raw: str) -> bool:
+    """Return True when Codex already points Ouroboros at a URL MCP server."""
+    import tomllib
+
+    if not raw.strip():
+        return False
+
+    parsed = tomllib.loads(raw)
+    mcp_servers = parsed.get("mcp_servers")
+    if not isinstance(mcp_servers, dict):
+        return False
+    ouroboros_server = mcp_servers.get("ouroboros")
+    if not isinstance(ouroboros_server, dict):
+        return False
+    url = ouroboros_server.get("url")
+    return isinstance(url, str) and bool(url.strip())
+
+
 def _render_codex_profile_section(name: str, settings: dict[str, str]) -> str:
     """Render a sparse Codex profile table used as an Ouroboros anchor."""
     lines = [_CODEX_PROFILE_COMMENT, f"[profiles.{name}]"]
@@ -434,6 +452,10 @@ def _register_codex_mcp_server() -> None:
             tomllib.loads(raw)
         except tomllib.TOMLDecodeError:
             print_error(f"Could not parse {codex_config} — skipping MCP registration.")
+            return
+
+        if _codex_mcp_server_uses_url(raw):
+            print_info("Existing URL-based Codex MCP server preserved.")
             return
 
         updated_raw, existed_before = _upsert_codex_mcp_section(raw)

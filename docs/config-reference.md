@@ -34,7 +34,7 @@ Complete reference for `~/.ouroboros/config.yaml` and all related environment va
 For Codex-backed Ouroboros workflows:
 
 - Put persistent Ouroboros role overrides in `~/.ouroboros/config.yaml`.
-- Use `~/.codex/config.toml` only for the Codex MCP/env hookup written by `ouroboros setup --runtime codex`.
+- Use `~/.codex/config.toml` only for the Codex MCP registration and Codex profile anchors written by `ouroboros setup --runtime codex`.
 - The Codex-aware loader does **not** hardcode a mini model when these keys are left at their shipped defaults. It resolves Codex-backed lookups to Codex's `default` sentinel unless you set an explicit model string.
 - Use `llm_profiles` and `llm_role_profiles` when you want portable task profiles that can map to Codex CLI profiles or to ordinary model settings for other providers.
 
@@ -133,6 +133,13 @@ model_reasoning_effort = "xhigh"
 ```
 
 These are intentionally sparse, flat Codex profiles. Codex currently exposes a single `--profile <name>` selector; setup does not depend on unsupported profile-to-profile inheritance. Edit these anchors if your local Codex account does not expose a listed model.
+
+If `~/.codex/config.toml` already contains a URL-based Ouroboros MCP server, setup preserves it instead of replacing it with a stdio command block:
+
+```toml
+[mcp_servers.ouroboros]
+url = "http://127.0.0.1:12000/mcp"
+```
 
 ---
 
