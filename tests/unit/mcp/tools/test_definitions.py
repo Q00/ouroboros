@@ -521,7 +521,9 @@ class TestOuroborosTools:
     def test_get_ouroboros_tools_can_inject_runtime_backend(self) -> None:
         """Tool factory can build execute_seed with a specific runtime backend."""
         tools = get_ouroboros_tools(runtime_backend="codex")
-        assert {h.definition.name for h in tools} == self.EXPECTED_OUROBOROS_TOOL_NAMES
+        assert {h.definition.name for h in tools} == self.EXPECTED_OUROBOROS_TOOL_NAMES | {
+            "ouroboros_auto"
+        }
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
 

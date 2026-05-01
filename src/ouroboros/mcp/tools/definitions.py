@@ -301,6 +301,7 @@ def get_ouroboros_tools(
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
     opencode_mode: str | None = None,
+    include_auto: bool = True,
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers.
 
@@ -341,9 +342,21 @@ def get_ouroboros_tools(
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
     )
+    auto = (
+        (
+            auto_handler(
+                llm_backend=llm_backend,
+                runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            ),
+        )
+        if include_auto
+        else ()
+    )
     return (
         execute_seed,
         start_execute,
+        *auto,
         SessionStatusHandler(),
         job_status,
         job_wait,
@@ -399,4 +412,4 @@ def __getattr__(name: str) -> object:
 
 
 # List of all Ouroboros tools for registration
-OUROBOROS_TOOLS: OuroborosToolHandlers = get_ouroboros_tools()
+OUROBOROS_TOOLS: OuroborosToolHandlers = get_ouroboros_tools(include_auto=False)

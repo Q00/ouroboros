@@ -183,7 +183,12 @@ class AutoPipeline:
             state.findings = [asdict(finding) for finding in review.findings]
             state.ledger = ledger.to_dict()
             if self.seed_saver is not None:
-                state.seed_path = self.seed_saver(seed)
+                try:
+                    state.seed_path = self.seed_saver(seed)
+                except Exception as exc:
+                    state.mark_failed(f"seed save failed: {exc}", tool_name="seed_saver")
+                    self._save(state)
+                    return self._result(state, ledger, review=review, blocker=state.last_error)
             self._save(state)
 
             if not review.may_run:

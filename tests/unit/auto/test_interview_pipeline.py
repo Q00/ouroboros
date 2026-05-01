@@ -998,3 +998,34 @@ async def test_pipeline_resumes_blocked_run_start_from_seed_path(tmp_path) -> No
     assert result.status == "complete"
     assert result.run_session_id == "session_2"
     assert result.job_id is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_save_error_marks_failed(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    def save(seed: Seed) -> str:  # noqa: ARG001
+        raise OSError("disk full")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver, generate_seed, store=AutoStore(tmp_path), seed_saver=save, skip_run=True
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "seed save failed" in (result.blocker or "")

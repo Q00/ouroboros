@@ -79,3 +79,11 @@ def test_auto_handler_uses_synchronous_authoring_mode_for_opencode_plugin() -> N
 
     assert handler.agent_runtime_backend == "opencode"
     assert handler.opencode_mode == "plugin"
+
+
+def test_get_ouroboros_tools_includes_auto_for_runtime_dispatch() -> None:
+    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+
+    names = {handler.definition.name for handler in get_ouroboros_tools()}
+
+    assert "ouroboros_auto" in names
