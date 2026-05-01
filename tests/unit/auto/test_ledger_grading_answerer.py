@@ -570,7 +570,15 @@ def test_auto_answerer_preserves_safe_product_behavior_questions() -> None:
     assert answer.blocker is None
     assert "marked done" in answer.text.lower()
     assert "conservative mvp" not in answer.text.lower()
-    assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
+    acceptance = [
+        entry for section, entry in answer.ledger_updates if section == "acceptance_criteria"
+    ]
+    assert acceptance
+    ledger = SeedDraftLedger.from_goal("Build a task app")
+    _fill_minimal_ready_ledger(ledger)
+    assert (
+        GradeGate().grade_seed(_seed(ac=(acceptance[0].value,)), ledger=ledger).grade == SeedGrade.A
+    )
 
 
 def test_auto_answerer_preserves_output_behavior_questions() -> None:
@@ -582,4 +590,12 @@ def test_auto_answerer_preserves_output_behavior_questions() -> None:
     assert answer.blocker is None
     assert "export command write" in answer.text.lower()
     assert "conservative mvp" not in answer.text.lower()
-    assert any(section == "acceptance_criteria" for section, _entry in answer.ledger_updates)
+    acceptance = [
+        entry for section, entry in answer.ledger_updates if section == "acceptance_criteria"
+    ]
+    assert acceptance
+    ledger = SeedDraftLedger.from_goal("Build an export command")
+    _fill_minimal_ready_ledger(ledger)
+    assert (
+        GradeGate().grade_seed(_seed(ac=(acceptance[0].value,)), ledger=ledger).grade == SeedGrade.A
+    )
