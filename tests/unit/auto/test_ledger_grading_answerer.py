@@ -179,6 +179,16 @@ def test_auto_answerer_allows_product_domain_delete_questions() -> None:
     assert answer.source != AutoAnswerSource.BLOCKER
 
 
+def test_auto_answerer_returns_blocker_for_plain_secret_questions() -> None:
+    answer = AutoAnswerer().answer(
+        "Which secret should the workflow use?",
+        SeedDraftLedger.from_goal("Deploy a service"),
+    )
+
+    assert answer.blocker is not None
+    assert answer.source == AutoAnswerSource.BLOCKER
+
+
 def test_auto_answerer_returns_blocker_for_credentials() -> None:
     ledger = SeedDraftLedger.from_goal("Deploy a service")
     answerer = AutoAnswerer()

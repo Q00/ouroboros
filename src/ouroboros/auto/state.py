@@ -204,4 +204,8 @@ class AutoStore:
         if not isinstance(raw, dict):
             msg = f"Auto session state must be an object: {path}"
             raise ValueError(msg)
-        return AutoPipelineState.from_dict(raw)
+        try:
+            return AutoPipelineState.from_dict(raw)
+        except (TypeError, ValueError) as exc:
+            msg = f"Auto session state is invalid: {path}: {exc}"
+            raise ValueError(msg) from exc

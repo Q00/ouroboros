@@ -61,3 +61,13 @@ def test_run_phase_uses_run_timeout_key_for_staleness() -> None:
     future = datetime.fromisoformat(state.last_progress_at) + timedelta(seconds=61)
     assert state.timeout_seconds_by_phase[AutoPhase.RUN.value] == 60
     assert state.is_stale(future)
+
+
+def test_store_load_wraps_semantically_invalid_state(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    path = store.path_for("auto_badstate")
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"goal": "x", "cwd": ".", "phase": "bogus"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Auto session state is invalid"):
+        store.load("auto_badstate")

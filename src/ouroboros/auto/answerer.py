@@ -239,6 +239,7 @@ def _blocker_for(question: str) -> AutoBlocker | None:
     blockers = {
         "credential": "credential or secret value required",
         "api key": "credential or API key required",
+        "secret": "credential or secret value required",
         "payment": "paid service or financial decision required",
         "legal": "legal judgment required",
         "medical": "medical judgment required",
