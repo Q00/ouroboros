@@ -96,6 +96,14 @@ class HandlerRunStarter:
         }
 
 
+def load_seed(path: str | Path) -> Seed:
+    """Load a persisted auto-generated Seed."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise HandlerError(f"Seed file is not an object: {path}")
+    return Seed.from_dict(raw)
+
+
 def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
     """Persist an auto-generated Seed in the standard seed directory."""
     directory = seeds_dir or (Path.home() / ".ouroboros" / "seeds")

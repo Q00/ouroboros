@@ -51,8 +51,8 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.REPAIR: {AutoPhase.REVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.RUN: {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.COMPLETE: set(),
-    AutoPhase.BLOCKED: set(),
-    AutoPhase.FAILED: set(),
+    AutoPhase.BLOCKED: {AutoPhase.INTERVIEW, AutoPhase.SEED_GENERATION, AutoPhase.RUN},
+    AutoPhase.FAILED: {AutoPhase.INTERVIEW, AutoPhase.SEED_GENERATION, AutoPhase.RUN},
 }
 
 
@@ -83,6 +83,7 @@ class AutoPipelineState:
     seed_artifact: dict[str, Any] = field(default_factory=dict)
     execution_id: str | None = None
     job_id: str | None = None
+    run_session_id: str | None = None
     run_start_attempted: bool = False
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
@@ -225,6 +226,7 @@ class AutoPipelineState:
             "seed_path",
             "execution_id",
             "job_id",
+            "run_session_id",
             "last_grade",
             "pending_question",
             "last_tool_name",

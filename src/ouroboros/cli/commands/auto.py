@@ -13,6 +13,7 @@ from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
     HandlerRunStarter,
     HandlerSeedGenerator,
+    load_seed,
     save_seed,
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
@@ -120,6 +121,7 @@ async def _run_auto(
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
         seed_saver=save_seed,
+        seed_loader=load_seed,
         skip_run=skip_run,
     )
     result = await pipeline.run(state)
@@ -141,10 +143,11 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"Interview session: {result.interview_session_id}")
     if result.seed_path:
         console.print(f"Seed: {result.seed_path}")
-    if result.job_id or result.execution_id:
+    if result.job_id or result.execution_id or result.run_session_id:
         console.print("Execution started:")
         console.print(f"  Job ID: {result.job_id}")
         console.print(f"  Execution ID: {result.execution_id}")
+        console.print(f"  Session ID: {result.run_session_id}")
     if show_ledger:
         if result.assumptions:
             console.print("Assumptions:")

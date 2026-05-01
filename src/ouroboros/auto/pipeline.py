@@ -17,6 +17,7 @@ from ouroboros.core.seed import Seed
 SeedGenerator = Callable[[str], Awaitable[Seed]]
 RunStarter = Callable[[Seed], Awaitable[dict[str, str | None]]]
 SeedSaver = Callable[[Seed], str]
+SeedLoader = Callable[[str], Seed]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,7 @@ class AutoPipelineResult:
     interview_session_id: str | None = None
     execution_id: str | None = None
     job_id: str | None = None
+    run_session_id: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -48,6 +50,7 @@ class AutoPipeline:
     repairer: SeedRepairer | None = None
     grade_gate: GradeGate | None = None
     seed_saver: SeedSaver | None = None
+    seed_loader: SeedLoader | None = None
     skip_run: bool = False
     seed_timeout_seconds: float = 120.0
     run_start_timeout_seconds: float = 60.0
@@ -61,9 +64,20 @@ class AutoPipeline:
         )
         self._save(state)
 
-        if state.phase in {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}:
+        if state.phase == AutoPhase.COMPLETE:
             return self._result(state, ledger, blocker=state.last_error)
+        if state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
+            resume_phase = _recoverable_phase_for_tool(state.last_tool_name)
+            if resume_phase is None:
+                return self._result(state, ledger, blocker=state.last_error)
+            previous_phase = state.phase
+            state.transition(
+                resume_phase,
+                f"resuming {resume_phase.value} after {previous_phase.value}: {state.last_error or 'no error recorded'}",
+            )
+            self._save(state)
 
+        review: SeedReview | None = None
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
             if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
                 if not state.interview_session_id:
@@ -144,6 +158,13 @@ class AutoPipeline:
                 self._save(state)
         elif state.seed_artifact:
             seed = Seed.from_dict(state.seed_artifact)
+        elif state.phase == AutoPhase.RUN and self.seed_loader is not None and state.seed_path:
+            try:
+                seed = self.seed_loader(state.seed_path)
+            except Exception as exc:
+                state.mark_failed(f"seed load failed: {exc}", tool_name="seed_loader")
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
         else:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
@@ -176,8 +197,6 @@ class AutoPipeline:
                 state.transition(AutoPhase.COMPLETE, "A-grade Seed ready; skip-run requested")
                 self._save(state)
                 return self._result(state, ledger, review=review)
-        else:
-            review = None
 
         if state.phase == AutoPhase.RUN:
             if any((state.job_id, state.execution_id)):
@@ -225,7 +244,8 @@ class AutoPipeline:
             state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
-        if not any((state.job_id, state.execution_id)):
+        state.run_session_id = _optional_str(run_meta.get("session_id"))
+        if not any((state.job_id, state.execution_id, state.run_session_id)):
             state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
@@ -250,6 +270,7 @@ class AutoPipeline:
             interview_session_id=state.interview_session_id,
             execution_id=state.execution_id,
             job_id=state.job_id,
+            run_session_id=state.run_session_id,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
@@ -258,6 +279,14 @@ class AutoPipeline:
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
             self.store.save(state)
+
+
+def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
+    if tool_name in {"interview.start", "interview.resume", "interview.answer"}:
+        return AutoPhase.INTERVIEW
+    if tool_name == "seed_generator":
+        return AutoPhase.SEED_GENERATION
+    return None
 
 
 def _optional_str(value: object) -> str | None:

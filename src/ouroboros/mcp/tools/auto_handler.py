@@ -10,6 +10,7 @@ from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
     HandlerRunStarter,
     HandlerSeedGenerator,
+    load_seed,
     save_seed,
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
@@ -102,6 +103,7 @@ class AutoHandler:
                     "interview_session_id": result.interview_session_id,
                     "execution_id": result.execution_id,
                     "job_id": result.job_id,
+                    "run_session_id": result.run_session_id,
                     "resume_command": f"ooo auto --resume {result.auto_session_id}",
                     "blocker": result.blocker,
                 },
@@ -111,13 +113,15 @@ class AutoHandler:
     async def _run(self, arguments: dict[str, Any]) -> AutoPipelineResult:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
-        cwd = str(arguments.get("cwd") or Path.cwd())
+        requested_cwd = str(arguments.get("cwd") or Path.cwd())
         if isinstance(resume, str) and resume:
             state = store.load(resume)
+            cwd = state.cwd
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
                 raise ValueError("goal is required when not resuming")
+            cwd = requested_cwd
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
 
         interview_handler = self.interview_handler or InterviewHandler(
@@ -156,6 +160,7 @@ class AutoHandler:
             store=store,
             repairer=SeedRepairer(max_repair_rounds=int(arguments.get("max_repair_rounds") or 5)),
             seed_saver=save_seed,
+            seed_loader=load_seed,
             skip_run=bool(arguments.get("skip_run", False)),
         )
         return await pipeline.run(state)
@@ -173,12 +178,13 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Interview session: {result.interview_session_id}")
     if result.seed_path:
         lines.append(f"Seed: {result.seed_path}")
-    if result.job_id or result.execution_id:
+    if result.job_id or result.execution_id or result.run_session_id:
         lines.extend(
             [
                 "Execution started:",
                 f"  job_id: {result.job_id}",
                 f"  execution_id: {result.execution_id}",
+                f"  session_id: {result.run_session_id}",
             ]
         )
     if result.assumptions:
