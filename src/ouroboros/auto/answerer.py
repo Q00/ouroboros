@@ -310,6 +310,14 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "deployment target requires human authority",
         ),
         (
+            r"\b(which|what|choose|select|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(environment|target|account|project|cluster|region)\b",
+            "deployment target requires human authority",
+        ),
+        (
+            r"\b(which|what|choose|select|use|configure|set)\b.+\b(environment|target|account|project|cluster|region)\b.+\b(deploy|release|publish)\b.+\b(production|prod|live|external)\b",
+            "deployment target requires human authority",
+        ),
+        (
             r"\b(production|prod|live|external)\b.+\b(credential|secret|api key)\b",
             "production deployment or irreversible external action required",
         ),

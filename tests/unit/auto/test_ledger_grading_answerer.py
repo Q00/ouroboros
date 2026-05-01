@@ -363,3 +363,14 @@ def test_auto_answerer_acceptance_default_matches_grade_observability() -> None:
     seed = _seed(ac=(acceptance[0].value,))
 
     assert GradeGate().grade_seed(seed, ledger=ledger).grade == SeedGrade.A
+
+
+def test_auto_answerer_blocks_production_environment_selection_variants() -> None:
+    questions = (
+        "Which production environment should we deploy to?",
+        "Which AWS account should we deploy production to?",
+    )
+    for question in questions:
+        answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal("Deploy a service"))
+        assert answer.blocker is not None
+        assert answer.source == AutoAnswerSource.BLOCKER
