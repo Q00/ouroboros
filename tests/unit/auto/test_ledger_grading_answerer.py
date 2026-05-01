@@ -119,6 +119,32 @@ def test_grade_gate_accepts_observable_seed_with_ready_ledger() -> None:
     assert result.may_run
 
 
+def test_grade_gate_rejects_unresolved_ledger_even_with_clean_seed() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    seed = _seed(ac=("`habit list` prints stdout containing created habits",))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.C
+    assert not result.may_run
+    assert any(blocker.code == "ledger_open_gap" for blocker in result.blockers)
+
+
+def test_grade_gate_requires_observable_acceptance_behavior_not_keywords() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(ac=("The command uses clean architecture", "The API is maintainable"))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    assert (
+        sum(1 for finding in result.findings if finding.code == "untestable_acceptance_criteria")
+        == 2
+    )
+
+
 def test_grade_gate_rejects_vague_acceptance_criteria() -> None:
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     _fill_minimal_ready_ledger(ledger)
@@ -141,6 +167,16 @@ def test_auto_answerer_source_tags_and_applies_updates() -> None:
     assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT
     assert answer.prefixed_text.startswith("[from-auto][conservative_default]")
     assert "verification_plan" not in ledger.open_gaps()
+
+
+def test_auto_answerer_allows_product_domain_delete_questions() -> None:
+    answer = AutoAnswerer().answer(
+        "Should users be able to delete habits?",
+        SeedDraftLedger.from_goal("Build a habit tracker"),
+    )
+
+    assert answer.blocker is None
+    assert answer.source != AutoAnswerSource.BLOCKER
 
 
 def test_auto_answerer_returns_blocker_for_credentials() -> None:

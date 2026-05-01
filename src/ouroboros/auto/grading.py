@@ -182,6 +182,17 @@ class GradeGate:
 
         non_goals = []
         if ledger is not None:
+            open_gaps = ledger.open_gaps()
+            for gap in open_gaps:
+                blockers.append(
+                    GradeFinding(
+                        "ledger_open_gap",
+                        "high",
+                        f"Ledger required section is unresolved: {gap}",
+                        gap,
+                        "Resolve the ledger section before allowing auto execution.",
+                    )
+                )
             non_goal_section = ledger.sections.get("non_goals")
             non_goals = (
                 [entry.value for entry in non_goal_section.entries] if non_goal_section else []
@@ -259,7 +270,16 @@ def _is_vague(value: str) -> bool:
 
 def _is_observable(value: str) -> bool:
     lowered = value.lower()
-    return any(hint in lowered for hint in _OBSERVABLE_HINTS)
+    if not any(hint in lowered for hint in _OBSERVABLE_HINTS):
+        return False
+    observable_patterns = (
+        r"`[^`]+`\s+(prints|returns|creates|writes|exits|displays)",
+        r"\b(prints|returns|creates|writes|exits|displays|contains)\b.+\b(stdout|stderr|file|artifact|status|response|output|non-zero|exit code)\b",
+        r"\b(stdout|stderr|file|artifact|status|response|output|non-zero|exit code)\b.+\b(contains|equals|includes|is|exists|created|written)\b",
+        r"\b(test|check)\b.+\b(passes|fails|asserts|verifies)\b",
+        r"\b(api|endpoint|request)\b.+\b(returns|responds|status)\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in observable_patterns)
 
 
 def _high_risk_assumption_count(ledger: SeedDraftLedger) -> int:

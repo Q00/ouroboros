@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import re
 
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 
@@ -238,14 +239,29 @@ def _blocker_for(question: str) -> AutoBlocker | None:
     blockers = {
         "credential": "credential or secret value required",
         "api key": "credential or API key required",
-        "production": "production deployment or irreversible external action required",
-        "deploy": "deployment target requires human authority",
-        "delete": "destructive operation requires human authority",
         "payment": "paid service or financial decision required",
         "legal": "legal judgment required",
         "medical": "medical judgment required",
     }
     for token, reason in blockers.items():
         if token in lowered:
+            return AutoBlocker(reason=reason, question=question)
+
+    external_action_patterns = (
+        (
+            r"\b(deploy|release|publish)\b.+\b(production|prod|live|external)\b",
+            "deployment target requires human authority",
+        ),
+        (
+            r"\bproduction\b.+\b(deploy|release|publish|credential|secret|api key)\b",
+            "production deployment or irreversible external action required",
+        ),
+        (
+            r"\b(delete|drop|erase|wipe|remove)\b.+\b(database|db|file|repo|branch|production|prod|secret|api key|credential)\b",
+            "destructive external operation requires human authority",
+        ),
+    )
+    for pattern, reason in external_action_patterns:
+        if re.search(pattern, lowered):
             return AutoBlocker(reason=reason, question=question)
     return None
