@@ -900,6 +900,55 @@ async def test_pipeline_marks_malformed_run_starter_result_failed(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_pipeline_retries_after_run_start_timeout(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    calls = 0
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(0.05)
+        return {"job_id": "job_after_timeout", "execution_id": "exec_after_timeout"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        run_start_timeout_seconds=0.001,
+    )
+
+    first = await pipeline.run(state)
+    pipeline.run_start_timeout_seconds = 1
+    second = await pipeline.run(state)
+
+    assert first.status == "blocked"
+    assert second.status == "complete"
+    assert second.job_id == "job_after_timeout"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_pipeline_retries_after_malformed_run_starter_metadata(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")

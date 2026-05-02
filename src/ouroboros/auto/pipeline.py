@@ -314,6 +314,7 @@ class AutoPipeline:
             state.job_id = _optional_str(run_meta.get("job_id"))
             state.execution_id = _optional_str(run_meta.get("execution_id"))
         except TimeoutError as exc:
+            state.run_start_attempted = False
             state.mark_blocked(
                 f"run start timed out after {self.run_start_timeout_seconds:.0f}s",
                 tool_name="run_starter",
