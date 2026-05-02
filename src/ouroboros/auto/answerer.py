@@ -70,19 +70,10 @@ class AutoAnswerer:
             lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
         ):
             return self._non_goal_answer(question, ledger)
+        if _is_verification_question(lowered):
+            return self._verification_answer(question)
         if _is_feature_acceptance_question(lowered):
             return self._feature_acceptance_answer(question)
-        if _matches_any(
-            lowered,
-            (
-                r"\btests?\b",
-                r"\bverify\b",
-                r"\bvalidation\b",
-                r"\bacceptance\b",
-                r"\bdefinition of done\b",
-            ),
-        ):
-            return self._verification_answer(question)
         if _is_actor_or_io_question(lowered):
             return self._io_actor_answer(question)
         if _is_product_behavior_question(lowered):
@@ -333,11 +324,30 @@ class AutoAnswerer:
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
 
 
+def _is_verification_question(lowered: str) -> bool:
+    return bool(
+        _matches_any(
+            lowered,
+            (
+                r"\btests?\b",
+                r"\bverify\b",
+                r"\bverifies\b",
+                r"\bverification\b",
+                r"\bvalidation\b",
+                r"\bdefinition of done\b",
+            ),
+        )
+        or re.search(r"\b(command output|output)\b.+\b(verifies|verify|proves?)\b", lowered)
+        or re.search(r"\b(verifies|verify|proves?)\b.+\b(acceptance|criteria)\b", lowered)
+    )
+
+
 def _is_feature_acceptance_question(lowered: str) -> bool:
     if not re.search(r"\b(acceptance|criteria)\b", lowered):
         return False
     if re.search(
-        r"\b(general|overall|test strategy|verification plan|definition of done)\b", lowered
+        r"\b(general|overall|test strategy|verification plan|definition of done|verify|verifies|verification|validation)\b",
+        lowered,
     ):
         return False
     return bool(
@@ -399,7 +409,20 @@ def _is_actor_or_io_question(lowered: str) -> bool:
         r"\b(what|which)\s+(are|inputs? are|outputs? are)\s+.+\b(inputs|outputs)\b", lowered
     ):
         return True
-    if re.search(r"\b(what|which)\s+(inputs|outputs)\s+(are|should be)\b", lowered):
+    if re.search(
+        r"\b(what|which)\s+(inputs|outputs)\s+(are|should be|does|do|will|can|must)\b",
+        lowered,
+    ):
+        return True
+    if re.search(
+        r"\b(what|which)\s+(inputs|outputs)\b.+\b(take|produce|return|emit|write|read|accept|receive)\b",
+        lowered,
+    ):
+        return True
+    if re.search(
+        r"\b(what|which)\s+.+\b(inputs|outputs)\b.+\b(take|produce|return|emit|write|read|accept|receive)\b",
+        lowered,
+    ):
         return True
     if re.search(
         r"\b(who|which|what)\s+(is|are)\s+.+\b(actors?|personas?|stakeholders?)\b", lowered
