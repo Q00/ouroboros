@@ -16,7 +16,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
-from ouroboros.config import get_wonder_model
+from ouroboros.config import get_llm_backend, get_wonder_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologySchema, Seed
@@ -58,6 +58,41 @@ class WonderEngine:
     """
 
     llm_adapter: LLMAdapter
+    adapter_factory: object = field(default=None)
+    _captured_backend: str | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        try:
+            self._captured_backend = get_llm_backend()
+        except Exception:  # noqa: BLE001
+            self._captured_backend = None
+
+    def _resolve_adapter(self) -> LLMAdapter:
+        if self.adapter_factory is not None:
+            try:
+                fresh = self.adapter_factory()
+                if fresh is not None:
+                    return fresh
+            except Exception:  # noqa: BLE001
+                return self.llm_adapter
+        try:
+            current_backend = get_llm_backend()
+        except Exception:  # noqa: BLE001
+            return self.llm_adapter
+        if (
+            self._captured_backend is not None
+            and current_backend
+            and current_backend != self._captured_backend
+        ):
+            try:
+                from ouroboros.providers.factory import create_llm_adapter
+                rebuilt = create_llm_adapter(backend=current_backend, max_turns=1)
+                self.llm_adapter = rebuilt
+                self._captured_backend = current_backend
+                return rebuilt
+            except Exception:  # noqa: BLE001
+                return self.llm_adapter
+        return self.llm_adapter
     model: str = field(default_factory=get_wonder_model)
 
     async def wonder(
@@ -95,7 +130,7 @@ class WonderEngine:
             max_tokens=2048,
         )
 
-        result = await self.llm_adapter.complete(messages, config)
+        result = await self._resolve_adapter().complete(messages, config)
 
         if result.is_err:
             logger.warning(
