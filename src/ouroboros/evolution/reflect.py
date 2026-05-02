@@ -110,7 +110,7 @@ class ReflectEngine:
             try:
                 fresh = self.adapter_factory()
                 if fresh is not None:
-                    if backend_drifted:
+                    if current_backend:
                         self._captured_backend = current_backend
                         self.model = get_reflect_model(current_backend)
                     return fresh
@@ -124,8 +124,7 @@ class ReflectEngine:
 
                 rebuilt = create_llm_adapter(
                     backend=current_backend,
-                    cwd=_adapter_cwd(self.llm_adapter),
-                    max_turns=_adapter_max_turns(self.llm_adapter),
+                    **_adapter_rebuild_kwargs(self.llm_adapter),
                 )
                 self.llm_adapter = rebuilt
                 self._captured_backend = current_backend
@@ -409,6 +408,28 @@ Guidelines:
                 },
             )
             return None
+
+
+def _adapter_rebuild_kwargs(adapter: LLMAdapter) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "cwd": _adapter_cwd(adapter),
+        "max_turns": _adapter_max_turns(adapter),
+    }
+    for key, attr in (
+        ("permission_mode", "_permission_mode"),
+        ("allowed_tools", "_allowed_tools"),
+        ("cli_path", "_cli_path"),
+        ("timeout", "_timeout"),
+        ("max_retries", "_max_retries"),
+        ("on_message", "_on_message"),
+        ("api_key", "_api_key"),
+        ("api_base", "_api_base"),
+    ):
+        if hasattr(adapter, attr):
+            value = getattr(adapter, attr)
+            if value is not None:
+                kwargs[key] = value
+    return kwargs
 
 
 def _adapter_cwd(adapter: LLMAdapter) -> str | None:
