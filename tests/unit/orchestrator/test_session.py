@@ -1229,6 +1229,117 @@ class TestFindOrphanedSessions:
         assert result[0].status == SessionStatus.PAUSED
 
     @pytest.mark.asyncio
+    async def test_usage_limit_paused_session_before_resume_after_not_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Usage-limit pauses should not be cancelled before the resume window."""
+        now = datetime.now(UTC)
+        paused_at = now - timedelta(hours=2)
+        resume_after = now + timedelta(hours=3)
+        start_event = self._make_start_event(
+            "sess_usage_limit",
+            timestamp=paused_at - timedelta(minutes=10),
+        )
+        paused_event = self._make_terminal_event(
+            "sess_usage_limit",
+            "orchestrator.session.paused",
+            timestamp=paused_at,
+        )
+        paused_event.data = {
+            "reason": "Usage limit reached",
+            "pause_kind": "usage_limit",
+            "pause_seconds": 18000,
+            "paused_at": paused_at.isoformat(),
+            "resume_after": resume_after.isoformat(),
+        }
+
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, paused_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_usage_limit_paused_session_after_resume_grace_is_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Usage-limit pauses can be cleaned up after resume time plus staleness."""
+        now = datetime.now(UTC)
+        resume_after = now - timedelta(hours=2)
+        paused_at = resume_after - timedelta(hours=5)
+        start_event = self._make_start_event(
+            "sess_expired_usage_limit",
+            timestamp=paused_at - timedelta(minutes=10),
+        )
+        paused_event = self._make_terminal_event(
+            "sess_expired_usage_limit",
+            "orchestrator.session.paused",
+            timestamp=paused_at,
+        )
+        paused_event.data = {
+            "reason": "Usage limit reached",
+            "pause_kind": "usage_limit",
+            "pause_seconds": 18000,
+            "paused_at": paused_at.isoformat(),
+            "resume_after": resume_after.isoformat(),
+        }
+
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, paused_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert len(result) == 1
+        assert result[0].status == SessionStatus.PAUSED
+
+    @pytest.mark.asyncio
+    async def test_snapshot_usage_limit_paused_session_before_resume_after_not_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Snapshot orphan detection should also respect usage-limit pause windows."""
+        now = datetime.now(UTC)
+        paused_at = now - timedelta(hours=2)
+        resume_after = now + timedelta(hours=3)
+        start_event = self._make_start_event(
+            "sess_snapshot_usage_limit",
+            timestamp=paused_at - timedelta(minutes=10),
+        )
+        paused_event = self._make_terminal_event(
+            "sess_snapshot_usage_limit",
+            "orchestrator.session.paused",
+            timestamp=paused_at,
+        )
+        paused_event.data = {
+            "reason": "Usage limit reached",
+            "pause_kind": "usage_limit",
+            "pause_seconds": 18000,
+            "paused_at": paused_at.isoformat(),
+            "resume_after": resume_after.isoformat(),
+        }
+        snapshot = MagicMock()
+        snapshot.session_id = "sess_snapshot_usage_limit"
+        snapshot.execution_id = "exec_sess_snapshot_usage_limit"
+        snapshot.seed_id = "seed_sess_snapshot_usage_limit"
+        snapshot.start_time = start_event.data["start_time"]
+        snapshot.last_activity = paused_at
+        snapshot.status_event_type = "orchestrator.session.paused"
+        snapshot.runtime_status = None
+
+        mock_event_store.get_session_activity_snapshots = AsyncMock(return_value=[snapshot])
+        mock_event_store.replay.return_value = [start_event, paused_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
     async def test_multiple_sessions_mixed_states(
         self,
         repository: SessionRepository,

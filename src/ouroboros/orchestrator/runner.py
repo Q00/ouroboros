@@ -1143,12 +1143,9 @@ class OrchestratorRunner:
         if not is_usage_limit:
             return None
 
-        try:
-            from ouroboros.config import get_usage_limit_pause_seconds
+        from ouroboros.config import get_usage_limit_pause_seconds
 
-            default_pause_seconds = get_usage_limit_pause_seconds()
-        except Exception:
-            default_pause_seconds = 5 * 60 * 60
+        default_pause_seconds = get_usage_limit_pause_seconds()
 
         pause_seconds = self._duration_from_message(message, now=now) or default_pause_seconds
         pause_seconds = max(1, pause_seconds)
@@ -1210,29 +1207,69 @@ class OrchestratorRunner:
         *,
         now: datetime | None = None,
     ) -> RecoverableFailurePause | None:
-        """Return the first recoverable runtime pause from nested parallel AC results."""
+        """Return a pause only when every executed failure is recoverable."""
 
-        def iter_ac_results(results: tuple[Any, ...]) -> Any:
+        def iter_leaf_ac_results(results: tuple[Any, ...]) -> Any:
             for result in results:
-                yield result
                 sub_results = getattr(result, "sub_results", ())
-                if isinstance(sub_results, tuple):
-                    yield from iter_ac_results(sub_results)
+                if isinstance(sub_results, tuple) and sub_results:
+                    yield from iter_leaf_ac_results(sub_results)
+                else:
+                    yield result
+
+        def latest_pause(
+            current: RecoverableFailurePause,
+            candidate: RecoverableFailurePause,
+        ) -> RecoverableFailurePause:
+            current_resume_after = current.resume_after or datetime.min.replace(tzinfo=UTC)
+            candidate_resume_after = candidate.resume_after or datetime.min.replace(tzinfo=UTC)
+            if candidate_resume_after > current_resume_after:
+                return candidate
+            if candidate_resume_after == current_resume_after and (candidate.pause_seconds or 0) > (
+                current.pause_seconds or 0
+            ):
+                return candidate
+            return current
 
         resolved_now = now or datetime.now(UTC)
         results = getattr(parallel_result, "results", ())
         if not isinstance(results, tuple):
             return None
 
-        for ac_result in iter_ac_results(results):
+        selected_pause: RecoverableFailurePause | None = None
+        found_failure = False
+
+        for ac_result in iter_leaf_ac_results(results):
+            if bool(getattr(ac_result, "is_invalid", False)):
+                return None
+            if not bool(getattr(ac_result, "is_failure", False)):
+                continue
+
+            found_failure = True
             messages = getattr(ac_result, "messages", ())
             if not isinstance(messages, tuple):
-                continue
+                return None
+
+            failure_pause = None
             for message in reversed(messages):
                 pause = self._recoverable_failure_pause(message, now=resolved_now)
                 if pause is not None:
-                    return pause
-        return None
+                    failure_pause = pause
+                    break
+
+            if failure_pause is None:
+                return None
+
+            selected_pause = (
+                failure_pause
+                if selected_pause is None
+                else latest_pause(selected_pause, failure_pause)
+            )
+
+        if not found_failure:
+            return None
+
+        return selected_pause
 
     async def _terminate_runtime_handle(
         self,

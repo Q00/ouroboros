@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.seed import (
     BrownfieldContext,
     ContextReference,
@@ -1373,6 +1374,25 @@ class TestOrchestratorRunner:
         assert pause.pause_seconds == 18000
         assert pause.resume_after == now + timedelta(hours=5)
 
+    def test_recoverable_failure_propagates_invalid_usage_limit_config(
+        self,
+        runner: OrchestratorRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid pause-window config should not be hidden by a fallback."""
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "invalid")
+        message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again later.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+
+        with pytest.raises(ConfigError):
+            runner._recoverable_failure_pause(
+                message,
+                now=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
     def test_parallel_result_detects_nested_usage_limit_window(
         self,
         runner: OrchestratorRunner,
@@ -1408,6 +1428,140 @@ class TestOrchestratorRunner:
         assert pause.pause_kind == "usage_limit"
         assert pause.pause_seconds == 7200
         assert pause.resume_after == now + timedelta(hours=2)
+
+    def test_parallel_result_detects_decomposed_usage_limit_window(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Decomposed AC parents should defer to recoverable failed leaves."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 3 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        child_result = ACExecutionResult(
+            ac_index=100,
+            ac_content="Patch the runner leaf",
+            success=False,
+            messages=(message,),
+            final_message=message.content,
+        )
+        parent_result = ACExecutionResult(
+            ac_index=0,
+            ac_content="Patch the runner",
+            success=False,
+            messages=(),
+            is_decomposed=True,
+            sub_results=(child_result,),
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(parent_result,),
+            success_count=0,
+            failure_count=1,
+            total_messages=1,
+        )
+
+        pause = runner._recoverable_failure_pause_from_parallel_result(
+            parallel_result,
+            now=now,
+        )
+
+        assert pause is not None
+        assert pause.pause_kind == "usage_limit"
+        assert pause.resume_after == now + timedelta(hours=3)
+
+    def test_parallel_result_requires_all_failures_recoverable(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Mixed quota and ordinary failures should remain failed, not paused."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        usage_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        ordinary_message = AgentMessage(
+            type="result",
+            content="Tests failed: expected 2 rows, got 1.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Patch the runner",
+                    success=False,
+                    messages=(usage_message,),
+                    final_message=usage_message.content,
+                ),
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="Patch the tests",
+                    success=False,
+                    messages=(ordinary_message,),
+                    final_message=ordinary_message.content,
+                ),
+            ),
+            success_count=0,
+            failure_count=2,
+            total_messages=2,
+        )
+
+        pause = runner._recoverable_failure_pause_from_parallel_result(
+            parallel_result,
+            now=now,
+        )
+
+        assert pause is None
+
+    def test_parallel_result_uses_latest_recoverable_resume_after(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """All-recoverable parallel failures should wait for the longest window."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        two_hour_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 2 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        five_hour_message = AgentMessage(
+            type="result",
+            content="Quota window exhausted. Retry after 5 hours.",
+            data={"subtype": "error", "error_type": "OpenCodeError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Patch the runner",
+                    success=False,
+                    messages=(two_hour_message,),
+                    final_message=two_hour_message.content,
+                ),
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="Patch the tests",
+                    success=False,
+                    messages=(five_hour_message,),
+                    final_message=five_hour_message.content,
+                ),
+            ),
+            success_count=0,
+            failure_count=2,
+            total_messages=2,
+        )
+
+        pause = runner._recoverable_failure_pause_from_parallel_result(
+            parallel_result,
+            now=now,
+        )
+
+        assert pause is not None
+        assert pause.pause_seconds == 18000
+        assert pause.resume_after == now + timedelta(hours=5)
 
     @pytest.mark.asyncio
     async def test_resume_session_allows_paused_sessions(
