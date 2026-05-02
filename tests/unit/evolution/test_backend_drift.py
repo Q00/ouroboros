@@ -129,7 +129,80 @@ class TestEvolutionBackendDrift:
         )
 
         assert engine._resolve_adapter() is fresh
+        assert engine.llm_adapter is fresh
         assert engine.model == "codex-reflect"
+
+    def test_factory_failure_falls_back_to_latest_successful_reflect_adapter(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
+        )
+        initial = _Adapter("initial")
+        fresh = _Adapter("fresh", _cwd="/safe", _max_turns=1)
+        calls = 0
+
+        def flaky_factory():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return fresh
+            raise RuntimeError("temporary factory failure")
+
+        engine = ReflectEngine(
+            llm_adapter=initial,
+            model="claude-old",
+            adapter_factory=flaky_factory,
+        )
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+        )
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_reflect_model", Mock(return_value="codex-reflect")
+        )
+
+        assert engine._resolve_adapter() is fresh
+        assert engine.llm_adapter is fresh
+        assert engine.model == "codex-reflect"
+        assert engine._resolve_adapter() is fresh
+        assert engine.llm_adapter is fresh
+        assert engine.model == "codex-reflect"
+
+    def test_factory_failure_falls_back_to_latest_successful_wonder_adapter(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="claude")
+        )
+        initial = _Adapter("initial")
+        fresh = _Adapter("fresh", _cwd="/safe", _max_turns=1)
+        calls = 0
+
+        def flaky_factory():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return fresh
+            raise RuntimeError("temporary factory failure")
+
+        engine = WonderEngine(
+            llm_adapter=initial,
+            model="claude-old",
+            adapter_factory=flaky_factory,
+        )
+        monkeypatch.setattr(
+            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="codex")
+        )
+        monkeypatch.setattr(
+            "ouroboros.evolution.wonder.get_wonder_model", Mock(return_value="codex-wonder")
+        )
+
+        assert engine._resolve_adapter() is fresh
+        assert engine.llm_adapter is fresh
+        assert engine.model == "codex-wonder"
+        assert engine._resolve_adapter() is fresh
+        assert engine.llm_adapter is fresh
+        assert engine.model == "codex-wonder"
 
     def test_factory_pinned_backend_keeps_model_on_config_drift(self, monkeypatch) -> None:
         monkeypatch.setattr(
