@@ -178,6 +178,12 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
 
+            if not review.may_run and not self.skip_run:
+                blocker = "Seed review did not clear the Seed for execution"
+                state.mark_blocked(blocker, tool_name="grade_gate")
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=blocker)
+
             if self.skip_run:
                 state.transition(
                     AutoPhase.COMPLETE,
@@ -205,6 +211,19 @@ class AutoPipeline:
             if not _grade_meets_required(state.last_grade, state.required_grade):
                 state.mark_blocked(
                     f"Cannot start execution without a persisted grade meeting {state.required_grade}",
+                    tool_name="grade_gate",
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+            if review is None:
+                reviewer = self.reviewer or SeedReviewer(self.grade_gate)
+                review = reviewer.review(seed)
+                state.last_grade = review.grade_result.grade.value
+                state.findings = [asdict(finding) for finding in review.findings]
+                self._save(state)
+            if not review.may_run:
+                state.mark_blocked(
+                    "Seed review did not clear the Seed for execution",
                     tool_name="grade_gate",
                 )
                 self._save(state)

@@ -194,6 +194,42 @@ def test_seed_repairer_assigns_new_seed_identity_after_mutation() -> None:
     assert result.seed.metadata.parent_seed_id == seed.metadata.seed_id
 
 
+def test_seed_repairer_non_goals_do_not_contradict_goal_scope() -> None:
+    seed = _seed()
+    ledger = SeedDraftLedger.from_goal("Add authentication and deploy this service to production")
+    finding = ReviewFinding.from_parts(
+        code="missing_non_goals",
+        target="non_goals",
+        severity="medium",
+        message="Auto-generated Seed has no explicit non-goals",
+        repair_instruction="Add MVP non-goals to bound scope.",
+    )
+    review = SeedReview(
+        grade_result=GradeResult(
+            grade=SeedGrade.B,
+            scores={
+                "coverage": 0.8,
+                "ambiguity": 0.1,
+                "testability": 0.9,
+                "execution_feasibility": 0.9,
+                "risk": 0.1,
+            },
+            findings=[],
+            blockers=[],
+            may_run=False,
+        ),
+        findings=(finding,),
+    )
+
+    result = SeedRepairer().repair_once(seed, review, ledger=ledger)
+
+    assert result.changed
+    non_goals = ledger.non_goals()
+    assert non_goals
+    assert "authentication" not in non_goals[0].lower()
+    assert "production deployment" not in non_goals[0].lower()
+
+
 @pytest.mark.asyncio
 async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -1088,7 +1124,7 @@ async def test_interview_driver_does_not_replace_specific_verification_answer_wi
 
 
 @pytest.mark.asyncio
-async def test_pipeline_run_resume_honors_persisted_required_grade(tmp_path) -> None:
+async def test_pipeline_run_resume_requires_may_run_even_when_required_grade_is_b(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("run resume should not restart interview")
 
@@ -1099,7 +1135,7 @@ async def test_pipeline_run_resume_honors_persisted_required_grade(tmp_path) -> 
         raise AssertionError("run resume should not regenerate seed")
 
     async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
-        return {"job_id": "job_required_b", "execution_id": None}
+        raise AssertionError("B-grade Seed with may_run=false must not start execution")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.required_grade = "B"
@@ -1114,8 +1150,8 @@ async def test_pipeline_run_resume_honors_persisted_required_grade(tmp_path) -> 
 
     result = await pipeline.run(state)
 
-    assert result.status == "complete"
-    assert result.job_id == "job_required_b"
+    assert result.status == "blocked"
+    assert "clear the Seed for execution" in (result.blocker or "")
 
 
 @pytest.mark.asyncio

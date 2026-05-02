@@ -82,11 +82,11 @@ class SeedRepairer:
                     "non_goals",
                     LedgerEntry(
                         key="non_goals.auto_mvp",
-                        value="No cloud sync, authentication, paid services, or production deployment in auto MVP scope.",
+                        value=_safe_auto_mvp_non_goal(ledger),
                         source=LedgerSource.NON_GOAL,
                         confidence=0.86,
                         status=LedgerStatus.DEFAULTED,
-                        rationale="Repair loop bounded scope for A-grade auto Seed.",
+                        rationale="Repair loop bounded scope without contradicting the requested goal.",
                     ),
                 )
                 applied.append(finding.fingerprint)
@@ -164,3 +164,26 @@ def _target_index(target: str) -> int | None:
         return int(target.split("[", 1)[1].split("]", 1)[0])
     except ValueError:
         return None
+
+
+def _safe_auto_mvp_non_goal(ledger: SeedDraftLedger) -> str:
+    goal = _latest_resolved_goal(ledger).lower()
+    excluded = ["cloud sync", "paid services"]
+    if not re.search(r"\b(auth|authentication|login|sign[- ]?in|signup|password)\b", goal):
+        excluded.append("authentication")
+    if not re.search(r"\b(production|prod|deploy|deployment|release|publish)\b", goal):
+        excluded.append("production deployment")
+    if not excluded:
+        return "No scope outside the explicitly requested goal is included in auto MVP scope."
+    return f"For auto MVP scope, {', '.join(excluded)} are non-goals unless explicitly requested."
+
+
+def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
+    section = ledger.sections.get("goal")
+    if section is None:
+        return ""
+    inactive = {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+    for entry in reversed(section.entries):
+        if entry.status not in inactive and entry.value.strip():
+            return entry.value
+    return ""
