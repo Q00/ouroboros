@@ -446,6 +446,12 @@ class TestOrchestratorConfig:
         assert config.opencode_permission_mode == "bypassPermissions"
         assert config.codex_cli_path is None
         assert config.opencode_cli_path is None
+        assert config.usage_limit_pause_hours == 5.0
+
+    def test_orchestrator_config_rejects_nonpositive_usage_limit_pause(self) -> None:
+        """Usage-limit pause duration must be positive."""
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(usage_limit_pause_hours=0)
 
     def test_orchestrator_config_expands_codex_cli_path(self) -> None:
         """Expands ~ in codex_cli_path."""

@@ -20,9 +20,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import uuid4
 
@@ -147,6 +149,17 @@ class OrchestratorResult:
     messages_processed: int = 0
     final_message: str = ""
     duration_seconds: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class RecoverableFailurePause:
+    """Structured pause decision for recoverable final runtime failures."""
+
+    pause_kind: str
+    reason: str
+    resume_hint: str
+    pause_seconds: int | None = None
+    resume_after: datetime | None = None
 
 
 # =============================================================================
@@ -313,6 +326,48 @@ SESSION_PROGRESS_PERSIST_INTERVAL = 10
 
 # Cancellation check interval (every N messages)
 CANCELLATION_CHECK_INTERVAL = 5
+
+_LONG_RETRY_AFTER_SECONDS = 60 * 60
+_DURATION_PATTERN = re.compile(
+    r"\b(?P<value>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
+    re.IGNORECASE,
+)
+_USAGE_LIMIT_RECOVERY_KINDS = frozenset(
+    {
+        "usage_limit",
+        "usage_quota",
+        "quota_limit",
+        "quota_window",
+        "quota_exceeded",
+        "quota_exhausted",
+        "usage_limit_pause",
+    }
+)
+_RESUME_RETRY_RECOVERY_KIND = "resume_retry"
+_USAGE_LIMIT_TEXT_PATTERNS = (
+    re.compile(
+        r"\b(?:usage|quota|credit|request)\s+"
+        r"(?:limit|quota|cap|window|allowance)\b.{0,80}"
+        r"\b(?:hit|reached|exceeded|exhausted|depleted)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:hit|reached|exceeded|exhausted|depleted)\b.{0,80}"
+        r"\b(?:usage|quota|credit|request)\s+"
+        r"(?:limit|quota|cap|window|allowance)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:quota|allowance)\s+(?:exceeded|exhausted|depleted)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:usage\s+limit|quota\s+window|rate\s+limit\s+window)"
+        r"\s+(?:hit|reached|exceeded|exhausted|depleted)\b",
+        re.IGNORECASE,
+    ),
+)
 
 
 class OrchestratorRunner:
@@ -808,27 +863,376 @@ class OrchestratorRunner:
         return event.model_copy(update={"data": event_data})
 
     @staticmethod
-    def _is_recoverable_resume_failure(message: AgentMessage) -> bool:
-        """Return True when a final resume error should leave the session resumable."""
-        if not (message.is_final and message.is_error):
+    def _metadata_candidates(message: AgentMessage) -> tuple[Mapping[str, Any], ...]:
+        """Return structured metadata maps attached to a runtime message."""
+        candidates: list[Mapping[str, Any]] = []
+        seen: set[int] = set()
+
+        def add(value: object) -> None:
+            if not isinstance(value, Mapping):
+                return
+            identity = id(value)
+            if identity in seen:
+                return
+            seen.add(identity)
+            candidates.append(value)
+            for key in ("meta", "mcp_meta", "metadata", "error", "details", "response"):
+                nested = value.get(key)
+                if isinstance(nested, Mapping):
+                    add(nested)
+
+        add(message.data)
+        return tuple(candidates)
+
+    @staticmethod
+    def _parse_datetime(value: object) -> datetime | None:
+        """Parse an ISO timestamp defensively."""
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    @staticmethod
+    def _duration_text_to_seconds(text: str) -> int | None:
+        """Parse the largest duration token from text into seconds."""
+        largest_seconds = 0.0
+        for match in _DURATION_PATTERN.finditer(text):
+            value = float(match.group("value"))
+            unit = match.group("unit").lower()
+            if unit.startswith("d"):
+                seconds = value * 24 * 60 * 60
+            elif unit.startswith("h"):
+                seconds = value * 60 * 60
+            elif unit.startswith("m"):
+                seconds = value * 60
+            else:
+                seconds = value
+            largest_seconds = max(largest_seconds, seconds)
+        if largest_seconds <= 0:
+            return None
+        return max(1, int(largest_seconds))
+
+    @classmethod
+    def _duration_value_to_seconds(cls, value: object) -> int | None:
+        """Parse a numeric or textual retry duration into seconds."""
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, int | float):
+            if value <= 0:
+                return None
+            return max(1, int(value))
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                numeric = float(stripped)
+            except ValueError:
+                return cls._duration_text_to_seconds(stripped)
+            if numeric <= 0:
+                return None
+            return max(1, int(numeric))
+        return None
+
+    @classmethod
+    def _duration_from_metadata(
+        cls,
+        metadata: Mapping[str, Any],
+        *,
+        now: datetime,
+    ) -> int | None:
+        """Extract retry/pause duration from structured runtime metadata."""
+        for key in (
+            "pause_seconds",
+            "retry_after_seconds",
+            "retryAfterSeconds",
+            "reset_after_seconds",
+            "resetAfterSeconds",
+        ):
+            parsed = cls._duration_value_to_seconds(metadata.get(key))
+            if parsed is not None:
+                return parsed
+
+        for key in ("retry_after_ms", "retryAfterMs", "reset_after_ms", "resetAfterMs"):
+            parsed = cls._duration_value_to_seconds(metadata.get(key))
+            if parsed is not None:
+                return max(1, parsed // 1000)
+
+        for key in ("retry_after", "retryAfter", "reset_after", "resetAfter"):
+            value = metadata.get(key)
+            parsed_datetime = cls._parse_datetime(value)
+            if parsed_datetime is not None:
+                seconds = int((parsed_datetime - now).total_seconds())
+                if seconds > 0:
+                    return seconds
+            parsed_duration = cls._duration_value_to_seconds(value)
+            if parsed_duration is not None:
+                return parsed_duration
+
+        for key in ("resume_after", "resumeAfter", "reset_at", "resetAt"):
+            parsed_datetime = cls._parse_datetime(metadata.get(key))
+            if parsed_datetime is not None:
+                seconds = int((parsed_datetime - now).total_seconds())
+                if seconds > 0:
+                    return seconds
+
+        return None
+
+    @classmethod
+    def _duration_from_message(cls, message: AgentMessage, *, now: datetime) -> int | None:
+        """Extract a retry/pause duration from metadata, then final error text."""
+        for metadata in cls._metadata_candidates(message):
+            duration = cls._duration_from_metadata(metadata, now=now)
+            if duration is not None:
+                return duration
+
+        return cls._duration_text_to_seconds(message.content)
+
+    @staticmethod
+    def _metadata_has_runtime_error_shape(metadata: Mapping[str, Any]) -> bool:
+        """Return True when metadata looks like provider/runtime error data."""
+        runtime_keys = {
+            "error_type",
+            "error_code",
+            "code",
+            "status",
+            "status_code",
+            "http_status",
+            "provider",
+            "recoverable",
+            "is_retriable",
+            "retriable",
+            "retry_after",
+            "retry_after_seconds",
+            "retryAfter",
+            "retryAfterSeconds",
+            "resume_after",
+            "reset_at",
+            "reset_after",
+        }
+        return any(key in metadata for key in runtime_keys)
+
+    @classmethod
+    def _message_has_runtime_error_shape(cls, message: AgentMessage) -> bool:
+        """Return True when any attached metadata looks runtime-owned."""
+        return any(
+            cls._metadata_has_runtime_error_shape(metadata)
+            for metadata in cls._metadata_candidates(message)
+        )
+
+    @staticmethod
+    def _metadata_text(metadata: Mapping[str, Any]) -> str:
+        """Flatten common structured error fields for quota classification."""
+        values: list[str] = []
+        for key in (
+            "error_type",
+            "error_code",
+            "code",
+            "type",
+            "reason",
+            "message",
+            "status",
+            "provider",
+        ):
+            value = metadata.get(key)
+            if isinstance(value, str):
+                values.append(value)
+        return " ".join(values).lower()
+
+    @staticmethod
+    def _is_usage_limit_text(text: str, *, has_runtime_error_shape: bool) -> bool:
+        """Classify provider usage/quota window messages with conservative text rules."""
+        normalized = " ".join(text.lower().split())
+        if not normalized:
+            return False
+        if not has_runtime_error_shape:
             return False
 
-        data = message.data
-        metadata_candidates = (
-            data,
-            data.get("meta") if isinstance(data.get("meta"), dict) else None,
-            data.get("mcp_meta") if isinstance(data.get("mcp_meta"), dict) else None,
+        has_quota_phrase = any(
+            pattern.search(normalized) is not None for pattern in _USAGE_LIMIT_TEXT_PATTERNS
         )
-        for metadata in metadata_candidates:
-            if not isinstance(metadata, dict):
-                continue
-            if metadata.get("recoverable") is True:
-                return True
-            if metadata.get("is_retriable") is True or metadata.get("retriable") is True:
+        duration_seconds = OrchestratorRunner._duration_text_to_seconds(normalized)
+        has_long_retry_window = (
+            duration_seconds is not None
+            and duration_seconds >= _LONG_RETRY_AFTER_SECONDS
+            and re.search(
+                r"\b(?:try again|retry|come back|available|reset|resets|window)\b",
+                normalized,
+            )
+            is not None
+        )
+        mentions_limit_window = (
+            re.search(
+                r"\b(?:usage|quota|allowance|rate|request)\s+"
+                r"(?:limit|quota|cap|window|allowance)\b",
+                normalized,
+            )
+            is not None
+        )
+
+        if has_quota_phrase and (has_runtime_error_shape or duration_seconds is not None):
+            return True
+        return bool(has_long_retry_window and mentions_limit_window)
+
+    @classmethod
+    def _usage_limit_failure_from_metadata(
+        cls,
+        message: AgentMessage,
+        *,
+        now: datetime,
+    ) -> bool:
+        """Return True when structured metadata identifies a quota-window failure."""
+        for metadata in cls._metadata_candidates(message):
+            recovery = metadata.get("recovery")
+            if isinstance(recovery, Mapping):
+                kind = str(recovery.get("kind", "")).strip().lower()
+                if kind in _USAGE_LIMIT_RECOVERY_KINDS:
+                    return True
+
+            if metadata.get("usage_limit") is True or metadata.get("quota_exhausted") is True:
                 return True
 
-        recovery = data.get("recovery")
-        return isinstance(recovery, dict) and recovery.get("kind") == "resume_retry"
+            metadata_text = cls._metadata_text(metadata)
+            duration = cls._duration_from_metadata(metadata, now=now)
+            if duration is not None and duration >= _LONG_RETRY_AFTER_SECONDS:
+                if re.search(r"\b(?:usage|quota|allowance|limit|window)\b", metadata_text):
+                    return True
+
+            if metadata_text and cls._is_usage_limit_text(
+                metadata_text,
+                has_runtime_error_shape=True,
+            ):
+                return True
+
+        return False
+
+    @staticmethod
+    def _format_pause_duration(seconds: int) -> str:
+        """Return a compact human-readable duration for pause hints."""
+        if seconds % (24 * 60 * 60) == 0:
+            days = seconds // (24 * 60 * 60)
+            return f"{days} day{'s' if days != 1 else ''}"
+        if seconds % (60 * 60) == 0:
+            hours = seconds // (60 * 60)
+            return f"{hours} hour{'s' if hours != 1 else ''}"
+        if seconds % 60 == 0:
+            minutes = seconds // 60
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+        return f"{seconds} second{'s' if seconds != 1 else ''}"
+
+    def _usage_limit_pause(
+        self,
+        message: AgentMessage,
+        *,
+        now: datetime,
+    ) -> RecoverableFailurePause | None:
+        """Return a pause decision for provider usage/quota window failures."""
+        has_runtime_error_shape = self._message_has_runtime_error_shape(message)
+        is_usage_limit = self._usage_limit_failure_from_metadata(
+            message,
+            now=now,
+        ) or self._is_usage_limit_text(
+            message.content,
+            has_runtime_error_shape=has_runtime_error_shape,
+        )
+        if not is_usage_limit:
+            return None
+
+        try:
+            from ouroboros.config import get_usage_limit_pause_seconds
+
+            default_pause_seconds = get_usage_limit_pause_seconds()
+        except Exception:
+            default_pause_seconds = 5 * 60 * 60
+
+        pause_seconds = self._duration_from_message(message, now=now) or default_pause_seconds
+        pause_seconds = max(1, pause_seconds)
+        resume_after = now + timedelta(seconds=pause_seconds)
+        duration_display = self._format_pause_duration(pause_seconds)
+        return RecoverableFailurePause(
+            pause_kind="usage_limit",
+            reason=message.content,
+            pause_seconds=pause_seconds,
+            resume_after=resume_after,
+            resume_hint=(
+                "Provider usage/quota window reached. "
+                f"Resume after {resume_after.isoformat()} "
+                f"(wait at least {duration_display})."
+            ),
+        )
+
+    @classmethod
+    def _resume_retry_pause(cls, message: AgentMessage) -> RecoverableFailurePause | None:
+        """Return a pause decision for recoverable resume-bootstrap failures."""
+        for metadata in cls._metadata_candidates(message):
+            recovery = metadata.get("recovery")
+            if not isinstance(recovery, Mapping):
+                continue
+            kind = str(recovery.get("kind", "")).strip().lower()
+            if kind == _RESUME_RETRY_RECOVERY_KIND:
+                return RecoverableFailurePause(
+                    pause_kind=_RESUME_RETRY_RECOVERY_KIND,
+                    reason=message.content,
+                    resume_hint=(
+                        "Retry the same --resume session after fixing the runtime/tooling issue."
+                    ),
+                )
+        return None
+
+    def _recoverable_failure_pause(
+        self,
+        message: AgentMessage,
+        *,
+        now: datetime | None = None,
+    ) -> RecoverableFailurePause | None:
+        """Return pause metadata when a final runtime error should stay resumable."""
+        if not (message.is_final and message.is_error):
+            return None
+
+        resume_retry = self._resume_retry_pause(message)
+        if resume_retry is not None:
+            return resume_retry
+
+        return self._usage_limit_pause(message, now=now or datetime.now(UTC))
+
+    def _is_recoverable_resume_failure(self, message: AgentMessage) -> bool:
+        """Return True when a final error should leave the session resumable."""
+        return self._recoverable_failure_pause(message) is not None
+
+    def _recoverable_failure_pause_from_parallel_result(
+        self,
+        parallel_result: Any,
+        *,
+        now: datetime | None = None,
+    ) -> RecoverableFailurePause | None:
+        """Return the first recoverable runtime pause from nested parallel AC results."""
+
+        def iter_ac_results(results: tuple[Any, ...]) -> Any:
+            for result in results:
+                yield result
+                sub_results = getattr(result, "sub_results", ())
+                if isinstance(sub_results, tuple):
+                    yield from iter_ac_results(sub_results)
+
+        resolved_now = now or datetime.now(UTC)
+        results = getattr(parallel_result, "results", ())
+        if not isinstance(results, tuple):
+            return None
+
+        for ac_result in iter_ac_results(results):
+            messages = getattr(ac_result, "messages", ())
+            if not isinstance(messages, tuple):
+                continue
+            for message in reversed(messages):
+                pause = self._recoverable_failure_pause(message, now=resolved_now)
+                if pause is not None:
+                    return pause
+        return None
 
     async def _terminate_runtime_handle(
         self,
@@ -1657,6 +2061,7 @@ class OrchestratorRunner:
             runtime_handle: RuntimeHandle | None = None
             recovery_interventions_used = 0
             recovery_personas: list[str] = []
+            recoverable_failure_pause: RecoverableFailurePause | None = None
 
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
@@ -1671,6 +2076,7 @@ class OrchestratorRunner:
                 nonlocal last_completed_count
                 nonlocal last_tool
                 nonlocal messages_processed
+                nonlocal recoverable_failure_pause
                 nonlocal success
                 nonlocal tracker
 
@@ -1805,6 +2211,10 @@ class OrchestratorRunner:
                         if message.is_final:
                             final_message = message.content
                             success = not message.is_error
+                            recoverable_failure_pause = self._recoverable_failure_pause(
+                                message,
+                                now=datetime.now(UTC),
+                            )
 
                 return active_runtime_handle
 
@@ -1853,7 +2263,12 @@ class OrchestratorRunner:
                 # Same-session recovery is limited to the sequential runner.
                 # Parallel execution owns per-AC retry semantics, and resume_session
                 # is already a recovery workflow.
-                if cancelled_result is None and not success and runtime_handle is not None:
+                if (
+                    cancelled_result is None
+                    and not success
+                    and recoverable_failure_pause is None
+                    and runtime_handle is not None
+                ):
                     planner = RecoveryPlanner()
                     recovery_action = planner.plan(_build_recovery_snapshot())
                     if (
@@ -1921,6 +2336,23 @@ class OrchestratorRunner:
                         border_style="green",
                     )
                 )
+            elif recoverable_failure_pause is not None:
+                await self._session_repo.mark_paused(
+                    tracker.session_id,
+                    reason=recoverable_failure_pause.reason,
+                    resume_hint=recoverable_failure_pause.resume_hint,
+                    pause_seconds=recoverable_failure_pause.pause_seconds,
+                    resume_after=recoverable_failure_pause.resume_after,
+                    pause_kind=recoverable_failure_pause.pause_kind,
+                )
+
+                self._console.print(
+                    Panel(
+                        Text(final_message[:1000], style="yellow"),
+                        title="[yellow]Execution Paused[/yellow]",
+                        border_style="yellow",
+                    )
+                )
             else:
                 failed_event = create_session_failed_event(
                     session_id=tracker.session_id,
@@ -1945,13 +2377,36 @@ class OrchestratorRunner:
             # Mirror terminal state into the execution event stream so
             # single-stream consumers (TUI) detect completion without
             # polling the separate session aggregate.
+            terminal_status = (
+                "completed" if success else ("paused" if recoverable_failure_pause else "failed")
+            )
             terminal_event = create_execution_terminal_event(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
-                status="completed" if success else "failed",
+                status=terminal_status,
                 summary=completion_summary if success else None,
                 error_message=final_message if not success else None,
                 messages_processed=messages_processed,
+                pause_seconds=(
+                    recoverable_failure_pause.pause_seconds
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
+                resume_after=(
+                    recoverable_failure_pause.resume_after
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
+                pause_kind=(
+                    recoverable_failure_pause.pause_kind
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
+                resume_hint=(
+                    recoverable_failure_pause.resume_hint
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
             )
             await self._event_store.append(terminal_event)
 
@@ -2184,6 +2639,12 @@ class OrchestratorRunner:
 
         # Determine overall success
         success = parallel_result.all_succeeded
+        recoverable_failure_pause = None
+        if not success:
+            recoverable_failure_pause = self._recoverable_failure_pause_from_parallel_result(
+                parallel_result,
+                now=datetime.now(UTC),
+            )
 
         final_message = render_parallel_completion_message(
             parallel_result,
@@ -2234,6 +2695,23 @@ class OrchestratorRunner:
                     border_style="green",
                 )
             )
+        elif recoverable_failure_pause is not None:
+            await self._session_repo.mark_paused(
+                tracker.session_id,
+                reason=recoverable_failure_pause.reason,
+                resume_hint=recoverable_failure_pause.resume_hint,
+                pause_seconds=recoverable_failure_pause.pause_seconds,
+                resume_after=recoverable_failure_pause.resume_after,
+                pause_kind=recoverable_failure_pause.pause_kind,
+            )
+
+            self._console.print(
+                Panel(
+                    Text(final_message, style="yellow"),
+                    title="[yellow]Parallel Execution Paused[/yellow]",
+                    border_style="yellow",
+                )
+            )
         else:
             failed_event = create_session_failed_event(
                 session_id=tracker.session_id,
@@ -2259,14 +2737,37 @@ class OrchestratorRunner:
                 )
             )
 
+        terminal_status = (
+            "completed" if success else ("paused" if recoverable_failure_pause else "failed")
+        )
         await self._event_store.append(
             create_execution_terminal_event(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
-                status="completed" if success else "failed",
+                status=terminal_status,
                 summary=execution_summary if success else None,
                 error_message=final_message if not success else None,
                 messages_processed=parallel_result.total_messages,
+                pause_seconds=(
+                    recoverable_failure_pause.pause_seconds
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
+                resume_after=(
+                    recoverable_failure_pause.resume_after
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
+                pause_kind=(
+                    recoverable_failure_pause.pause_kind
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
+                resume_hint=(
+                    recoverable_failure_pause.resume_hint
+                    if recoverable_failure_pause is not None
+                    else None
+                ),
             )
         )
 
@@ -2398,7 +2899,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             messages_processed = tracker.messages_processed
             final_message = ""
             success = False
-            recoverable_resume_failure = False
+            recoverable_resume_failure: RecoverableFailurePause | None = None
 
             # Create workflow state tracker for progress display
             from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
@@ -2551,8 +3052,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                         if message.is_final:
                             final_message = message.content
                             success = not message.is_error
-                            recoverable_resume_failure = self._is_recoverable_resume_failure(
-                                message
+                            recoverable_resume_failure = self._recoverable_failure_pause(
+                                message,
+                                now=datetime.now(UTC),
                             )
 
             if cancelled_result is not None:
@@ -2575,13 +3077,14 @@ Note: This is a resumed session. Please continue from where execution was interr
                         border_style="green",
                     )
                 )
-            elif recoverable_resume_failure:
+            elif recoverable_resume_failure is not None:
                 await self._session_repo.mark_paused(
                     session_id,
-                    reason=final_message,
-                    resume_hint=(
-                        "Retry the same --resume session after fixing the runtime/tooling issue."
-                    ),
+                    reason=recoverable_resume_failure.reason,
+                    resume_hint=recoverable_resume_failure.resume_hint,
+                    pause_seconds=recoverable_resume_failure.pause_seconds,
+                    resume_after=recoverable_resume_failure.resume_after,
+                    pause_kind=recoverable_resume_failure.pause_kind,
                 )
                 self._console.print(
                     Panel(
@@ -2611,6 +3114,26 @@ Note: This is a resumed session. Please continue from where execution was interr
                     status=terminal_status,
                     error_message=final_message if not success else None,
                     messages_processed=messages_processed,
+                    pause_seconds=(
+                        recoverable_resume_failure.pause_seconds
+                        if recoverable_resume_failure is not None
+                        else None
+                    ),
+                    resume_after=(
+                        recoverable_resume_failure.resume_after
+                        if recoverable_resume_failure is not None
+                        else None
+                    ),
+                    pause_kind=(
+                        recoverable_resume_failure.pause_kind
+                        if recoverable_resume_failure is not None
+                        else None
+                    ),
+                    resume_hint=(
+                        recoverable_resume_failure.resume_hint
+                        if recoverable_resume_failure is not None
+                        else None
+                    ),
                 )
             )
 

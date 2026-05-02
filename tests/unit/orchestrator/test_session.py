@@ -374,6 +374,31 @@ class TestSessionRepository:
         assert event.data["resume_hint"] == "Retry with --resume after fixing the CLI issue."
 
     @pytest.mark.asyncio
+    async def test_mark_paused_records_usage_limit_window(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Usage-limit pauses persist resume timing metadata."""
+        resume_after = datetime(2026, 1, 1, 5, tzinfo=UTC)
+
+        result = await repository.mark_paused(
+            session_id="sess_123",
+            reason="Usage limit reached",
+            resume_hint="Resume after the quota window resets.",
+            pause_seconds=18000,
+            resume_after=resume_after,
+            pause_kind="usage_limit",
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args[0][0]
+        assert event.type == "orchestrator.session.paused"
+        assert event.data["pause_seconds"] == 18000
+        assert event.data["resume_after"] == resume_after.isoformat()
+        assert event.data["pause_kind"] == "usage_limit"
+
+    @pytest.mark.asyncio
     async def test_mark_cancelled(
         self,
         repository: SessionRepository,
@@ -471,6 +496,30 @@ class TestSessionRepository:
         assert tracker.session_id == "sess_123"
         assert tracker.execution_id == "exec_123"
         assert tracker.messages_processed == 1
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_tolerates_invalid_start_time(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Malformed persisted start_time should not poison reconstruction."""
+        event_timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.timestamp = event_timestamp
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": "not-a-timestamp",
+        }
+
+        mock_event_store.replay.return_value = [start_event]
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        assert result.value.start_time == event_timestamp
 
     @pytest.mark.asyncio
     async def test_reconstruct_session_merges_progress_updates(

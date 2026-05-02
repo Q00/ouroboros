@@ -34,6 +34,7 @@ from ouroboros.config.loader import (
     get_qa_model,
     get_reflect_model,
     get_semantic_model,
+    get_usage_limit_pause_seconds,
     get_wonder_model,
     load_config,
     load_credentials,
@@ -785,6 +786,69 @@ class TestRuntimeHelperLookups:
 
         assert "Failed to read configuration file" in str(exc_info.value)
         assert exc_info.value.details["error_type"] == "PermissionError"
+
+    def test_get_usage_limit_pause_seconds_prefers_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Environment variable overrides config for usage-limit pause windows."""
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1.5")
+
+        assert get_usage_limit_pause_seconds() == 5400
+
+    @pytest.mark.parametrize("env_value", ["0", "-1", "five"])
+    def test_get_usage_limit_pause_seconds_rejects_invalid_env(
+        self,
+        env_value: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid pause env values fail instead of silently using the default."""
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", env_value)
+
+        with pytest.raises(ConfigError) as exc_info:
+            get_usage_limit_pause_seconds()
+
+        assert exc_info.value.config_key == "OUROBOROS_USAGE_LIMIT_PAUSE_HOURS"
+
+    def test_get_usage_limit_pause_seconds_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent for usage-limit pauses."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(usage_limit_pause_hours=2.0)
+                ),
+            ),
+        ):
+            assert get_usage_limit_pause_seconds() == 7200
+
+    def test_get_usage_limit_pause_seconds_defaults_when_config_missing(self) -> None:
+        """Missing config falls back to the built-in 5-hour window."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("missing config"),
+            ),
+        ):
+            assert get_usage_limit_pause_seconds() == 18000
+
+    def test_get_usage_limit_pause_seconds_rejects_invalid_config_key(self) -> None:
+        """Invalid configured pause windows should not be silently defaulted."""
+        config_error = ConfigError(
+            "Configuration validation failed",
+            config_key="orchestrator.usage_limit_pause_hours",
+            details={"config_keys": ["orchestrator.usage_limit_pause_hours"]},
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", side_effect=config_error),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_usage_limit_pause_seconds()
+
+        assert exc_info.value.config_key == "orchestrator.usage_limit_pause_hours"
 
 
 class TestLLMHelperLookups:

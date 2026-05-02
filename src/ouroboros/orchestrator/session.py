@@ -360,7 +360,14 @@ class SessionRepository:
                 return value.replace(tzinfo=UTC)
             return value
         if isinstance(value, str) and value:
-            parsed = datetime.fromisoformat(value)
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                log.warning(
+                    "orchestrator.session.timestamp_parse_failed",
+                    value=value,
+                )
+                return None
             if parsed.tzinfo is None:
                 return parsed.replace(tzinfo=UTC)
             return parsed
@@ -673,6 +680,10 @@ class SessionRepository:
         session_id: str,
         reason: str,
         resume_hint: str | None = None,
+        *,
+        pause_seconds: int | None = None,
+        resume_after: datetime | None = None,
+        pause_kind: str | None = None,
     ) -> Result[None, PersistenceError]:
         """Mark session as paused and resumable.
 
@@ -684,15 +695,23 @@ class SessionRepository:
         Returns:
             Result indicating success or failure.
         """
+        data: dict[str, Any] = {
+            "reason": reason,
+            "resume_hint": resume_hint,
+            "paused_at": datetime.now(UTC).isoformat(),
+        }
+        if pause_seconds is not None:
+            data["pause_seconds"] = pause_seconds
+        if resume_after is not None:
+            data["resume_after"] = resume_after.isoformat()
+        if pause_kind is not None:
+            data["pause_kind"] = pause_kind
+
         event = BaseEvent(
             type="orchestrator.session.paused",
             aggregate_type="session",
             aggregate_id=session_id,
-            data={
-                "reason": reason,
-                "resume_hint": resume_hint,
-                "paused_at": datetime.now(UTC).isoformat(),
-            },
+            data=data,
         )
 
         try:
@@ -806,14 +825,18 @@ class SessionRepository:
                 )
 
             # Create initial tracker from start event
+            start_time = self._coerce_snapshot_datetime(start_event.data.get("start_time"))
+            if start_time is None:
+                start_time = self._coerce_snapshot_datetime(start_event.timestamp)
+            if start_time is None:
+                start_time = datetime.now(UTC)
+
             tracker = SessionTracker(
                 session_id=session_id,
                 execution_id=start_event.data.get("execution_id", ""),
                 seed_id=start_event.data.get("seed_id", ""),
                 status=SessionStatus.RUNNING,
-                start_time=datetime.fromisoformat(
-                    start_event.data.get("start_time", datetime.now(UTC).isoformat())
-                ),
+                start_time=start_time,
             )
 
             execution_id = start_event.data.get("execution_id", "")
@@ -1011,9 +1034,11 @@ class SessionRepository:
                     # If no timestamp, use start_time from event data as fallback
                     start_time_str = start_event.data.get("start_time")
                     if start_time_str:
-                        last_activity = datetime.fromisoformat(start_time_str)
+                        last_activity = self._coerce_snapshot_datetime(start_time_str)
                     else:
                         continue
+                if last_activity is None:
+                    continue
 
                 # Ensure timezone-aware comparison
                 if last_activity.tzinfo is None:

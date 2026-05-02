@@ -302,16 +302,20 @@ class OuroborosTUI(App[None]):
             self._state.status = "running"
         elif event_type == "orchestrator.session.completed":
             self._state.status = "completed"
+            self._state.is_paused = False
         elif event_type == "orchestrator.session.failed":
             self._state.status = "failed"
+            self._state.is_paused = False
         elif event_type == "orchestrator.session.cancelled":
             self._state.status = "cancelled"
+            self._state.is_paused = False
         elif event_type == "execution.terminal":
             # Mirror event from the execution stream — ensures TUI sees
             # terminal transitions even when only polling "execution".
             terminal_status = data.get("status", "completed")
-            if terminal_status in {"completed", "failed", "cancelled"}:
+            if terminal_status in {"completed", "failed", "cancelled", "paused"}:
                 self._state.status = terminal_status
+                self._state.is_paused = terminal_status == "paused"
         elif event_type == "orchestrator.session.paused":
             self._state.status = "paused"
             self._state.is_paused = True

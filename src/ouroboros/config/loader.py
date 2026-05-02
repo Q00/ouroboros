@@ -67,6 +67,9 @@ _DEFAULT_CONSENSUS_MODELS = (
 _DEFAULT_CONSENSUS_ADVOCATE_MODEL = "openrouter/anthropic/claude-opus-4-6"
 _DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
 _DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
+_DEFAULT_USAGE_LIMIT_PAUSE_HOURS = 5.0
+_SECONDS_PER_HOUR = 3600
+_USAGE_LIMIT_PAUSE_CONFIG_KEY = "orchestrator.usage_limit_pause_hours"
 
 
 def _parse_env_value(raw_value: str) -> str:
@@ -517,6 +520,67 @@ def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
         )
 
     return parsed
+
+
+def _parse_positive_float(value: Any, *, config_key: str) -> float:
+    """Parse a positive float setting without silently accepting booleans."""
+    if isinstance(value, bool):
+        raise ConfigError(
+            f"{config_key} must be a positive number",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{config_key} must be a positive number",
+            config_key=config_key,
+            details={"value": value},
+        ) from exc
+
+    if parsed <= 0:
+        raise ConfigError(
+            f"{config_key} must be greater than 0",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    return parsed
+
+
+def get_usage_limit_pause_seconds() -> int:
+    """Get the default pause window for provider usage/quota limits.
+
+    Priority:
+        1. OUROBOROS_USAGE_LIMIT_PAUSE_HOURS environment variable
+        2. config.yaml orchestrator.usage_limit_pause_hours
+        3. built-in default (5 hours)
+    """
+    env_value = os.environ.get("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "").strip()
+    if env_value:
+        hours = _parse_positive_float(
+            env_value,
+            config_key="OUROBOROS_USAGE_LIMIT_PAUSE_HOURS",
+        )
+        return max(1, int(hours * _SECONDS_PER_HOUR))
+
+    try:
+        config = load_config()
+        hours = _parse_positive_float(
+            config.orchestrator.usage_limit_pause_hours,
+            config_key=_USAGE_LIMIT_PAUSE_CONFIG_KEY,
+        )
+    except ConfigError as exc:
+        config_keys = exc.details.get("config_keys", []) if isinstance(exc.details, dict) else []
+        if exc.config_key == _USAGE_LIMIT_PAUSE_CONFIG_KEY or (
+            _USAGE_LIMIT_PAUSE_CONFIG_KEY in config_keys
+        ):
+            raise
+        hours = _DEFAULT_USAGE_LIMIT_PAUSE_HOURS
+
+    return max(1, int(hours * _SECONDS_PER_HOUR))
 
 
 def get_max_parallel_workers() -> int:

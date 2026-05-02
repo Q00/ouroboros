@@ -40,6 +40,7 @@ from ouroboros.mcp.tools.definitions import (
     interview_handler,
     start_execute_seed_handler,
 )
+from ouroboros.mcp.tools.execution_handlers import _classify_synchronous_execution_status
 from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.types import ToolInputType
@@ -47,7 +48,7 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
-from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.resilience.lateral import ThinkingPersona
 
@@ -160,6 +161,28 @@ class TestExecuteSeedHandler:
         handler = execute_seed_handler(runtime_backend="opencode", llm_backend="opencode")
         assert handler.agent_runtime_backend == "opencode"
         assert handler.llm_backend == "opencode"
+
+    def test_synchronous_paused_status_is_not_mcp_error(self) -> None:
+        """Paused executions are resumable and should not be failed tool results."""
+        status, success, is_error, header = _classify_synchronous_execution_status(
+            SessionStatus.PAUSED
+        )
+
+        assert status == "paused"
+        assert success is None
+        assert is_error is False
+        assert header == "Seed Execution PAUSED"
+
+    def test_synchronous_failed_status_is_mcp_error(self) -> None:
+        """Failed executions still surface as failed tool results."""
+        status, success, is_error, header = _classify_synchronous_execution_status(
+            SessionStatus.FAILED
+        )
+
+        assert status == "failed"
+        assert success is False
+        assert is_error is True
+        assert header == "Seed Execution FINISHED"
 
 
 class TestSessionStatusHandler:

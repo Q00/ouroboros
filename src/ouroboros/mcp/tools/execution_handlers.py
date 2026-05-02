@@ -65,6 +65,20 @@ from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
+
+def _classify_synchronous_execution_status(
+    session_status: SessionStatus | None,
+) -> tuple[str, bool | None, bool, str]:
+    """Map reconstructed session status to MCP tool-result semantics."""
+    if session_status == SessionStatus.COMPLETED:
+        return "completed", True, False, "Seed Execution COMPLETED"
+    if session_status == SessionStatus.PAUSED:
+        return "paused", None, False, "Seed Execution PAUSED"
+    if session_status in {SessionStatus.FAILED, SessionStatus.CANCELLED}:
+        return session_status.value, False, True, "Seed Execution FINISHED"
+    return "unknown", None, False, "Seed Execution FINISHED"
+
+
 # ---------------------------------------------------------------------------
 # Delegation context extraction
 # ---------------------------------------------------------------------------
@@ -580,6 +594,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             except Exception:
                                 log.exception("mcp.tool.execute_seed.event_store_close_error")
 
+                session_status: SessionStatus | None = None
                 if synchronous:
                     # Run inline — the caller (StartExecuteSeedHandler / Job
                     # system) already handles backgrounding.  Pass
@@ -603,8 +618,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     except Exception:
                         session_status = None
 
-                    status_label = session_status.value if session_status is not None else "unknown"
-                    success = session_status == SessionStatus.COMPLETED
+                    status_label, success, is_error, status_header = (
+                        _classify_synchronous_execution_status(session_status)
+                    )
                 else:
                     # Fire-and-forget: launch in a background task.
                     task = asyncio.create_task(
@@ -615,15 +631,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     task.add_done_callback(self._background_tasks.discard)
                     status_label = "running"
                     success = None  # unknown yet
+                    is_error = False
+                    status_header = "Seed Execution LAUNCHED"
 
                 # --- shared message / meta construction ---
-                header = {
-                    True: "Seed Execution COMPLETED",
-                    False: "Seed Execution FINISHED",
-                    None: "Seed Execution LAUNCHED",  # fire-and-forget
-                }[success]
                 message = (
-                    f"{header}\n"
+                    f"{status_header}\n"
                     f"{'=' * 60}\n"
                     f"Seed ID: {seed.metadata.seed_id}\n"
                     f"Session ID: {tracker.session_id}\n"
@@ -657,6 +670,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 }
                 if success is not None:
                     meta["success"] = success
+                if session_status == SessionStatus.PAUSED:
+                    meta["paused"] = True
                 if workspace is not None:
                     meta["worktree_path"] = workspace.worktree_path
                     meta["worktree_branch"] = workspace.branch
@@ -664,7 +679,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 return Result.ok(
                     MCPToolResult(
                         content=(MCPContentItem(type=ContentType.TEXT, text=message),),
-                        is_error=success is False,
+                        is_error=is_error,
                         meta=meta,
                     )
                 )

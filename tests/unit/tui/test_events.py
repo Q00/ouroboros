@@ -316,6 +316,22 @@ class TestCreateMessageFromEvent:
         assert isinstance(msg, ExecutionUpdated)
         assert msg.status == "paused"
 
+    def test_execution_terminal_paused_event(self) -> None:
+        """Paused terminal events from execution stream should update execution status."""
+        event = BaseEvent(
+            type="execution.terminal",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={"session_id": "sess_123", "status": "paused"},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, ExecutionUpdated)
+        assert msg.execution_id == "exec_123"
+        assert msg.session_id == "sess_123"
+        assert msg.status == "paused"
+
     def test_phase_completed_event(self) -> None:
         """Test converting phase.completed event."""
         event = BaseEvent(
