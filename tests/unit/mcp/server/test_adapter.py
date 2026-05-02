@@ -30,7 +30,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator.control_bus import ControlBus
+from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
 
 
 class MockToolHandler:
@@ -1083,3 +1083,48 @@ async def test_server_shutdown_drains_runtime_control_bus() -> None:
     assert tasks[0].cancelled()
     assert bus._tasks == set()
     assert server._owned_resources == []
+
+
+@pytest.mark.asyncio
+async def test_server_shutdown_stops_before_dependents_when_control_bus_refuses_drain() -> None:
+    """Do not close dependent resources while control subscribers are still live."""
+    server = MCPServerAdapter()
+    bus = ControlBus(_close_timeout_s=0.01, _cancel_timeout_s=0.01)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _DependentResource:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    resource = _DependentResource()
+
+    async def stubborn(_event: BaseEvent) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await release.wait()
+
+    server.register_owned_resource(bus)
+    server.register_owned_resource(resource)
+    bus.subscribe(lambda _event: True, stubborn)
+    tasks = bus.publish(
+        BaseEvent(
+            type="control.directive.emitted",
+            aggregate_type="lineage",
+            aggregate_id="lin_shutdown_probe",
+            data={"directive": "cancel"},
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+
+    with pytest.raises(ControlBusDrainError):
+        await asyncio.wait_for(server.shutdown(), timeout=0.5)
+
+    assert resource.closed is False
+
+    release.set()
+    await asyncio.wait_for(tasks[0], timeout=0.5)

@@ -36,7 +36,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
-from ouroboros.orchestrator.control_bus import ControlBus
+from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
 
 log = structlog.get_logger(__name__)
 
@@ -721,6 +721,12 @@ class MCPServerAdapter:
             if callable(close_fn):
                 try:
                     await close_fn()
+                except ControlBusDrainError:
+                    log.error(
+                        "mcp.server.control_bus_close_failed",
+                        resource=type(resource).__name__,
+                    )
+                    raise
                 except Exception as exc:
                     log.warning(
                         "mcp.server.resource_close_failed",

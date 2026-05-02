@@ -53,6 +53,10 @@ Predicate = Callable[["BaseEvent"], bool]
 Handler = Callable[["BaseEvent"], Awaitable[None]]
 
 
+class ControlBusDrainError(RuntimeError):
+    """Raised when subscriber tasks refuse to quiesce during shutdown."""
+
+
 @dataclass(frozen=True, slots=True)
 class SubscriptionHandle:
     """Opaque token returned by :meth:`ControlBus.subscribe`.
@@ -243,4 +247,10 @@ class ControlBus:
                             "timeout_s": cancel_timeout,
                         },
                     )
+                    self._tasks.difference_update(task for task in self._tasks if task.done())
+                    msg = (
+                        f"{len(still_running)} ControlBus subscriber task(s) "
+                        "ignored cancellation during shutdown"
+                    )
+                    raise ControlBusDrainError(msg)
         self._tasks.difference_update(task for task in self._tasks if task.done())

@@ -25,7 +25,11 @@ import asyncio
 import pytest
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.control_bus import ControlBus, SubscriptionHandle
+from ouroboros.orchestrator.control_bus import (
+    ControlBus,
+    ControlBusDrainError,
+    SubscriptionHandle,
+)
 
 
 def _directive_event(directive: str = "retry") -> BaseEvent:
@@ -335,7 +339,8 @@ async def test_close_does_not_hang_when_cancel_is_ignored() -> None:
     tasks = bus.publish(_directive_event())
     await asyncio.wait_for(started.wait(), timeout=0.5)
 
-    await asyncio.wait_for(bus.close(), timeout=0.5)
+    with pytest.raises(ControlBusDrainError, match="ignored cancellation"):
+        await asyncio.wait_for(bus.close(), timeout=0.5)
 
     assert cancelled.is_set()
     assert not tasks[0].done()
