@@ -12,6 +12,7 @@ Reflect handles all subsequent generations autonomously.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 import logging
@@ -87,51 +88,48 @@ class ReflectEngine:
 
     llm_adapter: LLMAdapter
     model: str = field(default_factory=get_reflect_model)
-    adapter_factory: object = field(default=None)
+    adapter_factory: Callable[[], LLMAdapter | None] | None = field(default=None)
     _captured_backend: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        # Snapshot the backend at construction time so we can detect drift.
         try:
             self._captured_backend = get_llm_backend()
         except Exception:  # noqa: BLE001 — never fail engine init on config read
             self._captured_backend = None
 
     def _resolve_adapter(self) -> LLMAdapter:
-        """Return the adapter the next ``complete()`` call should use.
+        """Return the adapter the next ``complete()`` call should use."""
+        current_backend = self._current_backend()
+        backend_drifted = (
+            self._captured_backend is not None
+            and current_backend
+            and current_backend != self._captured_backend
+        )
 
-        Priority:
-            1. ``adapter_factory()`` if supplied (always per-call fresh).
-            2. A freshly constructed adapter when the live ``llm.backend``
-               differs from the one captured at engine init.
-            3. The originally injected ``llm_adapter`` (today's behavior).
-        """
         if self.adapter_factory is not None:
             try:
                 fresh = self.adapter_factory()
                 if fresh is not None:
+                    if backend_drifted:
+                        self._captured_backend = current_backend
+                        self.model = get_reflect_model(current_backend)
                     return fresh
             except Exception:  # noqa: BLE001 — fall through to captured adapter
                 logger.exception("ReflectEngine adapter_factory raised; using captured adapter")
                 return self.llm_adapter
 
-        # Detect post-startup config drift and rebuild the adapter inline.
-        try:
-            current_backend = get_llm_backend()
-        except Exception:  # noqa: BLE001
-            return self.llm_adapter
-
-        if (
-            self._captured_backend is not None
-            and current_backend
-            and current_backend != self._captured_backend
-        ):
+        if backend_drifted:
             try:
                 from ouroboros.providers.factory import create_llm_adapter
 
-                rebuilt = create_llm_adapter(backend=current_backend, max_turns=1)
+                rebuilt = create_llm_adapter(
+                    backend=current_backend,
+                    cwd=_adapter_cwd(self.llm_adapter),
+                    max_turns=_adapter_max_turns(self.llm_adapter),
+                )
                 self.llm_adapter = rebuilt
                 self._captured_backend = current_backend
+                self.model = get_reflect_model(current_backend)
                 logger.info(
                     "reflect.adapter_rebuilt_for_backend_drift",
                     extra={"new_backend": current_backend},
@@ -145,6 +143,12 @@ class ReflectEngine:
                 return self.llm_adapter
 
         return self.llm_adapter
+
+    def _current_backend(self) -> str | None:
+        try:
+            return get_llm_backend()
+        except Exception:  # noqa: BLE001
+            return None
 
     async def reflect(
         self,
@@ -405,3 +409,13 @@ Guidelines:
                 },
             )
             return None
+
+
+def _adapter_cwd(adapter: LLMAdapter) -> str | None:
+    value = getattr(adapter, "_cwd", None)
+    return str(value) if value is not None else None
+
+
+def _adapter_max_turns(adapter: LLMAdapter) -> int:
+    value = getattr(adapter, "_max_turns", 1)
+    return value if isinstance(value, int) and value > 0 else 1

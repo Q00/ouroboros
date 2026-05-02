@@ -887,13 +887,22 @@ def create_ouroboros_server(
     from ouroboros.verification.extractor import AssertionExtractor
     from ouroboros.verification.verifier import SpecVerifier
 
+    def fresh_llm_adapter():
+        return create_llm_adapter(
+            backend=llm_backend,
+            max_turns=1,
+            cwd=effective_cwd,
+        )
+
     wonder_engine = WonderEngine(
         llm_adapter=llm_adapter,
         model=get_wonder_model(llm_backend),
+        adapter_factory=fresh_llm_adapter,
     )
     reflect_engine = ReflectEngine(
         llm_adapter=llm_adapter,
         model=get_reflect_model(llm_backend),
+        adapter_factory=fresh_llm_adapter,
     )
 
     # Wire real execution/evaluation callables for evolve_step so that

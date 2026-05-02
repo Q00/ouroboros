@@ -10,6 +10,7 @@ The WonderEngine asks: "Given what we learned, what do we still not know?"
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 import logging
@@ -58,7 +59,8 @@ class WonderEngine:
     """
 
     llm_adapter: LLMAdapter
-    adapter_factory: object = field(default=None)
+    model: str = field(default_factory=get_wonder_model)
+    adapter_factory: Callable[[], LLMAdapter | None] | None = field(default=None)
     _captured_backend: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -68,32 +70,56 @@ class WonderEngine:
             self._captured_backend = None
 
     def _resolve_adapter(self) -> LLMAdapter:
+        current_backend = self._current_backend()
+        backend_drifted = (
+            self._captured_backend is not None
+            and current_backend
+            and current_backend != self._captured_backend
+        )
+
         if self.adapter_factory is not None:
             try:
                 fresh = self.adapter_factory()
                 if fresh is not None:
+                    if backend_drifted:
+                        self._captured_backend = current_backend
+                        self.model = get_wonder_model(current_backend)
                     return fresh
             except Exception:  # noqa: BLE001
+                logger.exception("WonderEngine adapter_factory raised; using captured adapter")
                 return self.llm_adapter
-        try:
-            current_backend = get_llm_backend()
-        except Exception:  # noqa: BLE001
-            return self.llm_adapter
-        if (
-            self._captured_backend is not None
-            and current_backend
-            and current_backend != self._captured_backend
-        ):
+
+        if backend_drifted:
             try:
                 from ouroboros.providers.factory import create_llm_adapter
-                rebuilt = create_llm_adapter(backend=current_backend, max_turns=1)
+
+                rebuilt = create_llm_adapter(
+                    backend=current_backend,
+                    cwd=_adapter_cwd(self.llm_adapter),
+                    max_turns=_adapter_max_turns(self.llm_adapter),
+                )
                 self.llm_adapter = rebuilt
                 self._captured_backend = current_backend
+                self.model = get_wonder_model(current_backend)
+                logger.info(
+                    "wonder.adapter_rebuilt_for_backend_drift",
+                    extra={"new_backend": current_backend},
+                )
                 return rebuilt
             except Exception:  # noqa: BLE001
+                logger.exception(
+                    "WonderEngine failed to rebuild adapter for drifted backend; "
+                    "falling back to captured adapter"
+                )
                 return self.llm_adapter
+
         return self.llm_adapter
-    model: str = field(default_factory=get_wonder_model)
+
+    def _current_backend(self) -> str | None:
+        try:
+            return get_llm_backend()
+        except Exception:  # noqa: BLE001
+            return None
 
     async def wonder(
         self,
@@ -338,3 +364,13 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             if should_continue
             else "Degraded mode: evaluation passed, no in-scope gaps remain",
         )
+
+
+def _adapter_cwd(adapter: LLMAdapter) -> str | None:
+    value = getattr(adapter, "_cwd", None)
+    return str(value) if value is not None else None
+
+
+def _adapter_max_turns(adapter: LLMAdapter) -> int:
+    value = getattr(adapter, "_max_turns", 1)
+    return value if isinstance(value, int) and value > 0 else 1
