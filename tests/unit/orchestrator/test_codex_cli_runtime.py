@@ -22,6 +22,9 @@ from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router.dispatch import SkillDispatchRouter as SharedSkillDispatchRouter
 
+_EXPECTED_CODEX_PATH = str(Path("/usr/local/bin/codex"))
+_EXPECTED_PROJECT_CWD = str(Path("/tmp/project"))
+
 
 class _FakeStream:
     def __init__(self, lines: list[str]) -> None:
@@ -210,13 +213,13 @@ class TestCodexCliRuntime:
             output_last_message_path="/tmp/out.txt",
         )
 
-        assert command[:2] == ["/usr/local/bin/codex", "exec"]
+        assert command[:2] == [_EXPECTED_CODEX_PATH, "exec"]
         assert "--json" in command
         assert "--full-auto" in command
         assert "--model" in command
         assert "o3" in command
         assert "-C" in command
-        assert "/tmp/project" in command
+        assert _EXPECTED_PROJECT_CWD in command
 
     def test_build_command_for_resume(self) -> None:
         """Builds an exec resume command when a session id is provided."""
@@ -234,7 +237,7 @@ class TestCodexCliRuntime:
         assert command.index("--skip-git-repo-check") < resume_index
         assert command.index("--output-last-message") < resume_index
         assert command.index("-C") < resume_index
-        assert command[command.index("-C") + 1] == "/tmp/project"
+        assert command[command.index("-C") + 1] == _EXPECTED_PROJECT_CWD
 
     def test_build_command_uses_profile_for_runtime_session_role(self) -> None:
         """Agent runtime sessions should resolve Codex profiles from session_role."""
@@ -434,7 +437,7 @@ class TestCodexCliRuntime:
         assert message.resume_handle is not None
         assert message.resume_handle.native_session_id == "thread-123"
         assert message.resume_handle.kind == "level_coordinator"
-        assert message.resume_handle.cwd == "/tmp/project"
+        assert message.resume_handle.cwd == _EXPECTED_PROJECT_CWD
         assert message.resume_handle.approval_mode == "acceptEdits"
         assert message.resume_handle.metadata == seeded_handle.metadata
 
@@ -532,7 +535,7 @@ class TestCodexCliRuntime:
         request = mock_resolve.call_args.args[1]
         assert isinstance(request, ResolveRequest)
         assert request.prompt == "ooo run seed.yaml"
-        assert request.cwd == "/tmp/project"
+        assert request.cwd == _EXPECTED_PROJECT_CWD
         assert request.skills_dir == tmp_path
         dispatcher.assert_awaited_once()
         intercept_request = dispatcher.await_args.args[0]
@@ -1202,7 +1205,7 @@ class TestCodexCliRuntime:
         assert intercept_request.first_argument == "Build a REST API"
         assert intercept_request.mcp_args == {
             "initial_context": "Build a REST API",
-            "cwd": "/tmp/project",
+            "cwd": _EXPECTED_PROJECT_CWD,
         }
         mock_exec.assert_not_called()
         assert [message.content for message in messages] == [

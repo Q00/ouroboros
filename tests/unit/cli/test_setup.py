@@ -203,9 +203,7 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts") as mock_install,
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server") as mock_register,
-            patch(
-                "ouroboros.cli.commands.setup._register_codex_default_profiles"
-            ) as mock_profiles,
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles") as mock_profiles,
             patch("ouroboros.cli.commands.setup.print_info") as mock_info,
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
@@ -221,13 +219,17 @@ class TestCodexSetup:
         assert config_dict["llm_profiles"]["frontier"]["providers"]["codex"]["profile"] == (
             "ouroboros-frontier"
         )
-        assert config_dict["llm_role_profiles"]["qa"] == "fast"
+        assert config_dict["llm_role_profiles"]["context_compression"] == "deep"
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+        assert config_dict["llm_role_profiles"]["brownfield_explore"] == "frontier"
+        assert config_dict["llm_role_profiles"]["clarification"] == "frontier"
         assert config_dict["llm_role_profiles"]["semantic_evaluation"] == "deep"
+        assert config_dict["llm_role_profiles"]["wonder"] == "frontier"
         assert config_dict["llm_role_profiles"]["consensus_judge"] == "frontier"
         assert config_dict["llm_role_profiles"]["agent_runtime"] == "standard"
         assert config_dict["llm_role_profiles"]["agent_runtime_implementation"] == "standard"
-        assert config_dict["llm_role_profiles"]["agent_runtime_interview"] == "standard"
-        assert config_dict["llm_role_profiles"]["agent_runtime_coordinator"] == "deep"
+        assert config_dict["llm_role_profiles"]["agent_runtime_interview"] == "deep"
+        assert config_dict["llm_role_profiles"]["agent_runtime_coordinator"] == "standard"
         assert config_dict["llm_role_profiles"]["agent_runtime_evaluation"] == "deep"
         mock_install.assert_called_once_with()
         mock_register.assert_called_once_with()
@@ -341,9 +343,7 @@ class TestCodexSetup:
         assert result["orchestrator"]["runtime_backend"] == "codex"
         assert result["orchestrator"]["codex_cli_path"] == "/usr/local/bin/codex"
         assert result["llm"]["backend"] == "codex"
-        assert result["llm_profiles"]["fast"]["providers"]["codex"]["profile"] == (
-            "ouroboros-fast"
-        )
+        assert result["llm_profiles"]["fast"]["providers"]["codex"]["profile"] == ("ouroboros-fast")
 
 
 class TestClaudeSetup:
@@ -441,6 +441,7 @@ class TestClaudeSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which_side_effect),
+            patch("subprocess.run"),
         ):
             setup_cmd._setup_claude("/usr/local/bin/claude")
 

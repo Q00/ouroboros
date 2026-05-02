@@ -252,20 +252,20 @@ _CODEX_DEFAULT_LLM_PROFILES: dict[str, dict[str, object]] = {
 }
 
 _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
-    "ambiguity": "fast",
+    "ambiguity": "deep",
     "assertion_extraction": "fast",
     "brownfield": "fast",
-    "context_compression": "fast",
+    "context_compression": "deep",
     "mechanical_detection": "fast",
-    "question_classification": "fast",
-    "qa": "fast",
+    "question_classification": "deep",
+    "qa": "frontier",
     "atomicity": "standard",
-    "brownfield_explore": "standard",
-    "clarification": "standard",
+    "brownfield_explore": "frontier",
+    "clarification": "frontier",
     "decomposition": "standard",
     "dependency_analysis": "standard",
-    "pm_interview": "standard",
-    "seed_generation": "standard",
+    "pm_interview": "deep",
+    "seed_generation": "deep",
     "consensus_advocate": "deep",
     "consensus_perspective": "deep",
     "consensus_vote": "deep",
@@ -274,12 +274,12 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
     "pm_document": "deep",
     "reflect": "deep",
     "semantic_evaluation": "deep",
-    "wonder": "deep",
+    "wonder": "frontier",
     "consensus_judge": "frontier",
     "agent_runtime": "standard",
     "agent_runtime_implementation": "standard",
-    "agent_runtime_interview": "standard",
-    "agent_runtime_coordinator": "deep",
+    "agent_runtime_interview": "deep",
+    "agent_runtime_coordinator": "standard",
     "agent_runtime_evaluation": "deep",
 }
 
@@ -300,9 +300,7 @@ _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], obje
     "consensus_advocate": (
         (("consensus", "advocate_model"), "openrouter/anthropic/claude-opus-4-6"),
     ),
-    "consensus_judge": (
-        (("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),
-    ),
+    "consensus_judge": ((("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),),
     "consensus_vote": ((("consensus", "models"), _DEFAULT_CONSENSUS_MODELS),),
     "context_compression": ((("llm", "context_compression_model"), "gpt-4"),),
     "decomposition": ((("execution", "decomposition_model"), "claude-opus-4-6"),),
@@ -498,9 +496,7 @@ def _register_codex_default_profiles() -> None:
         return
 
     codex_config.write_text(updated_raw, encoding="utf-8")
-    print_success(
-        f"Registered Codex task profiles in {codex_config}: {', '.join(added_profiles)}"
-    )
+    print_success(f"Registered Codex task profiles in {codex_config}: {', '.join(added_profiles)}")
 
 
 def _ensure_mapping_section(config_dict: dict, key: str) -> dict:
