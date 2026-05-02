@@ -6,10 +6,10 @@ import { randomBytes } from "crypto"
 // Platform-aware opencode config dir
 export function cfg(): string {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp"
+  if (process.env.OPENCODE_CONFIG_DIR)
+    return process.env.OPENCODE_CONFIG_DIR
   if (process.platform === "win32")
     return join(process.env.APPDATA ?? join(home, "AppData", "Roaming"), "OpenCode")
-  if (process.platform === "darwin")
-    return join(home, "Library", "Application Support", "OpenCode")
   return join(process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "opencode")
 }
 
@@ -557,4 +557,3 @@ export default {
 
 // Test-only exports for mocked-client coverage.
 export { resolveMid as _resolveMid, dispatch as _dispatch, patch as _patch, sleep as _sleep, PATCH_RETRIES as _PATCH_RETRIES, RESOLVE_RETRIES as _RESOLVE_RETRIES }
-

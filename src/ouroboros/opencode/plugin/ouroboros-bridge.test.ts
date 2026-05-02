@@ -64,10 +64,18 @@ describe("cfg — platform config dir", () => {
     expect(cfg()).toBe("/home/u/.config/opencode")
   })
 
-  test("darwin uses Library/Application Support", () => {
+  test("darwin uses XDG-style config path", () => {
     process.env.HOME = "/Users/u"
+    delete process.env.XDG_CONFIG_HOME
     Object.defineProperty(process, "platform", { value: "darwin" })
-    expect(cfg()).toBe("/Users/u/Library/Application Support/OpenCode")
+    expect(cfg()).toBe("/Users/u/.config/opencode")
+  })
+
+  test("OPENCODE_CONFIG_DIR overrides platform defaults", () => {
+    process.env.HOME = "/Users/u"
+    process.env.OPENCODE_CONFIG_DIR = "/custom/opencode"
+    Object.defineProperty(process, "platform", { value: "darwin" })
+    expect(cfg()).toBe("/custom/opencode")
   })
 
   test("win32 uses APPDATA when present", () => {

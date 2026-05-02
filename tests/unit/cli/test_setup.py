@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -1714,6 +1715,44 @@ class TestOpenCodeSetupConfigYaml:
         result = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         mock_claude.assert_not_called()
         assert result["orchestrator"]["opencode_mode"] == "plugin"
+
+    def test_plugin_setup_exposes_selected_cli_path_during_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plugin setup queries paths through the user-selected OpenCode binary."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+        cli_path = "/custom/bin/opencode"
+        observed: list[str | None] = []
+        monkeypatch.delenv("OUROBOROS_OPENCODE_CLI_PATH", raising=False)
+
+        def record_cli_path() -> bool:
+            observed.append(os.environ.get("OUROBOROS_OPENCODE_CLI_PATH"))
+            return True
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_opencode_bridge_plugin",
+                side_effect=record_cli_path,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._ensure_opencode_mcp_entry",
+                side_effect=record_cli_path,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._ensure_opencode_plugin_entry",
+                side_effect=record_cli_path,
+            ),
+        ):
+            from ouroboros.cli.commands.setup import _setup_opencode
+
+            assert _setup_opencode(cli_path, mode="plugin") is True
+
+        assert observed == [cli_path, cli_path, cli_path]
+        assert os.environ.get("OUROBOROS_OPENCODE_CLI_PATH") is None
 
     def test_plugin_setup_failure_returns_false_without_persisting_config(
         self,
