@@ -215,6 +215,9 @@ class AutoPipelineState:
             if not isinstance(value, str) or not value.strip():
                 msg = f"{field_name} must be a non-empty string"
                 raise ValueError(msg)
+        if self.required_grade not in {"A", "B", "C"}:
+            msg = "required_grade must be one of A, B, or C"
+            raise ValueError(msg)
 
         for field_name in (
             "phase_started_at",
