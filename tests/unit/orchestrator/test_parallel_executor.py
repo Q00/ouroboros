@@ -239,6 +239,99 @@ class TestParallelACExecutor:
         assert resume_handle.metadata["legacy_session_scope_id"] == legacy_scope_id
 
     @pytest.mark.asyncio
+    async def test_deep_sub_ac_runtime_identity_does_not_require_legacy_indices(self) -> None:
+        """Grandchild Sub-AC execution should not crash while building runtime identity."""
+
+        class _StubRuntime:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tools": tools,
+                        "system_prompt": system_prompt,
+                        "resume_handle": resume_handle,
+                        "resume_session_id": resume_session_id,
+                    }
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        grandchild_identity = (
+            ExecutionNodeIdentity.root(
+                execution_context_id="exec_deep_runtime",
+                ac_index=0,
+            )
+            .child(0)
+            .child(1)
+        )
+        event_store, _appended_events = _make_replaying_event_store()
+        runtime = _StubRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=10000,
+            ac_content="Implement deep recursive leaf",
+            session_id="sess_deep_runtime",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Support recursive decomposition",
+            depth=2,
+            start_time=datetime.now(UTC),
+            execution_id="exec_deep_runtime",
+            is_sub_ac=True,
+            node_identity=grandchild_identity,
+        )
+
+        assert result.success is True
+        resume_handle = runtime.calls[0]["resume_handle"]
+        assert isinstance(resume_handle, RuntimeHandle)
+        assert resume_handle.metadata["node_id"] == grandchild_identity.node_id
+        assert resume_handle.metadata["parent_node_id"] == grandchild_identity.parent_node_id
+        assert resume_handle.metadata["session_scope_id"] == (
+            f"exec_deep_runtime_{grandchild_identity.node_id}"
+        )
+        assert "legacy_session_scope_id" not in resume_handle.metadata
+        assert "legacy_session_scope_ids" not in resume_handle.metadata
+        event_store.replay.assert_awaited_once_with(
+            "execution",
+            f"exec_deep_runtime_{grandchild_identity.node_id}",
+        )
+
+    @pytest.mark.asyncio
     async def test_batch_fans_out_in_parallel_regardless_of_tool_catalog(self) -> None:
         """Batch scheduling is tool-catalog-agnostic.
 

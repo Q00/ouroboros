@@ -263,6 +263,30 @@ class TestBuildACRuntimeIdentity:
         assert identity.to_metadata()["node_kind"] == "ac"
         assert identity.to_metadata()["execution_id"] == "workflow:alpha/beta"
 
+    def test_deep_sub_ac_identity_skips_unrepresentable_legacy_index_scope(self) -> None:
+        grandchild_identity = (
+            ExecutionNodeIdentity.root(
+                execution_context_id="workflow:alpha/beta",
+                ac_index=0,
+            )
+            .child(0)
+            .child(1)
+        )
+
+        identity = build_ac_runtime_identity(
+            10000,
+            execution_context_id="workflow:alpha/beta",
+            is_sub_ac=True,
+            node_identity=grandchild_identity,
+        )
+
+        assert identity.session_scope_id == f"workflow_alpha_beta_{grandchild_identity.node_id}"
+        assert identity.parent_ac_index is None
+        assert identity.sub_ac_index is None
+        assert identity.legacy_session_scope_ids == ()
+        assert identity.legacy_session_state_paths == ()
+        assert identity.to_metadata()["legacy_node_id"] == grandchild_identity.legacy_node_id
+
     def test_sub_ac_identity_is_tied_only_to_that_sub_ac(self) -> None:
         identity = build_ac_runtime_identity(
             500,

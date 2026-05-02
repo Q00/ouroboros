@@ -464,7 +464,10 @@ def build_ac_runtime_identity(
         node_path=node_identity.path if node_identity is not None else (),
     )
     legacy_scopes: list[ExecutionRuntimeScope] = []
-    if node_identity is not None:
+    has_legacy_indexed_scope = not is_sub_ac or (
+        parent_ac_index is not None and sub_ac_index is not None
+    )
+    if node_identity is not None and has_legacy_indexed_scope:
         for one_based in (True, False):
             legacy_scope = _legacy_indexed_ac_runtime_scope(
                 ac_index,
