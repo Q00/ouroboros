@@ -16,7 +16,11 @@ import pytest
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io import content_hash
-from ouroboros.events.io_recorder import IOJournalRecorder, LLMCallRecord
+from ouroboros.events.io_recorder import (
+    IOJournalRecorder,
+    LLMCallRecord,
+    use_io_journal_recorder,
+)
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
@@ -224,6 +228,51 @@ async def test_complete_emits_paired_events_when_recorder_present(
     assert returned.data["finish_reason"] == "stop"
     assert returned.data["token_count_in"] == 10
     assert returned.data["is_error"] is False
+
+
+@pytest.mark.asyncio
+async def test_complete_uses_scoped_recorder_for_shared_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_a = _FakeEventStore()
+    store_b = _FakeEventStore()
+    recorder_a = IOJournalRecorder(
+        event_store=store_a,
+        target_type="execution",
+        target_id="exec_a",
+        execution_id="exec_a",
+    )
+    recorder_b = IOJournalRecorder(
+        event_store=store_b,
+        target_type="lineage",
+        target_id="lin_b",
+        lineage_id="lin_b",
+    )
+    adapter = LiteLLMAdapter(api_key="dummy")
+
+    monkeypatch.setattr(
+        adapter,
+        "_raw_complete",
+        AsyncMock(side_effect=[_stub_response(content="a"), _stub_response(content="b")]),
+    )
+
+    with use_io_journal_recorder(recorder_a):
+        result_a = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="hello a")],
+            config=CompletionConfig(model="openrouter/openai/gpt-4", max_tokens=64),
+        )
+    with use_io_journal_recorder(recorder_b):
+        result_b = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="hello b")],
+            config=CompletionConfig(model="openrouter/openai/gpt-4", max_tokens=64),
+        )
+
+    assert result_a.is_ok
+    assert result_b.is_ok
+    assert store_a.appended[0].data["target_id"] == "exec_a"
+    assert store_a.appended[1].data["execution_id"] == "exec_a"
+    assert store_b.appended[0].data["target_id"] == "lin_b"
+    assert store_b.appended[1].data["lineage_id"] == "lin_b"
 
 
 @pytest.mark.asyncio

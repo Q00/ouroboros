@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.events.io_recorder import IOJournalRecorder
+from ouroboros.events.io_recorder import IOJournalRecorder, use_io_journal_recorder
 from ouroboros.providers.anthropic_adapter import (
     AnthropicAdapter,
     _record_completion,
@@ -144,6 +144,42 @@ async def test_complete_emits_paired_events_when_recorder_present() -> None:
     assert returned.data["token_count_in"] == 10
     assert returned.data["token_count_out"] == 4
     assert returned.data["is_error"] is False
+
+
+@pytest.mark.asyncio
+async def test_complete_uses_scoped_recorder_for_shared_adapter() -> None:
+    store = _FakeEventStore()
+    recorder = IOJournalRecorder(
+        event_store=store,
+        target_type="execution",
+        target_id="exec_scoped",
+        execution_id="exec_scoped",
+    )
+    adapter = AnthropicAdapter(api_key="dummy")
+
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = "hi scoped"
+    stub_response = _StubAnthropicResponse(
+        content=[text_block],
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
+        usage=MagicMock(input_tokens=10, output_tokens=4),
+    )
+
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=stub_response)
+    adapter._client = fake_client
+
+    with use_io_journal_recorder(recorder):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="hello")],
+            config=CompletionConfig(model="claude-sonnet-4-6", max_tokens=128),
+        )
+
+    assert result.is_ok
+    assert store.appended[0].data["target_id"] == "exec_scoped"
+    assert store.appended[1].data["execution_id"] == "exec_scoped"
 
 
 @pytest.mark.asyncio

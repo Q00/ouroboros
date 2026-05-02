@@ -13,7 +13,7 @@ import structlog
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
-from ouroboros.events.io_recorder import IOJournalRecorder
+from ouroboros.events.io_recorder import IOJournalRecorder, get_current_io_journal_recorder
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
@@ -240,13 +240,14 @@ class AnthropicAdapter:
         )
 
         try:
-            if self._io_recorder is not None and self._io_recorder.is_active:
+            io_recorder = get_current_io_journal_recorder() or self._io_recorder
+            if io_recorder is not None and io_recorder.is_active:
                 prompt_text = _serialise_prompt_for_hash(
                     api_messages,
                     system_parts,
                     {"top_p": config.top_p, "stop_sequences": config.stop},
                 )
-                async with self._io_recorder.record_llm_call(
+                async with io_recorder.record_llm_call(
                     model_id=model,
                     prompt_text=prompt_text,
                     caller="anthropic_adapter",

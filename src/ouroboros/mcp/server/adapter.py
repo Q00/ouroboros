@@ -17,6 +17,8 @@ from typing import Any
 import structlog
 
 from ouroboros.core.types import Result
+from ouroboros.events.io import new_call_id
+from ouroboros.events.io_recorder import IOJournalRecorder, use_io_journal_recorder
 from ouroboros.mcp.errors import (
     MCPResourceNotFoundError,
     MCPServerError,
@@ -61,6 +63,24 @@ def _default_interview_state_dir() -> Path:
     from ouroboros.config.models import get_config_dir
 
     return get_config_dir() / "data"
+
+
+def _string_argument(arguments: dict[str, Any], *names: str) -> str | None:
+    """Return the first non-empty string argument among *names*."""
+    for name in names:
+        value = arguments.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _int_argument(arguments: dict[str, Any], *names: str) -> int | None:
+    """Return the first integer argument among *names*."""
+    for name in names:
+        value = arguments.get(name)
+        if isinstance(value, int):
+            return value
+    return None
 
 
 def validate_transport(transport: str) -> str:
@@ -449,10 +469,18 @@ class MCPServerAdapter:
 
         try:
             timeout = getattr(handler, "TIMEOUT_SECONDS", None)
-            if timeout is not None and timeout > 0:
-                result = await asyncio.wait_for(handler.handle(arguments), timeout=timeout)
+
+            async def invoke_handler() -> Result[MCPToolResult, MCPServerError]:
+                if timeout is not None and timeout > 0:
+                    return await asyncio.wait_for(handler.handle(arguments), timeout=timeout)
+                return await handler.handle(arguments)
+
+            recorder = self._io_recorder_for_tool_call(name, arguments)
+            if recorder is not None:
+                with use_io_journal_recorder(recorder):
+                    result = await invoke_handler()
             else:
-                result = await handler.handle(arguments)
+                result = await invoke_handler()
             return result
         except TimeoutError:
             log.error("mcp.server.tool_timeout", tool=name)
@@ -712,6 +740,49 @@ class MCPServerAdapter:
     def register_owned_resource(self, resource: Any) -> None:
         """Register a resource whose ``close()`` will be called on shutdown."""
         self._owned_resources.append(resource)
+
+    def _io_recorder_for_tool_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> IOJournalRecorder | None:
+        """Build a per-MCP-call recorder for shared LLM adapters."""
+        context = self._runtime_context
+        if context is None:
+            return None
+        event_store = getattr(context, "event_store", None)
+        if event_store is None:
+            return None
+
+        session_id = _string_argument(arguments, "session_id", "qa_session_id")
+        execution_id = _string_argument(arguments, "execution_id")
+        lineage_id = _string_argument(arguments, "lineage_id")
+        generation_number = _int_argument(arguments, "generation_number", "generation")
+        phase = _string_argument(arguments, "phase", "current_phase")
+
+        if execution_id is not None:
+            target_type = "execution"
+            target_id = execution_id
+        elif lineage_id is not None:
+            target_type = "lineage"
+            target_id = lineage_id
+        elif session_id is not None:
+            target_type = "session"
+            target_id = session_id
+        else:
+            target_type = "mcp_tool"
+            target_id = f"{name}:{new_call_id()}"
+
+        return IOJournalRecorder(
+            event_store=event_store,
+            target_type=target_type,
+            target_id=target_id,
+            session_id=session_id,
+            execution_id=execution_id,
+            lineage_id=lineage_id,
+            generation_number=generation_number,
+            phase=phase,
+        )
 
     async def shutdown(self) -> None:
         """Shutdown the server gracefully, closing owned resources."""

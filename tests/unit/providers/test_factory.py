@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+from ouroboros.events.base import BaseEvent
+from ouroboros.events.io_recorder import IOJournalRecorder
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.factory import (
@@ -14,6 +16,11 @@ from ouroboros.providers.factory import (
 )
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
+
+
+class _FakeEventStore:
+    async def append(self, event: BaseEvent) -> None:
+        pass
 
 
 class TestResolveLLMBackend:
@@ -80,6 +87,19 @@ class TestCreateLLMAdapter:
         """LiteLLM backend returns LiteLLMAdapter."""
         adapter = create_llm_adapter(backend="litellm")
         assert isinstance(adapter, LiteLLMAdapter)
+
+    def test_forwards_io_recorder_to_litellm_adapter(self) -> None:
+        """LiteLLM factory path preserves explicit recorder wiring."""
+        recorder = IOJournalRecorder(
+            event_store=_FakeEventStore(),
+            target_type="execution",
+            target_id="exec_factory",
+        )
+
+        adapter = create_llm_adapter(backend="litellm", io_recorder=recorder)
+
+        assert isinstance(adapter, LiteLLMAdapter)
+        assert adapter._io_recorder is recorder
 
     def test_litellm_import_error_raises_runtime_error(
         self, monkeypatch: pytest.MonkeyPatch

@@ -9,6 +9,7 @@ import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.events.io_recorder import get_current_io_journal_recorder
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
@@ -30,6 +31,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
 
 
@@ -209,6 +211,59 @@ class TestMCPServerAdapterTools:
         assert result.is_ok
         assert result.value.text_content == "Success"
         handler.handle_mock.assert_called_once_with({"input": "test"})
+
+    async def test_call_tool_scopes_io_journal_recorder_from_runtime_context(self) -> None:
+        """MCP tool calls provide per-call journal identity to shared adapters."""
+
+        class _FakeEventStore:
+            async def append(self, event: object) -> None:
+                pass
+
+        class _RecorderProbeHandler(MockToolHandler):
+            def __init__(self) -> None:
+                super().__init__("probe_tool")
+                self.recorder = None
+
+            async def handle(
+                self, arguments: dict[str, Any]
+            ) -> Result[MCPToolResult, MCPServerError]:
+                self.recorder = get_current_io_journal_recorder()
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="ok"),),
+                    )
+                )
+
+        adapter = MCPServerAdapter()
+        adapter.set_runtime_context(
+            AgentRuntimeContext(
+                event_store=_FakeEventStore(),
+                runtime_backend="codex",
+                llm_backend="litellm",
+            )
+        )
+        handler = _RecorderProbeHandler()
+        adapter.register_tool(handler)
+
+        result = await adapter.call_tool(
+            "probe_tool",
+            {
+                "execution_id": "exec_123",
+                "session_id": "sess_123",
+                "phase": "reflect",
+                "generation_number": 2,
+            },
+        )
+
+        assert result.is_ok
+        assert handler.recorder is not None
+        assert handler.recorder.target_type == "execution"
+        assert handler.recorder.target_id == "exec_123"
+        assert handler.recorder.session_id == "sess_123"
+        assert handler.recorder.execution_id == "exec_123"
+        assert handler.recorder.phase == "reflect"
+        assert handler.recorder.generation_number == 2
+        assert get_current_io_journal_recorder() is None
 
     async def test_call_tool_not_found(self) -> None:
         """call_tool returns error for unknown tool."""

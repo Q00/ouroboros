@@ -28,8 +28,9 @@ That keeps it cheaply testable with a ``list``-backed fake.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import logging
 import time
@@ -51,11 +52,36 @@ from ouroboros.events.io import (
 
 logger = logging.getLogger(__name__)
 
+_CURRENT_IO_JOURNAL_RECORDER: ContextVar[IOJournalRecorder | None] = ContextVar(
+    "ouroboros_current_io_journal_recorder",
+    default=None,
+)
+
 
 class _AppendableEventStore(Protocol):
     """Structural type for the recorder's ``event_store`` argument."""
 
     def append(self, event: BaseEvent) -> Awaitable[None]: ...
+
+
+def get_current_io_journal_recorder() -> IOJournalRecorder | None:
+    """Return the recorder scoped to the current async task, if any."""
+    return _CURRENT_IO_JOURNAL_RECORDER.get()
+
+
+@contextmanager
+def use_io_journal_recorder(recorder: IOJournalRecorder | None) -> Iterator[None]:
+    """Temporarily scope *recorder* to adapter calls in the current task.
+
+    This lets a shared LLM adapter resolve the right per-call
+    ``target_type`` / ``target_id`` without storing that target on the
+    adapter itself.
+    """
+    token = _CURRENT_IO_JOURNAL_RECORDER.set(recorder)
+    try:
+        yield
+    finally:
+        _CURRENT_IO_JOURNAL_RECORDER.reset(token)
 
 
 @dataclass(slots=True)
