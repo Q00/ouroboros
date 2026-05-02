@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -43,6 +44,8 @@ import time
 from typing import Any, Final
 
 from ouroboros.events.base import BaseEvent
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -94,15 +97,27 @@ class PrivacyMode(StrEnum):
 def get_privacy_mode() -> PrivacyMode:
     """Resolve the active privacy mode from the environment.
 
-    Unknown values fall back to :attr:`PrivacyMode.ON`. The env var is
-    read on every call so tests can flip it without restarting the
-    process; this is fine because the read is `os.environ.get`-cheap.
+    Unset values preserve the cooperative-trust default
+    (:attr:`PrivacyMode.ON`). Explicit but unknown values fail closed to
+    :attr:`PrivacyMode.OFF` so a typo never preserves raw previews. The
+    env var is read on every call so tests can flip it without
+    restarting the process; this is fine because the read is
+    `os.environ.get`-cheap.
     """
-    raw = os.environ.get(PRIVACY_ENV_VAR, PrivacyMode.ON.value).lower()
+    configured = os.environ.get(PRIVACY_ENV_VAR)
+    if configured is None:
+        return PrivacyMode.ON
+    raw = configured.strip().lower()
     try:
         return PrivacyMode(raw)
     except ValueError:
-        return PrivacyMode.ON
+        logger.warning(
+            "Invalid %s=%r; falling back to %s to avoid preserving I/O previews",
+            PRIVACY_ENV_VAR,
+            configured,
+            PrivacyMode.OFF.value,
+        )
+        return PrivacyMode.OFF
 
 
 # ---------------------------------------------------------------------------

@@ -108,10 +108,23 @@ class TestPrivacyMode:
             assert get_privacy_mode() is mode
         monkeypatch.setenv(PRIVACY_ENV_VAR, "OFF")
         assert get_privacy_mode() is PrivacyMode.OFF
+        monkeypatch.setenv(PRIVACY_ENV_VAR, " redacted ")
+        assert get_privacy_mode() is PrivacyMode.REDACTED
 
-    def test_unknown_value_falls_back_to_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unknown_value_fails_closed_to_off(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         monkeypatch.setenv(PRIVACY_ENV_VAR, "loud")
-        assert get_privacy_mode() is PrivacyMode.ON
+        assert get_privacy_mode() is PrivacyMode.OFF
+        assert PRIVACY_ENV_VAR in caplog.text
+
+    def test_invalid_env_value_does_not_preserve_preview(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(PRIVACY_ENV_VAR, "of")
+        assert shape_preview("SECRET prompt") is None
 
 
 class TestTruncatePreview:
