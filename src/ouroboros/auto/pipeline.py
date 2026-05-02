@@ -302,6 +302,7 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, review=review, blocker=str(exc) or state.last_error)
         except Exception as exc:
+            state.run_start_attempted = False
             state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
@@ -311,6 +312,7 @@ class AutoPipeline:
         )
         state.run_subagent = run_subagent or {}
         if not any((state.job_id, state.execution_id, state.run_session_id)):
+            state.run_start_attempted = False
             state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)

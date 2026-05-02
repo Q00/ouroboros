@@ -806,6 +806,47 @@ async def test_pipeline_marks_malformed_run_starter_result_failed(tmp_path) -> N
 
     assert result.status == "failed"
     assert "expected dict" in (result.blocker or "")
+    assert state.run_start_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_pipeline_retries_after_malformed_run_starter_metadata(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    calls = 0
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {}
+        return {"job_id": "job_after_retry", "execution_id": "exec_after_retry"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    first = await pipeline.run(state)
+    second = await pipeline.run(state)
+
+    assert first.status == "blocked"
+    assert state.run_start_attempted is True
+    assert second.status == "complete"
+    assert second.job_id == "job_after_retry"
+    assert calls == 2
 
 
 @pytest.mark.asyncio
