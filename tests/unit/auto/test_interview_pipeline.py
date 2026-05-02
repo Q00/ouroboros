@@ -1076,8 +1076,76 @@ async def test_pipeline_refuses_blocked_run_start_replay_from_seed_path(tmp_path
     result = await pipeline.run(state)
 
     assert result.status == "blocked"
-    assert "run start timed out" in (result.blocker or "")
+    assert "duplicate execution" in (result.blocker or "")
     assert result.job_id is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_recovers_auto_answerer_block_to_interview(tmp_path) -> None:
+    calls: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not start a new interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        calls.append(text)
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.pending_question = "What should we verify?"
+    state.mark_blocked("needs human authority", tool_name="auto_answerer")
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert calls
+
+
+@pytest.mark.asyncio
+async def test_pipeline_replays_persisted_run_subagent_after_complete_resume(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed) -> dict[str, object]:  # noqa: ARG001
+        return {
+            "session_id": "session_1",
+            "_subagent": {"tool_name": "ouroboros_execute_seed", "context": {"seed": "x"}},
+        }
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    first = await pipeline.run(state)
+    resumed = await pipeline.run(state)
+
+    assert first.status == "complete"
+    assert first.run_subagent == {"tool_name": "ouroboros_execute_seed", "context": {"seed": "x"}}
+    assert state.run_subagent == first.run_subagent
+    assert resumed.run_subagent == first.run_subagent
 
 
 @pytest.mark.asyncio

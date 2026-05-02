@@ -236,15 +236,20 @@ class AutoPipeline:
                     return self._result(state, ledger, review=review, blocker=state.last_error)
             self._save(state)
 
-            if not review.may_run:
-                state.mark_blocked("Seed did not reach A-grade", tool_name="grade_gate")
-                self._save(state)
-                return self._result(
-                    state, ledger, review=review, blocker="Seed did not reach A-grade"
+            if not _grade_meets_required(review.grade_result.grade.value, state.required_grade):
+                blocker = (
+                    f"Seed grade {review.grade_result.grade.value} did not meet "
+                    f"required grade {state.required_grade}"
                 )
+                state.mark_blocked(blocker, tool_name="grade_gate")
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=blocker)
 
             if self.skip_run or state.skip_run:
-                state.transition(AutoPhase.COMPLETE, "A-grade Seed ready; skip-run requested")
+                state.transition(
+                    AutoPhase.COMPLETE,
+                    f"Seed grade {review.grade_result.grade.value} ready; skip-run requested",
+                )
                 self._save(state)
                 return self._result(state, ledger, review=review)
 
@@ -308,6 +313,7 @@ class AutoPipeline:
         run_subagent = (
             run_meta.get("_subagent") if isinstance(run_meta.get("_subagent"), dict) else None
         )
+        state.run_subagent = run_subagent or {}
         if not any((state.job_id, state.execution_id, state.run_session_id)):
             state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
             self._save(state)
@@ -338,7 +344,7 @@ class AutoPipeline:
             execution_id=state.execution_id,
             job_id=state.job_id,
             run_session_id=state.run_session_id,
-            run_subagent=run_subagent,
+            run_subagent=run_subagent or state.run_subagent or None,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
@@ -357,12 +363,14 @@ def _grade_meets_required(actual: str | None, required: str) -> bool:
 
 
 def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
-    if tool_name in {"interview.start", "interview.resume", "interview.answer"}:
+    if tool_name in {"interview.start", "interview.resume", "interview.answer", "auto_answerer"}:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
     if tool_name in {"seed_saver", "grade_gate", "seed_loader"}:
         return AutoPhase.REVIEW
+    if tool_name == "run_starter":
+        return AutoPhase.RUN
     return None
 
 

@@ -97,6 +97,7 @@ class AutoPipelineState:
     execution_id: str | None = None
     job_id: str | None = None
     run_session_id: str | None = None
+    run_subagent: dict[str, Any] = field(default_factory=dict)
     run_start_attempted: bool = False
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
@@ -265,6 +266,9 @@ class AutoPipelineState:
 
         if not isinstance(self.ledger, dict):
             msg = "ledger must be an object"
+            raise ValueError(msg)
+        if not isinstance(self.run_subagent, dict):
+            msg = "run_subagent must be an object"
             raise ValueError(msg)
         if self.ledger:
             try:

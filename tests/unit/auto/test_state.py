@@ -268,6 +268,18 @@ def test_store_save_rejects_invalid_state_before_writing(tmp_path) -> None:
     assert not store.path_for(state.auto_session_id).exists()
 
 
+def test_store_load_rejects_malformed_run_subagent(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["run_subagent"] = []
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Auto session state is invalid"):
+        store.load(state.auto_session_id)
+
+
 def test_store_load_rejects_falsey_non_object_seed_artifacts(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
