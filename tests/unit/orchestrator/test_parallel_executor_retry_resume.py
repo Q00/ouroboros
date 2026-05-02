@@ -80,9 +80,9 @@ async def test_restarted_executor_starts_fresh_handle_for_next_retry_attempt() -
             "session_role": "implementation",
             "retry_attempt": 0,
             "ac_index": 1,
-            "session_scope_id": "orch_123_ac_1",
+            "session_scope_id": "orch_123_ac_2",
             "session_state_path": (
-                "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+                "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
             ),
             "server_session_id": "server-99",
         },
@@ -93,12 +93,12 @@ async def test_restarted_executor_starts_fresh_handle_for_next_retry_attempt() -
             BaseEvent(
                 type="execution.session.started",
                 aggregate_type="execution",
-                aggregate_id="orch_123_ac_1",
+                aggregate_id="orch_123_ac_2",
                 data={
                     "retry_attempt": 0,
                     "session_state_path": (
                         "execution.workflows.orch_123.acceptance_criteria."
-                        "ac_1.implementation_session"
+                        "ac_2.implementation_session"
                     ),
                     "runtime": persisted_handle.to_dict(),
                 },
@@ -106,12 +106,12 @@ async def test_restarted_executor_starts_fresh_handle_for_next_retry_attempt() -
             BaseEvent(
                 type="execution.session.failed",
                 aggregate_type="execution",
-                aggregate_id="orch_123_ac_1",
+                aggregate_id="orch_123_ac_2",
                 data={
                     "retry_attempt": 0,
                     "session_state_path": (
                         "execution.workflows.orch_123.acceptance_criteria."
-                        "ac_1.implementation_session"
+                        "ac_2.implementation_session"
                     ),
                     "runtime": persisted_handle.to_dict(),
                     "success": False,
@@ -147,9 +147,9 @@ async def test_restarted_executor_starts_fresh_handle_for_next_retry_attempt() -
     assert resume_handle.metadata["retry_attempt"] == 1
     assert resume_handle.metadata["attempt_number"] == 2
     assert resume_handle.metadata["ac_index"] == 1
-    assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_1"
-    assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_1_attempt_2"
-    event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_1")
+    assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_2"
+    assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_2_attempt_2"
+    event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
     assert result.runtime_handle is not None
     assert result.runtime_handle.native_session_id == "opencode-session-retry-attempt-2"
     assert result.runtime_handle.metadata == resume_handle.metadata
