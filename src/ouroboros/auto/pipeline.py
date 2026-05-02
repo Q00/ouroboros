@@ -183,11 +183,8 @@ class AutoPipeline:
             and self.seed_loader is not None
             and state.seed_path
         ):
-            try:
-                seed = self.seed_loader(state.seed_path)
-            except Exception as exc:
-                state.mark_failed(f"seed load failed: {exc}", tool_name="seed_loader")
-                self._save(state)
+            seed = self._load_seed(state, state.seed_path)
+            if seed is None:
                 return self._result(state, ledger, blocker=state.last_error)
         elif state.seed_artifact:
             try:
@@ -200,11 +197,8 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, blocker=state.last_error)
         elif self.seed_loader is not None and state.seed_path:
-            try:
-                seed = self.seed_loader(state.seed_path)
-            except Exception as exc:
-                state.mark_failed(f"seed load failed: {exc}", tool_name="seed_loader")
-                self._save(state)
+            seed = self._load_seed(state, state.seed_path)
+            if seed is None:
                 return self._result(state, ledger, blocker=state.last_error)
         else:
             state.mark_blocked(
@@ -341,6 +335,26 @@ class AutoPipeline:
         )
         self._save(state)
         return self._result(state, ledger, review=review, run_subagent=run_subagent)
+
+    def _load_seed(self, state: AutoPipelineState, seed_path: str) -> Seed | None:
+        if self.seed_loader is None:
+            state.mark_failed("seed loader is not configured", tool_name="seed_loader")
+            self._save(state)
+            return None
+        try:
+            seed = self.seed_loader(seed_path)
+        except Exception as exc:
+            state.mark_failed(f"seed load failed: {exc}", tool_name="seed_loader")
+            self._save(state)
+            return None
+        if not isinstance(seed, Seed):
+            state.mark_failed(
+                f"seed loader returned {type(seed).__name__}, expected Seed",
+                tool_name="seed_loader",
+            )
+            self._save(state)
+            return None
+        return seed
 
     def _result(
         self,

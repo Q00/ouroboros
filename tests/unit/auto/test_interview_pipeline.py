@@ -371,7 +371,7 @@ async def test_interview_resume_backend_error_blocks_and_persists(tmp_path) -> N
 
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
-    assert "resume/start failed" in (result.blocker or "")
+    assert "interview resume failed" in (result.blocker or "")
 
 
 @pytest.mark.asyncio
@@ -1715,3 +1715,84 @@ async def test_pipeline_run_resume_rejects_grade_b_when_required_grade_a(tmp_pat
 
     assert result.status == "blocked"
     assert "persisted grade" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_interview_blocker_does_not_consume_pending_final_round(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should use the persisted pending question")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("blocked auto answer should not reach backend")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.pending_question = "Should we use a billing provider for the live account?"
+    state.current_round = 1
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=2
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert result.rounds == 1
+    assert state.current_round == 1
+    assert state.pending_question == "Should we use a billing provider for the live account?"
+    persisted = AutoStore(tmp_path).load(state.auto_session_id)
+    assert persisted.current_round == 1
+    assert persisted.pending_question == state.pending_question
+
+
+@pytest.mark.asyncio
+async def test_interview_resume_backend_error_uses_resume_tool_name(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not start a new interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer without a question")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "resume interview")
+    state.interview_session_id = "interview_1"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "interview resume failed" in (result.blocker or "")
+    assert state.last_tool_name == "interview.resume"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_loader_rejects_non_seed_on_review_resume(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("review resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("review resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("review resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_path = str(tmp_path / "seed.yaml")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        seed_loader=lambda path: {"path": path},  # type: ignore[return-value]
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "seed loader returned dict, expected Seed" in (result.blocker or "")
+    assert state.last_tool_name == "seed_loader"

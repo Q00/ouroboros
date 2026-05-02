@@ -66,6 +66,7 @@ class AutoInterviewDriver:
     async def run(self, state: AutoPipelineState, ledger: SeedDraftLedger) -> AutoInterviewResult:
         """Run bounded auto interview until Seed-ready or blocked."""
         self._ensure_interview_phase(state)
+        interview_tool_name = "interview.start"
         try:
             if state.interview_session_id:
                 if state.pending_question:
@@ -74,11 +75,12 @@ class AutoInterviewDriver:
                         session_id=state.interview_session_id,
                     )
                 else:
+                    interview_tool_name = "interview.resume"
                     turn = _validate_turn(
                         await self._with_timeout(
                             self.backend.resume(state.interview_session_id),
                             state,
-                            tool_name="interview.resume",
+                            tool_name=interview_tool_name,
                         )
                     )
                     state.pending_question = turn.question
@@ -88,21 +90,22 @@ class AutoInterviewDriver:
                     await self._with_timeout(
                         self.backend.start(state.goal, cwd=state.cwd),
                         state,
-                        tool_name="interview.start",
+                        tool_name=interview_tool_name,
                     )
                 )
                 state.interview_session_id = turn.session_id
                 state.pending_question = turn.question
                 self._save(state)
         except TimeoutError as exc:
-            state.mark_blocked(str(exc), tool_name="interview.start")
+            state.mark_blocked(str(exc), tool_name=interview_tool_name)
             self._save(state)
             return AutoInterviewResult(
                 "blocked", state.interview_session_id, ledger, state.current_round, str(exc)
             )
         except Exception as exc:
-            blocker = f"interview resume/start failed: {exc}"
-            state.mark_blocked(blocker, tool_name="interview.start")
+            action = "resume" if interview_tool_name == "interview.resume" else "start"
+            blocker = f"interview {action} failed: {exc}"
+            state.mark_blocked(blocker, tool_name=interview_tool_name)
             self._save(state)
             return AutoInterviewResult(
                 "blocked", state.interview_session_id, ledger, state.current_round, blocker
@@ -112,7 +115,6 @@ class AutoInterviewDriver:
             return self._handle_completed_turn(state, ledger, turn, state.current_round)
 
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
-            state.current_round = round_number
             state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
             self._save(state)
 
@@ -126,9 +128,10 @@ class AutoInterviewDriver:
                     "blocked",
                     state.interview_session_id,
                     ledger,
-                    round_number,
+                    state.current_round,
                     answer.blocker.reason,
                 )
+            state.current_round = round_number
             self.answerer.apply(answer, ledger, question=turn.question)
             state.ledger = ledger.to_dict()
             state.pending_question = None
