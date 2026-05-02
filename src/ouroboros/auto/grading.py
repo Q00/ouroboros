@@ -142,6 +142,16 @@ class GradeGate:
 
         if not seed.goal.strip():
             blockers.append(GradeFinding("missing_goal", "high", "Seed goal is empty", "goal"))
+        elif ledger is not None and not _seed_goal_matches_ledger(seed.goal, ledger):
+            blockers.append(
+                GradeFinding(
+                    "seed_goal_mismatch",
+                    "high",
+                    "Seed goal does not match the converged interview goal",
+                    "goal",
+                    "Regenerate or repair the Seed so its goal matches the auto interview ledger goal.",
+                )
+            )
         if seed.metadata.ambiguity_score > 0.20:
             blockers.append(
                 GradeFinding(
@@ -275,6 +285,55 @@ class GradeGate:
             can_repair=not blockers,
             may_run=grade == SeedGrade.A and not blockers,
         )
+
+
+def _seed_goal_matches_ledger(seed_goal: str, ledger: SeedDraftLedger) -> bool:
+    goal_section = ledger.sections.get("goal")
+    if goal_section is None:
+        return True
+    inactive = {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+    goals = [entry.value for entry in goal_section.entries if entry.status not in inactive]
+    if not goals:
+        return True
+    seed_tokens = _goal_tokens(seed_goal)
+    if not seed_tokens:
+        return False
+    for goal in goals:
+        ledger_tokens = _goal_tokens(goal)
+        if not ledger_tokens:
+            continue
+        shared = seed_tokens & ledger_tokens
+        if ledger_tokens <= seed_tokens or seed_tokens <= ledger_tokens:
+            return True
+        if len(shared) / max(len(ledger_tokens), 1) >= 0.6:
+            return True
+    return False
+
+
+def _goal_tokens(value: str) -> set[str]:
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "app",
+        "application",
+        "build",
+        "create",
+        "for",
+        "make",
+        "the",
+        "to",
+    }
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) >= 2 and token not in stopwords
+    }
+    if "cli" in tokens:
+        tokens.update({"command", "line", "interface"})
+    if {"command", "line", "interface"} <= tokens:
+        tokens.add("cli")
+    return tokens
 
 
 def _is_vague(value: str) -> bool:
