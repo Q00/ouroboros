@@ -595,6 +595,9 @@ async def test_pipeline_resumes_run_with_persisted_handle_without_restarting(tmp
         raise AssertionError("persisted run handle should not start another run")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
     state.seed_artifact = _seed().to_dict()
     state.job_id = "job_existing"
     state.transition(AutoPhase.INTERVIEW, "interview")
@@ -970,6 +973,9 @@ async def test_pipeline_resumes_prepared_run_before_first_attempt(tmp_path) -> N
         return {"job_id": "job_after_resume", "execution_id": "exec_after_resume"}
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
     state.seed_artifact = _seed().to_dict()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
@@ -985,6 +991,37 @@ async def test_pipeline_resumes_prepared_run_before_first_attempt(tmp_path) -> N
     assert result.status == "complete"
     assert result.job_id == "job_after_resume"
     assert state.run_start_attempted is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_resume_rechecks_persisted_ledger_before_execution(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("run resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("unresolved ledger must not start execution")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run prepared")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "clear the Seed for execution" in (result.blocker or "")
+    assert result.grade == "C"
 
 
 @pytest.mark.asyncio
