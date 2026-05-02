@@ -142,6 +142,19 @@ class AutoPipelineState:
         self.last_progress_message = message
         self.last_tool_name = tool_name
 
+    def recover(self, next_phase: AutoPhase, message: str) -> None:
+        """Move a blocked/failed session back to a recoverable phase."""
+        if self.phase not in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
+            self.transition(next_phase, message)
+            return
+        now = utc_now_iso()
+        self.phase = next_phase
+        self.phase_started_at = now
+        self.last_progress_at = now
+        self.updated_at = now
+        self.last_progress_message = message
+        self.last_error = None
+
     def mark_blocked(self, message: str, *, tool_name: str | None = None) -> None:
         """Transition to blocked with actionable diagnostics."""
         self.last_tool_name = tool_name

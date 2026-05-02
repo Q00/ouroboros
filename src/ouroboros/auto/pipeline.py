@@ -87,7 +87,7 @@ class AutoPipeline:
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
-            state.transition(
+            state.recover(
                 resume_phase,
                 f"resuming {resume_phase.value} after {previous_phase.value}: {state.last_error or 'no error recorded'}",
             )
@@ -181,7 +181,7 @@ class AutoPipeline:
                 self._save(state)
         elif (
             state.phase == AutoPhase.REVIEW
-            and resume_tool_name == "grade_gate"
+            and resume_tool_name in {"grade_gate", "seed_loader"}
             and self.seed_loader is not None
             and state.seed_path
         ):
@@ -346,7 +346,7 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate"}:
+    if tool_name in {"seed_saver", "grade_gate", "seed_loader"}:
         return AutoPhase.REVIEW
     return None
 
