@@ -388,11 +388,28 @@ def test_auto_answerer_acceptance_default_matches_grade_observability() -> None:
     ]
 
     assert acceptance
+    assert (
+        "which command output verifies the acceptance criteria" not in acceptance[0].value.lower()
+    )
+    assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT
     ledger = SeedDraftLedger.from_goal("Build a CLI")
     _fill_minimal_ready_ledger(ledger)
     seed = _seed(ac=(acceptance[0].value,), goal="Build a CLI")
 
     assert GradeGate().grade_seed(seed, ledger=ledger).grade == SeedGrade.A
+
+
+def test_auto_answerer_routes_common_input_output_prompts_to_io_ledger() -> None:
+    answerer = AutoAnswerer()
+    for question in (
+        "What inputs does the command take?",
+        "What outputs does it produce?",
+    ):
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+
+        assert {"actors", "inputs", "outputs"} <= updated_sections
+        assert not {"constraints", "failure_modes"} >= updated_sections
 
 
 def test_auto_answerer_blocks_production_environment_selection_variants() -> None:
