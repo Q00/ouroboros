@@ -921,7 +921,7 @@ async def test_pipeline_refuses_run_resume_without_a_grade(tmp_path) -> None:
     result = await pipeline.run(state)
 
     assert result.status == "blocked"
-    assert "A-grade" in (result.blocker or "")
+    assert "persisted grade" in (result.blocker or "")
     assert state.job_id is None
 
 
@@ -1028,3 +1028,65 @@ async def test_interview_driver_does_not_replace_specific_verification_answer_wi
     assert answers
     assert "observable behavior" in answers[0].lower()
     assert "single local user" not in answers[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_resume_honors_persisted_required_grade(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("run resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        return {"job_id": "job_required_b", "execution_id": None}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.required_grade = "B"
+    state.last_grade = "B"
+    state.seed_artifact = _seed(ac=("The CLI should be easy and user-friendly",)).to_dict()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run prepared")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.job_id == "job_required_b"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_resume_rejects_grade_b_when_required_grade_a(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("run resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("run resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("grade B must not run when required grade is A")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.required_grade = "A"
+    state.last_grade = "B"
+    state.seed_artifact = _seed(ac=("The CLI should be easy and user-friendly",)).to_dict()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run prepared")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "persisted grade" in (result.blocker or "")

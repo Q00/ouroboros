@@ -143,7 +143,9 @@ class AutoPipeline:
                     return self._result(state, ledger, blocker=state.last_error)
                 state.mark_progress("Seed generated", tool_name="seed_generator")
                 self._save(state)
-                state.transition(AutoPhase.REVIEW, "reviewing Seed for A-grade")
+                state.transition(
+                    AutoPhase.REVIEW, f"reviewing Seed for required grade {state.required_grade}"
+                )
                 self._save(state)
         elif state.seed_artifact:
             try:
@@ -174,15 +176,17 @@ class AutoPipeline:
             state.ledger = ledger.to_dict()
             self._save(state)
 
-            if not review.may_run:
-                state.mark_blocked("Seed did not reach A-grade", tool_name="grade_gate")
+            if not _grade_meets_required(review.grade_result.grade.value, state.required_grade):
+                blocker = f"Seed did not reach required grade {state.required_grade}"
+                state.mark_blocked(blocker, tool_name="grade_gate")
                 self._save(state)
-                return self._result(
-                    state, ledger, review=review, blocker="Seed did not reach A-grade"
-                )
+                return self._result(state, ledger, review=review, blocker=blocker)
 
             if self.skip_run:
-                state.transition(AutoPhase.COMPLETE, "A-grade Seed ready; skip-run requested")
+                state.transition(
+                    AutoPhase.COMPLETE,
+                    f"Seed reached required grade {state.required_grade}; skip-run requested",
+                )
                 self._save(state)
                 return self._result(state, ledger, review=review)
         else:
@@ -202,9 +206,9 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=state.last_error)
-            if state.last_grade != "A":
+            if not _grade_meets_required(state.last_grade, state.required_grade):
                 state.mark_blocked(
-                    "Cannot start execution without a persisted A-grade review",
+                    f"Cannot start execution without a persisted grade meeting {state.required_grade}",
                     tool_name="grade_gate",
                 )
                 self._save(state)
@@ -217,7 +221,10 @@ class AutoPipeline:
 
         if state.phase != AutoPhase.RUN:
             state.run_start_attempted = False
-            state.transition(AutoPhase.RUN, "starting execution for A-grade Seed")
+            state.transition(
+                AutoPhase.RUN,
+                f"starting execution for grade {state.last_grade or state.required_grade} Seed",
+            )
             self._save(state)
         state.run_start_attempted = True
         self._save(state)
@@ -236,7 +243,10 @@ class AutoPipeline:
             state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
-        state.transition(AutoPhase.COMPLETE, "execution started for A-grade Seed")
+        state.transition(
+            AutoPhase.COMPLETE,
+            f"execution started for grade {state.last_grade or state.required_grade} Seed",
+        )
         self._save(state)
         return self._result(state, ledger, review=review)
 
@@ -265,6 +275,23 @@ class AutoPipeline:
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
             self.store.save(state)
+
+
+def _grade_meets_required(actual: str | None, required: str) -> bool:
+    rank = {"A": 0, "B": 1, "C": 2}
+    if actual not in rank or required not in rank:
+        return False
+    return rank[actual] <= rank[required]
+
+
+def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
+    if tool_name in {"interview.start", "interview.resume", "interview.answer"}:
+        return AutoPhase.INTERVIEW
+    if tool_name == "seed_generator":
+        return AutoPhase.SEED_GENERATION
+    if tool_name in {"seed_saver", "grade_gate"}:
+        return AutoPhase.REVIEW
+    return None
 
 
 def _optional_str(value: object) -> str | None:
