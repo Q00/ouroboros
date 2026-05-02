@@ -94,7 +94,12 @@ def test_resolve_completion_profile_preserves_explicit_role_model() -> None:
         },
         llm_role_profiles={"qa": "fast"},
     )
-    request = CompletionConfig(model="request-model", role="qa", temperature=0.7)
+    request = CompletionConfig(
+        model="request-model",
+        role="qa",
+        model_is_explicit=True,
+        temperature=0.7,
+    )
 
     with patch("ouroboros.providers.profiles.load_config", return_value=config):
         resolved = resolve_completion_profile(request, backend="litellm")
@@ -102,6 +107,21 @@ def test_resolve_completion_profile_preserves_explicit_role_model() -> None:
     assert resolved.profile_name == "fast"
     assert resolved.config.model == "request-model"
     assert resolved.config.temperature == 0.2
+
+
+def test_resolve_completion_profile_replaces_implicit_legacy_model() -> None:
+    """Role profiles should replace helper/config defaults that are not request pins."""
+    config = OuroborosConfig(
+        llm_profiles={"fast": {"model": "profile-model"}},
+        llm_role_profiles={"qa": "fast"},
+    )
+    request = CompletionConfig(model="legacy-helper-default", role="qa")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(request, backend="litellm")
+
+    assert resolved.profile_name == "fast"
+    assert resolved.config.model == "profile-model"
 
 
 def test_resolve_completion_profile_resolves_empty_role_model() -> None:

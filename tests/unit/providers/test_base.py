@@ -82,6 +82,7 @@ class TestCompletionConfig:
         assert config.temperature == 0.7
         assert config.max_tokens == 4096
         assert config.max_turns is None
+        assert config.model_is_explicit is False
         assert config.stop is None
         assert config.top_p == 1.0
 
@@ -94,6 +95,7 @@ class TestCompletionConfig:
             temperature=0.3,
             max_tokens=1000,
             max_turns=2,
+            model_is_explicit=True,
             stop=["###", "END"],
             top_p=0.9,
         )
@@ -104,6 +106,7 @@ class TestCompletionConfig:
         assert config.temperature == 0.3
         assert config.max_tokens == 1000
         assert config.max_turns == 2
+        assert config.model_is_explicit is True
         assert config.stop == ["###", "END"]
         assert config.top_p == 0.9
 
@@ -127,6 +130,7 @@ class TestCompletionConfig:
         assert config.role is None
         assert config.profile is None
         assert config.max_turns is None
+        assert config.model_is_explicit is False
 
     def test_completion_config_is_frozen(self) -> None:
         """CompletionConfig is immutable."""

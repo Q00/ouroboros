@@ -202,6 +202,10 @@ class TestConsensusEvaluator:
         assert consensus.approved is True
         assert consensus.majority_ratio == 1.0
         assert len(consensus.votes) == 3
+        configs = [call.args[1] for call in mock_llm.complete.call_args_list]
+        assert [config.model for config in configs] == ["m1", "m2", "m3"]
+        assert all(config.role == "consensus_vote" for config in configs)
+        assert all(config.model_is_explicit for config in configs)
 
     @pytest.mark.asyncio
     async def test_consensus_rejected(

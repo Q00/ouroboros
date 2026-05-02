@@ -95,27 +95,38 @@ llm_profiles:
         profile: ouroboros-frontier
 
 llm_role_profiles:
-  ambiguity: fast
+  ambiguity: deep
   assertion_extraction: fast
+  brownfield: fast
+  context_compression: deep
   mechanical_detection: fast
-  question_classification: fast
-  qa: fast
-  clarification: standard
-  seed_generation: standard
+  question_classification: deep
+  qa: frontier
+  atomicity: standard
+  brownfield_explore: frontier
+  clarification: frontier
+  decomposition: standard
   dependency_analysis: standard
-  semantic_evaluation: deep
-  wonder: deep
-  reflect: deep
+  pm_interview: deep
+  seed_generation: deep
+  consensus_advocate: deep
+  consensus_perspective: deep
   consensus_vote: deep
+  double_diamond: deep
+  ontology_analysis: deep
+  pm_document: deep
+  reflect: deep
+  semantic_evaluation: deep
+  wonder: frontier
   consensus_judge: frontier
   agent_runtime: standard
   agent_runtime_implementation: standard
-  agent_runtime_interview: standard
-  agent_runtime_coordinator: deep
+  agent_runtime_interview: deep
+  agent_runtime_coordinator: standard
   agent_runtime_evaluation: deep
 ```
 
-Resolution order is: role mapping, profile provider mapping for the active backend, existing `*_model` field, then backend default behavior.
+Resolution order is: explicit request-level model pins, role mapping, profile provider mapping for the active backend, existing `*_model` field, then backend default behavior.
 
 For Codex, setup creates flat profile anchors in `~/.codex/config.toml`:
 

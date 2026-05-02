@@ -238,6 +238,7 @@ async def compress_context_with_llm(
     Returns:
         Result containing the compressed summary or a ProviderError.
     """
+    model_is_explicit = model is not None
     resolved_model = model or get_context_compression_model()
 
     # Build summarization prompt
@@ -273,6 +274,7 @@ Keep the summary focused and factual. Omit unnecessary details."""
     config = CompletionConfig(
         model=resolved_model,
         role="context_compression",
+        model_is_explicit=model_is_explicit,
         temperature=0.3,  # Lower temperature for more consistent summaries
         max_tokens=2000,  # Limit summary size
     )

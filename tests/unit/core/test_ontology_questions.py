@@ -231,6 +231,36 @@ class TestAnalyzeOntologically:
         assert insight.is_root_problem is True
         assert len(insight.prerequisites) == 2
         assert insight.confidence == 0.85
+        config = mock_llm.complete.call_args.args[1]
+        assert config.role == "ontology_analysis"
+        assert config.model_is_explicit is False
+
+    @pytest.mark.asyncio
+    async def test_explicit_model_is_marked(self, mock_llm: AsyncMock) -> None:
+        """analyze_ontologically() should mark request-level model pins."""
+        mock_llm.complete.return_value = Result.ok(
+            CompletionResponse(
+                content="""{
+                    "essence": "A user authentication problem",
+                    "is_root_problem": true,
+                    "confidence": 0.85,
+                    "reasoning": "This addresses the core authentication need"
+                }""",
+                model="custom-model",
+                usage=UsageInfo(100, 200, 300),
+            )
+        )
+
+        result = await analyze_ontologically(
+            mock_llm,
+            "Build a login system",
+            model="custom-model",
+        )
+
+        assert result.is_ok
+        config = mock_llm.complete.call_args.args[1]
+        assert config.model == "custom-model"
+        assert config.model_is_explicit is True
 
     @pytest.mark.asyncio
     async def test_analysis_with_no_question_types(self, mock_llm: AsyncMock) -> None:

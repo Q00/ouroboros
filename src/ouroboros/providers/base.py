@@ -57,6 +57,8 @@ class CompletionConfig:
         role: Optional logical Ouroboros task role used to resolve llm_profiles.
         profile: Optional explicit Ouroboros llm_profiles key.
         max_turns: Optional per-request agent turn budget for CLI-backed providers.
+        model_is_explicit: True when ``model`` is a request-level pin that must
+            not be replaced by role-based profile resolution.
     """
 
     model: str
@@ -68,6 +70,7 @@ class CompletionConfig:
     role: str | None = None
     profile: str | None = None
     max_turns: int | None = None
+    model_is_explicit: bool = False
 
 
 @dataclass(frozen=True, slots=True)

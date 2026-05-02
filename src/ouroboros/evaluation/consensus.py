@@ -500,6 +500,7 @@ class ConsensusEvaluator:
         config = CompletionConfig(
             model=model,
             role="consensus_vote",
+            model_is_explicit=True,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
