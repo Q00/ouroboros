@@ -134,10 +134,10 @@ class SeedRepairer:
             history.append(repair)
             if repair.blocker or not repair.changed:
                 return current, review, history
+            current = repair.seed
             if high and high == previous_high_fingerprints:
                 return current, review, history
             previous_high_fingerprints = high
-            current = repair.seed
             review = self.reviewer.review(current, ledger=ledger)
         return current, review, history
 
