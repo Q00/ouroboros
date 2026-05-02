@@ -1,5 +1,6 @@
 """Tests for MCP server adapter."""
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ouroboros.core.types import Result
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
@@ -28,6 +30,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator.control_bus import ControlBus
 
 
 class MockToolHandler:
@@ -1031,7 +1034,8 @@ class TestCreateOuroborosServerBrownfieldStore:
             )
 
         assert captured_handler_kwargs["_store"] is mock_brownfield_store
-        assert server._owned_resources == [mock_event_store, mock_brownfield_store]
+        assert isinstance(server._owned_resources[0], ControlBus)
+        assert server._owned_resources[1:] == [mock_event_store, mock_brownfield_store]
 
 
 def test_create_ouroboros_server_retains_runtime_context() -> None:
@@ -1044,3 +1048,38 @@ def test_create_ouroboros_server_retains_runtime_context() -> None:
     assert server.runtime_context.runtime_backend == "codex"
     assert server.runtime_context.llm_backend == "claude_code"
     assert server.runtime_context.control is not None
+
+
+@pytest.mark.asyncio
+async def test_server_shutdown_drains_runtime_control_bus() -> None:
+    """Server-owned ControlBus must not leave subscriber tasks behind."""
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+    server = create_ouroboros_server(runtime_backend="codex", llm_backend="claude_code")
+    assert server.runtime_context is not None
+    bus = server.runtime_context.control
+    assert bus is not None
+    bus._close_timeout_s = 0.01
+
+    started = asyncio.Event()
+
+    async def blocked(_event: BaseEvent) -> None:
+        started.set()
+        await asyncio.sleep(60)
+
+    bus.subscribe(lambda _event: True, blocked)
+    tasks = bus.publish(
+        BaseEvent(
+            type="control.directive.emitted",
+            aggregate_type="lineage",
+            aggregate_id="lin_shutdown_probe",
+            data={"directive": "cancel"},
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+
+    await server.shutdown()
+
+    assert tasks[0].cancelled()
+    assert bus._tasks == set()
+    assert server._owned_resources == []
