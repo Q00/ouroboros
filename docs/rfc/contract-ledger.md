@@ -138,8 +138,9 @@ Step 2 — additive event family + contract-targeted directives
         Rollout invariant: land and switch lineage/session/execution readers to
         Ledger/projector dual-read helpers before any emitter starts writing
         contract-targeted directives. Only after those readers can join
-        contract/<contract_id> directive streams back through extra lineage/session
-        correlation may contract-serving directive emitters target contract/<contract_id>
+        contract/<contract_id> directive streams back through the existing
+        first-class lineage/session/execution correlation fields may contract-serving
+        directive emitters target contract/<contract_id>
         for decisions whose object is the contract. Update current runtime I/O
         producers (`orchestrator.tool.called`) and normalized/future tool.call.* /
         llm.call.* producers to carry contract_id in payload or extra when emitted
@@ -172,8 +173,9 @@ Step 5 — non-critical consumer migration
         is already covered by the Step 2 rollout invariant before contract-targeted
         directive writes begin. Legacy direct event_store reads remain valid for
         legacy aggregate-targeted directives, but contract-targeted decisions
-        require Ledger dual-read helpers (contract aggregate + extra lineage/session
-        correlation) to appear in lineage/session views. No storage flag day.
+        require Ledger dual-read helpers (contract aggregate + first-class
+        lineage/session/execution correlation fields) to appear in lineage/session
+        views. No storage flag day.
 ```
 
 **Backfill mapping rule (deterministic first draft).**
@@ -187,7 +189,7 @@ Backfill uses one precedence rule so rerunning it over the same historical journ
 
 Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key` / `extra.backfill_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
 
-Backfill is idempotent by key, not by event UUID. Before appending any synthetic `contract.*` event, the command queries for an existing synthetic event with the same `type`, `contract_id`, and `extra.backfill_key`; if present it skips the append. Synthetic envelope rows use backfill-time append timestamps because the current EventStore cannot insert a deterministic cursor before historical rows. Their payload must carry `historical_started_at` / `historical_finished_at` (and edge source timestamps for dependency events) so Layer 1/2 projectors can render historical order without pretending Layer 0 raw ordering brackets old rows. The journal remains append-only, and repeated backfill runs do not create duplicate synthetic envelopes for the same historical boundary.
+Backfill is idempotent by event key, not by event UUID. Every synthetic `contract.*` row carries both the boundary-level `extra.backfill_key=<synthetic_contract_key>` and an event-specific `extra.backfill_event_key`. Before appending a synthetic event, the command queries for an existing synthetic event with the same `type`, `contract_id`, and `extra.backfill_event_key`; if present it skips the append. Envelope event keys are deterministic literals scoped to the boundary, for example `<synthetic_contract_key>:created`, `<synthetic_contract_key>:completed`, or `<synthetic_contract_key>:failed`. Dependency event keys additionally include the full edge identity and source evidence: `<synthetic_contract_key>:dependency:<from_contract_id>:<to_contract_id>:<edge_type>:<source_event_id-or-source_timestamp>`. Implementations must not dedupe `contract.dependency.recorded` rows on `extra.backfill_key` alone, because one synthetic contract can legitimately emit multiple dependency edges. Synthetic envelope rows use backfill-time append timestamps because the current EventStore cannot insert a deterministic cursor before historical rows. Their payload must carry `historical_started_at` / `historical_finished_at` (and edge source timestamps for dependency events) so Layer 1/2 projectors can render historical order without pretending Layer 0 raw ordering brackets old rows. The journal remains append-only, and repeated backfill runs do not create duplicate synthetic envelopes or dependency edges for the same historical boundary.
 
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
@@ -298,7 +300,7 @@ sequenceDiagram
 - [ ] ER + sequence diagrams render
 - [ ] Cross-references resolve to existing issues / files
 - [ ] At least two maintainer approvals
-- [ ] L7 sub-thread resolved with the backfill mapping table extended for ambiguous boundaries (`synthetic=true` + `provenance="backfill"`)
+- [ ] L7 sub-thread resolved with the backfill mapping table extended for ambiguous boundaries (`synthetic=true` + `provenance="backfill:ambiguous"`)
 - [ ] `replay()` semantics match [#511](https://github.com/Q00/ouroboros/issues/511) D6 (no LLM re-execution) and [#512](https://github.com/Q00/ouroboros/issues/512) C5 (read artifact default)
 - [ ] CheckpointStore boundary explicit: Ledger does not absorb [#338](https://github.com/Q00/ouroboros/pull/338)
 
