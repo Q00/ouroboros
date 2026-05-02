@@ -12,6 +12,10 @@ class _Adapter:
     name: str
     _cwd: str = "/repo"
     _max_turns: int = 3
+    _allowed_tools: list[str] | None = None
+    _permission_mode: str | None = None
+    _timeout: float | None = None
+    _max_retries: int | None = None
 
 
 class TestEvolutionBackendDrift:
@@ -27,7 +31,16 @@ class TestEvolutionBackendDrift:
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
         )
-        engine = ReflectEngine(llm_adapter=_Adapter("initial"), model="claude-old")
+        engine = ReflectEngine(
+            llm_adapter=_Adapter(
+                "initial",
+                _allowed_tools=["Read"],
+                _permission_mode="default",
+                _timeout=12.5,
+                _max_retries=7,
+            ),
+            model="claude-old",
+        )
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="gemini")
         )
@@ -41,7 +54,15 @@ class TestEvolutionBackendDrift:
         rebuilt = engine._resolve_adapter()
 
         assert rebuilt.name == "rebuilt"
-        assert created == {"backend": "gemini", "cwd": "/repo", "max_turns": 3}
+        assert created == {
+            "backend": "gemini",
+            "cwd": "/repo",
+            "max_turns": 3,
+            "allowed_tools": ["Read"],
+            "permission_mode": "default",
+            "timeout": 12.5,
+            "max_retries": 7,
+        }
         assert engine.model == "gemini-reflect"
 
     def test_wonder_rebuild_preserves_runtime_options_and_refreshes_model(
@@ -56,7 +77,16 @@ class TestEvolutionBackendDrift:
         monkeypatch.setattr(
             "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="claude")
         )
-        engine = WonderEngine(llm_adapter=_Adapter("initial"), model="claude-old")
+        engine = WonderEngine(
+            llm_adapter=_Adapter(
+                "initial",
+                _allowed_tools=["Read"],
+                _permission_mode="default",
+                _timeout=12.5,
+                _max_retries=7,
+            ),
+            model="claude-old",
+        )
         monkeypatch.setattr(
             "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="gemini")
         )
@@ -70,8 +100,33 @@ class TestEvolutionBackendDrift:
         rebuilt = engine._resolve_adapter()
 
         assert rebuilt.name == "rebuilt"
-        assert created == {"backend": "gemini", "cwd": "/repo", "max_turns": 3}
+        assert created == {
+            "backend": "gemini",
+            "cwd": "/repo",
+            "max_turns": 3,
+            "allowed_tools": ["Read"],
+            "permission_mode": "default",
+            "timeout": 12.5,
+            "max_retries": 7,
+        }
         assert engine.model == "gemini-wonder"
+
+    def test_factory_fresh_adapter_refreshes_model_without_backend_drift(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
+        )
+        fresh = _Adapter("fresh", _cwd="/safe", _max_turns=1)
+        engine = ReflectEngine(
+            llm_adapter=_Adapter("initial"),
+            model="codex-startup-override",
+            adapter_factory=lambda: fresh,
+        )
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_reflect_model", Mock(return_value="claude-reflect")
+        )
+
+        assert engine._resolve_adapter() is fresh
+        assert engine.model == "claude-reflect"
 
     def test_factory_fresh_adapter_refreshes_model_on_backend_drift(self, monkeypatch) -> None:
         monkeypatch.setattr(
