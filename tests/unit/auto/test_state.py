@@ -123,6 +123,48 @@ def test_store_load_wraps_malformed_container_and_counter_fields(tmp_path) -> No
             store.load(state.auto_session_id)
 
 
+def test_store_load_rejects_malformed_nested_ledger(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["ledger"] = {
+        "sections": {
+            "goal": {
+                "name": "goal",
+                "entries": [
+                    {
+                        "key": "goal.primary",
+                        "value": "Build a CLI",
+                        "source": "not-a-source",
+                        "confidence": 0.9,
+                        "status": "confirmed",
+                    }
+                ],
+            }
+        },
+        "question_history": [],
+    }
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="valid Seed Draft Ledger"):
+        store.load(state.auto_session_id)
+
+
+def test_store_save_rejects_malformed_nested_ledger_before_writing(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.ledger = {
+        "sections": {"goal": {"name": "goal", "entries": [{"key": "missing fields"}]}},
+        "question_history": [],
+    }
+
+    with pytest.raises(ValueError, match="valid Seed Draft Ledger"):
+        store.save(state)
+
+    assert not store.path_for(state.auto_session_id).exists()
+
+
 def test_store_load_rejects_empty_optional_resume_identifiers(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")

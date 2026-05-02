@@ -49,14 +49,17 @@ class SeedRepairer:
         acceptance = list(seed.acceptance_criteria)
         applied: list[str] = []
         unresolved: list[ReviewFinding] = []
+        repaired_acceptance_indices: set[int] = set()
 
         for finding in review.findings:
             if finding.code in {"vague_acceptance_criteria", "untestable_acceptance_criteria"}:
                 index = _target_index(finding.target)
                 if index is not None and index < len(acceptance):
-                    acceptance[index] = _observable_preserving_replacement(
-                        acceptance[index], index=index
-                    )
+                    if index not in repaired_acceptance_indices:
+                        acceptance[index] = _observable_preserving_replacement(
+                            acceptance[index], index=index
+                        )
+                        repaired_acceptance_indices.add(index)
                 else:
                     acceptance.append(
                         "A command/API check returns stable observable output or artifacts proving the task goal."

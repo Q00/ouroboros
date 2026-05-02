@@ -12,7 +12,8 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
-from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview
+from ouroboros.auto.seed_repairer import SeedRepairer
+from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -163,6 +164,21 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
     )
     assert result.job_id == "job_1"
     assert state.execution_id == "exec_1"
+
+
+def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
+    seed = _seed(ac=("The CLI should be easy and user-friendly",))
+    ledger = SeedDraftLedger.from_goal(seed.goal)
+    _fill_ready(ledger)
+    review = SeedReviewer().review(seed, ledger=ledger)
+
+    result = SeedRepairer().repair_once(seed, review, ledger=ledger)
+
+    assert result.changed
+    repaired_acceptance = result.seed.acceptance_criteria[0]
+    assert repaired_acceptance.count("original requirement for") == 1
+    assert "The CLI" in repaired_acceptance
+    assert "original requirement for A command/API check" not in repaired_acceptance
 
 
 @pytest.mark.asyncio
