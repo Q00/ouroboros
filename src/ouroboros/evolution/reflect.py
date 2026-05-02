@@ -18,7 +18,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
-from ouroboros.config import get_reflect_model
+from ouroboros.config import get_llm_backend, get_reflect_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
 from ouroboros.core.seed import Seed
@@ -72,10 +72,79 @@ class ReflectEngine:
 
     When evaluation is fully approved (score >= 0.8, no drift), outputs
     minimal changes to allow convergence.
+
+    Adapter freshness:
+        ``llm_adapter`` is captured at MCP server startup. If the user
+        changes ``llm.backend`` in ``~/.ouroboros/config.yaml`` after the
+        server has started, the captured adapter is stale and every Reflect
+        call still hits the previous backend's adapter (issue #562). The
+        ``adapter_factory`` field lets callers supply a zero-arg factory
+        the engine invokes per call so Reflect always honors the live
+        config; if no factory is supplied the engine falls back to the
+        captured adapter (preserving today's behavior for tests and direct
+        consumers).
     """
 
     llm_adapter: LLMAdapter
     model: str = field(default_factory=get_reflect_model)
+    adapter_factory: object = field(default=None)
+    _captured_backend: str | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Snapshot the backend at construction time so we can detect drift.
+        try:
+            self._captured_backend = get_llm_backend()
+        except Exception:  # noqa: BLE001 — never fail engine init on config read
+            self._captured_backend = None
+
+    def _resolve_adapter(self) -> LLMAdapter:
+        """Return the adapter the next ``complete()`` call should use.
+
+        Priority:
+            1. ``adapter_factory()`` if supplied (always per-call fresh).
+            2. A freshly constructed adapter when the live ``llm.backend``
+               differs from the one captured at engine init.
+            3. The originally injected ``llm_adapter`` (today's behavior).
+        """
+        if self.adapter_factory is not None:
+            try:
+                fresh = self.adapter_factory()
+                if fresh is not None:
+                    return fresh
+            except Exception:  # noqa: BLE001 — fall through to captured adapter
+                logger.exception("ReflectEngine adapter_factory raised; using captured adapter")
+                return self.llm_adapter
+
+        # Detect post-startup config drift and rebuild the adapter inline.
+        try:
+            current_backend = get_llm_backend()
+        except Exception:  # noqa: BLE001
+            return self.llm_adapter
+
+        if (
+            self._captured_backend is not None
+            and current_backend
+            and current_backend != self._captured_backend
+        ):
+            try:
+                from ouroboros.providers.factory import create_llm_adapter
+
+                rebuilt = create_llm_adapter(backend=current_backend, max_turns=1)
+                self.llm_adapter = rebuilt
+                self._captured_backend = current_backend
+                logger.info(
+                    "reflect.adapter_rebuilt_for_backend_drift",
+                    extra={"new_backend": current_backend},
+                )
+                return rebuilt
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "ReflectEngine failed to rebuild adapter for drifted backend; "
+                    "falling back to captured adapter"
+                )
+                return self.llm_adapter
+
+        return self.llm_adapter
 
     async def reflect(
         self,
@@ -116,7 +185,7 @@ class ReflectEngine:
             max_tokens=3000,
         )
 
-        result = await self.llm_adapter.complete(messages, config)
+        result = await self._resolve_adapter().complete(messages, config)
 
         if result.is_err:
             logger.error("ReflectEngine LLM call failed: %s", result.error)
