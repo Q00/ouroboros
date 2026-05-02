@@ -10,6 +10,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     ACTreeHUDHandler,
     _extract_tree_snapshot,
+    _merge_subtask_events_into_snapshot,
     format_subtask_progress_summary,
     render_ac_tree_hud_markdown,
     summarize_subtask_events,
@@ -595,6 +596,81 @@ class TestRenderACTreeHUDMarkdown:
         assert summary["pending_count"] == 0
         assert summary["total_count"] == 2
         assert format_subtask_progress_summary(summary) == "1/2 complete · 1 working"
+
+    def test_merge_subtask_events_prefers_explicit_node_parent(self) -> None:
+        """Explicit node ancestry should prevent synthetic indexes from stealing children."""
+        snapshot = _extract_tree_snapshot(
+            {
+                "acceptance_criteria": [
+                    {
+                        "index": 1,
+                        "node_id": "ac_0",
+                        "content": "Parent AC",
+                        "status": "executing",
+                    },
+                    {
+                        "index": 2,
+                        "node_id": "ac_1",
+                        "content": "Unrelated AC",
+                        "status": "pending",
+                    },
+                ],
+            }
+        )
+        events = [
+            BaseEvent(
+                type="execution.node.created",
+                aggregate_type="execution",
+                aggregate_id="exec_nodes",
+                data={
+                    "identity_model": "execution_node_v1",
+                    "node_id": "node_child",
+                    "parent_node_id": "ac_0",
+                    "display_path": "1.1",
+                    "path": [0, 0],
+                    "depth": 1,
+                    "content": "First-level child",
+                    "status": "executing",
+                    "legacy_ac_index": 1,
+                },
+            ),
+            BaseEvent(
+                type="execution.subtask.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_nodes",
+                data={
+                    "ac_index": 2,
+                    "sub_task_index": 1,
+                    "sub_task_id": "node_grandchild",
+                    "content": "Legacy fallback should be corrected",
+                    "status": "pending",
+                },
+            ),
+            BaseEvent(
+                type="execution.node.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_nodes",
+                data={
+                    "identity_model": "execution_node_v1",
+                    "node_id": "node_grandchild",
+                    "parent_node_id": "node_child",
+                    "display_path": "1.1.1",
+                    "path": [0, 0, 0],
+                    "depth": 2,
+                    "content": "Nested child",
+                    "status": "executing",
+                    "ac_index": 2,
+                },
+            ),
+        ]
+
+        merged = _merge_subtask_events_into_snapshot(snapshot, events)
+        nodes = merged["nodes"]
+
+        assert nodes["ac_0"]["children_ids"] == ["node_child"]
+        assert nodes["node_child"]["children_ids"] == ["node_grandchild"]
+        assert nodes["node_grandchild"]["parent_id"] == "node_child"
+        assert nodes["ac_1"]["children_ids"] == []
 
 
 class TestACTreeHUDHandler:

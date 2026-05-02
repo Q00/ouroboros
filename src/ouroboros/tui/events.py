@@ -399,6 +399,14 @@ class SubtaskUpdated(Message):
         status: str,
         current_tool_activity: dict[str, Any] | None = None,
         last_update: dict[str, Any] | None = None,
+        node_id: str | None = None,
+        parent_node_id: str | None = None,
+        path: list[int] | None = None,
+        display_path: str | None = None,
+        depth: int | None = None,
+        ordinal: int | None = None,
+        root_ac_index: int | None = None,
+        identity_model: str | None = None,
     ) -> None:
         """Initialize SubtaskUpdated message."""
         super().__init__()
@@ -412,6 +420,14 @@ class SubtaskUpdated(Message):
             dict(current_tool_activity) if isinstance(current_tool_activity, dict) else {}
         )
         self.last_update = dict(last_update) if isinstance(last_update, dict) else {}
+        self.node_id = node_id
+        self.parent_node_id = parent_node_id
+        self.path = list(path) if isinstance(path, list) else []
+        self.display_path = display_path
+        self.node_depth = depth
+        self.ordinal = ordinal
+        self.root_ac_index = root_ac_index
+        self.identity_model = identity_model
 
 
 class LineageSelected(Message):
@@ -797,16 +813,36 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             last_update=data.get("last_update"),
         )
 
-    elif event_type == "execution.subtask.updated":
+    elif event_type in {
+        "execution.subtask.updated",
+        "execution.node.created",
+        "execution.node.updated",
+    }:
         return SubtaskUpdated(
             execution_id=event.aggregate_id,
-            ac_index=data.get("ac_index", 0),
-            sub_task_index=data.get("sub_task_index", 0),
-            sub_task_id=data.get("sub_task_id", ""),
-            content=data.get("content", ""),
+            ac_index=data.get("ac_index", data.get("legacy_ac_index", 0)),
+            sub_task_index=data.get("sub_task_index", data.get("legacy_sub_task_index", 0)),
+            sub_task_id=data.get("sub_task_id", data.get("legacy_sub_task_id", "")),
+            content=data.get("label") or data.get("content", ""),
             status=data.get("status", "pending"),
             current_tool_activity=data.get("current_tool_activity"),
             last_update=data.get("last_update"),
+            node_id=data.get("node_id") if isinstance(data.get("node_id"), str) else None,
+            parent_node_id=data.get("parent_node_id")
+            if isinstance(data.get("parent_node_id"), str)
+            else None,
+            path=data.get("path") if isinstance(data.get("path"), list) else None,
+            display_path=data.get("display_path")
+            if isinstance(data.get("display_path"), str)
+            else None,
+            depth=data.get("depth") if isinstance(data.get("depth"), int) else None,
+            ordinal=data.get("ordinal") if isinstance(data.get("ordinal"), int) else None,
+            root_ac_index=data.get("root_ac_index")
+            if isinstance(data.get("root_ac_index"), int)
+            else None,
+            identity_model=data.get("identity_model")
+            if isinstance(data.get("identity_model"), str)
+            else None,
         )
 
     elif event_type == "execution.tool.started":

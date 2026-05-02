@@ -44,6 +44,8 @@ _TREE_CHANGE_EVENT_TYPES = frozenset(
     {
         "workflow.progress.updated",
         "execution.subtask.updated",
+        "execution.node.created",
+        "execution.node.updated",
     }
 )
 
@@ -365,7 +367,11 @@ def summarize_subtask_events(execution_events: object) -> dict[str, Any]:
     order_by_id: dict[str, int] = {}
 
     for order, event in enumerate(execution_events):
-        if getattr(event, "type", None) != "execution.subtask.updated":
+        if getattr(event, "type", None) not in {
+            "execution.subtask.updated",
+            "execution.node.created",
+            "execution.node.updated",
+        }:
             continue
 
         data = getattr(event, "data", None)
@@ -374,7 +380,9 @@ def summarize_subtask_events(execution_events: object) -> dict[str, Any]:
 
         ac_index = _coerce_int(data.get("ac_index"), 0)
         sub_task_index = _coerce_int(data.get("sub_task_index"), 0)
-        sub_task_id = _coerce_non_empty_string(data.get("sub_task_id"))
+        sub_task_id = _coerce_non_empty_string(data.get("node_id")) or _coerce_non_empty_string(
+            data.get("sub_task_id")
+        )
         if sub_task_id is None:
             if ac_index <= 0 or sub_task_index <= 0:
                 continue
@@ -528,11 +536,15 @@ def _build_tree_from_acceptance_criteria(
 
         raw_index = raw_node.get("index")
         ac_index = _coerce_int(raw_index, 0)
-        node_id = _coerce_non_empty_string(raw_node.get("id"))
+        node_id = _coerce_non_empty_string(raw_node.get("node_id")) or _coerce_non_empty_string(
+            raw_node.get("id")
+        )
         if node_id is None:
             node_id = f"ac_{ac_index}" if ac_index > 0 else f"ac_node_{order}"
 
-        parent_id = _coerce_non_empty_string(raw_node.get("parent_id"))
+        parent_id = _coerce_non_empty_string(
+            raw_node.get("parent_node_id")
+        ) or _coerce_non_empty_string(raw_node.get("parent_id"))
         depth = _coerce_int(raw_node.get("depth"), 2 if parent_id else 1)
         status = _normalize_status(raw_node.get("status"))
         node = {
@@ -646,7 +658,11 @@ def _merge_subtask_events_into_snapshot(
         nodes[str(node_id)] = dict(raw_node)
 
     for event in execution_events:
-        if getattr(event, "type", None) != "execution.subtask.updated":
+        if getattr(event, "type", None) not in {
+            "execution.subtask.updated",
+            "execution.node.created",
+            "execution.node.updated",
+        }:
             continue
 
         data = getattr(event, "data", None)
@@ -654,12 +670,15 @@ def _merge_subtask_events_into_snapshot(
             continue
 
         ac_index = _coerce_int(data.get("ac_index"), 0)
-        parent_id = _find_node_id_for_ac_index(nodes, ac_index)
+        explicit_parent_id = _coerce_non_empty_string(data.get("parent_node_id"))
+        parent_id = explicit_parent_id or _find_node_id_for_ac_index(nodes, ac_index)
         if parent_id is None or parent_id not in nodes:
             continue
 
         sub_task_index = _coerce_int(data.get("sub_task_index"), 0)
-        sub_task_id = _coerce_non_empty_string(data.get("sub_task_id"))
+        sub_task_id = _coerce_non_empty_string(data.get("node_id")) or _coerce_non_empty_string(
+            data.get("sub_task_id")
+        )
         if sub_task_id is None:
             if sub_task_index <= 0:
                 continue
@@ -667,7 +686,10 @@ def _merge_subtask_events_into_snapshot(
 
         parent_node = nodes[parent_id]
         existing_node = nodes.get(sub_task_id, {})
-        depth = max(1, _coerce_int(parent_node.get("depth"), 1) + 1)
+        depth = _coerce_int(data.get("depth"), 0) or max(
+            1,
+            _coerce_int(parent_node.get("depth"), 1) + 1,
+        )
         children_ids = _coerce_children_ids(existing_node.get("children_ids"))
         status = _normalize_status(data.get("status") or existing_node.get("status"))
         raw_activity = (
@@ -685,6 +707,11 @@ def _merge_subtask_events_into_snapshot(
             "depth": depth,
             "index": sub_task_index if sub_task_index > 0 else existing_node.get("index"),
             "parent_id": parent_id,
+            "node_id": _coerce_non_empty_string(data.get("node_id")),
+            "parent_node_id": explicit_parent_id,
+            "path": data.get("path") if isinstance(data.get("path"), list) else [],
+            "display_path": _coerce_non_empty_string(data.get("display_path")),
+            "identity_model": _coerce_non_empty_string(data.get("identity_model")),
             "children_ids": children_ids,
             "_order": (
                 sub_task_index
@@ -701,6 +728,13 @@ def _merge_subtask_events_into_snapshot(
                 fallback_tool_input=data.get("tool_input"),
             )
         )
+        previous_parent_id = _coerce_non_empty_string(existing_node.get("parent_id"))
+        if previous_parent_id and previous_parent_id != parent_id and previous_parent_id in nodes:
+            nodes[previous_parent_id]["children_ids"] = [
+                child_id
+                for child_id in _coerce_children_ids(nodes[previous_parent_id].get("children_ids"))
+                if child_id != sub_task_id
+            ]
         nodes[sub_task_id] = node
 
         parent_children = _coerce_children_ids(parent_node.get("children_ids"))

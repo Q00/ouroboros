@@ -105,3 +105,24 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         (10001, 2),
         (101, 1),
     ]
+    assert [
+        call.kwargs["node_identity"].display_path
+        for call in executor._execute_atomic_ac.await_args_list
+    ] == [
+        "2.1.1.1",
+        "2.1.1.2",
+        "2.1.2",
+        "2.2",
+    ]
+    assert [
+        (
+            call.kwargs["parent_ac_index"],
+            call.kwargs["sub_ac_index"],
+        )
+        for call in executor._execute_atomic_ac.await_args_list
+    ] == [
+        (None, None),
+        (None, None),
+        (None, None),
+        (1, 1),
+    ]

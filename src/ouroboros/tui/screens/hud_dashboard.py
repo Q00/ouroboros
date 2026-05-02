@@ -360,17 +360,15 @@ class HUDDashboardScreen(Screen[None]):
         if ac_index not in self._subtasks:
             self._subtasks[ac_index] = []
 
-        existing = next(
-            (st for st in self._subtasks[ac_index] if st["id"] == message.sub_task_id),
-            None,
-        )
+        subtask_id = message.node_id or message.sub_task_id
+        existing = next((st for st in self._subtasks[ac_index] if st["id"] == subtask_id), None)
 
         if existing:
             existing["status"] = message.status
         else:
             self._subtasks[ac_index].append(
                 {
-                    "id": message.sub_task_id,
+                    "id": subtask_id,
                     "index": message.sub_task_index,
                     "content": message.content,
                     "status": message.status,

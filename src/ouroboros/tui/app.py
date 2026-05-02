@@ -438,8 +438,8 @@ class OuroborosTUI(App[None]):
     def on_subtask_updated(self, message: SubtaskUpdated) -> None:
         """Handle sub-task updates and add to AC tree (SSOT)."""
         nodes = self._state.ac_tree.get("nodes", {})
-        parent_ac_id = f"ac_{message.ac_index}"
-        sub_task_id = message.sub_task_id
+        parent_ac_id = message.parent_node_id or f"ac_{message.ac_index}"
+        sub_task_id = message.node_id or message.sub_task_id
         existing_node = nodes.get(sub_task_id, {})
 
         # Add or update subtask node
@@ -447,10 +447,18 @@ class OuroborosTUI(App[None]):
             "id": sub_task_id,
             "content": message.content or existing_node.get("content", ""),
             "status": message.status,
-            "depth": existing_node.get("depth", 2),
+            "depth": message.node_depth
+            if message.node_depth is not None
+            else existing_node.get("depth", 2),
             "parent_id": parent_ac_id,
             "is_atomic": True,
             "children_ids": existing_node.get("children_ids", []),
+            "node_id": message.node_id,
+            "path": message.path,
+            "display_path": message.display_path,
+            "ordinal": message.ordinal,
+            "root_ac_index": message.root_ac_index,
+            "identity_model": message.identity_model,
         }
         if message.current_tool_activity:
             subtask_node["current_tool_activity"] = dict(message.current_tool_activity)
@@ -465,6 +473,17 @@ class OuroborosTUI(App[None]):
         nodes[sub_task_id] = subtask_node
 
         # Update parent's children_ids (add if not present)
+        previous_parent_id = existing_node.get("parent_id")
+        if (
+            isinstance(previous_parent_id, str)
+            and previous_parent_id != parent_ac_id
+            and previous_parent_id in nodes
+        ):
+            nodes[previous_parent_id]["children_ids"] = [
+                child_id
+                for child_id in nodes[previous_parent_id].get("children_ids", [])
+                if child_id != sub_task_id
+            ]
         if parent_ac_id in nodes:
             parent = nodes[parent_ac_id]
             children = parent.get("children_ids", [])
@@ -566,7 +585,7 @@ class OuroborosTUI(App[None]):
         # Create child nodes for each AC
         for ac in acceptance_criteria:
             ac_index = ac.get("index", 0)
-            ac_id = f"ac_{ac_index}"
+            ac_id = ac.get("node_id") or ac.get("ac_id") or f"ac_{ac_index}"
             child_ids.append(ac_id)
 
             # Map status from workflow to tree status
@@ -585,6 +604,12 @@ class OuroborosTUI(App[None]):
                 "depth": 1,
                 "is_atomic": True,  # Flat list = all atomic
                 "children_ids": [],
+                "node_id": ac.get("node_id"),
+                "path": ac.get("path", []),
+                "display_path": ac.get("display_path"),
+                "ordinal": ac.get("ordinal"),
+                "root_ac_index": ac.get("root_ac_index"),
+                "identity_model": ac.get("identity_model"),
             }
 
         # Create root node
@@ -631,7 +656,7 @@ class OuroborosTUI(App[None]):
         # Smart merge: update status/content but preserve children
         for ac in acceptance_criteria:
             ac_index = ac.get("index", 0)
-            ac_id = f"ac_{ac_index}"
+            ac_id = ac.get("node_id") or ac.get("ac_id") or f"ac_{ac_index}"
 
             status = ac.get("status", "pending")
             if status == "in_progress":
@@ -643,6 +668,12 @@ class OuroborosTUI(App[None]):
                 # Update existing node - preserve children_ids and is_atomic
                 existing_nodes[ac_id]["status"] = status
                 existing_nodes[ac_id]["content"] = ac.get("content", "")
+                existing_nodes[ac_id]["node_id"] = ac.get("node_id")
+                existing_nodes[ac_id]["path"] = ac.get("path", [])
+                existing_nodes[ac_id]["display_path"] = ac.get("display_path")
+                existing_nodes[ac_id]["ordinal"] = ac.get("ordinal")
+                existing_nodes[ac_id]["root_ac_index"] = ac.get("root_ac_index")
+                existing_nodes[ac_id]["identity_model"] = ac.get("identity_model")
             else:
                 # New AC node - add it
                 existing_nodes[ac_id] = {
@@ -652,11 +683,20 @@ class OuroborosTUI(App[None]):
                     "depth": 1,
                     "is_atomic": True,
                     "children_ids": [],
+                    "node_id": ac.get("node_id"),
+                    "path": ac.get("path", []),
+                    "display_path": ac.get("display_path"),
+                    "ordinal": ac.get("ordinal"),
+                    "root_ac_index": ac.get("root_ac_index"),
+                    "identity_model": ac.get("identity_model"),
                 }
 
         # Ensure root exists and keep its children_ids in sync
         root_id = self._state.ac_tree.get("root_id", "root")
-        expected_child_ids = [f"ac_{ac.get('index', 0)}" for ac in acceptance_criteria]
+        expected_child_ids = [
+            ac.get("node_id") or ac.get("ac_id") or f"ac_{ac.get('index', 0)}"
+            for ac in acceptance_criteria
+        ]
 
         if root_id not in existing_nodes:
             existing_nodes[root_id] = {

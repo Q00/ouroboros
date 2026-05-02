@@ -38,6 +38,8 @@ _JOB_EXECUTION_EVENT_LIMIT = 250
 _JOB_SUBTASK_EVENT_PAGE_SIZE = 500
 _JOB_PROGRESS_EVENT_TYPES = {
     "workflow.progress.updated",
+    "execution.node.created",
+    "execution.node.updated",
     "execution.subtask.updated",
 }
 _JOB_VIEW_ALIASES = {
@@ -65,7 +67,16 @@ async def _query_all_execution_subtask_events(
 ) -> list[Any]:
     """Fetch subtask updates from one stable execution replay snapshot."""
     events, _cursor = await event_store.get_events_after("execution", execution_id, 0)
-    return [event for event in events if event.type == "execution.subtask.updated"]
+    return [
+        event
+        for event in events
+        if event.type
+        in {
+            "execution.node.created",
+            "execution.node.updated",
+            "execution.subtask.updated",
+        }
+    ]
 
 
 async def _query_latest_workflow_event(event_store: EventStore, execution_id: str) -> Any | None:
