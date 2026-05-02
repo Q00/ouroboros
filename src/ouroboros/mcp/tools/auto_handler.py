@@ -168,19 +168,32 @@ class AutoHandler:
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,
-            max_rounds=int(arguments.get("max_interview_rounds") or 12),
+            max_rounds=_positive_int_arg(arguments, "max_interview_rounds", 12),
         )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
             run_starter=HandlerRunStarter(start_execute, cwd=cwd),
             store=store,
-            repairer=SeedRepairer(max_repair_rounds=int(arguments.get("max_repair_rounds") or 5)),
+            repairer=SeedRepairer(
+                max_repair_rounds=_positive_int_arg(arguments, "max_repair_rounds", 5)
+            ),
             seed_saver=save_seed,
             seed_loader=load_seed,
             skip_run=skip_run,
         )
         return await pipeline.run(state)
+
+
+def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:
+    value = arguments.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{name} must be a positive integer"
+        raise ValueError(msg)
+    if value <= 0:
+        msg = f"{name} must be >= 1"
+        raise ValueError(msg)
+    return value
 
 
 def _safe_default_cwd() -> Path:

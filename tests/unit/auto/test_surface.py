@@ -314,3 +314,13 @@ def test_static_ouroboros_tools_exports_auto_handler() -> None:
     names = {handler.definition.name for handler in OUROBOROS_TOOLS}
 
     assert "ouroboros_auto" in names
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_rejects_zero_loop_bounds() -> None:
+    for field_name in ("max_interview_rounds", "max_repair_rounds"):
+        result = await AutoHandler().handle({"goal": "Build a CLI", field_name: 0})
+
+        assert result.is_err
+        assert field_name in str(result.error)
+        assert ">= 1" in str(result.error)
