@@ -314,3 +314,33 @@ async def test_close_cancels_stragglers_after_timeout() -> None:
 
     assert tasks[0].cancelled()
     assert bus._tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_hang_when_cancel_is_ignored() -> None:
+    bus = ControlBus(_close_timeout_s=0.01, _cancel_timeout_s=0.01)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stubborn(event: BaseEvent) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+
+    bus.subscribe(_is_directive, stubborn)
+    tasks = bus.publish(_directive_event())
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+
+    await asyncio.wait_for(bus.close(), timeout=0.5)
+
+    assert cancelled.is_set()
+    assert not tasks[0].done()
+
+    release.set()
+    await asyncio.wait_for(tasks[0], timeout=0.5)
+    await asyncio.sleep(0)
+    assert bus._tasks == set()

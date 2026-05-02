@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_CLOSE_TIMEOUT_S = 1.0
+DEFAULT_CANCEL_TIMEOUT_S = 0.1
 
 
 Predicate = Callable[["BaseEvent"], bool]
@@ -90,6 +91,7 @@ class ControlBus:
     _spawn: Callable[[Awaitable[None]], asyncio.Task[None]] | None = None
     _closed: bool = False
     _close_timeout_s: float | None = DEFAULT_CLOSE_TIMEOUT_S
+    _cancel_timeout_s: float | None = DEFAULT_CANCEL_TIMEOUT_S
 
     def subscribe(self, predicate: Predicate, handler: Handler) -> SubscriptionHandle:
         """Register *handler* to be invoked when *predicate* returns ``True``.
@@ -186,14 +188,23 @@ class ControlBus:
             return
         self._closed = True
         self._subscriptions.clear()
-        await self.drain(timeout=self._close_timeout_s)
+        await self.drain(
+            timeout=self._close_timeout_s,
+            cancel_timeout=self._cancel_timeout_s,
+        )
 
-    async def drain(self, *, timeout: float | None = DEFAULT_CLOSE_TIMEOUT_S) -> None:
+    async def drain(
+        self,
+        *,
+        timeout: float | None = DEFAULT_CLOSE_TIMEOUT_S,
+        cancel_timeout: float | None = DEFAULT_CANCEL_TIMEOUT_S,
+    ) -> None:
         """Await pending subscriber tasks, cancelling stragglers after *timeout*.
 
-        ``timeout=None`` waits indefinitely. Any task exceptions are
-        collected so drain itself remains a lifecycle cleanup primitive,
-        not a second error channel.
+        ``timeout=None`` waits indefinitely before cancellation.
+        ``cancel_timeout=None`` waits indefinitely after cancellation.
+        Any task exceptions are collected so drain itself remains a
+        lifecycle cleanup primitive, not a second error channel.
         """
         pending = tuple(task for task in self._tasks if not task.done())
         if not pending:
@@ -215,5 +226,21 @@ class ControlBus:
             )
             for task in still_pending:
                 task.cancel()
-            await asyncio.gather(*still_pending, return_exceptions=True)
+            if cancel_timeout is None:
+                await asyncio.gather(*still_pending, return_exceptions=True)
+            else:
+                cancelled_done, still_running = await asyncio.wait(
+                    still_pending,
+                    timeout=max(cancel_timeout, 0.0),
+                )
+                if cancelled_done:
+                    await asyncio.gather(*cancelled_done, return_exceptions=True)
+                if still_running:
+                    logger.error(
+                        "control_bus.cancel_timeout",
+                        extra={
+                            "pending_tasks": len(still_running),
+                            "timeout_s": cancel_timeout,
+                        },
+                    )
         self._tasks.difference_update(task for task in self._tasks if task.done())
