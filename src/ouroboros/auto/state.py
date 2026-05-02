@@ -263,10 +263,17 @@ class AutoPipelineState:
                 msg = "timeout_seconds_by_phase values must be positive integers"
                 raise ValueError(msg)
 
-        for field_name in ("ledger",):
-            if not isinstance(getattr(self, field_name), dict):
-                msg = f"{field_name} must be an object"
-                raise ValueError(msg)
+        if not isinstance(self.ledger, dict):
+            msg = "ledger must be an object"
+            raise ValueError(msg)
+        if self.ledger:
+            try:
+                from ouroboros.auto.ledger import SeedDraftLedger
+
+                SeedDraftLedger.from_dict(self.ledger)
+            except Exception as exc:
+                msg = "ledger must be a valid Seed Draft Ledger"
+                raise ValueError(msg) from exc
         optional_string_fields = (
             "runtime_backend",
             "opencode_mode",
