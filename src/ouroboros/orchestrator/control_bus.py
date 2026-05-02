@@ -45,6 +45,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_CLOSE_TIMEOUT_S = 1.0
+
 
 Predicate = Callable[["BaseEvent"], bool]
 Handler = Callable[["BaseEvent"], Awaitable[None]]
@@ -86,6 +88,8 @@ class ControlBus:
     _owner: object = field(default_factory=object)
     _tasks: set[asyncio.Task[None]] = field(default_factory=set)
     _spawn: Callable[[Awaitable[None]], asyncio.Task[None]] | None = None
+    _closed: bool = False
+    _close_timeout_s: float | None = DEFAULT_CLOSE_TIMEOUT_S
 
     def subscribe(self, predicate: Predicate, handler: Handler) -> SubscriptionHandle:
         """Register *handler* to be invoked when *predicate* returns ``True``.
@@ -102,6 +106,9 @@ class ControlBus:
             A :class:`SubscriptionHandle` accepted by
             :meth:`unsubscribe`.
         """
+        if self._closed:
+            msg = "Cannot subscribe to a closed ControlBus"
+            raise RuntimeError(msg)
         handle = SubscriptionHandle(_id=self._next_id, _owner=self._owner)
         self._next_id += 1
         self._subscriptions.append(
@@ -129,6 +136,12 @@ class ControlBus:
         A subscription whose predicate raises an exception is treated as
         non-matching for that event; the predicate is not unsubscribed.
         """
+        if self._closed:
+            logger.debug(
+                "control_bus.publish_after_close",
+                extra={"event_type": event.type},
+            )
+            return ()
         spawned: list[asyncio.Task[None]] = []
         for sub in tuple(self._subscriptions):
             try:
@@ -161,3 +174,46 @@ class ControlBus:
                 "control_bus.handler_raised",
                 extra={"event_type": event.type, "error": repr(exc)},
             )
+
+    async def close(self) -> None:
+        """Close the bus and drain in-flight subscriber tasks.
+
+        Shutdown is idempotent. Once closed, the bus rejects new
+        subscriptions and turns publishes into no-ops so server teardown
+        cannot fan out new work while owned resources are closing.
+        """
+        if self._closed and not self._tasks:
+            return
+        self._closed = True
+        self._subscriptions.clear()
+        await self.drain(timeout=self._close_timeout_s)
+
+    async def drain(self, *, timeout: float | None = DEFAULT_CLOSE_TIMEOUT_S) -> None:
+        """Await pending subscriber tasks, cancelling stragglers after *timeout*.
+
+        ``timeout=None`` waits indefinitely. Any task exceptions are
+        collected so drain itself remains a lifecycle cleanup primitive,
+        not a second error channel.
+        """
+        pending = tuple(task for task in self._tasks if not task.done())
+        if not pending:
+            self._tasks.difference_update(task for task in self._tasks if task.done())
+            return
+
+        if timeout is None:
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._tasks.difference_update(task for task in self._tasks if task.done())
+            return
+
+        done, still_pending = await asyncio.wait(pending, timeout=max(timeout, 0.0))
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+        if still_pending:
+            logger.warning(
+                "control_bus.drain_timeout",
+                extra={"pending_tasks": len(still_pending), "timeout_s": timeout},
+            )
+            for task in still_pending:
+                task.cancel()
+            await asyncio.gather(*still_pending, return_exceptions=True)
+        self._tasks.difference_update(task for task in self._tasks if task.done())

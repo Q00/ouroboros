@@ -269,3 +269,48 @@ async def test_publish_retains_fire_and_forget_tasks_until_done() -> None:
     await asyncio.gather(*tasks)
     await asyncio.sleep(0)
     assert bus._tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_pending_tasks_and_stops_delivery() -> None:
+    bus = ControlBus()
+    release = asyncio.Event()
+    seen: list[str] = []
+
+    async def slow(event: BaseEvent) -> None:
+        await release.wait()
+        seen.append(event.type)
+
+    bus.subscribe(_is_directive, slow)
+    tasks = bus.publish(_directive_event())
+
+    assert len(tasks) == 1
+    assert len(bus._tasks) == 1
+
+    release.set()
+    await bus.close()
+
+    assert seen == ["control.directive.emitted"]
+    assert bus._tasks == set()
+    assert bus.publish(_directive_event()) == ()
+    with pytest.raises(RuntimeError, match="closed ControlBus"):
+        bus.subscribe(_is_directive, slow)
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_stragglers_after_timeout() -> None:
+    bus = ControlBus(_close_timeout_s=0.01)
+    started = asyncio.Event()
+
+    async def blocked(event: BaseEvent) -> None:
+        started.set()
+        await asyncio.sleep(60)
+
+    bus.subscribe(_is_directive, blocked)
+    tasks = bus.publish(_directive_event())
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+
+    await bus.close()
+
+    assert tasks[0].cancelled()
+    assert bus._tasks == set()

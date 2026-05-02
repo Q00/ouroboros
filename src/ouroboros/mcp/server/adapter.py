@@ -1467,24 +1467,27 @@ def create_ouroboros_server(
         rate_limit_config=rate_limit_config,
     )
 
-    # The server owns the shared event store lifecycle
-    server.register_owned_resource(event_store)
-    if brownfield_store is not None:
-        server.register_owned_resource(brownfield_store)
-
     # Build the AgentRuntimeContext that #474 funnels through every
     # handler. For now the context only exposes the EventStore, the
     # backend labels, the optional MCP bridge, and a fresh ControlBus
     # for #515. Subsequent migration slices move handler internals to
     # consume context.mcp_bridge directly instead of self.mcp_manager.
+    control_bus = ControlBus()
     agent_runtime_context = AgentRuntimeContext(
         event_store=event_store,
         runtime_backend=resolved_runtime_backend,
         llm_backend=llm_backend,
         mcp_bridge=mcp_bridge,
-        control=ControlBus(),
+        control=control_bus,
     )
     server.set_runtime_context(agent_runtime_context)
+
+    # Close the reactive control surface before stores/bridges it may
+    # reference from subscriber tasks.
+    server.register_owned_resource(control_bus)
+    server.register_owned_resource(event_store)
+    if brownfield_store is not None:
+        server.register_owned_resource(brownfield_store)
 
     # Inject the bridge from the runtime context into every
     # BridgeAwareMixin handler. ``inject_runtime_context`` is byte-
