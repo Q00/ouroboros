@@ -904,7 +904,7 @@ async def test_pipeline_marks_malformed_run_starter_result_failed(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_pipeline_retries_after_run_start_timeout(tmp_path) -> None:
+async def test_pipeline_blocks_duplicate_run_after_start_timeout(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -919,8 +919,7 @@ async def test_pipeline_retries_after_run_start_timeout(tmp_path) -> None:
     async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
         nonlocal calls
         calls += 1
-        if calls == 1:
-            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)
         return {"job_id": "job_after_timeout", "execution_id": "exec_after_timeout"}
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -947,9 +946,10 @@ async def test_pipeline_retries_after_run_start_timeout(tmp_path) -> None:
     second = await pipeline.run(state)
 
     assert first.status == "blocked"
-    assert second.status == "complete"
-    assert second.job_id == "job_after_timeout"
-    assert calls == 2
+    assert state.run_start_attempted is True
+    assert second.status == "blocked"
+    assert "duplicate execution" in (second.blocker or "")
+    assert calls == 1
 
 
 @pytest.mark.asyncio
