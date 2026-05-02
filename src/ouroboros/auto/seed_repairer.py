@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import re
+from uuid import uuid4
 
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
@@ -92,12 +94,21 @@ class SeedRepairer:
                 unresolved.append(finding)
 
         changed = bool(applied)
-        updated_seed = seed.model_copy(
-            update={
-                "constraints": tuple(dict.fromkeys(constraints)),
-                "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
-            }
-        )
+        updated_seed = seed
+        if changed:
+            updated_seed = seed.model_copy(
+                update={
+                    "constraints": tuple(dict.fromkeys(constraints)),
+                    "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
+                    "metadata": seed.metadata.model_copy(
+                        update={
+                            "seed_id": f"seed_{uuid4().hex[:12]}",
+                            "created_at": datetime.now(UTC),
+                            "parent_seed_id": seed.metadata.seed_id,
+                        }
+                    ),
+                }
+            )
         return RepairResult(
             changed=changed,
             seed=updated_seed,

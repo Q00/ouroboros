@@ -181,6 +181,19 @@ def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
     assert "original requirement for A command/API check" not in repaired_acceptance
 
 
+def test_seed_repairer_assigns_new_seed_identity_after_mutation() -> None:
+    seed = _seed(ac=("The CLI should be easy and user-friendly",))
+    ledger = SeedDraftLedger.from_goal(seed.goal)
+    _fill_ready(ledger)
+    review = SeedReviewer().review(seed, ledger=ledger)
+
+    result = SeedRepairer().repair_once(seed, review, ledger=ledger)
+
+    assert result.changed
+    assert result.seed.metadata.seed_id != seed.metadata.seed_id
+    assert result.seed.metadata.parent_seed_id == seed.metadata.seed_id
+
+
 @pytest.mark.asyncio
 async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001

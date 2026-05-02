@@ -303,7 +303,7 @@ def _seed_goal_matches_ledger(seed_goal: str, ledger: SeedDraftLedger) -> bool:
         if not ledger_tokens:
             continue
         shared = seed_tokens & ledger_tokens
-        if ledger_tokens <= seed_tokens or seed_tokens <= ledger_tokens:
+        if ledger_tokens <= seed_tokens:
             return True
         if len(shared) / max(len(ledger_tokens), 1) >= 0.6:
             return True

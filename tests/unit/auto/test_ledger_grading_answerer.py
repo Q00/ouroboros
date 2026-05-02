@@ -134,6 +134,20 @@ def test_grade_gate_blocks_seed_goal_mismatch_with_ready_ledger() -> None:
     assert {blocker.code for blocker in result.blockers} == {"seed_goal_mismatch"}
 
 
+def test_grade_gate_blocks_subset_goal_mismatch_with_ready_ledger() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a weather dashboard")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Build a dashboard",
+        ac=("`dashboard show` prints stable stdout containing dashboard status",),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.C
+    assert {blocker.code for blocker in result.blockers} == {"seed_goal_mismatch"}
+
+
 def test_grade_gate_rejects_unresolved_ledger_even_with_clean_seed() -> None:
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     seed = _seed(ac=("`habit list` prints stdout containing created habits",))
