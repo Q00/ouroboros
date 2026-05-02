@@ -278,7 +278,7 @@ class AutoPipeline:
                 return self._result(state, ledger, review=review, blocker=state.last_error)
             if review is None:
                 reviewer = self.reviewer or SeedReviewer(self.grade_gate)
-                review = reviewer.review(seed)
+                review = reviewer.review(seed, ledger=ledger)
                 state.last_grade = review.grade_result.grade.value
                 state.findings = [asdict(finding) for finding in review.findings]
                 self._save(state)
