@@ -136,6 +136,7 @@ class SeedRepairer:
                 return current, review, history
             current = repair.seed
             if high and high == previous_high_fingerprints:
+                review = self.reviewer.review(current, ledger=ledger)
                 return current, review, history
             previous_high_fingerprints = high
             review = self.reviewer.review(current, ledger=ledger)
