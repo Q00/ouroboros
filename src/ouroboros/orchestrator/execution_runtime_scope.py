@@ -7,6 +7,7 @@ distinct, stable locations without leaking runtime-specific details upward.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import blake2b
 import re
 
 
@@ -31,6 +32,118 @@ class ExecutionRuntimeScope:
         return self.retry_attempt + 1
 
 
+def _display_path(path: tuple[int, ...]) -> str:
+    """Return a human-readable 1-based dotted path for an execution node."""
+    return ".".join(str(segment + 1) for segment in path)
+
+
+def _build_local_node_id(path: tuple[int, ...]) -> str:
+    """Return a stable, compact node id unique within an execution."""
+    if not path:
+        msg = "execution node path must not be empty"
+        raise ValueError(msg)
+    if len(path) == 1:
+        return f"ac_{path[0]}"
+
+    digest = blake2b(
+        ".".join(str(segment) for segment in path).encode("utf-8"),
+        digest_size=8,
+    ).hexdigest()
+    return f"node_{digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionNodeIdentity:
+    """Canonical hierarchical identity for one AC/Sub-AC execution node.
+
+    ``node_id`` is intentionally local to an execution; event payloads also
+    carry ``execution_id`` and runtime scopes prefix it with the workflow scope.
+    ``path`` is metadata for ordering/display, not the storage key.
+    """
+
+    execution_context_id: str | None
+    root_ac_index: int
+    path: tuple[int, ...]
+    node_id: str
+    parent_node_id: str | None
+    depth: int
+    ordinal: int
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            msg = "execution node path must not be empty"
+            raise ValueError(msg)
+        if self.root_ac_index < 0:
+            msg = "root_ac_index must be >= 0"
+            raise ValueError(msg)
+        if self.depth != len(self.path) - 1:
+            msg = "depth must match execution node path length"
+            raise ValueError(msg)
+        if self.ordinal < 0:
+            msg = "ordinal must be >= 0"
+            raise ValueError(msg)
+
+    @classmethod
+    def root(
+        cls,
+        *,
+        execution_context_id: str | None,
+        ac_index: int,
+    ) -> ExecutionNodeIdentity:
+        """Build identity for a top-level AC node."""
+        path = (ac_index,)
+        return cls(
+            execution_context_id=execution_context_id,
+            root_ac_index=ac_index,
+            path=path,
+            node_id=_build_local_node_id(path),
+            parent_node_id=None,
+            depth=0,
+            ordinal=ac_index,
+        )
+
+    def child(self, ordinal: int) -> ExecutionNodeIdentity:
+        """Build identity for a direct child node."""
+        path = (*self.path, ordinal)
+        return ExecutionNodeIdentity(
+            execution_context_id=self.execution_context_id,
+            root_ac_index=self.root_ac_index,
+            path=path,
+            node_id=_build_local_node_id(path),
+            parent_node_id=self.node_id,
+            depth=self.depth + 1,
+            ordinal=ordinal,
+        )
+
+    @property
+    def display_path(self) -> str:
+        """Return a stable human-readable dotted path, e.g. ``1.2.3``."""
+        return _display_path(self.path)
+
+    @property
+    def root_ac_number(self) -> int:
+        """Return the human-readable top-level AC number."""
+        return self.root_ac_index + 1
+
+    def to_event_metadata(self) -> dict[str, object]:
+        """Serialize node identity fields for persisted events."""
+        metadata: dict[str, object] = {
+            "identity_model": "execution_node_v1",
+            "schema_version": 1,
+            "node_id": self.node_id,
+            "parent_node_id": self.parent_node_id,
+            "root_ac_index": self.root_ac_index,
+            "root_ac_number": self.root_ac_number,
+            "path": list(self.path),
+            "display_path": self.display_path,
+            "depth": self.depth,
+            "ordinal": self.ordinal,
+        }
+        if self.execution_context_id:
+            metadata["execution_id"] = self.execution_context_id
+        return metadata
+
+
 @dataclass(frozen=True, slots=True)
 class ACRuntimeIdentity:
     """Stable AC/session ownership metadata for one implementation attempt."""
@@ -39,6 +152,13 @@ class ACRuntimeIdentity:
     ac_index: int | None = None
     parent_ac_index: int | None = None
     sub_ac_index: int | None = None
+    node_id: str | None = None
+    parent_node_id: str | None = None
+    root_ac_index: int | None = None
+    node_path: tuple[int, ...] = ()
+    display_path: str | None = None
+    depth: int | None = None
+    ordinal: int | None = None
     scope: str = "ac"
     session_role: str = "implementation"
 
@@ -95,6 +215,22 @@ class ACRuntimeIdentity:
             metadata["sub_ac_index"] = self.sub_ac_index
         if self.ac_index is not None and self.parent_ac_index is None:
             metadata["ac_index"] = self.ac_index
+        if self.node_id is not None:
+            metadata["identity_model"] = "execution_node_v1"
+            metadata["schema_version"] = 1
+            metadata["node_id"] = self.node_id
+            metadata["parent_node_id"] = self.parent_node_id
+        if self.root_ac_index is not None:
+            metadata["root_ac_index"] = self.root_ac_index
+            metadata["root_ac_number"] = self.root_ac_index + 1
+        if self.node_path:
+            metadata["path"] = list(self.node_path)
+        if self.display_path is not None:
+            metadata["display_path"] = self.display_path
+        if self.depth is not None:
+            metadata["depth"] = self.depth
+        if self.ordinal is not None:
+            metadata["ordinal"] = self.ordinal
         return metadata
 
 
@@ -117,11 +253,40 @@ def build_ac_runtime_scope(
     parent_ac_index: int | None = None,
     sub_ac_index: int | None = None,
     retry_attempt: int = 0,
+    node_id: str | None = None,
+    node_path: tuple[int, ...] = (),
 ) -> ExecutionRuntimeScope:
     """Build the persisted runtime scope for an AC implementation session."""
     workflow_scope = (
         normalize_execution_scope_id(execution_context_id) if execution_context_id else None
     )
+    if node_id:
+        normalized_node_id = _normalize_scope_segment(node_id, fallback="node")
+        aggregate_id = (
+            f"{workflow_scope}_{normalized_node_id}" if workflow_scope else normalized_node_id
+        )
+        if len(node_path) == 1:
+            state_path = f"execution.acceptance_criteria.ac_{node_path[0]}.implementation_session"
+            if workflow_scope is not None:
+                state_path = (
+                    "execution.workflows."
+                    f"{workflow_scope}.acceptance_criteria.ac_{node_path[0]}."
+                    "implementation_session"
+                )
+        elif workflow_scope is not None:
+            state_path = (
+                "execution.workflows."
+                f"{workflow_scope}.nodes.{normalized_node_id}.implementation_session"
+            )
+        else:
+            state_path = f"execution.nodes.{normalized_node_id}.implementation_session"
+        return ExecutionRuntimeScope(
+            aggregate_type="execution",
+            aggregate_id=aggregate_id,
+            state_path=state_path,
+            retry_attempt=retry_attempt,
+        )
+
     if is_sub_ac:
         if parent_ac_index is None or sub_ac_index is None:
             msg = "parent_ac_index and sub_ac_index are required for sub-AC runtime scopes"
@@ -170,6 +335,7 @@ def build_ac_runtime_identity(
     parent_ac_index: int | None = None,
     sub_ac_index: int | None = None,
     retry_attempt: int = 0,
+    node_identity: ExecutionNodeIdentity | None = None,
 ) -> ACRuntimeIdentity:
     """Build stable AC/session identity metadata for one implementation attempt."""
     runtime_scope = build_ac_runtime_scope(
@@ -179,12 +345,21 @@ def build_ac_runtime_identity(
         parent_ac_index=parent_ac_index,
         sub_ac_index=sub_ac_index,
         retry_attempt=retry_attempt,
+        node_id=node_identity.node_id if node_identity is not None else None,
+        node_path=node_identity.path if node_identity is not None else (),
     )
     return ACRuntimeIdentity(
         runtime_scope=runtime_scope,
         ac_index=None if is_sub_ac else ac_index,
         parent_ac_index=parent_ac_index if is_sub_ac else None,
         sub_ac_index=sub_ac_index if is_sub_ac else None,
+        node_id=node_identity.node_id if node_identity is not None else None,
+        parent_node_id=node_identity.parent_node_id if node_identity is not None else None,
+        root_ac_index=node_identity.root_ac_index if node_identity is not None else None,
+        node_path=node_identity.path if node_identity is not None else (),
+        display_path=node_identity.display_path if node_identity is not None else None,
+        depth=node_identity.depth if node_identity is not None else None,
+        ordinal=node_identity.ordinal if node_identity is not None else None,
     )
 
 
@@ -209,6 +384,7 @@ __all__ = [
     "ACRuntimeIdentity",
     "build_ac_runtime_identity",
     "ExecutionRuntimeScope",
+    "ExecutionNodeIdentity",
     "build_ac_runtime_scope",
     "build_level_coordinator_runtime_scope",
     "normalize_execution_scope_id",

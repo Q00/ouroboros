@@ -440,6 +440,42 @@ class TestCreateMessageFromEvent:
             "tool_input": {"file_path": "src/ouroboros/tui/events.py"},
         }
 
+    def test_node_event_preserves_hierarchical_identity(self) -> None:
+        """Generic node events should project through the same SubtaskUpdated bridge."""
+        event = BaseEvent(
+            type="execution.node.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "identity_model": "execution_node_v1",
+                "node_id": "node_child",
+                "parent_node_id": "ac_0",
+                "display_path": "1.2",
+                "path": [0, 1],
+                "depth": 1,
+                "ordinal": 1,
+                "root_ac_index": 0,
+                "legacy_ac_index": 1,
+                "legacy_sub_task_index": 2,
+                "legacy_sub_task_id": "ac_1_sub_2",
+                "content": "Patch node event ownership",
+                "status": "executing",
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, SubtaskUpdated)
+        assert msg.node_id == "node_child"
+        assert msg.parent_node_id == "ac_0"
+        assert msg.display_path == "1.2"
+        assert msg.path == [0, 1]
+        assert msg.node_depth == 1
+        assert msg.ordinal == 1
+        assert msg.root_ac_index == 0
+        assert msg.ac_index == 1
+        assert msg.sub_task_id == "ac_1_sub_2"
+
     def test_cost_updated_event(self) -> None:
         """Test converting cost.updated event."""
         event = BaseEvent(

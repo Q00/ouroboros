@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
+    ExecutionNodeIdentity,
     ExecutionRuntimeScope,
     build_ac_runtime_identity,
     build_ac_runtime_scope,
@@ -85,6 +86,58 @@ class TestBuildACRuntimeScope:
     def test_negative_retry_attempt_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="retry_attempt must be >= 0"):
             build_ac_runtime_scope(1, retry_attempt=-1)
+
+    def test_node_identity_scope_is_hierarchical_and_compact(self) -> None:
+        root = ExecutionNodeIdentity.root(
+            execution_context_id="exec_scope",
+            ac_index=0,
+        )
+        child = root.child(0)
+        grandchild = child.child(1)
+        sibling_root = ExecutionNodeIdentity.root(
+            execution_context_id="exec_scope",
+            ac_index=1,
+        )
+
+        assert root.node_id == "ac_0"
+        assert root.parent_node_id is None
+        assert root.display_path == "1"
+        assert child.parent_node_id == root.node_id
+        assert child.display_path == "1.1"
+        assert grandchild.parent_node_id == child.node_id
+        assert grandchild.display_path == "1.1.2"
+        assert grandchild.root_ac_index == 0
+        assert grandchild.node_id.startswith("node_")
+        assert grandchild.node_id != sibling_root.node_id
+
+    def test_node_identity_runtime_scope_avoids_synthetic_ac_index_collisions(self) -> None:
+        root = ExecutionNodeIdentity.root(
+            execution_context_id="workflow:alpha/beta",
+            ac_index=0,
+        )
+        grandchild = root.child(0).child(1)
+        synthetic_top_level_collision = ExecutionNodeIdentity.root(
+            execution_context_id="workflow:alpha/beta",
+            ac_index=10000,
+        )
+
+        grandchild_scope = build_ac_runtime_scope(
+            10000,
+            execution_context_id="workflow:alpha/beta",
+            is_sub_ac=True,
+            node_id=grandchild.node_id,
+            node_path=grandchild.path,
+        )
+        top_level_scope = build_ac_runtime_scope(
+            10000,
+            execution_context_id="workflow:alpha/beta",
+            node_id=synthetic_top_level_collision.node_id,
+            node_path=synthetic_top_level_collision.path,
+        )
+
+        assert grandchild_scope.aggregate_id != top_level_scope.aggregate_id
+        assert ".nodes." in grandchild_scope.state_path
+        assert ".acceptance_criteria.ac_10000." in top_level_scope.state_path
 
 
 class TestBuildLevelCoordinatorRuntimeScope:

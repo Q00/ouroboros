@@ -63,6 +63,10 @@ from ouroboros.orchestrator.events import (
     create_tool_called_event,
     create_workflow_progress_event,
 )
+from ouroboros.orchestrator.execution_runtime_scope import (
+    ExecutionNodeIdentity,
+    build_ac_runtime_scope,
+)
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
@@ -806,6 +810,37 @@ class OrchestratorRunner:
             **projected.runtime_metadata,
         }
         return event.model_copy(update={"data": event_data})
+
+    @staticmethod
+    def _with_execution_node_identity(
+        acceptance_criteria: list[dict[str, Any]],
+        *,
+        execution_id: str,
+    ) -> list[dict[str, Any]]:
+        """Attach canonical node identity to top-level workflow progress items."""
+        enriched: list[dict[str, Any]] = []
+        for order, raw_ac in enumerate(acceptance_criteria):
+            ac = dict(raw_ac)
+            raw_index = ac.get("index")
+            ac_index = raw_index - 1 if isinstance(raw_index, int) and raw_index > 0 else order
+            node_identity = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id,
+                ac_index=ac_index,
+            )
+            runtime_scope = build_ac_runtime_scope(
+                ac_index,
+                execution_context_id=execution_id,
+                node_id=node_identity.node_id,
+                node_path=node_identity.path,
+            )
+            enriched.append(
+                {
+                    **node_identity.to_event_metadata(),
+                    **ac,
+                    "ac_id": ac.get("ac_id") or runtime_scope.aggregate_id,
+                }
+            )
+        return enriched
 
     @staticmethod
     def _is_recoverable_resume_failure(message: AgentMessage) -> bool:
@@ -1752,7 +1787,10 @@ class OrchestratorRunner:
                         workflow_event = create_workflow_progress_event(
                             execution_id=exec_id,
                             session_id=tracker.session_id,
-                            acceptance_criteria=progress_data["acceptance_criteria"],
+                            acceptance_criteria=self._with_execution_node_identity(
+                                progress_data["acceptance_criteria"],
+                                execution_id=exec_id,
+                            ),
                             completed_count=progress_data["completed_count"],
                             total_count=progress_data["total_count"],
                             current_ac_index=progress_data["current_ac_index"],
@@ -2519,7 +2557,10 @@ Note: This is a resumed session. Please continue from where execution was interr
                         workflow_event = create_workflow_progress_event(
                             execution_id=session_id,
                             session_id=session_id,
-                            acceptance_criteria=progress_data["acceptance_criteria"],
+                            acceptance_criteria=self._with_execution_node_identity(
+                                progress_data["acceptance_criteria"],
+                                execution_id=session_id,
+                            ),
                             completed_count=progress_data["completed_count"],
                             total_count=progress_data["total_count"],
                             current_ac_index=progress_data["current_ac_index"],

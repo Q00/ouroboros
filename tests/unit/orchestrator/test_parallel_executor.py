@@ -17,6 +17,7 @@ from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
     MAX_STALL_RETRIES,
@@ -82,6 +83,87 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
 
 class TestParallelACExecutor:
     """Tests for staged hybrid result handling."""
+
+    @pytest.mark.asyncio
+    async def test_emit_subtask_event_preserves_full_content_with_compact_label(self) -> None:
+        """Sub-AC events should retain full replay content plus compact display text."""
+        event_store = AsyncMock()
+        appended_events: list[BaseEvent] = []
+
+        async def _append(event: BaseEvent) -> None:
+            appended_events.append(event)
+
+        event_store.append.side_effect = _append
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+        )
+        full_content = (
+            "Define baseline_source_branch as a single authoritative baseline identity "
+            "with repository URL, exact ref, commit SHA, capture timestamp, operator, "
+            "and artifact bundle IDs."
+        )
+
+        await executor._emit_subtask_event(
+            execution_id="exec_subtask_event",
+            ac_index=0,
+            sub_task_index=1,
+            sub_task_content=full_content,
+            status="executing",
+        )
+
+        assert len(appended_events) == 1
+        data = appended_events[0].data
+        assert data["content"] == full_content
+        assert data["label"] == "Define baseline_source_branch as a single authorit"
+        assert len(data["label"]) == 50
+        assert data["sub_task_id"] == "ac_1_sub_1"
+        assert data["status"] == "executing"
+
+    @pytest.mark.asyncio
+    async def test_emit_subtask_event_emits_node_identity_with_legacy_event(self) -> None:
+        """New Sub-AC events should expose canonical node identity and legacy fields."""
+        event_store = AsyncMock()
+        appended_events: list[BaseEvent] = []
+
+        async def _append(event: BaseEvent) -> None:
+            appended_events.append(event)
+
+        event_store.append.side_effect = _append
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+        )
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="exec_subtask_event",
+            ac_index=0,
+        ).child(1)
+
+        await executor._emit_subtask_event(
+            execution_id="exec_subtask_event",
+            ac_index=0,
+            sub_task_index=2,
+            sub_task_content="Populate the baseline source branch evidence ledger.",
+            status="pending",
+            node_identity=node_identity,
+        )
+
+        assert [event.type for event in appended_events] == [
+            "execution.node.created",
+            "execution.subtask.updated",
+        ]
+        node_event, legacy_event = appended_events
+        assert node_event.data["identity_model"] == "execution_node_v1"
+        assert node_event.data["node_id"] == node_identity.node_id
+        assert node_event.data["parent_node_id"] == "ac_0"
+        assert node_event.data["display_path"] == "1.2"
+        assert node_event.data["legacy_ac_index"] == 1
+        assert node_event.data["legacy_sub_task_id"] == "ac_1_sub_2"
+        assert legacy_event.data["node_id"] == node_identity.node_id
+        assert legacy_event.data["parent_node_id"] == "ac_0"
+        assert legacy_event.data["sub_task_id"] == "ac_1_sub_2"
 
     @pytest.mark.asyncio
     async def test_batch_fans_out_in_parallel_regardless_of_tool_catalog(self) -> None:
@@ -1025,7 +1107,13 @@ class TestParallelACExecutor:
             if call.args and call.args[0].type == "execution.ac.stall_detected"
         ]
         assert len(stall_events) == 1
-        assert stall_events[0].aggregate_id == "exec_atomic_retry_scope_sub_ac_1_0"
+        first_leaf_identity = executor._execute_atomic_ac.await_args_list[0].kwargs["node_identity"]
+        assert (
+            stall_events[0].aggregate_id == f"exec_atomic_retry_scope_{first_leaf_identity.node_id}"
+        )
+        assert stall_events[0].data["node_id"] == first_leaf_identity.node_id
+        assert stall_events[0].data["parent_node_id"] == "ac_1"
+        assert stall_events[0].data["display_path"] == "2.1"
         assert stall_events[0].data["attempt"] == 1
         assert stall_events[0].data["max_attempts"] == MAX_STALL_RETRIES + 1
         assert stall_events[0].data["action"] == "restart"
