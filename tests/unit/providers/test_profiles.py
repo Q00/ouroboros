@@ -104,6 +104,21 @@ def test_resolve_completion_profile_preserves_explicit_role_model() -> None:
     assert resolved.config.temperature == 0.2
 
 
+def test_resolve_completion_profile_resolves_empty_role_model() -> None:
+    """Empty request models are adapter-default sentinels, not explicit overrides."""
+    config = OuroborosConfig(
+        llm_profiles={"deep": {"model": "profile-model"}},
+        llm_role_profiles={"consensus_perspective": "deep"},
+    )
+    request = CompletionConfig(model="", role="consensus_perspective")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(request, backend="litellm")
+
+    assert resolved.profile_name == "deep"
+    assert resolved.config.model == "profile-model"
+
+
 def test_resolve_completion_profile_falls_back_when_config_missing() -> None:
     """Missing user config preserves existing model behavior."""
     request = CompletionConfig(model="fallback", role="qa", temperature=0.1)
