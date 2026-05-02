@@ -889,7 +889,7 @@ def create_ouroboros_server(
 
     def fresh_llm_adapter():
         return create_llm_adapter(
-            backend=None,
+            backend=llm_backend if llm_backend is not None else None,
             max_turns=1,
             cwd=effective_cwd,
         )

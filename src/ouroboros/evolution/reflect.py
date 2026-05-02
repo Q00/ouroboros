@@ -110,7 +110,7 @@ class ReflectEngine:
             try:
                 fresh = self.adapter_factory()
                 if fresh is not None:
-                    if current_backend:
+                    if backend_drifted:
                         self._captured_backend = current_backend
                         self.model = get_reflect_model(current_backend)
                     return fresh

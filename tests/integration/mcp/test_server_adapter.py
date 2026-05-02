@@ -589,9 +589,27 @@ class TestCreateOuroborosServer:
             factory()
 
         assert initial_kwargs["backend"] == "codex"
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] is None
+        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
         assert mock_create_llm_adapter.call_args.kwargs["cwd"] == initial_kwargs["cwd"]
         assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
+
+    def test_evolution_adapter_factory_uses_live_backend_without_explicit_override(self) -> None:
+        """Per-call evolution adapter factory resolves live config absent override."""
+        with (
+            patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
+            patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
+            patch("ouroboros.evolution.wonder.WonderEngine") as mock_wonder_engine,
+            patch("ouroboros.evolution.reflect.ReflectEngine"),
+        ):
+            mock_create_llm_adapter.return_value = MagicMock()
+            mock_create_runtime.return_value = MagicMock()
+
+            create_ouroboros_server(runtime_backend="codex")
+
+            factory = mock_wonder_engine.call_args.kwargs["adapter_factory"]
+            factory()
+
+        assert mock_create_llm_adapter.call_args.kwargs["backend"] is None
 
     def test_opencode_backend_is_accepted_at_server_creation(self) -> None:
         """OpenCode backend is forwarded through the shared adapter factory."""

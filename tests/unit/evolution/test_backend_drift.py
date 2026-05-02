@@ -111,23 +111,6 @@ class TestEvolutionBackendDrift:
         }
         assert engine.model == "gemini-wonder"
 
-    def test_factory_fresh_adapter_refreshes_model_without_backend_drift(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
-        )
-        fresh = _Adapter("fresh", _cwd="/safe", _max_turns=1)
-        engine = ReflectEngine(
-            llm_adapter=_Adapter("initial"),
-            model="codex-startup-override",
-            adapter_factory=lambda: fresh,
-        )
-        monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_reflect_model", Mock(return_value="claude-reflect")
-        )
-
-        assert engine._resolve_adapter() is fresh
-        assert engine.model == "claude-reflect"
-
     def test_factory_fresh_adapter_refreshes_model_on_backend_drift(self, monkeypatch) -> None:
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
