@@ -34,6 +34,11 @@ def test_auto_skill_frontmatter_dispatches_to_mcp_tool() -> None:
     assert "name: auto" in content
     assert "mcp_tool: ouroboros_auto" in content
     assert 'goal: "$1"' in content
+    assert 'resume: "$resume"' in content
+    assert 'skip_run: "$skip_run"' in content
+    assert 'max_interview_rounds: "$max_interview_rounds"' in content
+    assert "ooo auto --resume" in content
+    assert "--show-ledger" in content
 
 
 def test_auto_handler_schema_contains_hang_safe_options() -> None:
