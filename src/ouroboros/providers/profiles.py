@@ -61,6 +61,11 @@ def _coalesce[T](specific: T | None, general: T | None, fallback: T) -> T:
     return fallback
 
 
+def _has_request_model_override(config: CompletionConfig) -> bool:
+    """Return True when a role-based profile should preserve the request model."""
+    return bool(config.role and not config.profile and config.model.strip() != "default")
+
+
 def resolve_completion_profile(
     config: CompletionConfig,
     *,
@@ -92,10 +97,13 @@ def resolve_completion_profile(
 
     normalized_backend = _normalize_backend(backend)
     provider = _provider_config(profile, normalized_backend)
+    model_override = _has_request_model_override(config)
 
     effective = replace(
         config,
-        model=_coalesce(
+        model=config.model
+        if model_override
+        else _coalesce(
             provider.model if provider is not None else None,
             profile.model,
             config.model,

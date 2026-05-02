@@ -521,18 +521,11 @@ def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
     return current
 
 
-def _matches_default_value(value: object, default: object) -> bool:
-    """Compare scalar and sequence defaults across YAML/Python representations."""
-    if isinstance(value, (list, tuple)) and isinstance(default, (list, tuple)):
-        return tuple(value) == tuple(default)
-    return value == default
-
-
 def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
     """Return True when an existing model setting should beat setup defaults."""
-    for path, default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
+    for path, _default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
         value = _get_nested_value(config_dict, path)
-        if value is not _MISSING and not _matches_default_value(value, default):
+        if value is not _MISSING:
             return True
     return False
 

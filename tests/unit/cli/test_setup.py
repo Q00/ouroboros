@@ -300,6 +300,39 @@ class TestCodexSetup:
         assert "consensus_advocate" not in config_dict["llm_role_profiles"]
         assert "consensus_judge" not in config_dict["llm_role_profiles"]
 
+    def test_setup_codex_preserves_pinned_legacy_default_model(self, tmp_path: Path) -> None:
+        """Presence of a legacy model key should count as an explicit user override."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {
+                        "backend": "litellm",
+                        "qa_model": "claude-sonnet-4-20250514",
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
+        ):
+            setup_cmd._setup_codex("/usr/local/bin/codex")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert config_dict["llm"]["backend"] == "codex"
+        assert config_dict["llm"]["qa_model"] == "claude-sonnet-4-20250514"
+        assert "qa" not in config_dict["llm_role_profiles"]
+
     def test_setup_codex_does_not_register_claude_integration(self, tmp_path: Path) -> None:
         """Codex setup should stay scoped to Codex even when Claude is installed."""
         config_dir = tmp_path / ".ouroboros"

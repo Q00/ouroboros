@@ -26,7 +26,7 @@ def test_resolve_completion_profile_uses_codex_backend_profile() -> None:
         },
         llm_role_profiles={"qa": "fast"},
     )
-    request = CompletionConfig(model="fallback", role="qa", temperature=0.7)
+    request = CompletionConfig(model="default", role="qa", temperature=0.7)
 
     with patch("ouroboros.providers.profiles.load_config", return_value=config):
         resolved = resolve_completion_profile(request, backend="codex")
@@ -54,7 +54,7 @@ def test_resolve_completion_profile_uses_provider_aliases() -> None:
         },
         llm_role_profiles={"semantic_evaluation": "deep"},
     )
-    request = CompletionConfig(model="fallback", role="semantic_evaluation")
+    request = CompletionConfig(model="default", role="semantic_evaluation")
 
     with patch("ouroboros.providers.profiles.load_config", return_value=config):
         resolved = resolve_completion_profile(request, backend="litellm")
@@ -81,6 +81,27 @@ def test_resolve_completion_profile_explicit_profile_overrides_role() -> None:
 
     assert resolved.profile_name == "deep"
     assert resolved.config.model == "deep-model"
+
+
+def test_resolve_completion_profile_preserves_explicit_role_model() -> None:
+    """Role mappings should not replace an explicit request-level model."""
+    config = OuroborosConfig(
+        llm_profiles={
+            "fast": {
+                "model": "profile-model",
+                "temperature": 0.2,
+            },
+        },
+        llm_role_profiles={"qa": "fast"},
+    )
+    request = CompletionConfig(model="request-model", role="qa", temperature=0.7)
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(request, backend="litellm")
+
+    assert resolved.profile_name == "fast"
+    assert resolved.config.model == "request-model"
+    assert resolved.config.temperature == 0.2
 
 
 def test_resolve_completion_profile_falls_back_when_config_missing() -> None:
