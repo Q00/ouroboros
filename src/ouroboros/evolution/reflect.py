@@ -111,6 +111,10 @@ class ReflectEngine:
             try:
                 fresh = self.adapter_factory()
                 if fresh is not None:
+                    # Treat the factory result as the latest known-good adapter so
+                    # a later transient factory failure does not fall back to a
+                    # stale startup adapter after backend/model state has moved.
+                    self.llm_adapter = fresh
                     if backend_drifted:
                         self._captured_backend = current_backend
                         self.model = get_reflect_model(current_backend)
