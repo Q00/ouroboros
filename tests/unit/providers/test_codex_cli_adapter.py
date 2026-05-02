@@ -93,6 +93,27 @@ class _FakeProcess:
         self.returncode = self._final_returncode
 
 
+class _LegacyFakeProcess:
+    """Process stub that exercises the communicate() fallback branch."""
+
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        returncode: int = 0,
+    ) -> None:
+        self.stdin = _FakeStdin()
+        self._stdout = stdout.encode("utf-8")
+        self._stderr = stderr.encode("utf-8")
+        self.returncode = returncode
+        self.communicate_calls = 0
+
+    async def communicate(self, _input: bytes | None = None) -> tuple[bytes, bytes]:
+        self.communicate_calls += 1
+        return self._stdout, self._stderr
+
+
 class TestCodexCliLLMAdapter:
     """Tests for CodexCliLLMAdapter."""
 
@@ -607,7 +628,6 @@ class TestCodexCliLLMAdapter:
         assert result.error.details["overflow_stage"] == "stream_capture"
         assert result.error.details["capture_limit_bytes"] == 8
 
-
     @pytest.mark.asyncio
     async def test_complete_surfaces_stdout_error_events_on_nonzero_exit(self) -> None:
         """Codex emits in-flight failures as JSONL on stdout — those messages must
@@ -661,6 +681,61 @@ class TestCodexCliLLMAdapter:
         assert "Reconnecting... 1/5" in stdout_errors[0]
         assert "502 Bad Gateway final" in stdout_errors[1]
         assert result.error.details["stderr"] == "Reading prompt from stdin..."
+
+    @pytest.mark.asyncio
+    async def test_legacy_complete_surfaces_stdout_error_events_on_nonzero_exit(
+        self,
+    ) -> None:
+        """The communicate() fallback reports stdout JSONL errors like the streaming path."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+        process_holder: dict[str, _LegacyFakeProcess] = {}
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _LegacyFakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            process = _LegacyFakeProcess(
+                stdout="\n".join(
+                    [
+                        json.dumps({"type": "thread.started", "thread_id": "legacy-thread"}),
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": "legacy transient failure",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "turn.failed",
+                                "error": {"message": "legacy final failure"},
+                            }
+                        ),
+                    ]
+                ),
+                stderr="Reading prompt from stdin...",
+                returncode=1,
+            )
+            process_holder["process"] = process
+            return process
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Reflect on the legacy run.")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert result.error.provider == "codex_cli"
+        assert result.error.message == "legacy final failure"
+        assert result.error.details["session_id"] == "legacy-thread"
+        assert result.error.details["stdout_errors"] == [
+            "legacy transient failure",
+            "legacy final failure",
+        ]
+        assert result.error.details["stderr"] == "Reading prompt from stdin..."
+        assert process_holder["process"].communicate_calls == 1
 
     def test_extract_stdout_errors_returns_messages_in_arrival_order(self) -> None:
         """Helper extracts only error/turn.failed events and preserves order."""
