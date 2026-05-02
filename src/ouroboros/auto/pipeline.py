@@ -10,7 +10,7 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore, utc_now_iso
 from ouroboros.core.seed import Seed
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
@@ -58,11 +58,7 @@ class AutoPipeline:
             try:
                 Seed.from_dict(state.seed_artifact)
             except Exception as exc:
-                state.seed_artifact = {}
-                state.mark_failed(
-                    f"persisted Seed artifact is invalid: {exc}",
-                    tool_name="auto_pipeline",
-                )
+                _mark_invalid_seed_artifact(state, f"persisted Seed artifact is invalid: {exc}")
                 self._save(state)
                 return self._result(state, ledger, blocker=state.last_error)
         self._save(state)
@@ -275,6 +271,21 @@ class AutoPipeline:
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
             self.store.save(state)
+
+
+def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:
+    state.seed_artifact = {}
+    if state.phase in {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}:
+        now = utc_now_iso()
+        state.phase = AutoPhase.FAILED
+        state.phase_started_at = now
+        state.last_progress_at = now
+        state.updated_at = now
+        state.last_tool_name = "auto_pipeline"
+        state.last_progress_message = message
+        state.last_error = message
+        return
+    state.mark_failed(message, tool_name="auto_pipeline")
 
 
 def _grade_meets_required(actual: str | None, required: str) -> bool:

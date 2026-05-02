@@ -849,6 +849,34 @@ async def test_interview_driver_clears_pending_question_before_backend_answer(tm
 
 
 @pytest.mark.asyncio
+async def test_pipeline_returns_structured_failure_for_terminal_malformed_seed_artifact(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("terminal resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("terminal resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("terminal resume should not generate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_artifact = {"goal": "missing required seed fields"}
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.COMPLETE, "complete")
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert "persisted Seed artifact is invalid" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
 async def test_pipeline_seed_generation_resume_uses_persisted_seed_artifact(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("seed resume should not restart interview")

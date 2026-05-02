@@ -39,9 +39,9 @@ def _fill_minimal_ready_ledger(ledger: SeedDraftLedger) -> None:
         )
 
 
-def _seed(*, ac: tuple[str, ...]) -> Seed:
+def _seed(*, ac: tuple[str, ...], goal: str = "Build a habit tracker") -> Seed:
     return Seed(
-        goal="Build a local CLI",
+        goal=goal,
         constraints=("Use existing project patterns",),
         acceptance_criteria=ac,
         ontology_schema=OntologySchema(
@@ -117,6 +117,21 @@ def test_grade_gate_accepts_observable_seed_with_ready_ledger() -> None:
 
     assert result.grade == SeedGrade.A
     assert result.may_run
+
+
+def test_grade_gate_blocks_seed_goal_mismatch_with_ready_ledger() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Build a weather dashboard",
+        ac=("`weather list` prints stable stdout containing forecasts",),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.C
+    assert not result.may_run
+    assert {blocker.code for blocker in result.blockers} == {"seed_goal_mismatch"}
 
 
 def test_grade_gate_rejects_unresolved_ledger_even_with_clean_seed() -> None:
@@ -361,7 +376,7 @@ def test_auto_answerer_acceptance_default_matches_grade_observability() -> None:
     assert acceptance
     ledger = SeedDraftLedger.from_goal("Build a CLI")
     _fill_minimal_ready_ledger(ledger)
-    seed = _seed(ac=(acceptance[0].value,))
+    seed = _seed(ac=(acceptance[0].value,), goal="Build a CLI")
 
     assert GradeGate().grade_seed(seed, ledger=ledger).grade == SeedGrade.A
 
@@ -485,7 +500,9 @@ def test_auto_answerer_non_goals_use_latest_resolved_goal() -> None:
 def test_grade_gate_accepts_exit_status_and_http_status_criteria() -> None:
     ledger = SeedDraftLedger.from_goal("Build health checks")
     _fill_minimal_ready_ledger(ledger)
-    seed = _seed(ac=("CLI exits 0 on success", "GET /health returns 200"))
+    seed = _seed(
+        ac=("CLI exits 0 on success", "GET /health returns 200"), goal="Build health checks"
+    )
 
     result = GradeGate().grade_seed(seed, ledger=ledger)
 
@@ -542,7 +559,10 @@ def test_grade_seed_allows_safe_product_delete_assumptions() -> None:
     )
 
     result = GradeGate().grade_seed(
-        _seed(ac=("`task delete` prints stable stdout confirming deletion",)), ledger=ledger
+        _seed(
+            ac=("`task delete` prints stable stdout confirming deletion",), goal="Build a task app"
+        ),
+        ledger=ledger,
     )
 
     assert result.grade == SeedGrade.A
@@ -563,7 +583,10 @@ def test_grade_gate_ignores_inactive_high_risk_assumptions() -> None:
         ),
     )
 
-    result = GradeGate().grade_seed(_seed(ac=("`task list` prints stable stdout",)), ledger=ledger)
+    result = GradeGate().grade_seed(
+        _seed(ac=("`task list` prints stable stdout",), goal="Build a local task app"),
+        ledger=ledger,
+    )
 
     assert result.grade == SeedGrade.A
     assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
@@ -599,7 +622,10 @@ def test_auto_answerer_preserves_safe_product_behavior_questions() -> None:
     ledger = SeedDraftLedger.from_goal("Build a task app")
     _fill_minimal_ready_ledger(ledger)
     assert (
-        GradeGate().grade_seed(_seed(ac=(acceptance[0].value,)), ledger=ledger).grade == SeedGrade.A
+        GradeGate()
+        .grade_seed(_seed(ac=(acceptance[0].value,), goal="Build a task app"), ledger=ledger)
+        .grade
+        == SeedGrade.A
     )
 
 
@@ -619,7 +645,10 @@ def test_auto_answerer_preserves_output_behavior_questions() -> None:
     ledger = SeedDraftLedger.from_goal("Build an export command")
     _fill_minimal_ready_ledger(ledger)
     assert (
-        GradeGate().grade_seed(_seed(ac=(acceptance[0].value,)), ledger=ledger).grade == SeedGrade.A
+        GradeGate()
+        .grade_seed(_seed(ac=(acceptance[0].value,), goal="Build an export command"), ledger=ledger)
+        .grade
+        == SeedGrade.A
     )
 
 
