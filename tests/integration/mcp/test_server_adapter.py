@@ -584,7 +584,9 @@ class TestCreateOuroborosServer:
 
             initial_kwargs = mock_create_llm_adapter.call_args.kwargs
             factory = mock_wonder_engine.call_args.kwargs["adapter_factory"]
+            assert mock_wonder_engine.call_args.kwargs["adapter_backend"] == "codex"
             assert mock_reflect_engine.call_args.kwargs["adapter_factory"] is factory
+            assert mock_reflect_engine.call_args.kwargs["adapter_backend"] == "codex"
 
             factory()
 
@@ -607,6 +609,7 @@ class TestCreateOuroborosServer:
             create_ouroboros_server(runtime_backend="codex")
 
             factory = mock_wonder_engine.call_args.kwargs["adapter_factory"]
+            assert mock_wonder_engine.call_args.kwargs["adapter_backend"] is None
             factory()
 
         assert mock_create_llm_adapter.call_args.kwargs["backend"] is None

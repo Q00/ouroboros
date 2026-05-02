@@ -898,11 +898,13 @@ def create_ouroboros_server(
         llm_adapter=llm_adapter,
         model=get_wonder_model(llm_backend),
         adapter_factory=fresh_llm_adapter,
+        adapter_backend=llm_backend,
     )
     reflect_engine = ReflectEngine(
         llm_adapter=llm_adapter,
         model=get_reflect_model(llm_backend),
         adapter_factory=fresh_llm_adapter,
+        adapter_backend=llm_backend,
     )
 
     # Wire real execution/evaluation callables for evolve_step so that

@@ -130,3 +130,45 @@ class TestEvolutionBackendDrift:
 
         assert engine._resolve_adapter() is fresh
         assert engine.model == "codex-reflect"
+
+    def test_factory_pinned_backend_keeps_model_on_config_drift(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+        )
+        fresh = _Adapter("fresh", _cwd="/safe", _max_turns=1)
+        engine = ReflectEngine(
+            llm_adapter=_Adapter("initial"),
+            model="codex-reflect",
+            adapter_factory=lambda: fresh,
+            adapter_backend="codex",
+        )
+        get_model = Mock(return_value="gemini-reflect")
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="gemini")
+        )
+        monkeypatch.setattr("ouroboros.evolution.reflect.get_reflect_model", get_model)
+
+        assert engine._resolve_adapter() is fresh
+        assert engine.model == "codex-reflect"
+        get_model.assert_not_called()
+
+    def test_wonder_factory_pinned_backend_keeps_model_on_config_drift(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="codex")
+        )
+        fresh = _Adapter("fresh", _cwd="/safe", _max_turns=1)
+        engine = WonderEngine(
+            llm_adapter=_Adapter("initial"),
+            model="codex-wonder",
+            adapter_factory=lambda: fresh,
+            adapter_backend="codex",
+        )
+        get_model = Mock(return_value="gemini-wonder")
+        monkeypatch.setattr(
+            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="gemini")
+        )
+        monkeypatch.setattr("ouroboros.evolution.wonder.get_wonder_model", get_model)
+
+        assert engine._resolve_adapter() is fresh
+        assert engine.model == "codex-wonder"
+        get_model.assert_not_called()

@@ -61,16 +61,17 @@ class WonderEngine:
     llm_adapter: LLMAdapter
     model: str = field(default_factory=get_wonder_model)
     adapter_factory: Callable[[], LLMAdapter | None] | None = field(default=None)
+    adapter_backend: str | None = None
     _captured_backend: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         try:
-            self._captured_backend = get_llm_backend()
+            self._captured_backend = self.adapter_backend or get_llm_backend()
         except Exception:  # noqa: BLE001
             self._captured_backend = None
 
     def _resolve_adapter(self) -> LLMAdapter:
-        current_backend = self._current_backend()
+        current_backend = self._selected_backend()
         backend_drifted = (
             self._captured_backend is not None
             and current_backend
@@ -114,7 +115,9 @@ class WonderEngine:
 
         return self.llm_adapter
 
-    def _current_backend(self) -> str | None:
+    def _selected_backend(self) -> str | None:
+        if self.adapter_backend is not None:
+            return self.adapter_backend
         try:
             return get_llm_backend()
         except Exception:  # noqa: BLE001
