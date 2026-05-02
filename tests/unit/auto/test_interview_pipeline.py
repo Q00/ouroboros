@@ -230,6 +230,44 @@ def test_seed_repairer_non_goals_do_not_contradict_goal_scope() -> None:
     assert "production deployment" not in non_goals[0].lower()
 
 
+def test_seed_repairer_converge_returns_latest_repair_when_high_findings_repeat() -> None:
+    finding = ReviewFinding.from_parts(
+        code="vague_acceptance_criteria",
+        target="acceptance_criteria[0]",
+        severity="high",
+        message="Still vague",
+        repair_instruction="Make it observable.",
+    )
+
+    class RepeatingReviewer:
+        def review(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> SeedReview:  # noqa: ARG002
+            return SeedReview(
+                grade_result=GradeResult(
+                    grade=SeedGrade.B,
+                    scores={
+                        "coverage": 0.8,
+                        "ambiguity": 0.2,
+                        "testability": 0.5,
+                        "execution_feasibility": 0.8,
+                        "risk": 0.1,
+                    },
+                    findings=[],
+                    blockers=[],
+                    may_run=False,
+                ),
+                findings=(finding,),
+            )
+
+    seed = _seed(ac=("The CLI should be easy and user-friendly",))
+    repaired, _review, history = SeedRepairer(
+        reviewer=RepeatingReviewer(), max_repair_rounds=3
+    ).converge(seed)
+
+    assert history
+    assert repaired == history[-1].seed
+    assert repaired != seed
+
+
 @pytest.mark.asyncio
 async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
