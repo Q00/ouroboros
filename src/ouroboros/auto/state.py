@@ -290,7 +290,7 @@ class AutoPipelineState:
                 msg = f"{field_name} must be a non-negative integer"
                 raise ValueError(msg)
 
-        if self.seed_artifact:
+        if self.seed_artifact != {}:
             if not isinstance(self.seed_artifact, dict):
                 msg = "seed_artifact must be an object"
                 raise ValueError(msg)

@@ -1251,3 +1251,30 @@ async def test_interview_driver_accepts_initial_completed_turn_without_answering
     assert state.interview_completed is True
     assert state.pending_question is None
     assert not answered
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_does_not_replace_specific_verification_answer_with_gap_prompt(
+    tmp_path,
+) -> None:
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        return InterviewTurn("done", session_id, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert answers
+    assert "observable behavior" in answers[0].lower()
+    assert "single local user" not in answers[0].lower()

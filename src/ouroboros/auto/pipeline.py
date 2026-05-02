@@ -71,7 +71,7 @@ class AutoPipeline:
             try:
                 Seed.from_dict(state.seed_artifact)
             except Exception as exc:
-                state.seed_artifact = None
+                state.seed_artifact = {}
                 state.mark_failed(
                     f"persisted Seed artifact is invalid: {exc}",
                     tool_name="auto_pipeline",

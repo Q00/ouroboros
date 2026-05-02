@@ -224,3 +224,17 @@ def test_store_save_rejects_invalid_state_before_writing(tmp_path) -> None:
         store.save(state)
 
     assert not store.path_for(state.auto_session_id).exists()
+
+
+def test_store_load_rejects_falsey_non_object_seed_artifacts(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    path = store.path_for(state.auto_session_id)
+
+    for value in (None, [], "", 0):
+        data = state.to_dict()
+        data["seed_artifact"] = value
+        path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Auto session state is invalid"):
+            store.load(state.auto_session_id)
