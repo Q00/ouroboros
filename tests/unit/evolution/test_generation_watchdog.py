@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,12 +11,24 @@ import pytest
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_failed
+import ouroboros.evolution.watchdog as watchdog_module
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
 )
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_scope
 from ouroboros.persistence.event_store import EventStore
+
+
+class _FakeMonotonicClock:
+    def __init__(self) -> None:
+        self.current = 0.0
+
+    def __call__(self) -> float:
+        return self.current
+
+    def advance(self, seconds: float) -> None:
+        self.current += seconds
 
 
 async def _store() -> EventStore:
@@ -138,21 +151,28 @@ def _watchdog(
 
 
 @pytest.mark.asyncio
-async def test_productive_long_run_resets_material_progress_timeout() -> None:
+async def test_productive_long_run_resets_material_progress_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Material progress keeps a generation alive past the no-progress window."""
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     execution_id = "exec-productive"
     watchdog = _watchdog(
         event_store,
         execution_id=execution_id,
         generation_no_progress_timeout_seconds=0.09,
+        watchdog_poll_seconds=0.005,
     )
 
     async def productive_work() -> str:
         for completed in (0, 1, 2):
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
+            clock.advance(0.05)
             await event_store.append(_workflow_progress(execution_id, completed_count=completed))
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
+        clock.advance(0.05)
         return "done"
 
     assert await watchdog.watch(productive_work()) == "done"
