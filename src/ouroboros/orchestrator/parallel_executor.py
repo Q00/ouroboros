@@ -142,7 +142,17 @@ _AC_RUNTIME_OWNERSHIP_METADATA_KEYS = frozenset(
         "attempt_number",
         "depth",
         "display_path",
+        "execution_id",
         "identity_model",
+        "legacy_node_id",
+        "legacy_node_aliases",
+        "legacy_parent_node_id",
+        "legacy_parent_node_aliases",
+        "legacy_session_scope_id",
+        "legacy_session_scope_ids",
+        "legacy_session_state_path",
+        "legacy_session_state_paths",
+        "node_kind",
         "node_id",
         "ordinal",
         "parent_ac_index",
@@ -164,7 +174,9 @@ _AC_RUNTIME_SCOPE_METADATA_KEYS = frozenset(
     {
         "ac_id",
         "ac_index",
+        "execution_id",
         "identity_model",
+        "node_kind",
         "node_id",
         "parent_ac_index",
         "parent_node_id",
@@ -559,22 +571,68 @@ class ParallelACExecutor:
         parent_ac_index: int | None,
         sub_ac_index: int | None,
         node_identity: ExecutionNodeIdentity | None,
-        retry_attempt: int,  # noqa: ARG004
+        retry_attempt: int,
     ) -> dict[str, Any]:
         """Build metadata that binds a runtime handle to a single AC execution scope."""
-        return ACRuntimeIdentity(
-            runtime_scope=runtime_scope,
-            ac_index=None if is_sub_ac else ac_index,
-            parent_ac_index=parent_ac_index if is_sub_ac else None,
-            sub_ac_index=sub_ac_index if is_sub_ac else None,
-            node_id=node_identity.node_id if node_identity is not None else None,
-            parent_node_id=node_identity.parent_node_id if node_identity is not None else None,
-            root_ac_index=node_identity.root_ac_index if node_identity is not None else None,
-            node_path=node_identity.path if node_identity is not None else (),
-            display_path=node_identity.display_path if node_identity is not None else None,
-            depth=node_identity.depth if node_identity is not None else None,
-            ordinal=node_identity.ordinal if node_identity is not None else None,
-        ).to_metadata()
+        identity = build_ac_runtime_identity(
+            ac_index,
+            execution_context_id=node_identity.execution_context_id
+            if node_identity is not None
+            else None,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+            node_identity=node_identity,
+            retry_attempt=retry_attempt,
+        )
+        if identity.runtime_scope != runtime_scope:
+            identity = replace(identity, runtime_scope=runtime_scope)
+        return identity.to_metadata()
+
+    @staticmethod
+    def _metadata_value_matches_expected_scope(
+        key: str,
+        observed_value: Any,
+        expected_metadata: dict[str, Any],
+    ) -> bool:
+        """Return True when observed metadata matches canonical or legacy scope."""
+        if observed_value == expected_metadata.get(key):
+            return True
+
+        if key in {"ac_id", "session_scope_id"}:
+            legacy_scope_ids = expected_metadata.get("legacy_session_scope_ids")
+            if isinstance(legacy_scope_ids, (list, tuple)) and observed_value in legacy_scope_ids:
+                return True
+            return observed_value == expected_metadata.get("legacy_session_scope_id")
+
+        if key == "session_state_path":
+            legacy_state_paths = expected_metadata.get("legacy_session_state_paths")
+            if (
+                isinstance(legacy_state_paths, (list, tuple))
+                and observed_value in legacy_state_paths
+            ):
+                return True
+            return observed_value == expected_metadata.get("legacy_session_state_path")
+
+        if key == "node_id":
+            legacy_node_aliases = expected_metadata.get("legacy_node_aliases")
+            if (
+                isinstance(legacy_node_aliases, (list, tuple))
+                and observed_value in legacy_node_aliases
+            ):
+                return True
+            return observed_value == expected_metadata.get("legacy_node_id")
+
+        if key == "parent_node_id":
+            legacy_parent_node_aliases = expected_metadata.get("legacy_parent_node_aliases")
+            if (
+                isinstance(legacy_parent_node_aliases, (list, tuple))
+                and observed_value in legacy_parent_node_aliases
+            ):
+                return True
+            return observed_value == expected_metadata.get("legacy_parent_node_id")
+
+        return False
 
     @staticmethod
     def _runtime_handle_claims_foreign_ac_scope(
@@ -589,8 +647,11 @@ class ParallelACExecutor:
 
         metadata = runtime_handle.metadata
         for key in _AC_RUNTIME_SCOPE_METADATA_KEYS:
-            expected_value = expected_metadata.get(key)
-            if key in metadata and metadata.get(key) != expected_value:
+            if key in metadata and not ParallelACExecutor._metadata_value_matches_expected_scope(
+                key,
+                metadata.get(key),
+                expected_metadata,
+            ):
                 return True
 
         if is_sub_ac:
@@ -618,7 +679,11 @@ class ParallelACExecutor:
             if key not in metadata:
                 continue
             matched_scope_key = True
-            if metadata.get(key) != expected_metadata.get(key):
+            if not cls._metadata_value_matches_expected_scope(
+                key,
+                metadata.get(key),
+                expected_metadata,
+            ):
                 return False
 
         if not matched_scope_key:
@@ -886,75 +951,80 @@ class ParallelACExecutor:
         if cached_handle is not None:
             return cached_handle
 
-        try:
-            events = await self._event_store.replay(
-                runtime_identity.runtime_scope.aggregate_type,
-                runtime_identity.session_scope_id,
-            )
-        except Exception:
-            log.exception(
-                "parallel_executor.ac.runtime_handle_load_failed",
-                ac_index=ac_index,
-                is_sub_ac=is_sub_ac,
-                parent_ac_index=parent_ac_index,
-                sub_ac_index=sub_ac_index,
-                retry_attempt=retry_attempt,
-                session_scope_id=runtime_identity.session_scope_id,
-            )
-            return None
-
-        for event in reversed(events):
-            event_data = event.data if isinstance(event.data, dict) else {}
-            if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
+        candidate_scope_ids = (
+            runtime_identity.session_scope_id,
+            *runtime_identity.legacy_session_scope_ids,
+        )
+        for candidate_scope_id in dict.fromkeys(candidate_scope_ids):
+            try:
+                events = await self._event_store.replay(
+                    runtime_identity.runtime_scope.aggregate_type,
+                    candidate_scope_id,
+                )
+            except Exception:
+                log.exception(
+                    "parallel_executor.ac.runtime_handle_load_failed",
+                    ac_index=ac_index,
+                    is_sub_ac=is_sub_ac,
+                    parent_ac_index=parent_ac_index,
+                    sub_ac_index=sub_ac_index,
+                    retry_attempt=retry_attempt,
+                    session_scope_id=candidate_scope_id,
+                )
                 continue
 
-            if event.type in _NON_REUSABLE_RUNTIME_EVENT_TYPES:
-                self._forget_ac_runtime_handle(
-                    ac_index,
-                    execution_context_id=execution_context_id,
+            for event in reversed(events):
+                event_data = event.data if isinstance(event.data, dict) else {}
+                if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
+                    continue
+
+                if event.type in _NON_REUSABLE_RUNTIME_EVENT_TYPES:
+                    self._forget_ac_runtime_handle(
+                        ac_index,
+                        execution_context_id=execution_context_id,
+                        is_sub_ac=is_sub_ac,
+                        parent_ac_index=parent_ac_index,
+                        sub_ac_index=sub_ac_index,
+                        node_identity=node_identity,
+                        retry_attempt=retry_attempt,
+                    )
+                    return None
+                if event.type not in _REUSABLE_RUNTIME_EVENT_TYPES:
+                    continue
+
+                runtime_payload = event_data.get("runtime")
+                try:
+                    runtime_handle = RuntimeHandle.from_dict(runtime_payload)
+                except ValueError as exc:
+                    log.warning(
+                        "parallel_executor.persisted_runtime_handle_invalid",
+                        aggregate_id=event.aggregate_id,
+                        event_type=event.type,
+                        error=str(exc),
+                        runtime_keys=sorted(runtime_payload)
+                        if isinstance(runtime_payload, dict)
+                        else None,
+                    )
+                    continue
+                if runtime_handle is None:
+                    continue
+                runtime_handle = self._normalize_ac_runtime_handle(
+                    runtime_handle,
+                    runtime_scope=runtime_identity.runtime_scope,
+                    ac_index=ac_index,
                     is_sub_ac=is_sub_ac,
                     parent_ac_index=parent_ac_index,
                     sub_ac_index=sub_ac_index,
                     node_identity=node_identity,
                     retry_attempt=retry_attempt,
+                    source="persisted_event",
+                    require_resume_scope_match=True,
                 )
-                return None
-            if event.type not in _REUSABLE_RUNTIME_EVENT_TYPES:
-                continue
+                if runtime_handle is None:
+                    continue
 
-            runtime_payload = event_data.get("runtime")
-            try:
-                runtime_handle = RuntimeHandle.from_dict(runtime_payload)
-            except ValueError as exc:
-                log.warning(
-                    "parallel_executor.persisted_runtime_handle_invalid",
-                    aggregate_id=event.aggregate_id,
-                    event_type=event.type,
-                    error=str(exc),
-                    runtime_keys=sorted(runtime_payload)
-                    if isinstance(runtime_payload, dict)
-                    else None,
-                )
-                continue
-            if runtime_handle is None:
-                continue
-            runtime_handle = self._normalize_ac_runtime_handle(
-                runtime_handle,
-                runtime_scope=runtime_identity.runtime_scope,
-                ac_index=ac_index,
-                is_sub_ac=is_sub_ac,
-                parent_ac_index=parent_ac_index,
-                sub_ac_index=sub_ac_index,
-                node_identity=node_identity,
-                retry_attempt=retry_attempt,
-                source="persisted_event",
-                require_resume_scope_match=True,
-            )
-            if runtime_handle is None:
-                continue
-
-            self._ac_runtime_handles[runtime_identity.cache_key] = runtime_handle
-            return runtime_handle
+                self._ac_runtime_handles[runtime_identity.cache_key] = runtime_handle
+                return runtime_handle
 
         return None
 
@@ -1116,7 +1186,11 @@ class ParallelACExecutor:
                 continue
 
             matched_identity_key = True
-            if observed_value != expected_metadata.get(key):
+            if not ParallelACExecutor._metadata_value_matches_expected_scope(
+                key,
+                observed_value,
+                expected_metadata,
+            ):
                 return False
 
         return matched_identity_key

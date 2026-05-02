@@ -157,13 +157,86 @@ class TestParallelACExecutor:
         node_event, legacy_event = appended_events
         assert node_event.data["identity_model"] == "execution_node_v1"
         assert node_event.data["node_id"] == node_identity.node_id
-        assert node_event.data["parent_node_id"] == "ac_0"
+        assert node_event.data["parent_node_id"] == node_identity.parent_node_id
+        assert node_event.data["legacy_parent_node_id"] == "ac_0"
         assert node_event.data["display_path"] == "1.2"
         assert node_event.data["legacy_ac_index"] == 1
         assert node_event.data["legacy_sub_task_id"] == "ac_1_sub_2"
         assert legacy_event.data["node_id"] == node_identity.node_id
-        assert legacy_event.data["parent_node_id"] == "ac_0"
+        assert legacy_event.data["parent_node_id"] == node_identity.parent_node_id
+        assert legacy_event.data["legacy_parent_node_id"] == "ac_0"
         assert legacy_event.data["sub_task_id"] == "ac_1_sub_2"
+
+    @pytest.mark.asyncio
+    async def test_node_runtime_load_falls_back_to_legacy_scope_events(self) -> None:
+        """Node-aware resume lookup should still find pre-node runtime events."""
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="orch_123",
+            ac_index=1,
+        )
+        legacy_scope_id = "orch_123_ac_2"
+        legacy_state_path = (
+            "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
+        )
+        persisted_handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            native_session_id="opencode-session-legacy",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                "scope": "ac",
+                "session_role": "implementation",
+                "retry_attempt": 0,
+                "ac_index": 1,
+                "session_scope_id": legacy_scope_id,
+                "session_state_path": legacy_state_path,
+                "server_session_id": "server-legacy",
+            },
+        )
+        replayed_scope_ids: list[str] = []
+
+        async def _replay(_aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
+            replayed_scope_ids.append(aggregate_id)
+            if aggregate_id != legacy_scope_id:
+                return []
+            return [
+                BaseEvent(
+                    type="execution.session.started",
+                    aggregate_type="execution",
+                    aggregate_id=legacy_scope_id,
+                    data={
+                        "retry_attempt": 0,
+                        "session_scope_id": legacy_scope_id,
+                        "session_state_path": legacy_state_path,
+                        "runtime": persisted_handle.to_dict(),
+                    },
+                )
+            ]
+
+        event_store = AsyncMock()
+        event_store.replay.side_effect = _replay
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+        )
+
+        resume_handle = await executor._load_persisted_ac_runtime_handle(
+            1,
+            execution_context_id="orch_123",
+            node_identity=node_identity,
+        )
+
+        assert resume_handle is not None
+        assert replayed_scope_ids[0] == f"orch_123_{node_identity.node_id}"
+        assert legacy_scope_id in replayed_scope_ids
+        assert resume_handle.native_session_id == "opencode-session-legacy"
+        assert resume_handle.metadata["server_session_id"] == "server-legacy"
+        assert resume_handle.metadata["node_id"] == node_identity.node_id
+        assert resume_handle.metadata["legacy_node_id"] == "ac_1"
+        assert resume_handle.metadata["session_scope_id"] == f"orch_123_{node_identity.node_id}"
+        assert resume_handle.metadata["legacy_session_scope_id"] == legacy_scope_id
 
     @pytest.mark.asyncio
     async def test_batch_fans_out_in_parallel_regardless_of_tool_catalog(self) -> None:
@@ -318,7 +391,7 @@ class TestParallelACExecutor:
         assert resume_handle.native_session_id is None
         assert resume_handle.cwd == "/tmp/project"
         assert resume_handle.approval_mode == "acceptEdits"
-        assert resume_handle.metadata["ac_id"] == "orch_123_ac_2"
+        assert resume_handle.metadata["ac_id"] == "orch_123_ac_3"
         assert resume_handle.metadata["scope"] == "ac"
         assert resume_handle.metadata["session_role"] == "implementation"
         assert resume_handle.metadata["retry_attempt"] == 0
@@ -336,11 +409,11 @@ class TestParallelACExecutor:
             "Read",
             "Edit",
         ]
-        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_2"
-        assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_2_attempt_1"
+        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_3"
+        assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_3_attempt_1"
         assert (
             resume_handle.metadata["session_state_path"]
-            == "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
+            == "execution.workflows.orch_123.acceptance_criteria.ac_3.implementation_session"
         )
         started_event = next(
             event for event in appended_events if event.type == "execution.session.started"
@@ -355,7 +428,7 @@ class TestParallelACExecutor:
             "Read",
             "Edit",
         ]
-        assert started_event.data["session_attempt_id"] == "orch_123_ac_2_attempt_1"
+        assert started_event.data["session_attempt_id"] == "orch_123_ac_3_attempt_1"
         assert result.success is True
         assert result.session_id == "opencode-session-1"
         assert result.runtime_handle is not None
@@ -474,7 +547,7 @@ class TestParallelACExecutor:
         )
 
         assert rebound is not None
-        assert rebound.metadata["session_scope_id"] == "orch_ctrl_ac_0"
+        assert rebound.metadata["session_scope_id"] == "orch_ctrl_ac_1"
         assert rebound.can_terminate is True
 
         observed = await rebound.observe()
@@ -580,9 +653,9 @@ class TestParallelACExecutor:
         assert isinstance(second_handle, RuntimeHandle)
         assert first_handle.native_session_id is None
         assert second_handle.native_session_id is None
-        assert second_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert second_handle.metadata["session_scope_id"] == "orch_123_ac_2"
         assert second_handle.metadata["retry_attempt"] == 0
-        assert second_handle.metadata["session_attempt_id"] == "orch_123_ac_1_attempt_1"
+        assert second_handle.metadata["session_attempt_id"] == "orch_123_ac_2_attempt_1"
         assert first_attempt.runtime_handle is not None
         assert resumed_attempt.runtime_handle is not None
         assert first_attempt.runtime_handle.native_session_id == "opencode-session-1"
@@ -1112,7 +1185,8 @@ class TestParallelACExecutor:
             stall_events[0].aggregate_id == f"exec_atomic_retry_scope_{first_leaf_identity.node_id}"
         )
         assert stall_events[0].data["node_id"] == first_leaf_identity.node_id
-        assert stall_events[0].data["parent_node_id"] == "ac_1"
+        assert stall_events[0].data["parent_node_id"] == first_leaf_identity.parent_node_id
+        assert stall_events[0].data["legacy_parent_node_id"] == "ac_1"
         assert stall_events[0].data["display_path"] == "2.1"
         assert stall_events[0].data["attempt"] == 1
         assert stall_events[0].data["max_attempts"] == MAX_STALL_RETRIES + 1
@@ -1271,10 +1345,10 @@ class TestParallelACExecutor:
         assert isinstance(second_handle, RuntimeHandle)
         assert first_handle.native_session_id is None
         assert second_handle.native_session_id is None
-        assert first_handle.metadata["session_scope_id"] == "orch_123_ac_0"
-        assert second_handle.metadata["session_scope_id"] == "orch_123_ac_1"
-        assert first_handle.metadata["session_attempt_id"] == "orch_123_ac_0_attempt_1"
-        assert second_handle.metadata["session_attempt_id"] == "orch_123_ac_1_attempt_1"
+        assert first_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert second_handle.metadata["session_scope_id"] == "orch_123_ac_2"
+        assert first_handle.metadata["session_attempt_id"] == "orch_123_ac_1_attempt_1"
+        assert second_handle.metadata["session_attempt_id"] == "orch_123_ac_2_attempt_1"
         assert second_handle.metadata["ac_index"] == 1
         assert first_result.runtime_handle is not None
         assert second_result.runtime_handle is not None
@@ -1339,9 +1413,9 @@ class TestParallelACExecutor:
                 )
 
         current_state_path = (
-            "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+            "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
         )
-        current_attempt_id = "orch_123_ac_1_attempt_1"
+        current_attempt_id = "orch_123_ac_2_attempt_1"
         foreign_handle = RuntimeHandle(
             backend="opencode",
             kind="implementation_session",
@@ -1349,16 +1423,16 @@ class TestParallelACExecutor:
             cwd="/tmp/project",
             approval_mode="acceptEdits",
             metadata={
-                "ac_id": "orch_123_ac_0",
+                "ac_id": "orch_123_ac_1",
                 "scope": "ac",
                 "session_role": "implementation",
                 "retry_attempt": 0,
                 "attempt_number": 1,
                 "ac_index": 0,
-                "session_scope_id": "orch_123_ac_0",
-                "session_attempt_id": "orch_123_ac_0_attempt_1",
+                "session_scope_id": "orch_123_ac_1",
+                "session_attempt_id": "orch_123_ac_1_attempt_1",
                 "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_0.implementation_session"
+                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
                 ),
                 "server_session_id": "server-foreign",
             },
@@ -1369,11 +1443,11 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "attempt_number": 1,
-                        "session_scope_id": "orch_123_ac_1",
+                        "session_scope_id": "orch_123_ac_2",
                         "session_attempt_id": current_attempt_id,
                         "session_state_path": current_state_path,
                         "runtime": foreign_handle.to_dict(),
@@ -1406,7 +1480,7 @@ class TestParallelACExecutor:
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.native_session_id is None
         assert resume_handle.metadata["ac_index"] == 1
-        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_2"
         assert resume_handle.metadata["session_attempt_id"] == current_attempt_id
         assert "server_session_id" not in resume_handle.metadata
         assert result.runtime_handle is not None
@@ -1488,16 +1562,16 @@ class TestParallelACExecutor:
             cwd="/tmp/project",
             approval_mode="acceptEdits",
             metadata={
-                "ac_id": "orch_123_ac_0",
+                "ac_id": "orch_123_ac_1",
                 "scope": "ac",
                 "session_role": "implementation",
                 "retry_attempt": 0,
                 "attempt_number": 1,
                 "ac_index": 0,
-                "session_scope_id": "orch_123_ac_0",
-                "session_attempt_id": "orch_123_ac_0_attempt_1",
+                "session_scope_id": "orch_123_ac_1",
+                "session_attempt_id": "orch_123_ac_1_attempt_1",
                 "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_0.implementation_session"
+                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
                 ),
                 "server_session_id": "server-foreign",
             },
@@ -1519,8 +1593,8 @@ class TestParallelACExecutor:
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.native_session_id is None
         assert resume_handle.metadata["ac_index"] == 1
-        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_1"
-        assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_1_attempt_1"
+        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_2"
+        assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_2_attempt_1"
         assert "server_session_id" not in resume_handle.metadata
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == "opencode-session-current"
@@ -1689,9 +1763,9 @@ class TestParallelACExecutor:
                 "session_role": "implementation",
                 "retry_attempt": 0,
                 "ac_index": 1,
-                "session_scope_id": "orch_123_ac_1",
+                "session_scope_id": "orch_123_ac_2",
                 "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
                 ),
                 "server_session_id": "server-99",
             },
@@ -1702,12 +1776,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": persisted_handle.to_dict(),
                     },
@@ -1739,7 +1813,7 @@ class TestParallelACExecutor:
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.native_session_id == "opencode-session-9"
         assert resume_handle.metadata["server_session_id"] == "server-99"
-        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_1")
+        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
         assert result.runtime_handle.metadata == resume_handle.metadata
@@ -1799,12 +1873,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": {
                             "kind": "implementation_session",
@@ -1815,10 +1889,10 @@ class TestParallelACExecutor:
                                 "session_role": "implementation",
                                 "retry_attempt": 0,
                                 "ac_index": 1,
-                                "session_scope_id": "orch_123_ac_1",
+                                "session_scope_id": "orch_123_ac_2",
                                 "session_state_path": (
                                     "execution.workflows.orch_123.acceptance_criteria."
-                                    "ac_1.implementation_session"
+                                    "ac_2.implementation_session"
                                 ),
                                 "server_session_id": "server-invalid",
                             },
@@ -1852,10 +1926,10 @@ class TestParallelACExecutor:
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.backend == "opencode"
         assert resume_handle.native_session_id is None
-        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_2"
         assert resume_handle.metadata["session_role"] == "implementation"
         assert "server_session_id" not in resume_handle.metadata
-        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_1")
+        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         # Compare handles ignoring updated_at (timestamp set at creation time
         # may differ by microseconds from the one stored in the result).
         result_handle = replace(result.runtime_handle, updated_at=None)  # type: ignore[type-var]
@@ -1922,9 +1996,9 @@ class TestParallelACExecutor:
                 "session_role": "implementation",
                 "retry_attempt": 0,
                 "ac_index": 1,
-                "session_scope_id": "orch_123_ac_1",
+                "session_scope_id": "orch_123_ac_2",
                 "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
                 ),
                 "server_session_id": "server-started",
             },
@@ -1940,9 +2014,9 @@ class TestParallelACExecutor:
                 "session_role": "implementation",
                 "retry_attempt": 0,
                 "ac_index": 1,
-                "session_scope_id": "orch_123_ac_1",
+                "session_scope_id": "orch_123_ac_2",
                 "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
                 ),
                 "server_session_id": "server-resumed",
             },
@@ -1953,12 +2027,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": started_handle.to_dict(),
                     },
@@ -1966,12 +2040,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.resumed",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": resumed_handle.to_dict(),
                     },
@@ -2003,7 +2077,7 @@ class TestParallelACExecutor:
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.native_session_id == "opencode-session-resumed"
         assert resume_handle.metadata["server_session_id"] == "server-resumed"
-        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_1")
+        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
         assert result.runtime_handle.metadata == resume_handle.metadata
@@ -2089,12 +2163,12 @@ class TestParallelACExecutor:
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.native_session_id is None
-        assert resume_handle.metadata["session_scope_id"] == "orch_new_ac_1"
+        assert resume_handle.metadata["session_scope_id"] == "orch_new_ac_2"
         assert (
             resume_handle.metadata["session_state_path"]
-            == "execution.workflows.orch_new.acceptance_criteria.ac_1.implementation_session"
+            == "execution.workflows.orch_new.acceptance_criteria.ac_2.implementation_session"
         )
-        event_store.replay.assert_awaited_once_with("execution", "orch_new_ac_1")
+        event_store.replay.assert_awaited_once_with("execution", "orch_new_ac_2")
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == "opencode-session-fresh"
 
@@ -2165,9 +2239,9 @@ class TestParallelACExecutor:
                 "session_role": "implementation",
                 "retry_attempt": 0,
                 "ac_index": 1,
-                "session_scope_id": "orch_123_ac_1",
+                "session_scope_id": "orch_123_ac_2",
                 "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
                 ),
             },
         )
@@ -2177,12 +2251,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": persisted_handle.to_dict(),
                     },
@@ -2190,12 +2264,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.completed",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": persisted_handle.to_dict(),
                         "success": True,
@@ -2227,7 +2301,7 @@ class TestParallelACExecutor:
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.native_session_id is None
-        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_2"
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == "opencode-session-fresh"
         assert executor._ac_runtime_handles == {}
@@ -2333,14 +2407,14 @@ class TestParallelACExecutor:
         assert isinstance(second_handle, RuntimeHandle)
         assert first_handle.native_session_id is None
         assert second_handle.native_session_id is None
-        assert first_handle.metadata["session_scope_id"] == "orch_123_ac_0"
-        assert second_handle.metadata["session_scope_id"] == "orch_123_ac_0"
-        assert first_handle.metadata["session_attempt_id"] == "orch_123_ac_0_attempt_1"
-        assert second_handle.metadata["session_attempt_id"] == "orch_123_ac_0_attempt_2"
+        assert first_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert second_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert first_handle.metadata["session_attempt_id"] == "orch_123_ac_1_attempt_1"
+        assert second_handle.metadata["session_attempt_id"] == "orch_123_ac_1_attempt_2"
         assert (
             first_handle.metadata["session_state_path"]
             == second_handle.metadata["session_state_path"]
-            == "execution.workflows.orch_123.acceptance_criteria.ac_0.implementation_session"
+            == "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
         )
         assert first_handle.metadata["retry_attempt"] == 0
         assert second_handle.metadata["retry_attempt"] == 1
@@ -2372,10 +2446,10 @@ class TestParallelACExecutor:
             "execution.session.completed",
         ]
         assert [event.data["session_attempt_id"] for event in lifecycle_events] == [
-            "orch_123_ac_0_attempt_1",
-            "orch_123_ac_0_attempt_1",
-            "orch_123_ac_0_attempt_2",
-            "orch_123_ac_0_attempt_2",
+            "orch_123_ac_1_attempt_1",
+            "orch_123_ac_1_attempt_1",
+            "orch_123_ac_1_attempt_2",
+            "orch_123_ac_1_attempt_2",
         ]
         assert executor._ac_runtime_handles == {}
 
@@ -3262,21 +3336,21 @@ class TestParallelACExecutor:
             event for event in appended_events if event.type == "execution.session.completed"
         )
 
-        assert tool_event.aggregate_id == "sess_retry_ac_3"
-        assert tool_event.data["ac_id"] == "sess_retry_ac_3"
+        assert tool_event.aggregate_id == "sess_retry_ac_4"
+        assert tool_event.data["ac_id"] == "sess_retry_ac_4"
         assert tool_event.data["retry_attempt"] == 2
         assert tool_event.data["attempt_number"] == 3
-        assert tool_event.data["session_attempt_id"] == "sess_retry_ac_3_attempt_3"
-        assert thinking_event.aggregate_id == "sess_retry_ac_3"
-        assert thinking_event.data["ac_id"] == "sess_retry_ac_3"
+        assert tool_event.data["session_attempt_id"] == "sess_retry_ac_4_attempt_3"
+        assert thinking_event.aggregate_id == "sess_retry_ac_4"
+        assert thinking_event.data["ac_id"] == "sess_retry_ac_4"
         assert thinking_event.data["retry_attempt"] == 2
         assert thinking_event.data["attempt_number"] == 3
-        assert thinking_event.data["session_attempt_id"] == "sess_retry_ac_3_attempt_3"
-        assert completed_event.aggregate_id == "sess_retry_ac_3"
-        assert completed_event.data["ac_id"] == "sess_retry_ac_3"
+        assert thinking_event.data["session_attempt_id"] == "sess_retry_ac_4_attempt_3"
+        assert completed_event.aggregate_id == "sess_retry_ac_4"
+        assert completed_event.data["ac_id"] == "sess_retry_ac_4"
         assert completed_event.data["retry_attempt"] == 2
         assert completed_event.data["attempt_number"] == 3
-        assert completed_event.data["session_attempt_id"] == "sess_retry_ac_3_attempt_3"
+        assert completed_event.data["session_attempt_id"] == "sess_retry_ac_4_attempt_3"
         assert completed_event.data["success"] is True
 
     @pytest.mark.asyncio
@@ -3521,9 +3595,9 @@ class TestParallelACExecutor:
                 "session_role": "implementation",
                 "retry_attempt": 0,
                 "ac_index": 1,
-                "session_scope_id": "orch_123_ac_1",
+                "session_scope_id": "orch_123_ac_2",
                 "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
                 ),
                 "server_session_id": "server-valid",
             },
@@ -3535,12 +3609,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": valid_handle.to_dict(),
                     },
@@ -3549,12 +3623,12 @@ class TestParallelACExecutor:
                 BaseEvent(
                     type="execution.session.resumed",
                     aggregate_type="execution",
-                    aggregate_id="orch_123_ac_1",
+                    aggregate_id="orch_123_ac_2",
                     data={
                         "retry_attempt": 0,
                         "session_state_path": (
                             "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_1.implementation_session"
+                            "ac_2.implementation_session"
                         ),
                         "runtime": {
                             "kind": "implementation_session",

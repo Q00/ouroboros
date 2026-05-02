@@ -1477,8 +1477,8 @@ class TestOrchestratorRunner:
             updated_at="2026-03-13T00:00:00+00:00",
             metadata={
                 "server_session_id": "server-42",
-                "session_scope_id": "ac_0",
-                "session_state_path": ("execution.acceptance_criteria.ac_0.implementation_session"),
+                "session_scope_id": "ac_1",
+                "session_state_path": ("execution.acceptance_criteria.ac_1.implementation_session"),
                 "session_role": "implementation",
                 "retry_attempt": 0,
             },

@@ -504,7 +504,7 @@ def create_heartbeat_event(
     Args:
         session_id: Parent session ID.
         ac_index: AC being executed.
-        ac_id: AC identifier string (e.g., "ac_0" or "sub_ac_1_0").
+        ac_id: AC identifier string (e.g., "node_7YK4Q2J9F6"; legacy "ac_1" allowed).
         elapsed_seconds: Seconds since AC execution started.
         message_count: Messages received so far.
 

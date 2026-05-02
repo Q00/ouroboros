@@ -23,6 +23,15 @@ from ouroboros.tui.events import (
 )
 
 
+async def _wait_for_status(app: OuroborosTUI, status: str, *, timeout: float = 1.0) -> None:
+    """Wait for the async subscription poller to apply a status update."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while app.state.status != status:
+        if asyncio.get_running_loop().time() >= deadline:
+            return
+        await asyncio.sleep(0.01)
+
+
 @pytest.fixture
 async def memory_event_store() -> AsyncIterator[EventStore]:
     """Provide an initialized in-memory event store."""
@@ -482,7 +491,7 @@ class TestOuroborosTUIEventSubscription:
                 data={"execution_id": "exec_active"},
             )
         )
-        await asyncio.sleep(0.03)
+        await _wait_for_status(app, "completed")
 
         assert app.state.execution_id == "exec_active"
         assert app.state.session_id == "sess_active"

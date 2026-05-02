@@ -529,20 +529,21 @@ class TestSessionRepository:
         mock_event_store: AsyncMock,
     ) -> None:
         """Parallel execution progress should replay through related execution aggregates."""
+        base_time = datetime.now(UTC)
         start_event = MagicMock()
         start_event.id = "evt-start"
         start_event.type = "orchestrator.session.started"
-        start_event.timestamp = datetime.now(UTC)
+        start_event.timestamp = base_time
         start_event.data = {
             "execution_id": "exec_parallel_123",
             "seed_id": "seed_456",
-            "start_time": datetime.now(UTC).isoformat(),
+            "start_time": base_time.isoformat(),
         }
 
         workflow_progress = MagicMock()
         workflow_progress.id = "evt-workflow"
         workflow_progress.type = "workflow.progress.updated"
-        workflow_progress.timestamp = datetime.now(UTC)
+        workflow_progress.timestamp = base_time + timedelta(milliseconds=1)
         workflow_progress.data = {
             "completed_count": 2,
             "total_count": 5,
@@ -560,9 +561,9 @@ class TestSessionRepository:
         child_runtime_event = MagicMock()
         child_runtime_event.id = "evt-child"
         child_runtime_event.type = "execution.session.started"
-        child_runtime_event.timestamp = datetime.now(UTC)
+        child_runtime_event.timestamp = base_time + timedelta(milliseconds=2)
         child_runtime_event.data = {
-            "session_scope_id": "exec_parallel_123_sub_ac_0_0",
+            "session_scope_id": "exec_parallel_123_sub_ac_1_1",
         }
 
         mock_event_store.replay.return_value = [start_event]
@@ -808,8 +809,8 @@ class TestSessionRepository:
                     "cwd": "/tmp/project",
                     "approval_mode": "acceptEdits",
                     "metadata": {
-                        "ac_id": "exec_parallel_123_sub_ac_4_2",
-                        "session_scope_id": "exec_parallel_123_sub_ac_4_2",
+                        "ac_id": "exec_parallel_123_sub_ac_5_3",
+                        "session_scope_id": "exec_parallel_123_sub_ac_5_3",
                         "session_role": "implementation",
                     },
                 },

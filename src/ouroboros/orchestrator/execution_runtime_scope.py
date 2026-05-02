@@ -6,6 +6,7 @@ distinct, stable locations without leaking runtime-specific details upward.
 
 from __future__ import annotations
 
+from base64 import b32encode
 from dataclasses import dataclass
 from hashlib import blake2b
 import re
@@ -37,8 +38,13 @@ def _display_path(path: tuple[int, ...]) -> str:
     return ".".join(str(segment + 1) for segment in path)
 
 
-def _build_local_node_id(path: tuple[int, ...]) -> str:
-    """Return a stable, compact node id unique within an execution."""
+def _path_seed(path: tuple[int, ...]) -> str:
+    """Return the stable zero-based path seed used for node identity hashing."""
+    return ".".join(str(segment) for segment in path)
+
+
+def _build_legacy_local_node_id(path: tuple[int, ...]) -> str:
+    """Return the pre-v1 local node id used as a transitional alias."""
     if not path:
         msg = "execution node path must not be empty"
         raise ValueError(msg)
@@ -46,10 +52,95 @@ def _build_local_node_id(path: tuple[int, ...]) -> str:
         return f"ac_{path[0]}"
 
     digest = blake2b(
-        ".".join(str(segment) for segment in path).encode("utf-8"),
+        _path_seed(path).encode("utf-8"),
         digest_size=8,
     ).hexdigest()
     return f"node_{digest}"
+
+
+def _build_legacy_display_node_id(path: tuple[int, ...]) -> str:
+    """Return the temporary one-based path node id used by early v1 drafts."""
+    if not path:
+        msg = "execution node path must not be empty"
+        raise ValueError(msg)
+    return "ac_" + "_".join(str(segment + 1) for segment in path)
+
+
+def _build_execution_scoped_node_id(
+    execution_context_id: str | None,
+    path: tuple[int, ...],
+) -> str:
+    """Return the canonical opaque node id scoped by execution id and path."""
+    if not execution_context_id:
+        return _build_legacy_local_node_id(path)
+
+    digest = blake2b(
+        f"{execution_context_id}:{_path_seed(path)}".encode(),
+        digest_size=8,
+    ).digest()
+    token = b32encode(digest).decode("ascii").rstrip("=")
+    return f"node_{token}"
+
+
+def _legacy_indexed_ac_runtime_scope(
+    ac_index: int,
+    *,
+    execution_context_id: str | None,
+    is_sub_ac: bool,
+    parent_ac_index: int | None,
+    sub_ac_index: int | None,
+    retry_attempt: int,
+    one_based: bool,
+) -> ExecutionRuntimeScope:
+    """Build legacy index-derived runtime scopes for compatibility lookup."""
+    workflow_scope = (
+        _normalize_scope_segment(execution_context_id, fallback="workflow")
+        if execution_context_id
+        else None
+    )
+    offset = 1 if one_based else 0
+
+    if is_sub_ac:
+        if parent_ac_index is None or sub_ac_index is None:
+            msg = "parent_ac_index and sub_ac_index are required for sub-AC runtime scopes"
+            raise ValueError(msg)
+        parent_scope_id = f"ac_{parent_ac_index + offset}"
+        sub_scope_id = f"sub_ac_{sub_ac_index + offset}"
+        aggregate_id = f"sub_ac_{parent_ac_index + offset}_{sub_ac_index + offset}"
+        state_path = (
+            "execution.acceptance_criteria."
+            f"{parent_scope_id}.sub_acs.{sub_scope_id}.implementation_session"
+        )
+        if workflow_scope is not None:
+            aggregate_id = f"{workflow_scope}_{aggregate_id}"
+            state_path = (
+                "execution.workflows."
+                f"{workflow_scope}.acceptance_criteria."
+                f"{parent_scope_id}.sub_acs.{sub_scope_id}.implementation_session"
+            )
+        return ExecutionRuntimeScope(
+            aggregate_type="execution",
+            aggregate_id=aggregate_id,
+            state_path=state_path,
+            retry_attempt=retry_attempt,
+        )
+
+    aggregate_id = f"ac_{ac_index + offset}"
+    state_path = f"execution.acceptance_criteria.ac_{ac_index + offset}.implementation_session"
+    if workflow_scope is not None:
+        aggregate_id = f"{workflow_scope}_{aggregate_id}"
+        state_path = (
+            "execution.workflows."
+            f"{workflow_scope}.acceptance_criteria.ac_{ac_index + offset}."
+            "implementation_session"
+        )
+
+    return ExecutionRuntimeScope(
+        aggregate_type="execution",
+        aggregate_id=aggregate_id,
+        state_path=state_path,
+        retry_attempt=retry_attempt,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +157,10 @@ class ExecutionNodeIdentity:
     path: tuple[int, ...]
     node_id: str
     parent_node_id: str | None
+    legacy_node_id: str
+    legacy_parent_node_id: str | None
+    legacy_node_aliases: tuple[str, ...]
+    legacy_parent_node_aliases: tuple[str, ...]
     depth: int
     ordinal: int
 
@@ -96,8 +191,12 @@ class ExecutionNodeIdentity:
             execution_context_id=execution_context_id,
             root_ac_index=ac_index,
             path=path,
-            node_id=_build_local_node_id(path),
+            node_id=_build_execution_scoped_node_id(execution_context_id, path),
             parent_node_id=None,
+            legacy_node_id=_build_legacy_local_node_id(path),
+            legacy_parent_node_id=None,
+            legacy_node_aliases=(_build_legacy_display_node_id(path),),
+            legacy_parent_node_aliases=(),
             depth=0,
             ordinal=ac_index,
         )
@@ -109,8 +208,15 @@ class ExecutionNodeIdentity:
             execution_context_id=self.execution_context_id,
             root_ac_index=self.root_ac_index,
             path=path,
-            node_id=_build_local_node_id(path),
+            node_id=_build_execution_scoped_node_id(self.execution_context_id, path),
             parent_node_id=self.node_id,
+            legacy_node_id=_build_legacy_local_node_id(path),
+            legacy_parent_node_id=self.legacy_node_id,
+            legacy_node_aliases=(_build_legacy_display_node_id(path),),
+            legacy_parent_node_aliases=(
+                self.legacy_node_id,
+                *self.legacy_node_aliases,
+            ),
             depth=self.depth + 1,
             ordinal=ordinal,
         )
@@ -125,6 +231,11 @@ class ExecutionNodeIdentity:
         """Return the human-readable top-level AC number."""
         return self.root_ac_index + 1
 
+    @property
+    def node_kind(self) -> str:
+        """Return the generic node kind for renderer and projection consumers."""
+        return "ac" if self.depth == 0 else "sub_ac"
+
     def to_event_metadata(self) -> dict[str, object]:
         """Serialize node identity fields for persisted events."""
         metadata: dict[str, object] = {
@@ -132,12 +243,17 @@ class ExecutionNodeIdentity:
             "schema_version": 1,
             "node_id": self.node_id,
             "parent_node_id": self.parent_node_id,
+            "legacy_node_id": self.legacy_node_id,
+            "legacy_parent_node_id": self.legacy_parent_node_id,
+            "legacy_node_aliases": list(self.legacy_node_aliases),
+            "legacy_parent_node_aliases": list(self.legacy_parent_node_aliases),
             "root_ac_index": self.root_ac_index,
             "root_ac_number": self.root_ac_number,
             "path": list(self.path),
             "display_path": self.display_path,
             "depth": self.depth,
             "ordinal": self.ordinal,
+            "node_kind": self.node_kind,
         }
         if self.execution_context_id:
             metadata["execution_id"] = self.execution_context_id
@@ -152,13 +268,21 @@ class ACRuntimeIdentity:
     ac_index: int | None = None
     parent_ac_index: int | None = None
     sub_ac_index: int | None = None
+    execution_id: str | None = None
     node_id: str | None = None
     parent_node_id: str | None = None
+    legacy_node_id: str | None = None
+    legacy_parent_node_id: str | None = None
+    legacy_node_aliases: tuple[str, ...] = ()
+    legacy_parent_node_aliases: tuple[str, ...] = ()
     root_ac_index: int | None = None
     node_path: tuple[int, ...] = ()
     display_path: str | None = None
     depth: int | None = None
     ordinal: int | None = None
+    node_kind: str | None = None
+    legacy_session_scope_ids: tuple[str, ...] = ()
+    legacy_session_state_paths: tuple[str, ...] = ()
     scope: str = "ac"
     session_role: str = "implementation"
 
@@ -220,6 +344,15 @@ class ACRuntimeIdentity:
             metadata["schema_version"] = 1
             metadata["node_id"] = self.node_id
             metadata["parent_node_id"] = self.parent_node_id
+        if self.execution_id is not None:
+            metadata["execution_id"] = self.execution_id
+        if self.legacy_node_id is not None:
+            metadata["legacy_node_id"] = self.legacy_node_id
+            metadata["legacy_parent_node_id"] = self.legacy_parent_node_id
+        if self.legacy_node_aliases:
+            metadata["legacy_node_aliases"] = list(self.legacy_node_aliases)
+        if self.legacy_parent_node_aliases:
+            metadata["legacy_parent_node_aliases"] = list(self.legacy_parent_node_aliases)
         if self.root_ac_index is not None:
             metadata["root_ac_index"] = self.root_ac_index
             metadata["root_ac_number"] = self.root_ac_index + 1
@@ -231,6 +364,14 @@ class ACRuntimeIdentity:
             metadata["depth"] = self.depth
         if self.ordinal is not None:
             metadata["ordinal"] = self.ordinal
+        if self.node_kind is not None:
+            metadata["node_kind"] = self.node_kind
+        if self.legacy_session_scope_ids:
+            metadata["legacy_session_scope_id"] = self.legacy_session_scope_ids[0]
+            metadata["legacy_session_scope_ids"] = list(self.legacy_session_scope_ids)
+        if self.legacy_session_state_paths:
+            metadata["legacy_session_state_path"] = self.legacy_session_state_paths[0]
+            metadata["legacy_session_state_paths"] = list(self.legacy_session_state_paths)
         return metadata
 
 
@@ -258,19 +399,14 @@ def build_ac_runtime_scope(
         else None
     )
     if node_id:
+        if any(segment < 0 for segment in node_path):
+            msg = "execution node path segments must be >= 0"
+            raise ValueError(msg)
         normalized_node_id = _normalize_scope_segment(node_id, fallback="node")
         aggregate_id = (
             f"{workflow_scope}_{normalized_node_id}" if workflow_scope else normalized_node_id
         )
-        if len(node_path) == 1:
-            state_path = f"execution.acceptance_criteria.ac_{node_path[0]}.implementation_session"
-            if workflow_scope is not None:
-                state_path = (
-                    "execution.workflows."
-                    f"{workflow_scope}.acceptance_criteria.ac_{node_path[0]}."
-                    "implementation_session"
-                )
-        elif workflow_scope is not None:
+        if workflow_scope is not None:
             state_path = (
                 "execution.workflows."
                 f"{workflow_scope}.nodes.{normalized_node_id}.implementation_session"
@@ -285,42 +421,24 @@ def build_ac_runtime_scope(
         )
 
     if is_sub_ac:
-        if parent_ac_index is None or sub_ac_index is None:
-            msg = "parent_ac_index and sub_ac_index are required for sub-AC runtime scopes"
-            raise ValueError(msg)
-        aggregate_id = f"sub_ac_{parent_ac_index}_{sub_ac_index}"
-        state_path = (
-            "execution.acceptance_criteria."
-            f"ac_{parent_ac_index}.sub_acs.sub_ac_{sub_ac_index}.implementation_session"
-        )
-        if workflow_scope is not None:
-            aggregate_id = f"{workflow_scope}_{aggregate_id}"
-            state_path = (
-                "execution.workflows."
-                f"{workflow_scope}.acceptance_criteria."
-                f"ac_{parent_ac_index}.sub_acs.sub_ac_{sub_ac_index}.implementation_session"
-            )
-        return ExecutionRuntimeScope(
-            aggregate_type="execution",
-            aggregate_id=aggregate_id,
-            state_path=state_path,
+        return _legacy_indexed_ac_runtime_scope(
+            ac_index,
+            execution_context_id=execution_context_id,
+            is_sub_ac=True,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
             retry_attempt=retry_attempt,
+            one_based=True,
         )
 
-    aggregate_id = f"ac_{ac_index}"
-    state_path = f"execution.acceptance_criteria.ac_{ac_index}.implementation_session"
-    if workflow_scope is not None:
-        aggregate_id = f"{workflow_scope}_{aggregate_id}"
-        state_path = (
-            "execution.workflows."
-            f"{workflow_scope}.acceptance_criteria.ac_{ac_index}.implementation_session"
-        )
-
-    return ExecutionRuntimeScope(
-        aggregate_type="execution",
-        aggregate_id=aggregate_id,
-        state_path=state_path,
+    return _legacy_indexed_ac_runtime_scope(
+        ac_index,
+        execution_context_id=execution_context_id,
+        is_sub_ac=False,
+        parent_ac_index=None,
+        sub_ac_index=None,
         retry_attempt=retry_attempt,
+        one_based=True,
     )
 
 
@@ -345,18 +463,46 @@ def build_ac_runtime_identity(
         node_id=node_identity.node_id if node_identity is not None else None,
         node_path=node_identity.path if node_identity is not None else (),
     )
+    legacy_scopes: list[ExecutionRuntimeScope] = []
+    if node_identity is not None:
+        for one_based in (True, False):
+            legacy_scope = _legacy_indexed_ac_runtime_scope(
+                ac_index,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                retry_attempt=retry_attempt,
+                one_based=one_based,
+            )
+            if legacy_scope.aggregate_id != runtime_scope.aggregate_id:
+                legacy_scopes.append(legacy_scope)
     return ACRuntimeIdentity(
         runtime_scope=runtime_scope,
         ac_index=None if is_sub_ac else ac_index,
         parent_ac_index=parent_ac_index if is_sub_ac else None,
         sub_ac_index=sub_ac_index if is_sub_ac else None,
+        execution_id=node_identity.execution_context_id if node_identity is not None else None,
         node_id=node_identity.node_id if node_identity is not None else None,
         parent_node_id=node_identity.parent_node_id if node_identity is not None else None,
+        legacy_node_id=node_identity.legacy_node_id if node_identity is not None else None,
+        legacy_parent_node_id=(
+            node_identity.legacy_parent_node_id if node_identity is not None else None
+        ),
+        legacy_node_aliases=(
+            node_identity.legacy_node_aliases if node_identity is not None else ()
+        ),
+        legacy_parent_node_aliases=(
+            node_identity.legacy_parent_node_aliases if node_identity is not None else ()
+        ),
         root_ac_index=node_identity.root_ac_index if node_identity is not None else None,
         node_path=node_identity.path if node_identity is not None else (),
         display_path=node_identity.display_path if node_identity is not None else None,
         depth=node_identity.depth if node_identity is not None else None,
         ordinal=node_identity.ordinal if node_identity is not None else None,
+        node_kind=node_identity.node_kind if node_identity is not None else None,
+        legacy_session_scope_ids=tuple(scope.aggregate_id for scope in legacy_scopes),
+        legacy_session_state_paths=tuple(scope.state_path for scope in legacy_scopes),
     )
 
 
