@@ -455,6 +455,9 @@ class TestCreateMessageFromEvent:
                 "depth": 1,
                 "ordinal": 1,
                 "root_ac_index": 0,
+                "root_ac_number": 1,
+                "legacy_parent_node_id": "ac_0",
+                "legacy_parent_node_aliases": ["ac_1"],
                 "legacy_ac_index": 1,
                 "legacy_sub_task_index": 2,
                 "legacy_sub_task_id": "ac_1_sub_2",
@@ -473,6 +476,9 @@ class TestCreateMessageFromEvent:
         assert msg.node_depth == 1
         assert msg.ordinal == 1
         assert msg.root_ac_index == 0
+        assert msg.root_ac_number == 1
+        assert msg.legacy_parent_node_id == "ac_0"
+        assert msg.legacy_parent_node_aliases == ["ac_1"]
         assert msg.ac_index == 1
         assert msg.sub_task_id == "ac_1_sub_2"
 

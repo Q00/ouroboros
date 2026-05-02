@@ -58,6 +58,99 @@ class _EventSubscriptionContext:
     generation: int = 0
 
 
+def _coerce_non_empty_string(value: object) -> str | None:
+    """Return a stripped non-empty string when present."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _coerce_int(value: object, default: int) -> int:
+    """Return an integer when possible, otherwise a default."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return default
+
+
+def _find_node_id_for_ac_index(nodes: dict[str, Any], ac_index: int) -> str | None:
+    """Resolve the top-level tree node associated with a 1-based AC index."""
+    if ac_index <= 0:
+        return None
+
+    conventional_id = f"ac_{ac_index}"
+    if conventional_id in nodes:
+        return conventional_id
+
+    for node_id, raw_node in nodes.items():
+        if not isinstance(raw_node, dict):
+            continue
+        if _coerce_int(raw_node.get("index"), 0) != ac_index:
+            continue
+        if _coerce_int(raw_node.get("depth"), 0) > 1:
+            continue
+        return node_id
+
+    return None
+
+
+def _subtask_message_may_fallback_to_ac_index(message: SubtaskUpdated) -> bool:
+    """Return whether AC-index fallback is safe for a subtask update."""
+    return message.node_depth is None or message.node_depth <= 1
+
+
+def _resolve_subtask_parent_id(
+    nodes: dict[str, Any],
+    message: SubtaskUpdated,
+) -> str | None:
+    """Resolve a Sub-AC parent from canonical, legacy, then index metadata."""
+    candidates: list[str] = []
+    for value in (
+        message.parent_node_id,
+        message.legacy_parent_node_id,
+    ):
+        candidate = _coerce_non_empty_string(value)
+        if candidate is not None and candidate not in candidates:
+            candidates.append(candidate)
+
+    for value in message.legacy_parent_node_aliases:
+        candidate = _coerce_non_empty_string(value)
+        if candidate is not None and candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        if candidate in nodes:
+            return candidate
+
+    if not _subtask_message_may_fallback_to_ac_index(message):
+        return None
+
+    ac_indexes: list[int] = []
+    for value in (message.ac_index, message.root_ac_number):
+        ac_index = _coerce_int(value, 0)
+        if ac_index > 0 and ac_index not in ac_indexes:
+            ac_indexes.append(ac_index)
+
+    if message.root_ac_index is not None and message.root_ac_index >= 0:
+        root_ac_number = message.root_ac_index + 1
+        if root_ac_number not in ac_indexes:
+            ac_indexes.append(root_ac_number)
+
+    for ac_index in ac_indexes:
+        parent_id = _find_node_id_for_ac_index(nodes, ac_index)
+        if parent_id is not None:
+            return parent_id
+
+    return None
+
+
 class OuroborosTUI(App[None]):
     """Main Textual application for Ouroboros TUI."""
 
@@ -438,7 +531,13 @@ class OuroborosTUI(App[None]):
     def on_subtask_updated(self, message: SubtaskUpdated) -> None:
         """Handle sub-task updates and add to AC tree (SSOT)."""
         nodes = self._state.ac_tree.get("nodes", {})
-        parent_ac_id = message.parent_node_id or f"ac_{message.ac_index}"
+        resolved_parent_id = _resolve_subtask_parent_id(nodes, message)
+        parent_ac_id = (
+            resolved_parent_id
+            or message.parent_node_id
+            or message.legacy_parent_node_id
+            or (f"ac_{message.ac_index}" if message.ac_index > 0 else "")
+        )
         sub_task_id = message.node_id or message.sub_task_id
         existing_node = nodes.get(sub_task_id, {})
 
@@ -484,7 +583,8 @@ class OuroborosTUI(App[None]):
                 for child_id in nodes[previous_parent_id].get("children_ids", [])
                 if child_id != sub_task_id
             ]
-        if parent_ac_id in nodes:
+        if resolved_parent_id is not None and resolved_parent_id in nodes:
+            parent_ac_id = resolved_parent_id
             parent = nodes[parent_ac_id]
             children = parent.get("children_ids", [])
             if sub_task_id not in children:

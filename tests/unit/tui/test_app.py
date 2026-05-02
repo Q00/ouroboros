@@ -348,6 +348,122 @@ class TestOuroborosTUIMessageHandlers:
         assert app.state.ac_tree["nodes"]["ac_0"]["children_ids"] == ["node_child"]
         assert app.state.ac_tree["nodes"]["ac_1"]["children_ids"] == []
 
+    def test_on_subtask_updated_falls_back_to_legacy_parent_alias(self) -> None:
+        """Mixed-history node events should attach to legacy-keyed parents."""
+        app = OuroborosTUI()
+        app.state.ac_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": "Acceptance Criteria",
+                    "children_ids": ["ac_1"],
+                },
+                "ac_1": {
+                    "id": "ac_1",
+                    "content": "Legacy parent",
+                    "status": "executing",
+                    "children_ids": [],
+                    "depth": 1,
+                },
+            },
+        }
+
+        app.on_subtask_updated(
+            SubtaskUpdated(
+                execution_id="exec_123",
+                ac_index=1,
+                sub_task_index=1,
+                sub_task_id="ac_1_sub_1",
+                content="Resumed child",
+                status="executing",
+                node_id="node_child",
+                parent_node_id="node_missing_parent",
+                legacy_parent_node_aliases=["ac_1"],
+                depth=1,
+            )
+        )
+
+        assert app.state.ac_tree["nodes"]["node_child"]["parent_id"] == "ac_1"
+        assert app.state.ac_tree["nodes"]["ac_1"]["children_ids"] == ["node_child"]
+
+    def test_on_subtask_updated_falls_back_to_legacy_parent_node_id(self) -> None:
+        """Legacy zero-based parent IDs should keep pre-migration trees live."""
+        app = OuroborosTUI()
+        app.state.ac_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": "Acceptance Criteria",
+                    "children_ids": ["ac_0"],
+                },
+                "ac_0": {
+                    "id": "ac_0",
+                    "content": "Legacy zero-based parent",
+                    "status": "executing",
+                    "children_ids": [],
+                    "depth": 1,
+                },
+            },
+        }
+
+        app.on_subtask_updated(
+            SubtaskUpdated(
+                execution_id="exec_123",
+                ac_index=1,
+                sub_task_index=1,
+                sub_task_id="ac_1_sub_1",
+                content="Resumed child",
+                status="executing",
+                node_id="node_child",
+                parent_node_id="node_missing_parent",
+                legacy_parent_node_id="ac_0",
+                depth=1,
+            )
+        )
+
+        assert app.state.ac_tree["nodes"]["node_child"]["parent_id"] == "ac_0"
+        assert app.state.ac_tree["nodes"]["ac_0"]["children_ids"] == ["node_child"]
+
+    def test_on_subtask_updated_does_not_attach_deep_event_by_ac_index(self) -> None:
+        """Depth-2 updates should not attach to the root AC when parent is missing."""
+        app = OuroborosTUI()
+        app.state.ac_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": "Acceptance Criteria",
+                    "children_ids": ["ac_1"],
+                },
+                "ac_1": {
+                    "id": "ac_1",
+                    "content": "Root AC",
+                    "status": "executing",
+                    "children_ids": [],
+                    "depth": 1,
+                },
+            },
+        }
+
+        app.on_subtask_updated(
+            SubtaskUpdated(
+                execution_id="exec_123",
+                ac_index=1,
+                sub_task_index=1,
+                sub_task_id="ac_1_sub_1",
+                content="Deep child with missing parent",
+                status="executing",
+                node_id="node_grandchild",
+                parent_node_id="node_missing_parent",
+                depth=2,
+            )
+        )
+
+        assert app.state.ac_tree["nodes"]["node_grandchild"]["parent_id"] == ("node_missing_parent")
+        assert app.state.ac_tree["nodes"]["ac_1"]["children_ids"] == []
+
     def test_on_pause_requested(self) -> None:
         """Test handling PauseRequested message."""
         app = OuroborosTUI()

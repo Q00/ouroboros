@@ -406,7 +406,10 @@ class SubtaskUpdated(Message):
         depth: int | None = None,
         ordinal: int | None = None,
         root_ac_index: int | None = None,
+        root_ac_number: int | None = None,
         identity_model: str | None = None,
+        legacy_parent_node_id: str | None = None,
+        legacy_parent_node_aliases: list[str] | None = None,
     ) -> None:
         """Initialize SubtaskUpdated message."""
         super().__init__()
@@ -427,7 +430,14 @@ class SubtaskUpdated(Message):
         self.node_depth = depth
         self.ordinal = ordinal
         self.root_ac_index = root_ac_index
+        self.root_ac_number = root_ac_number
         self.identity_model = identity_model
+        self.legacy_parent_node_id = legacy_parent_node_id
+        self.legacy_parent_node_aliases = (
+            [alias for alias in legacy_parent_node_aliases if isinstance(alias, str)]
+            if isinstance(legacy_parent_node_aliases, list)
+            else []
+        )
 
 
 class LineageSelected(Message):
@@ -840,8 +850,17 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             root_ac_index=data.get("root_ac_index")
             if isinstance(data.get("root_ac_index"), int)
             else None,
+            root_ac_number=data.get("root_ac_number")
+            if isinstance(data.get("root_ac_number"), int)
+            else None,
             identity_model=data.get("identity_model")
             if isinstance(data.get("identity_model"), str)
+            else None,
+            legacy_parent_node_id=data.get("legacy_parent_node_id")
+            if isinstance(data.get("legacy_parent_node_id"), str)
+            else None,
+            legacy_parent_node_aliases=data.get("legacy_parent_node_aliases")
+            if isinstance(data.get("legacy_parent_node_aliases"), list)
             else None,
         )
 

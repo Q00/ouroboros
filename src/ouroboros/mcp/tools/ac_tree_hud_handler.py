@@ -641,6 +641,75 @@ def _find_node_id_for_ac_index(
     return None
 
 
+def _subtask_event_may_fallback_to_ac_index(data: Mapping[str, Any]) -> bool:
+    """Return whether AC-index fallback is safe for a subtask event.
+
+    AC-index fallback can only identify the top-level parent. For nested
+    descendants, attaching to that parent would hide a missing intermediate
+    ancestor and produce the wrong tree.
+    """
+    depth = _coerce_int(data.get("depth"), -1)
+    return depth <= 1
+
+
+def _iter_subtask_parent_id_candidates(data: Mapping[str, Any]) -> list[str]:
+    """Return explicit and legacy parent IDs in resolution order."""
+    candidates: list[str] = []
+    for value in (
+        data.get("parent_node_id"),
+        data.get("legacy_parent_node_id"),
+        data.get("parent_id"),
+    ):
+        candidate = _coerce_non_empty_string(value)
+        if candidate is not None and candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in _coerce_children_ids(data.get("legacy_parent_node_aliases")):
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    return candidates
+
+
+def _iter_subtask_parent_ac_index_candidates(data: Mapping[str, Any]) -> list[int]:
+    """Return 1-based AC indexes usable for first-level legacy fallback."""
+    candidates: list[int] = []
+    for value in (
+        data.get("ac_index"),
+        data.get("legacy_ac_index"),
+        data.get("root_ac_number"),
+    ):
+        candidate = _coerce_int(value, 0)
+        if candidate > 0 and candidate not in candidates:
+            candidates.append(candidate)
+
+    root_ac_index = _coerce_int(data.get("root_ac_index"), -1)
+    if root_ac_index >= 0 and root_ac_index + 1 not in candidates:
+        candidates.append(root_ac_index + 1)
+
+    return candidates
+
+
+def _resolve_subtask_parent_id(
+    nodes: Mapping[str, Mapping[str, Any]],
+    data: Mapping[str, Any],
+) -> str | None:
+    """Resolve a subtask parent from canonical, legacy, then index metadata."""
+    for candidate in _iter_subtask_parent_id_candidates(data):
+        if candidate in nodes:
+            return candidate
+
+    if not _subtask_event_may_fallback_to_ac_index(data):
+        return None
+
+    for ac_index in _iter_subtask_parent_ac_index_candidates(data):
+        parent_id = _find_node_id_for_ac_index(nodes, ac_index)
+        if parent_id is not None:
+            return parent_id
+
+    return None
+
+
 def _merge_subtask_events_into_snapshot(
     snapshot: Mapping[str, Any],
     execution_events: list[Any],
@@ -669,9 +738,11 @@ def _merge_subtask_events_into_snapshot(
         if not isinstance(data, Mapping):
             continue
 
-        ac_index = _coerce_int(data.get("ac_index"), 0)
+        ac_index = _coerce_int(data.get("ac_index"), 0) or _coerce_int(
+            data.get("legacy_ac_index"), 0
+        )
         explicit_parent_id = _coerce_non_empty_string(data.get("parent_node_id"))
-        parent_id = explicit_parent_id or _find_node_id_for_ac_index(nodes, ac_index)
+        parent_id = _resolve_subtask_parent_id(nodes, data)
         if parent_id is None or parent_id not in nodes:
             continue
 
