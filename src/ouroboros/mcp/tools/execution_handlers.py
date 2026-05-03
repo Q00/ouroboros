@@ -66,6 +66,19 @@ from ouroboros.providers.base import LLMAdapter
 log = structlog.get_logger(__name__)
 
 
+def _pause_metadata_from_progress(progress: dict[str, Any]) -> dict[str, Any]:
+    """Extract pause metadata safe to expose in MCP tool results."""
+    metadata: dict[str, Any] = {}
+    for key in ("pause_kind", "pause_seconds", "resume_after", "resume_hint", "paused_at"):
+        value = progress.get(key)
+        if value is not None:
+            metadata[key] = value
+    reason = progress.get("pause_reason")
+    if reason is not None:
+        metadata["pause_reason"] = reason
+    return metadata
+
+
 def _classify_synchronous_execution_status(
     session_status: SessionStatus | None,
 ) -> tuple[str, bool | None, bool, str]:
@@ -595,6 +608,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 log.exception("mcp.tool.execute_seed.event_store_close_error")
 
                 session_status: SessionStatus | None = None
+                pause_metadata: dict[str, Any] = {}
                 if synchronous:
                     # Run inline — the caller (StartExecuteSeedHandler / Job
                     # system) already handles backgrounding.  Pass
@@ -614,7 +628,15 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     # Derive actual outcome from session state.
                     try:
                         post_result = await session_repo.reconstruct_session(tracker.session_id)
-                        session_status = post_result.value.status if post_result.is_ok else None
+                        if post_result.is_ok:
+                            reconstructed_tracker = post_result.value
+                            session_status = reconstructed_tracker.status
+                            if session_status == SessionStatus.PAUSED:
+                                pause_metadata = _pause_metadata_from_progress(
+                                    reconstructed_tracker.progress
+                                )
+                        else:
+                            session_status = None
                     except Exception:
                         session_status = None
 
@@ -646,6 +668,15 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
                 )
+                if pause_metadata:
+                    if pause_metadata.get("pause_kind") is not None:
+                        message += f"Pause Kind: {pause_metadata['pause_kind']}\n"
+                    if pause_metadata.get("pause_seconds") is not None:
+                        message += f"Pause Seconds: {pause_metadata['pause_seconds']}\n"
+                    if pause_metadata.get("resume_after") is not None:
+                        message += f"Resume After: {pause_metadata['resume_after']}\n"
+                    if pause_metadata.get("resume_hint") is not None:
+                        message += f"Resume Hint: {pause_metadata['resume_hint']}\n"
                 if workspace is not None:
                     message += (
                         f"Task Worktree: {workspace.worktree_path}\n"
@@ -672,6 +703,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     meta["success"] = success
                 if session_status == SessionStatus.PAUSED:
                     meta["paused"] = True
+                    meta.update(pause_metadata)
                 if workspace is not None:
                     meta["worktree_path"] = workspace.worktree_path
                     meta["worktree_branch"] = workspace.branch

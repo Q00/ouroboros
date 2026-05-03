@@ -617,7 +617,7 @@ class TestRuntimeHelperLookups:
 
         assert get_max_parallel_workers() == 5
 
-    @pytest.mark.parametrize("env_value", ["0", "-1", "five"])
+    @pytest.mark.parametrize("env_value", ["0", "-1", "five", "nan", "inf", "-inf"])
     def test_get_max_parallel_workers_rejects_invalid_env(
         self,
         env_value: str,
@@ -796,7 +796,7 @@ class TestRuntimeHelperLookups:
 
         assert get_usage_limit_pause_seconds() == 5400
 
-    @pytest.mark.parametrize("env_value", ["0", "-1", "five"])
+    @pytest.mark.parametrize("env_value", ["0", "-1", "five", "nan", "inf", "-inf"])
     def test_get_usage_limit_pause_seconds_rejects_invalid_env(
         self,
         env_value: str,

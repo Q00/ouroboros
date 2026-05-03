@@ -40,7 +40,10 @@ from ouroboros.mcp.tools.definitions import (
     interview_handler,
     start_execute_seed_handler,
 )
-from ouroboros.mcp.tools.execution_handlers import _classify_synchronous_execution_status
+from ouroboros.mcp.tools.execution_handlers import (
+    _classify_synchronous_execution_status,
+    _pause_metadata_from_progress,
+)
 from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.types import ToolInputType
@@ -172,6 +175,28 @@ class TestExecuteSeedHandler:
         assert success is None
         assert is_error is False
         assert header == "Seed Execution PAUSED"
+
+    def test_pause_metadata_from_progress_exposes_resume_contract(self) -> None:
+        """Synchronous MCP paused results should carry resume timing metadata."""
+        metadata = _pause_metadata_from_progress(
+            {
+                "runtime_status": "paused",
+                "pause_kind": "usage_limit",
+                "pause_seconds": 5400,
+                "resume_after": "2026-01-01T01:30:00+00:00",
+                "resume_hint": "Resume after the quota window.",
+                "pause_reason": "Usage limit reached",
+                "unrelated": "ignored",
+            }
+        )
+
+        assert metadata == {
+            "pause_kind": "usage_limit",
+            "pause_seconds": 5400,
+            "resume_after": "2026-01-01T01:30:00+00:00",
+            "resume_hint": "Resume after the quota window.",
+            "pause_reason": "Usage limit reached",
+        }
 
     def test_synchronous_failed_status_is_mcp_error(self) -> None:
         """Failed executions still surface as failed tool results."""

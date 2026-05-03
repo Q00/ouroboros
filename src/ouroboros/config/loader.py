@@ -35,6 +35,7 @@ Functions:
 """
 
 import ast
+import math
 import os
 from pathlib import Path
 import shutil
@@ -498,7 +499,7 @@ def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
 
     try:
         parsed = int(value)
-    except (TypeError, ValueError) as exc:
+    except (OverflowError, TypeError, ValueError) as exc:
         raise ConfigError(
             f"{config_key} must be a positive integer",
             config_key=config_key,
@@ -508,6 +509,13 @@ def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
     if isinstance(value, float) and not value.is_integer():
         raise ConfigError(
             f"{config_key} must be a positive integer",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    if not math.isfinite(parsed):
+        raise ConfigError(
+            f"{config_key} must be finite",
             config_key=config_key,
             details={"value": value},
         )
@@ -539,6 +547,13 @@ def _parse_positive_float(value: Any, *, config_key: str) -> float:
             config_key=config_key,
             details={"value": value},
         ) from exc
+
+    if not math.isfinite(parsed):
+        raise ConfigError(
+            f"{config_key} must be finite",
+            config_key=config_key,
+            details={"value": value},
+        )
 
     if parsed <= 0:
         raise ConfigError(
