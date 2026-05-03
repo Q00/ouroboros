@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.errors import ConfigError
 from ouroboros.providers.base import CompletionConfig
@@ -198,6 +200,57 @@ def test_resolve_completion_profile_applies_explicit_profile_sampling_settings()
     assert resolved.config.temperature == 0.3
     assert resolved.config.max_tokens == 8192
     assert resolved.config.top_p == 0.8
+
+
+def test_resolve_completion_profile_rejects_missing_explicit_profile() -> None:
+    """Explicit profile names are strict and should fail fast when misspelled."""
+    config = OuroborosConfig(llm_profiles={})
+    request = CompletionConfig(model="fallback", profile="typo")
+
+    with (
+        patch("ouroboros.providers.profiles.load_config", return_value=config),
+        pytest.raises(ConfigError, match="LLM profile 'typo'.*not defined"),
+    ):
+        resolve_completion_profile(request, backend="codex")
+
+
+def test_resolve_completion_profile_rejects_missing_role_profile() -> None:
+    """Role mappings should not silently fall back when they point to deleted profiles."""
+    config = OuroborosConfig(llm_profiles={}, llm_role_profiles={"qa": "deleted"})
+    request = CompletionConfig(model="default", role="qa")
+
+    with (
+        patch("ouroboros.providers.profiles.load_config", return_value=config),
+        pytest.raises(ConfigError, match="LLM profile 'deleted'.*not defined"),
+    ):
+        resolve_completion_profile(request, backend="codex")
+
+
+def test_resolve_completion_profile_rejects_explicit_profile_without_config() -> None:
+    """An explicit profile request requires loadable profile configuration."""
+    request = CompletionConfig(model="fallback", profile="fast")
+
+    with (
+        patch(
+            "ouroboros.providers.profiles.load_config",
+            side_effect=ConfigError("missing config"),
+        ),
+        pytest.raises(ConfigError, match="profile 'fast'.*config could not be loaded"),
+    ):
+        resolve_completion_profile(request, backend="codex")
+
+
+def test_resolve_completion_profile_preserves_model_when_role_unmapped() -> None:
+    """A role with no configured mapping remains a backwards-compatible fallback."""
+    config = OuroborosConfig(llm_profiles={}, llm_role_profiles={})
+    request = CompletionConfig(model="fallback", role="qa")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(request, backend="codex")
+
+    assert resolved.config is request
+    assert resolved.profile_name is None
+    assert resolved.backend_profile is None
 
 
 def test_resolve_completion_profile_falls_back_when_config_missing() -> None:

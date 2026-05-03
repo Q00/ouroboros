@@ -82,7 +82,10 @@ def resolve_completion_profile(
 
     try:
         ouroboros_config = load_config()
-    except ConfigError:
+    except ConfigError as exc:
+        if config.profile:
+            msg = f"LLM profile {config.profile!r} was requested, but Ouroboros config could not be loaded"
+            raise ConfigError(msg, config_key="llm_profiles") from exc
         return ResolvedCompletionProfile(config=config)
 
     profile_name = config.profile
@@ -93,7 +96,11 @@ def resolve_completion_profile(
 
     profile = ouroboros_config.llm_profiles.get(profile_name)
     if profile is None:
-        return ResolvedCompletionProfile(config=config, profile_name=profile_name)
+        source = (
+            f"role {config.role!r}" if config.role and not config.profile else "explicit request"
+        )
+        msg = f"LLM profile {profile_name!r} referenced by {source} is not defined"
+        raise ConfigError(msg, config_key=f"llm_profiles.{profile_name}")
 
     normalized_backend = _normalize_backend(backend)
     provider = _provider_config(profile, normalized_backend)
