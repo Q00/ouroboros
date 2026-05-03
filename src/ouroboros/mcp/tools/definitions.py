@@ -19,6 +19,8 @@ Handler modules:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler
 from ouroboros.mcp.tools.authoring_handlers import (
     GenerateSeedHandler,
@@ -54,6 +56,29 @@ from ouroboros.mcp.tools.query_handlers import (
     SessionStatusHandler,
 )
 
+if TYPE_CHECKING:
+    from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
+
+
+def _resolve_bridge_fields(
+    context: AgentRuntimeContext | None,
+    mcp_manager: object | None,
+    mcp_tool_prefix: str,
+) -> tuple[object | None, str]:
+    """Pick which (mcp_manager, mcp_tool_prefix) pair the factory should use.
+
+    When ``context`` is provided and carries an ``mcp_bridge``, its bridge
+    wins over the legacy explicit kwargs — that is the migration path
+    captured by #474. When ``context`` is ``None`` (or carries no
+    bridge), the legacy kwargs are returned unchanged so existing
+    callers continue to work.
+    """
+    if context is not None and context.mcp_bridge is not None:
+        bridge = context.mcp_bridge
+        return getattr(bridge, "manager", None), getattr(bridge, "tool_prefix", "")
+    return mcp_manager, mcp_tool_prefix
+
+
 # ---------------------------------------------------------------------------
 # Convenience factory functions
 # ---------------------------------------------------------------------------
@@ -66,13 +91,24 @@ def execute_seed_handler(
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
     opencode_mode: str | None = None,
+    context: AgentRuntimeContext | None = None,
 ) -> ExecuteSeedHandler:
-    """Create an ExecuteSeedHandler instance."""
+    """Create an ExecuteSeedHandler instance.
+
+    When ``context`` is provided and carries an ``mcp_bridge``, the
+    bridge supersedes the explicit ``mcp_manager`` / ``mcp_tool_prefix``
+    kwargs. This is the migration path captured by #474; the legacy
+    kwargs continue to work for callers that have not adopted
+    :class:`AgentRuntimeContext`.
+    """
+    resolved_manager, resolved_prefix = _resolve_bridge_fields(
+        context, mcp_manager, mcp_tool_prefix
+    )
     return ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
-        mcp_manager=mcp_manager,
-        mcp_tool_prefix=mcp_tool_prefix,
+        mcp_manager=resolved_manager,
+        mcp_tool_prefix=resolved_prefix,
         opencode_mode=opencode_mode,
     )
 
@@ -84,13 +120,21 @@ def start_execute_seed_handler(
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
     opencode_mode: str | None = None,
+    context: AgentRuntimeContext | None = None,
 ) -> StartExecuteSeedHandler:
-    """Create a StartExecuteSeedHandler instance."""
+    """Create a StartExecuteSeedHandler instance.
+
+    Accepts the same ``context`` keyword as :func:`execute_seed_handler`;
+    see that function's docstring for the migration semantics.
+    """
+    resolved_manager, resolved_prefix = _resolve_bridge_fields(
+        context, mcp_manager, mcp_tool_prefix
+    )
     execute_handler = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
-        mcp_manager=mcp_manager,
-        mcp_tool_prefix=mcp_tool_prefix,
+        mcp_manager=resolved_manager,
+        mcp_tool_prefix=resolved_prefix,
         opencode_mode=opencode_mode,
     )
     return StartExecuteSeedHandler(
@@ -306,6 +350,7 @@ def get_ouroboros_tools(
     mcp_tool_prefix: str = "",
     opencode_mode: str | None = None,
     include_auto: bool = True,
+    context: AgentRuntimeContext | None = None,
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers.
 
@@ -315,12 +360,20 @@ def get_ouroboros_tools(
     In every other combination (including ``opencode_mode=None``) the handler
     falls through to its real in-process path. See
     ``ouroboros.mcp.tools.subagent.should_dispatch_via_plugin``.
+
+    When ``context`` is provided and carries an ``mcp_bridge``, the
+    bridge supersedes the explicit ``mcp_manager`` / ``mcp_tool_prefix``
+    kwargs (see :func:`_resolve_bridge_fields`). This is the migration
+    path captured by #474; legacy kwargs continue to work unchanged.
     """
+    resolved_manager, resolved_prefix = _resolve_bridge_fields(
+        context, mcp_manager, mcp_tool_prefix
+    )
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
-        mcp_manager=mcp_manager,
-        mcp_tool_prefix=mcp_tool_prefix,
+        mcp_manager=resolved_manager,
+        mcp_tool_prefix=resolved_prefix,
         opencode_mode=opencode_mode,
     )
     start_execute = StartExecuteSeedHandler(
@@ -351,8 +404,8 @@ def get_ouroboros_tools(
             auto_handler(
                 llm_backend=llm_backend,
                 runtime_backend=runtime_backend,
-                mcp_manager=mcp_manager,
-                mcp_tool_prefix=mcp_tool_prefix,
+                mcp_manager=resolved_manager,
+                mcp_tool_prefix=resolved_prefix,
                 opencode_mode=opencode_mode,
             ),
         )

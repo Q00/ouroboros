@@ -13,6 +13,7 @@ import structlog
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
+from ouroboros.events.io_recorder import IOJournalRecorder, get_current_io_journal_recorder
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
@@ -24,6 +25,46 @@ from ouroboros.providers.base import (
 log = structlog.get_logger()
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
+def _serialise_prompt_for_hash(
+    api_messages: list[dict[str, str]],
+    system_parts: list[str],
+    request_options: dict[str, Any] | None = None,
+) -> str:
+    """Build a deterministic string representation of a request for hashing.
+
+    Used by the I/O Journal recorder (#517) to compute ``prompt_hash``
+    without depending on any provider-specific message format. The
+    string itself is **not** the wire payload — it just needs to be
+    stable for the same input so identical prompts collapse to the same
+    hash across runs.
+    """
+    import json
+
+    payload: dict[str, Any] = {"messages": api_messages}
+    if system_parts:
+        payload["system"] = "\n\n".join(system_parts)
+    if request_options:
+        payload["request_options"] = {
+            key: value for key, value in request_options.items() if value is not None
+        }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _record_completion(call: Any, parsed: CompletionResponse) -> None:
+    """Populate the recorder's LLMCallRecord from a parsed completion.
+
+    Kept as a free function so the recording fields stay close to the
+    parser; the adapter does not need to know about the recorder's
+    internal field names beyond what shows up here.
+    """
+    call.record_completion(
+        completion_text=parsed.content,
+        finish_reason=parsed.finish_reason,
+        token_count_in=parsed.usage.prompt_tokens if parsed.usage else None,
+        token_count_out=parsed.usage.completion_tokens if parsed.usage else None,
+    )
 
 
 class AnthropicAdapter:
@@ -47,6 +88,7 @@ class AnthropicAdapter:
         timeout: float = 120.0,
         max_retries: int = 2,
         default_model: str = DEFAULT_MODEL,
+        io_recorder: IOJournalRecorder | None = None,
     ) -> None:
         """Initialize the Anthropic adapter.
 
@@ -55,12 +97,20 @@ class AnthropicAdapter:
             timeout: Request timeout in seconds. Default 120.0.
             max_retries: Max retries for transient errors (handled by SDK). Default 2.
             default_model: Fallback model when config.model is empty or generic.
+            io_recorder: Optional :class:`IOJournalRecorder` (M3 / #517).
+                When provided, the adapter wraps each outbound LLM call
+                in the recorder so paired ``llm.call.requested`` /
+                ``llm.call.returned`` events land on the EventStore. The
+                default ``None`` is byte-for-byte the previous
+                behaviour: no journal events, no signature visible to
+                callers that have not adopted the recorder.
         """
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._timeout = timeout
         self._max_retries = max_retries
         self._default_model = default_model
         self._client: Any = None
+        self._io_recorder = io_recorder
 
     def _get_client(self) -> Any:
         """Lazy-initialize the Anthropic async client.
@@ -190,6 +240,26 @@ class AnthropicAdapter:
         )
 
         try:
+            io_recorder = get_current_io_journal_recorder() or self._io_recorder
+            if io_recorder is not None and io_recorder.is_active:
+                prompt_text = _serialise_prompt_for_hash(
+                    api_messages,
+                    system_parts,
+                    {"top_p": config.top_p, "stop_sequences": config.stop},
+                )
+                async with io_recorder.record_llm_call(
+                    model_id=model,
+                    prompt_text=prompt_text,
+                    caller="anthropic_adapter",
+                    max_tokens=config.max_tokens,
+                    temperature=config.temperature,
+                    extra={"top_p": config.top_p, "stop_sequences": config.stop},
+                ) as call:
+                    response = await client.messages.create(**kwargs)
+                    parsed = self._parse_response(response, model, json_prefill)
+                    _record_completion(call, parsed)
+                return Result.ok(parsed)
+
             response = await client.messages.create(**kwargs)
             return Result.ok(self._parse_response(response, model, json_prefill))
 

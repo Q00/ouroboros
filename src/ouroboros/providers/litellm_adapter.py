@@ -4,8 +4,9 @@ This module provides the LiteLLMAdapter class that implements the LLMAdapter
 protocol using LiteLLM for multi-provider support including OpenRouter.
 """
 
+import json
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import litellm
 import structlog
@@ -14,12 +15,16 @@ from ouroboros.core.errors import ProviderError
 from ouroboros.core.retry import retry_async
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
+from ouroboros.events.io_recorder import get_current_io_journal_recorder
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
     Message,
     UsageInfo,
 )
+
+if TYPE_CHECKING:
+    from ouroboros.events.io_recorder import IOJournalRecorder
 
 log = structlog.get_logger()
 _CREDENTIALS_UNSET = object()
@@ -33,6 +38,54 @@ RETRIABLE_EXCEPTIONS = (
     litellm.Timeout,
     litellm.APIConnectionError,
 )
+
+
+def _serialise_messages_for_hash(
+    messages: list[Message],
+    request_options: dict[str, Any] | None = None,
+) -> str:
+    """Build a deterministic string of the request payload for hashing.
+
+    Used by the I/O Journal recorder (#517) to compute ``prompt_hash``.
+    The string is stable for identical input and request-shaping options
+    so materially different LiteLLM calls do not collapse to the same
+    hash; it is not the wire payload.
+    """
+    payload: dict[str, Any] = {
+        "messages": [{"role": str(m.role), "content": m.content} for m in messages]
+    }
+    if request_options:
+        payload["request_options"] = {
+            key: value for key, value in request_options.items() if value is not None
+        }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _record_litellm_completion(call: Any, parsed: CompletionResponse) -> None:
+    """Populate the recorder's LLMCallRecord from the parsed response.
+
+    Recording the same ``CompletionResponse`` returned to callers keeps
+    the journal aligned with adapter-visible truncation and normalization.
+    """
+    call.record_completion(
+        completion_text=parsed.content,
+        finish_reason=parsed.finish_reason,
+        token_count_in=parsed.usage.prompt_tokens if parsed.usage else None,
+        token_count_out=parsed.usage.completion_tokens if parsed.usage else None,
+    )
+
+
+def _request_options_for_hash(config: CompletionConfig) -> dict[str, Any]:
+    """Return request-shaping options not already first-class journal fields."""
+    options: dict[str, Any] = {}
+    model_lower = config.model.lower()
+    if not ("anthropic" in model_lower or "claude" in model_lower):
+        options["top_p"] = config.top_p
+    if config.stop:
+        options["stop"] = config.stop
+    if config.response_format:
+        options["response_format"] = config.response_format
+    return options
 
 
 class LiteLLMAdapter:
@@ -65,6 +118,7 @@ class LiteLLMAdapter:
         api_base: str | None = None,
         timeout: float = 60.0,
         max_retries: int = 3,
+        io_recorder: "IOJournalRecorder | None" = None,
     ) -> None:
         """Initialize the LiteLLM adapter.
 
@@ -73,12 +127,21 @@ class LiteLLMAdapter:
             api_base: Optional API base URL for custom endpoints.
             timeout: Request timeout in seconds. Default 60.0.
             max_retries: Maximum number of retries for transient errors. Default 3.
+            io_recorder: Optional :class:`IOJournalRecorder` (M3 / #517).
+                When provided, every retry attempt of the outbound LLM
+                call is wrapped in the recorder so paired
+                ``llm.call.requested`` / ``llm.call.returned`` events
+                land on the EventStore — each retry produces its own
+                pair, so failures across retries appear in the journal
+                as distinct attempts. Default ``None`` is byte-for-byte
+                the previous behaviour.
         """
         self._api_key = api_key
         self._api_base = api_base
         self._timeout = timeout
         self._max_retries = max_retries
         self._credentials_cache: object = _CREDENTIALS_UNSET
+        self._io_recorder = io_recorder
 
     def _load_credentials_config(self):
         """Load credentials.yaml once, caching missing-config cases."""
@@ -335,12 +398,29 @@ class LiteLLMAdapter:
             wait_max=10.0,
             wait_jitter=1.0,
         )
-        async def _with_retry() -> litellm.ModelResponse:
-            return await self._raw_complete(messages, config)
+        async def _with_retry() -> CompletionResponse:
+            recorder = get_current_io_journal_recorder() or self._io_recorder
+            if recorder is None or not recorder.is_active:
+                response = await self._raw_complete(messages, config)
+                return self._parse_response(response, config)
+            request_options = _request_options_for_hash(config)
+            prompt_text = _serialise_messages_for_hash(messages, request_options)
+            async with recorder.record_llm_call(
+                model_id=config.model,
+                prompt_text=prompt_text,
+                caller="litellm_adapter",
+                max_tokens=config.max_tokens,
+                temperature=config.temperature,
+                extra=request_options,
+            ) as call:
+                response = await self._raw_complete(messages, config)
+                parsed = self._parse_response(response, config)
+                _record_litellm_completion(call, parsed)
+            return parsed
 
         try:
-            response = await _with_retry()
-            return Result.ok(self._parse_response(response, config))
+            parsed = await _with_retry()
+            return Result.ok(parsed)
         except RETRIABLE_EXCEPTIONS as e:
             # All retries exhausted
             log.warning(

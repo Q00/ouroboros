@@ -12,10 +12,12 @@ Also provides brownfield repository management subcommands:
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import shutil
-from typing import Annotated
+from typing import Annotated, Literal
 
 from rich.prompt import Prompt
 from rich.table import Table
@@ -204,6 +206,43 @@ _CODEX_MCP_COMMENT_LINES = (
     "# This file is only for the Codex MCP/env registration block.",
 )
 
+CodexMcpMode = Literal["auto", "preserve", "stdio"]
+_CODEX_MCP_ARGS = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+
+
+def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
+    """Validate and normalize the Codex MCP setup mode."""
+    normalized = value.lower()
+    if normalized not in {"auto", "preserve", "stdio"}:
+        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio.")
+        raise typer.Exit(1)
+    return normalized  # type: ignore[return-value]
+
+
+def _codex_mcp_entry_from_toml(data: dict[str, object]) -> dict[str, object] | None:
+    """Return the parsed Ouroboros Codex MCP entry, if present."""
+    mcp_servers = data.get("mcp_servers")
+    if not isinstance(mcp_servers, dict):
+        return None
+    entry = mcp_servers.get("ouroboros")
+    return entry if isinstance(entry, dict) else None
+
+
+def _is_setup_managed_codex_mcp_entry(entry: dict[str, object]) -> bool:
+    """Return whether setup may safely replace this Codex MCP entry."""
+    if "url" in entry:
+        return False
+
+    command = entry.get("command")
+    args = entry.get("args")
+    if command != "uvx" or not isinstance(args, list):
+        return False
+
+    # Current setup-managed config and older setup-managed uvx configs both
+    # end by launching `ouroboros mcp serve`. Editable/worktree configs often
+    # use a direct command path and are intentionally treated as user-managed.
+    return len(args) >= 3 and args[-3:] == ["ouroboros", "mcp", "serve"]
+
 
 def _is_codex_ouroboros_table_header(line: str) -> bool:
     """Return True when the line starts the managed Codex MCP table."""
@@ -268,9 +307,13 @@ def _upsert_codex_mcp_section(raw: str) -> tuple[str, bool]:
     return "\n".join(output_lines).rstrip() + "\n", existed_before
 
 
-def _register_codex_mcp_server() -> None:
+def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
     """Register the Ouroboros MCP/env hookup in ~/.codex/config.toml."""
     import tomllib
+
+    if mode == "preserve":
+        print_info("Preserved Codex MCP config.")
+        return
 
     codex_config = Path.home() / ".codex" / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
@@ -278,9 +321,17 @@ def _register_codex_mcp_server() -> None:
     if codex_config.exists():
         raw = codex_config.read_text(encoding="utf-8")
         try:
-            tomllib.loads(raw)
+            parsed = tomllib.loads(raw)
         except tomllib.TOMLDecodeError:
             print_error(f"Could not parse {codex_config} — skipping MCP registration.")
+            return
+
+        entry = _codex_mcp_entry_from_toml(parsed)
+        if mode == "auto" and entry is not None and not _is_setup_managed_codex_mcp_entry(entry):
+            print_info(
+                "Preserved existing user-managed Ouroboros MCP config in "
+                f"{codex_config}. Use --mcp-mode stdio to replace it."
+            )
             return
 
         updated_raw, existed_before = _upsert_codex_mcp_section(raw)
@@ -306,24 +357,19 @@ def _print_codex_config_guidance(config_path: Path) -> None:
 
 def _install_codex_artifacts() -> None:
     """Install packaged Ouroboros rules and skills into ~/.codex/."""
-    from ouroboros.codex import install_codex_rules, install_codex_skills
+    from ouroboros.codex import install_codex_artifacts
 
     codex_dir = Path.home() / ".codex"
 
     try:
-        rules_path = install_codex_rules(codex_dir=codex_dir, prune=True)
-        print_success(f"Installed Codex rules → {rules_path}")
+        result = install_codex_artifacts(codex_dir=codex_dir, prune=True)
+        print_success(f"Installed Codex rules → {result.rules_path}")
+        print_success(f"Installed {len(result.skill_paths)} Codex skills → {codex_dir / 'skills'}")
     except FileNotFoundError:
-        print_error("Could not locate packaged Codex rules.")
-
-    try:
-        skill_paths = install_codex_skills(codex_dir=codex_dir, prune=True)
-        print_success(f"Installed {len(skill_paths)} Codex skills → {codex_dir / 'skills'}")
-    except FileNotFoundError:
-        print_error("Could not locate packaged Codex skills.")
+        print_error("Could not locate packaged Codex rules or skills.")
 
 
-def _setup_codex(codex_path: str) -> None:
+def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
     """Configure Ouroboros for the Codex runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -354,7 +400,7 @@ def _setup_codex(codex_path: str) -> None:
     _install_codex_artifacts()
 
     # Register MCP server in Codex config (~/.codex/config.toml)
-    _register_codex_mcp_server()
+    _register_codex_mcp_server(mode=mcp_mode)
     _print_codex_config_guidance(config_path)
 
 
@@ -718,6 +764,21 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
 # this file keeps its historic `_BRIDGE_PLUGIN_*` naming.
 
 
+@contextmanager
+def _temporary_opencode_cli_path(opencode_path: str):
+    """Expose the setup-selected OpenCode CLI path to config-dir discovery."""
+    key = "OUROBOROS_OPENCODE_CLI_PATH"
+    previous = os.environ.get(key)
+    os.environ[key] = opencode_path
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 def _bridge_plugin_source_text() -> str | None:
     """Return the bridge plugin TypeScript source, or ``None`` when missing.
 
@@ -778,7 +839,7 @@ def _install_opencode_bridge_plugin() -> bool:
     Writes to the platform-appropriate OpenCode plugins directory:
 
     * Linux:   ``~/.config/opencode/plugins/ouroboros-bridge/``
-    * macOS:   ``~/Library/Application Support/OpenCode/plugins/ouroboros-bridge/``
+    * macOS:   ``~/.config/opencode/plugins/ouroboros-bridge/`` (or the directory reported by ``opencode debug paths``)
     * Windows: ``%APPDATA%\\OpenCode\\plugins\\ouroboros-bridge\\``
 
     Robustness:
@@ -1003,7 +1064,8 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
 
         # Mutual-exclusion cleanup: remove plugin-mode artifacts so both
         # paths are not active simultaneously (duplicate dispatch).
-        _cleanup_plugin_artifacts()
+        with _temporary_opencode_cli_path(opencode_path):
+            _cleanup_plugin_artifacts()
 
         print_success(f"Configured OpenCode subprocess runtime (CLI: {opencode_path})")
         print_info(f"Config saved to: {config_path}")
@@ -1013,9 +1075,10 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     # if ALL steps succeed (fail-closed).  Without this, a failed bridge install
     # leaves the user in plugin mode without a working bridge — subsequent runs
     # take the plugin dispatch path and silently break.
-    _install_ok = _install_opencode_bridge_plugin()
-    _mcp_ok = _ensure_opencode_mcp_entry()
-    _plugin_ok = _ensure_opencode_plugin_entry()
+    with _temporary_opencode_cli_path(opencode_path):
+        _install_ok = _install_opencode_bridge_plugin()
+        _mcp_ok = _ensure_opencode_mcp_entry()
+        _plugin_ok = _ensure_opencode_plugin_entry()
 
     if not (_install_ok and _mcp_ok and _plugin_ok):
         failed = []
@@ -1245,6 +1308,13 @@ def setup(
             help="OpenCode integration mode (mutually exclusive): plugin (default) or subprocess.",
         ),
     ] = "plugin",
+    mcp_mode: Annotated[
+        str,
+        typer.Option(
+            "--mcp-mode",
+            help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
+        ),
+    ] = "auto",
 ) -> None:
     """Set up Ouroboros for your environment.
 
@@ -1338,7 +1408,7 @@ def setup(
         if not codex_path:
             print_error("Codex CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_codex(codex_path)
+        _setup_codex(codex_path, mcp_mode=_normalize_codex_mcp_mode(mcp_mode))
     elif selected in ("opencode", "opencode_cli"):
         opencode_path = available.get("opencode")
         if not opencode_path:

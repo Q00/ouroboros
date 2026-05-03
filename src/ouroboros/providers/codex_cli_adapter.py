@@ -484,6 +484,39 @@ class CodexCliLLMAdapter:
 
         return stderr.strip()
 
+    def _extract_stdout_errors(self, stdout_lines: list[str]) -> list[str]:
+        """Pull error event messages from a Codex JSONL stdout stream.
+
+        Codex CLI 0.128+ emits in-flight failures (provider 502s, model
+        registry mismatches, auth issues, retry exhaustion) as JSONL events
+        on stdout with ``type`` of ``"error"`` or ``"turn.failed"``. The
+        process eventually exits with rc != 0 and only the static startup
+        banner ("Reading prompt from stdin...") on stderr — so any error
+        report that forwards just stderr loses every actionable detail.
+
+        This helper reads ``stdout_lines`` in arrival order and returns the
+        textual ``message`` from each terminal/error event, preserving order
+        so callers can use ``[-1]`` for the most recent (final) error.
+        """
+        errors: list[str] = []
+        for line in stdout_lines:
+            event = self._parse_json_event(line)
+            if not event:
+                continue
+            event_type = event.get("type")
+            if event_type not in {"error", "turn.failed"}:
+                continue
+
+            payload = event.get("error") if event_type == "turn.failed" else event
+            if isinstance(payload, dict):
+                msg = payload.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    errors.append(msg.strip())
+                    continue
+            if isinstance(payload, str) and payload.strip():
+                errors.append(payload.strip())
+        return errors
+
     def _format_tool_info(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """Format tool name and input details for debug callbacks."""
         detail = ""
@@ -728,15 +761,18 @@ class CodexCliLLMAdapter:
                 )
 
             if process.returncode != 0:
+                stdout_errors = self._extract_stdout_errors(stdout_lines)
                 return Result.err(
                     ProviderError(
-                        message=content
+                        message=(stdout_errors[-1] if stdout_errors else None)
+                        or content
                         or f"{self._display_name} exited with code {process.returncode}",
                         provider=self._provider_name,
                         details={
                             "returncode": process.returncode,
                             "session_id": session_id,
                             "stderr": "\n".join(stderr_lines).strip(),
+                            "stdout_errors": stdout_errors,
                         },
                     )
                 )
@@ -889,15 +925,18 @@ class CodexCliLLMAdapter:
             content = last_content or self._fallback_content(stdout_lines, "\n".join(stderr_lines))
 
         if process.returncode != 0:
+            stdout_errors = self._extract_stdout_errors(stdout_lines)
             return Result.err(
                 ProviderError(
-                    message=content
+                    message=(stdout_errors[-1] if stdout_errors else None)
+                    or content
                     or f"{self._display_name} exited with code {process.returncode}",
                     provider=self._provider_name,
                     details={
                         "returncode": process.returncode,
                         "session_id": session_id,
                         "stderr": "\n".join(stderr_lines).strip(),
+                        "stdout_errors": stdout_errors,
                     },
                 )
             )

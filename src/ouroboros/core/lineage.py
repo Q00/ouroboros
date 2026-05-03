@@ -369,6 +369,24 @@ class RewindRecord(BaseModel, frozen=True):
     discarded_generations: tuple[GenerationRecord, ...] = ()
 
 
+class ControlDirectiveEmission(BaseModel, frozen=True):
+    """One ``control.directive.emitted`` event folded onto a lineage.
+
+    Captures the audit-level "who/what/why/when" of a control-plane
+    decision so it appears in the lineage timeline alongside state events
+    (per RFC #476 M2 / sub-RFC #511). The full event row remains in the
+    EventStore; this is the projected view used by callers.
+    """
+
+    directive: str
+    reason: str
+    emitted_by: str
+    timestamp: datetime
+    generation_number: int | None = None
+    phase: str | None = None
+    is_terminal: bool = False
+
+
 class OntologyLineage(BaseModel, frozen=True):
     """Tracks O₁ → O₂ → O₃ evolution across generations.
 
@@ -382,6 +400,7 @@ class OntologyLineage(BaseModel, frozen=True):
     goal: str
     generations: tuple[GenerationRecord, ...] = Field(default_factory=tuple)
     rewind_history: tuple[RewindRecord, ...] = Field(default_factory=tuple)
+    directive_emissions: tuple[ControlDirectiveEmission, ...] = Field(default_factory=tuple)
     status: LineageStatus = LineageStatus.ACTIVE
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -409,6 +428,18 @@ class OntologyLineage(BaseModel, frozen=True):
     def with_status(self, status: LineageStatus) -> OntologyLineage:
         """Return new lineage with updated status."""
         return self.model_copy(update={"status": status})
+
+    def with_directive_emission(self, emission: ControlDirectiveEmission) -> OntologyLineage:
+        """Return new lineage with the directive emission appended.
+
+        Folds one ``control.directive.emitted`` event into the lineage's
+        timeline view. Existing emissions are preserved; ordering is
+        whatever the projector replayed (timestamp order from the
+        EventStore).
+        """
+        return self.model_copy(
+            update={"directive_emissions": self.directive_emissions + (emission,)}
+        )
 
     def rewind_to(self, generation_number: int) -> OntologyLineage:
         """Return lineage truncated to the given generation.
