@@ -101,6 +101,54 @@ def _find_node_id_for_ac_index(nodes: dict[str, Any], ac_index: int) -> str | No
     return None
 
 
+def _legacy_ac_node_aliases(ac: dict[str, Any], canonical_id: str) -> list[str]:
+    """Return legacy top-level AC node IDs that may alias ``canonical_id``."""
+    aliases: list[str] = []
+    for value in (
+        ac.get("ac_id"),
+        f"ac_{ac.get('index', 0)}",
+        f"ac_{ac.get('root_ac_index') + 1}"
+        if isinstance(ac.get("root_ac_index"), int) and ac.get("root_ac_index") >= 0
+        else None,
+    ):
+        alias = _coerce_non_empty_string(value)
+        if alias is not None and alias != canonical_id and alias not in aliases:
+            aliases.append(alias)
+    return aliases
+
+
+def _merge_legacy_ac_node_alias(
+    nodes: dict[str, Any],
+    *,
+    canonical_id: str,
+    aliases: list[str],
+) -> None:
+    """Move mixed-history root AC state from legacy aliases to ``canonical_id``."""
+    canonical_node = nodes.get(canonical_id)
+    if not isinstance(canonical_node, dict):
+        canonical_node = {"id": canonical_id, "children_ids": []}
+        nodes[canonical_id] = canonical_node
+
+    canonical_children = list(canonical_node.get("children_ids", []))
+    for alias in aliases:
+        legacy_node = nodes.pop(alias, None)
+        if not isinstance(legacy_node, dict):
+            continue
+        for child_id in legacy_node.get("children_ids", []):
+            if child_id not in canonical_children:
+                canonical_children.append(child_id)
+            child = nodes.get(child_id)
+            if isinstance(child, dict) and child.get("parent_id") == alias:
+                child["parent_id"] = canonical_id
+        for key, value in legacy_node.items():
+            if key in {"id", "children_ids"}:
+                continue
+            canonical_node.setdefault(key, value)
+
+    canonical_node["id"] = canonical_id
+    canonical_node["children_ids"] = canonical_children
+
+
 def _subtask_message_may_fallback_to_ac_index(message: SubtaskUpdated) -> bool:
     """Return whether AC-index fallback is safe for a subtask update."""
     return message.node_depth is None or message.node_depth <= 1
@@ -757,6 +805,13 @@ class OuroborosTUI(App[None]):
         for ac in acceptance_criteria:
             ac_index = ac.get("index", 0)
             ac_id = ac.get("node_id") or ac.get("ac_id") or f"ac_{ac_index}"
+            legacy_aliases = _legacy_ac_node_aliases(ac, ac_id)
+            if legacy_aliases:
+                _merge_legacy_ac_node_alias(
+                    existing_nodes,
+                    canonical_id=ac_id,
+                    aliases=legacy_aliases,
+                )
 
             status = ac.get("status", "pending")
             if status == "in_progress":
@@ -811,8 +866,15 @@ class OuroborosTUI(App[None]):
             existing_nodes[root_id]["status"] = (
                 "executing" if current_ac_index is not None else "pending"
             )
-            # Sync children_ids: add any new ACs not already present
-            current_children = existing_nodes[root_id].get("children_ids", [])
+            # Sync children_ids to the current canonical root AC identities.
+            # This removes mixed-history legacy ``ac_<n>`` roots once a
+            # node-aware progress snapshot introduces the canonical ``node_*``
+            # ID, preventing duplicate root entries after resume replay.
+            current_children = [
+                child_id
+                for child_id in existing_nodes[root_id].get("children_ids", [])
+                if child_id in expected_child_ids
+            ]
             for child_id in expected_child_ids:
                 if child_id not in current_children:
                     current_children.append(child_id)
