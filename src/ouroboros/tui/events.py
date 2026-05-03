@@ -647,6 +647,26 @@ class TUIState:
 # =============================================================================
 
 
+def _coerce_event_int(value: object) -> int | None:
+    """Return event integer metadata while rejecting bools."""
+    return value if type(value) is int else None
+
+
+def _subtask_root_ac_index(data: dict[str, Any]) -> int:
+    """Return the 1-based top-level AC index for subtask dashboard grouping."""
+    root_ac_number = _coerce_event_int(data.get("root_ac_number"))
+    if root_ac_number is not None and root_ac_number > 0:
+        return root_ac_number
+
+    root_ac_index = _coerce_event_int(data.get("root_ac_index"))
+    if root_ac_index is not None and root_ac_index >= 0:
+        return root_ac_index + 1
+
+    legacy_ac_index = _coerce_event_int(data.get("legacy_ac_index"))
+    ac_index = _coerce_event_int(data.get("ac_index"))
+    return ac_index if ac_index is not None else legacy_ac_index or 0
+
+
 def create_message_from_event(event: BaseEvent) -> Message | None:
     """Convert an EventStore event to a TUI message.
 
@@ -830,7 +850,7 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
     }:
         return SubtaskUpdated(
             execution_id=event.aggregate_id,
-            ac_index=data.get("ac_index", data.get("legacy_ac_index", 0)),
+            ac_index=_subtask_root_ac_index(data),
             sub_task_index=data.get("sub_task_index", data.get("legacy_sub_task_index", 0)),
             sub_task_id=data.get("sub_task_id", data.get("legacy_sub_task_id", "")),
             content=data.get("label") or data.get("content", ""),

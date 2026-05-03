@@ -482,6 +482,61 @@ class TestCreateMessageFromEvent:
         assert msg.ac_index == 1
         assert msg.sub_task_id == "ac_1_sub_2"
 
+    def test_node_event_uses_root_ac_number_for_subtask_bucket(self) -> None:
+        """Nested node events should group under their root AC, not synthetic indexes."""
+        event = BaseEvent(
+            type="execution.node.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "identity_model": "execution_node_v1",
+                "node_id": "node_grandchild",
+                "parent_node_id": "node_child",
+                "display_path": "2.1.1",
+                "path": [1, 0, 0],
+                "depth": 2,
+                "ordinal": 0,
+                "root_ac_index": 1,
+                "root_ac_number": 2,
+                "legacy_ac_index": 101,
+                "ac_index": 101,
+                "legacy_sub_task_index": 1,
+                "legacy_sub_task_id": "ac_101_sub_1",
+                "content": "Nested child event",
+                "status": "executing",
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, SubtaskUpdated)
+        assert msg.ac_index == 2
+        assert msg.root_ac_index == 1
+        assert msg.root_ac_number == 2
+        assert msg.sub_task_id == "ac_101_sub_1"
+
+    def test_node_event_uses_root_ac_index_when_root_number_missing(self) -> None:
+        """Root AC index is enough to avoid synthetic nested bucket indexes."""
+        event = BaseEvent(
+            type="execution.node.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "node_id": "node_grandchild",
+                "parent_node_id": "node_child",
+                "depth": 2,
+                "root_ac_index": 1,
+                "ac_index": 101,
+                "legacy_ac_index": 101,
+                "legacy_sub_task_id": "ac_101_sub_1",
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, SubtaskUpdated)
+        assert msg.ac_index == 2
+
     def test_cost_updated_event(self) -> None:
         """Test converting cost.updated event."""
         event = BaseEvent(
