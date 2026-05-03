@@ -610,6 +610,53 @@ class TestSessionActivitySnapshots:
         assert by_id["sess-completed"].status_event_type == "orchestrator.progress.updated"
         assert by_id["sess-completed"].runtime_status == "completed"
 
+    async def test_includes_terminal_session_without_started_event(
+        self, event_store: EventStore
+    ) -> None:
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.completed",
+                aggregate_type="session",
+                aggregate_id="sess-imported-complete",
+                data={"summary": "imported terminal event"},
+            )
+        )
+
+        snapshots = await event_store.get_session_activity_snapshots()
+        by_id = {snapshot.session_id: snapshot for snapshot in snapshots}
+
+        assert set(by_id) == {"sess-imported-complete"}
+        snapshot = by_id["sess-imported-complete"]
+        assert snapshot.execution_id is None
+        assert snapshot.seed_id is None
+        assert snapshot.start_time is not None
+        assert snapshot.last_activity is not None
+        assert snapshot.status_event_type == "orchestrator.session.completed"
+
+    async def test_includes_progress_only_session_without_started_event(
+        self, event_store: EventStore
+    ) -> None:
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id="sess-imported-progress",
+                data={"progress": {"step": 1, "runtime_status": "running"}},
+            )
+        )
+
+        snapshots = await event_store.get_session_activity_snapshots()
+        by_id = {snapshot.session_id: snapshot for snapshot in snapshots}
+
+        assert set(by_id) == {"sess-imported-progress"}
+        snapshot = by_id["sess-imported-progress"]
+        assert snapshot.execution_id is None
+        assert snapshot.seed_id is None
+        assert snapshot.start_time is not None
+        assert snapshot.last_activity is not None
+        assert snapshot.status_event_type == "orchestrator.progress.updated"
+        assert snapshot.runtime_status == "running"
+
 
 class TestGetAllSessions:
     """Test get_all_sessions returns all session lifecycle events."""
