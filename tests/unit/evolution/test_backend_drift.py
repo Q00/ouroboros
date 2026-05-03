@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from unittest.mock import Mock
 
+from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
+from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
+from ouroboros.core.types import Result
 from ouroboros.evolution.reflect import ReflectEngine
-from ouroboros.evolution.wonder import WonderEngine
+from ouroboros.evolution.wonder import WonderEngine, WonderOutput
+from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message, UsageInfo
 
 
 @dataclass
@@ -16,6 +21,46 @@ class _Adapter:
     _permission_mode: str | None = None
     _timeout: float | None = None
     _max_retries: int | None = None
+
+
+@dataclass
+class _CompletingAdapter(_Adapter):
+    content: str = (
+        '{"questions": [], "ontology_tensions": [], "should_continue": false, "reasoning": "ok"}'
+    )
+    seen_configs: list[CompletionConfig] = field(default_factory=list)
+
+    async def complete(self, messages: list[Message], config: CompletionConfig):
+        self.seen_configs.append(config)
+        return Result.ok(
+            CompletionResponse(
+                content=self.content,
+                model=config.model,
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+
+def _seed() -> Seed:
+    return Seed(
+        metadata=SeedMetadata(ambiguity_score=0.1),
+        goal="Build a login system",
+        constraints=("Must use OAuth",),
+        acceptance_criteria=("User can log in",),
+        ontology_schema=OntologySchema(
+            name="login",
+            description="Login ontology",
+            fields=(OntologyField(name="user", field_type="entity", description="A user"),),
+        ),
+    )
+
+
+def _summary() -> EvaluationSummary:
+    return EvaluationSummary(final_approved=True, highest_stage_passed=3, score=0.95)
+
+
+def _lineage() -> OntologyLineage:
+    return OntologyLineage(goal="Build a login system")
 
 
 class TestEvolutionBackendDrift:
@@ -132,6 +177,72 @@ class TestEvolutionBackendDrift:
         assert engine.llm_adapter is fresh
         assert engine.model == "codex-reflect"
 
+    def test_reflect_factory_same_backend_model_refresh_reaches_completion_config(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+        )
+        fresh = _CompletingAdapter(
+            "fresh",
+            content=(
+                '{"refined_goal": "Build a login system", "refined_constraints": [], '
+                '"refined_acs": [], "ontology_mutations": [], "reasoning": "ok"}'
+            ),
+        )
+        engine = ReflectEngine(
+            llm_adapter=_Adapter("initial"),
+            model="old-reflect",
+            adapter_factory=lambda: fresh,
+        )
+        monkeypatch.setattr(
+            "ouroboros.evolution.reflect.get_reflect_model", Mock(return_value="new-reflect")
+        )
+
+        result = asyncio.run(
+            engine.reflect(
+                _seed(),
+                "execution output",
+                _summary(),
+                WonderOutput(questions=(), ontology_tensions=(), should_continue=False),
+                _lineage(),
+            )
+        )
+
+        assert result.is_ok
+        assert engine.model == "new-reflect"
+        assert fresh.seen_configs[-1].model == "new-reflect"
+
+    def test_wonder_factory_same_backend_model_refresh_reaches_completion_config(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="codex")
+        )
+        fresh = _CompletingAdapter("fresh")
+        engine = WonderEngine(
+            llm_adapter=_Adapter("initial"),
+            model="old-wonder",
+            adapter_factory=lambda: fresh,
+        )
+        monkeypatch.setattr(
+            "ouroboros.evolution.wonder.get_wonder_model", Mock(return_value="new-wonder")
+        )
+
+        result = asyncio.run(
+            engine.wonder(
+                _seed().ontology_schema,
+                _summary(),
+                "execution output",
+                _lineage(),
+                _seed(),
+            )
+        )
+
+        assert result.is_ok
+        assert engine.model == "new-wonder"
+        assert fresh.seen_configs[-1].model == "new-wonder"
+
     def test_factory_failure_falls_back_to_latest_successful_reflect_adapter(
         self, monkeypatch
     ) -> None:
@@ -215,15 +326,15 @@ class TestEvolutionBackendDrift:
             adapter_factory=lambda: fresh,
             adapter_backend="codex",
         )
-        get_model = Mock(return_value="gemini-reflect")
+        get_model = Mock(return_value="codex-reflect-updated")
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="gemini")
         )
         monkeypatch.setattr("ouroboros.evolution.reflect.get_reflect_model", get_model)
 
         assert engine._resolve_adapter() is fresh
-        assert engine.model == "codex-reflect"
-        get_model.assert_not_called()
+        assert engine.model == "codex-reflect-updated"
+        get_model.assert_called_once_with("codex")
 
     def test_wonder_factory_pinned_backend_keeps_model_on_config_drift(self, monkeypatch) -> None:
         monkeypatch.setattr(
@@ -236,12 +347,12 @@ class TestEvolutionBackendDrift:
             adapter_factory=lambda: fresh,
             adapter_backend="codex",
         )
-        get_model = Mock(return_value="gemini-wonder")
+        get_model = Mock(return_value="codex-wonder-updated")
         monkeypatch.setattr(
             "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="gemini")
         )
         monkeypatch.setattr("ouroboros.evolution.wonder.get_wonder_model", get_model)
 
         assert engine._resolve_adapter() is fresh
-        assert engine.model == "codex-wonder"
-        get_model.assert_not_called()
+        assert engine.model == "codex-wonder-updated"
+        get_model.assert_called_once_with("codex")
