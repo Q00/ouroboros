@@ -105,19 +105,34 @@ async def _run_auto(
     state = (
         store.load(resume)
         if resume
-        else AutoPipelineState(goal=goal or "", cwd=str(_safe_default_cwd()))
+        else AutoPipelineState(
+            goal=goal or "",
+            cwd=str(_safe_default_cwd()),
+            skip_run=skip_run,
+            max_interview_rounds=max_interview_rounds,
+            max_repair_rounds=max_repair_rounds,
+        )
     )
+    if resume:
+        skip_run = state.skip_run or skip_run
+        max_interview_rounds = state.max_interview_rounds
+        max_repair_rounds = state.max_repair_rounds
     opencode_mode = get_opencode_mode() if runtime == "opencode" else None
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
+    execution_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     interview = InterviewHandler(
         agent_runtime_backend=runtime, opencode_mode=authoring_opencode_mode
     )
     generate_seed = GenerateSeedHandler(
         agent_runtime_backend=runtime, opencode_mode=authoring_opencode_mode
     )
-    execute_seed = ExecuteSeedHandler(agent_runtime_backend=runtime, opencode_mode=opencode_mode)
+    execute_seed = ExecuteSeedHandler(
+        agent_runtime_backend=runtime, opencode_mode=execution_opencode_mode
+    )
     start_execute = StartExecuteSeedHandler(
-        execute_handler=execute_seed, agent_runtime_backend=runtime, opencode_mode=opencode_mode
+        execute_handler=execute_seed,
+        agent_runtime_backend=runtime,
+        opencode_mode=execution_opencode_mode,
     )
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),

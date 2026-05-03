@@ -145,7 +145,22 @@ class AutoHandler:
             if not isinstance(goal, str) or not goal.strip():
                 raise ValueError("goal is required when not resuming")
             cwd = requested_cwd
-            state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
+            state = AutoPipelineState(
+                goal=goal.strip(),
+                cwd=cwd,
+                skip_run=bool(arguments.get("skip_run", False)),
+                max_interview_rounds=int(arguments.get("max_interview_rounds") or 12),
+                max_repair_rounds=int(arguments.get("max_repair_rounds") or 5),
+            )
+
+        if not isinstance(resume, str) or not resume:
+            skip_run = state.skip_run
+            max_interview_rounds = state.max_interview_rounds
+            max_repair_rounds = state.max_repair_rounds
+        else:
+            skip_run = state.skip_run or bool(arguments.get("skip_run", False))
+            max_interview_rounds = state.max_interview_rounds
+            max_repair_rounds = state.max_repair_rounds
 
         interview_handler = _authoring_interview_handler(
             self.interview_handler,
@@ -171,17 +186,17 @@ class AutoHandler:
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,
-            max_rounds=int(arguments.get("max_interview_rounds") or 12),
+            max_rounds=max_interview_rounds,
         )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
             run_starter=HandlerRunStarter(start_execute, cwd=cwd),
             store=store,
-            repairer=SeedRepairer(max_repair_rounds=int(arguments.get("max_repair_rounds") or 5)),
+            repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
             seed_saver=save_seed,
             seed_loader=load_seed,
-            skip_run=bool(arguments.get("skip_run", False)),
+            skip_run=skip_run,
         )
         return await pipeline.run(state)
 
@@ -217,6 +232,9 @@ class AutoHandler:
             state = AutoPipelineState(
                 goal=goal.strip() if isinstance(goal, str) else "",
                 cwd=str(arguments.get("cwd") or _safe_default_cwd()),
+                skip_run=bool(arguments.get("skip_run", False)),
+                max_interview_rounds=int(arguments.get("max_interview_rounds") or 12),
+                max_repair_rounds=int(arguments.get("max_repair_rounds") or 5),
             )
             try:
                 store.save(state)
@@ -229,6 +247,19 @@ class AutoHandler:
                 )
             resume_id = state.auto_session_id
 
+        effective_skip_run = state.skip_run or bool(arguments.get("skip_run", False))
+        if effective_skip_run != state.skip_run:
+            state.skip_run = effective_skip_run
+            try:
+                store.save(state)
+            except Exception as exc:
+                return Result.err(
+                    MCPToolError(
+                        f"Auto pipeline failed: {exc}",
+                        tool_name="ouroboros_auto",
+                    )
+                )
+
         context = {
             "goal": state.goal,
             "resume": resume_id,
@@ -237,9 +268,9 @@ class AutoHandler:
             "cwd": state.cwd,
             "state_path": str(store.path_for(state.auto_session_id)),
             "state": state.to_dict(),
-            "max_interview_rounds": arguments.get("max_interview_rounds", 12),
-            "max_repair_rounds": arguments.get("max_repair_rounds", 5),
-            "skip_run": bool(arguments.get("skip_run", False)),
+            "max_interview_rounds": state.max_interview_rounds,
+            "max_repair_rounds": state.max_repair_rounds,
+            "skip_run": state.skip_run,
         }
         payload = build_subagent_payload(
             tool_name="ouroboros_auto",

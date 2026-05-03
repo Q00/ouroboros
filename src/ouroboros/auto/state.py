@@ -95,6 +95,9 @@ class AutoPipelineState:
     job_id: str | None = None
     run_session_id: str | None = None
     run_start_attempted: bool = False
+    skip_run: bool = False
+    max_interview_rounds: int = 12
+    max_repair_rounds: int = 5
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -252,7 +255,7 @@ class AutoPipelineState:
             if not value.strip():
                 msg = f"{field_name} must be a non-empty string or null"
                 raise ValueError(msg)
-        for field_name in ("interview_completed", "run_start_attempted"):
+        for field_name in ("interview_completed", "run_start_attempted", "skip_run"):
             if type(getattr(self, field_name)) is not bool:
                 msg = f"{field_name} must be a boolean"
                 raise ValueError(msg)
@@ -265,6 +268,12 @@ class AutoPipelineState:
             value = getattr(self, field_name)
             if type(value) is not int or value < 0:
                 msg = f"{field_name} must be a non-negative integer"
+                raise ValueError(msg)
+
+        for field_name in ("max_interview_rounds", "max_repair_rounds"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value <= 0:
+                msg = f"{field_name} must be a positive integer"
                 raise ValueError(msg)
 
         if self.seed_artifact:

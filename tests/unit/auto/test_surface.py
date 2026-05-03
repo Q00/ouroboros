@@ -201,6 +201,34 @@ async def test_auto_handler_plugin_resume_uses_persisted_cwd(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_handler_plugin_resume_uses_persisted_policy(tmp_path) -> None:
+    store = AutoStore(root=tmp_path)
+    state = AutoPipelineState(
+        goal="Build a CLI",
+        cwd="/repo",
+        skip_run=True,
+        max_interview_rounds=3,
+        max_repair_rounds=2,
+    )
+    store.save(state)
+
+    result = await AutoHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        store=store,
+    ).handle({"resume": state.auto_session_id})
+
+    assert result.is_ok
+    context = result.value.meta["_subagent"]["context"]
+    assert context["skip_run"] is True
+    assert context["max_interview_rounds"] == 3
+    assert context["max_repair_rounds"] == 2
+    assert context["state"]["skip_run"] is True
+    assert context["state"]["max_interview_rounds"] == 3
+    assert context["state"]["max_repair_rounds"] == 2
+
+
+@pytest.mark.asyncio
 async def test_auto_handler_plugin_resume_validates_session_id(tmp_path) -> None:
     result = await AutoHandler(
         agent_runtime_backend="opencode",
@@ -263,7 +291,7 @@ async def test_auto_handler_forwards_run_subagent_envelope(monkeypatch) -> None:
     assert '"_subagent"' in result.value.content[0].text
 
 
-def test_cli_opencode_plugin_uses_subprocess_authoring(monkeypatch) -> None:
+def test_cli_opencode_plugin_uses_subprocess_handlers(monkeypatch) -> None:
     from ouroboros.cli.commands import auto as auto_command
 
     captured: dict[str, str | None] = {}
@@ -299,18 +327,21 @@ def test_cli_opencode_plugin_uses_subprocess_authoring(monkeypatch) -> None:
     auto_command.GenerateSeedHandler(
         agent_runtime_backend="opencode", opencode_mode=authoring_opencode_mode
     )
+    execution_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     execute_seed = auto_command.ExecuteSeedHandler(
-        agent_runtime_backend="opencode", opencode_mode=opencode_mode
+        agent_runtime_backend="opencode", opencode_mode=execution_opencode_mode
     )
     auto_command.StartExecuteSeedHandler(
-        execute_handler=execute_seed, agent_runtime_backend="opencode", opencode_mode=opencode_mode
+        execute_handler=execute_seed,
+        agent_runtime_backend="opencode",
+        opencode_mode=execution_opencode_mode,
     )
 
     assert captured == {
         "interview_mode": "subprocess",
         "seed_mode": "subprocess",
-        "execute_mode": "plugin",
-        "start_mode": "plugin",
+        "execute_mode": "subprocess",
+        "start_mode": "subprocess",
     }
 
 
