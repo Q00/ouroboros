@@ -901,6 +901,52 @@ class TestErrorDiagnostics:
         assert result.error.details["stop_reason"] == "tool_use"
 
     @pytest.mark.asyncio
+    async def test_error_max_turns_rejects_tool_preamble_partial(self) -> None:
+        """Tool preambles before max-turns are not treated as final answers."""
+        adapter = ClaudeCodeAdapter(max_turns=5)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        class TextBlock:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        async def preamble_then_max_turns_query(*args, **kwargs):
+            assistant_msg = MagicMock()
+            type(assistant_msg).__name__ = "AssistantMessage"
+            assistant_msg.content = [TextBlock("I'll inspect the project files first.")]
+            yield assistant_msg
+
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = ""
+            result_msg.is_error = True
+            result_msg.subtype = "error_max_turns"
+            result_msg.errors = ["Reached maximum number of turns (5)"]
+            result_msg.stop_reason = "tool_use"
+            yield result_msg
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls, MagicMock(side_effect=preamble_then_max_turns_query)
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert "usable final response" in result.error.message
+        assert result.error.details["partial_rejected"] is True
+        assert result.error.details["partial_content"] == "I'll inspect the project files first."
+
+    @pytest.mark.asyncio
     async def test_sdk_error_message_includes_stderr(self) -> None:
         """SDK is_error result includes stderr in ProviderError details."""
         adapter = ClaudeCodeAdapter()

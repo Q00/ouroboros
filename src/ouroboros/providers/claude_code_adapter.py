@@ -707,7 +707,10 @@ class ClaudeCodeAdapter:
                         subtype = getattr(sdk_message, "subtype", None)
                         stop_reason = getattr(sdk_message, "stop_reason", None)
                         errors = getattr(sdk_message, "errors", None)
-                        if subtype == "error_max_turns" and content.strip():
+                        if subtype == "error_max_turns" and self._is_usable_max_turns_partial(
+                            content,
+                            stop_reason=stop_reason,
+                        ):
                             # Claude Code can emit a useful AssistantMessage and then
                             # finish with ResultMessage(error_max_turns) after trying
                             # to continue with tools. Surface the already-streamed
@@ -735,12 +738,19 @@ class ClaudeCodeAdapter:
                             getattr(sdk_message, "result", "")
                             or "Unknown error from Claude Agent SDK"
                         )
+                        partial_content = content.strip() if subtype == "error_max_turns" else ""
+                        if subtype == "error_max_turns" and partial_content:
+                            error_msg = (
+                                "Claude Agent SDK reached max turns before producing "
+                                "a usable final response"
+                            )
                         log.warning(
                             "claude_code_adapter.sdk_error",
                             error=error_msg,
                             session_id=session_id,
                             stderr_lines=len(stderr_lines),
                             subtype=subtype,
+                            partial_rejected=bool(partial_content),
                         )
                         error_result = ProviderError(
                             message=error_msg,
@@ -752,6 +762,8 @@ class ClaudeCodeAdapter:
                                 "subtype": subtype,
                                 "stop_reason": stop_reason,
                                 "errors": errors,
+                                "partial_content": partial_content or None,
+                                "partial_rejected": bool(partial_content),
                             },
                         )
         except asyncio.CancelledError:
@@ -851,6 +863,48 @@ class ClaudeCodeAdapter:
         )
 
         return Result.ok(response)
+
+    @staticmethod
+    def _is_usable_max_turns_partial(content: str, *, stop_reason: object) -> bool:
+        """Return whether max-turn partial text is safe to surface as a completion.
+
+        Claude Code may stream natural-language preambles before attempting a tool
+        call and then finish with ``error_max_turns``. Those preambles are not a
+        final answer, so only accept tool-use-stopped partials when they look like
+        a standalone user-facing response rather than planning/tool setup.
+        """
+        text = content.strip()
+        if not text:
+            return False
+        if stop_reason != "tool_use":
+            return True
+
+        lowered = text.lower()
+        planning_prefixes = (
+            "i'll ",
+            "i will ",
+            "i need to ",
+            "let me ",
+            "first, i'll ",
+            "first i'll ",
+            "we need to ",
+            "i should ",
+        )
+        planning_markers = (
+            " use the ",
+            " run the ",
+            " inspect ",
+            " check the ",
+            " look at ",
+            " read the ",
+            " search ",
+        )
+        if lowered.startswith(planning_prefixes) or any(
+            marker in lowered for marker in planning_markers
+        ):
+            return False
+
+        return "?" in text or "\n" in text or len(text.split()) >= 8
 
     def _format_tool_info(self, tool_name: str, tool_input: dict) -> str:
         """Format tool name and input for display.
