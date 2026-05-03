@@ -212,6 +212,10 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review)
+            if self.skip_run and not state.run_start_attempted:
+                state.transition(AutoPhase.COMPLETE, "A-grade Seed ready; skip-run requested")
+                self._save(state)
+                return self._result(state, ledger, review=review)
             if state.run_start_attempted:
                 state.mark_blocked(
                     "Run start status is unknown; refusing to start a duplicate execution",

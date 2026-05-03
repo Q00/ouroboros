@@ -228,3 +228,12 @@ def test_auto_handler_default_cwd_avoids_root(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     assert _safe_default_cwd() == tmp_path
+
+
+def test_cli_auto_default_cwd_avoids_root(monkeypatch, tmp_path) -> None:
+    from ouroboros.cli.commands import auto as auto_command
+
+    monkeypatch.setattr(auto_command.Path, "cwd", lambda: Path("/"))
+    monkeypatch.setattr(auto_command.Path, "home", lambda: tmp_path)
+
+    assert auto_command._safe_default_cwd() == tmp_path

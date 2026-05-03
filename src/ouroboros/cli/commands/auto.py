@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -102,7 +103,9 @@ async def _run_auto(
 ) -> AutoPipelineResult:
     store = AutoStore()
     state = (
-        store.load(resume) if resume else AutoPipelineState(goal=goal or "", cwd=str(Path.cwd()))
+        store.load(resume)
+        if resume
+        else AutoPipelineState(goal=goal or "", cwd=str(_safe_default_cwd()))
     )
     opencode_mode = get_opencode_mode() if runtime == "opencode" else None
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
@@ -133,6 +136,14 @@ async def _run_auto(
     )
     result = await pipeline.run(state)
     return result
+
+
+def _safe_default_cwd() -> Path:
+    """Return a usable project cwd, avoiding launcher roots such as ``/``."""
+    cwd = Path.cwd()
+    if cwd == Path("/") or not os.access(cwd, os.W_OK):
+        return Path.home()
+    return cwd
 
 
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
