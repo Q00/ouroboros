@@ -1140,6 +1140,31 @@ class TestInterviewEngineConversationHistory:
         assert history[0].role == MessageRole.USER
         assert history[0].content == "Build an iOS calculator"
 
+    def test_summary_recovery_context_becomes_first_user_message(self) -> None:
+        """Summary sentinel rounds should not make the first provider call system-only."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_summary_recovery_first_turn",
+            initial_context="A" * 4_000,
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Short project summary",
+            )
+        )
+
+        history = engine._build_conversation_history(
+            state,
+            initial_context=prompt_safe_initial_context(state),
+        )
+
+        assert len(history) == 1
+        assert history[0].role == MessageRole.USER
+        assert history[0].content == "Short project summary"
+
     def test_history_with_rounds(self) -> None:
         """_build_conversation_history creates message pairs."""
         mock_adapter = MagicMock()

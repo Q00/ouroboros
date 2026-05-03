@@ -901,15 +901,21 @@ class InterviewEngine:
             initial_context if initial_context is not None else state.initial_context
         )
 
+        has_conversation_rounds = any(
+            round_data.question != self._INITIAL_CONTEXT_SUMMARY_QUESTION
+            for round_data in state.rounds
+        )
         overflow = self._initial_context_overflow_message(context_for_prompt)
         if overflow:
             messages.append(Message(role=MessageRole.USER, content=overflow))
-        elif not state.rounds and context_for_prompt:
+        elif not has_conversation_rounds and context_for_prompt:
             # Some chat providers reject a first request that contains only a
             # system message. Mirror the user's initial context as the first
             # user turn so provider adapters always receive a non-system
-            # conversation message on round one. Long contexts keep using the
-            # overflow path above to preserve prompt-budget caps.
+            # conversation message on round one. Summary-recovery sentinel
+            # rounds do not count as conversation because they are skipped
+            # below. Long contexts keep using the overflow path above to
+            # preserve prompt-budget caps.
             user_content = context_for_prompt
             if len(user_content) > self._MAX_USER_RESPONSE_CHARS:
                 user_content = user_content[: self._MAX_USER_RESPONSE_CHARS] + "..."
