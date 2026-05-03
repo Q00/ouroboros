@@ -1292,6 +1292,7 @@ class ParallelACExecutor:
         runtime_identity: ACRuntimeIdentity,
         ac_content: str,
         runtime_handle: RuntimeHandle | None,
+        execution_id: str | None = None,
         session_id: str | None = None,
         result_summary: str | None = None,
         success: bool | None = None,
@@ -1314,6 +1315,7 @@ class ParallelACExecutor:
                 "session_role": runtime_identity.session_role,
                 "retry_attempt": runtime_identity.retry_attempt,
                 "attempt_number": runtime_identity.attempt_number,
+                "execution_id": execution_id,
                 "session_scope_id": runtime_identity.session_scope_id,
                 "session_attempt_id": runtime_identity.session_attempt_id,
                 "session_state_path": runtime_identity.session_state_path,
@@ -2964,6 +2966,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                                     runtime_identity=runtime_identity,
                                     ac_content=ac_content,
                                     runtime_handle=runtime_handle,
+                                    execution_id=execution_context_id,
                                     session_id=ac_session_id,
                                 )
                                 emitted_recovery_turn_ids.add(replacement_turn_id)
@@ -3000,6 +3003,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                             runtime_identity=runtime_identity,
                             ac_content=ac_content,
                             runtime_handle=runtime_handle,
+                            execution_id=execution_context_id,
                             session_id=persisted_session_id,
                         )
                         lifecycle_emitted = True
@@ -3153,6 +3157,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 runtime_identity=runtime_identity,
                 ac_content=ac_content,
                 runtime_handle=runtime_handle,
+                execution_id=execution_context_id,
                 session_id=ac_session_id,
                 result_summary=final_message or None,
                 success=success,
@@ -3199,6 +3204,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 runtime_identity=runtime_identity,
                 ac_content=ac_content,
                 runtime_handle=runtime_handle,
+                execution_id=execution_context_id,
                 session_id=ac_session_id,
                 success=False,
                 error=str(e),
