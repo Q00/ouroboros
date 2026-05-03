@@ -46,6 +46,14 @@ class CodexManagedArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class CodexArtifactInstallResult:
+    """Installed Codex artifact paths produced by an artifact refresh."""
+
+    rules_path: Path
+    skill_paths: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CodexPackagedAssets:
     """Resolved packaged skills and the matching Codex rule assets."""
 
@@ -374,12 +382,29 @@ def install_codex_skills(
     return tuple(installed_paths)
 
 
+def install_codex_artifacts(
+    *,
+    codex_dir: str | Path | None = None,
+    prune: bool = True,
+) -> CodexArtifactInstallResult:
+    """Install or refresh all packaged Ouroboros Codex artifacts.
+
+    This intentionally only touches managed Codex rules and skills. It does
+    not read or write ``~/.codex/config.toml`` or ``~/.ouroboros/config.yaml``.
+    """
+    rules_path = install_codex_rules(codex_dir=codex_dir, prune=prune)
+    skill_paths = install_codex_skills(codex_dir=codex_dir, prune=prune)
+    return CodexArtifactInstallResult(rules_path=rules_path, skill_paths=skill_paths)
+
+
 __all__ = [
+    "CodexArtifactInstallResult",
     "CodexManagedArtifact",
     "CodexPackagedAssets",
     "CodexPackagedSkill",
     "CODEX_RULE_FILENAME",
     "CODEX_SKILL_NAMESPACE",
+    "install_codex_artifacts",
     "install_codex_rules",
     "install_codex_skills",
     "load_packaged_codex_skill",

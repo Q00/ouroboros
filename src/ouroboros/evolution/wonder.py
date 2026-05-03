@@ -58,7 +58,14 @@ class WonderEngine:
     """
 
     llm_adapter: LLMAdapter
-    model: str = field(default_factory=get_wonder_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_wonder_model()
 
     async def wonder(
         self,
@@ -89,9 +96,11 @@ class WonderEngine:
             Message(role=MessageRole.USER, content=prompt),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
             role="wonder",
+            model_is_explicit=self.model_is_explicit,
             temperature=0.7,
             max_tokens=2048,
         )

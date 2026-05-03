@@ -1032,3 +1032,15 @@ class TestCreateOuroborosServerBrownfieldStore:
 
         assert captured_handler_kwargs["_store"] is mock_brownfield_store
         assert server._owned_resources == [mock_event_store, mock_brownfield_store]
+
+
+def test_create_ouroboros_server_retains_runtime_context() -> None:
+    """The composition root must keep AgentRuntimeContext reachable after return."""
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+    server = create_ouroboros_server(runtime_backend="codex", llm_backend="claude_code")
+
+    assert server.runtime_context is not None
+    assert server.runtime_context.runtime_backend == "codex"
+    assert server.runtime_context.llm_backend == "claude_code"
+    assert server.runtime_context.control is not None

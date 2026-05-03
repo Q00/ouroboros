@@ -35,6 +35,8 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
+from ouroboros.orchestrator.control_bus import ControlBus
 
 log = structlog.get_logger(__name__)
 
@@ -322,6 +324,7 @@ class MCPServerAdapter:
         self._prompt_handlers: dict[str, PromptHandler] = {}
         self._mcp_server: Any = None
         self._owned_resources: list[Any] = []  # objects with async close()
+        self._runtime_context: AgentRuntimeContext | None = None
 
         # Initialize security layer
         self._security = SecurityLayer(
@@ -696,6 +699,15 @@ class MCPServerAdapter:
             await self._mcp_server.run_streamable_http_async()
         else:
             await self._mcp_server.run_stdio_async()
+
+    @property
+    def runtime_context(self) -> AgentRuntimeContext | None:
+        """Return the session-scoped runtime context owned by this server."""
+        return self._runtime_context
+
+    def set_runtime_context(self, context: AgentRuntimeContext) -> None:
+        """Attach the session-scoped runtime context to the server object graph."""
+        self._runtime_context = context
 
     def register_owned_resource(self, resource: Any) -> None:
         """Register a resource whose ``close()`` will be called on shutdown."""
@@ -1460,11 +1472,34 @@ def create_ouroboros_server(
     if brownfield_store is not None:
         server.register_owned_resource(brownfield_store)
 
-    # Inject bridge into all BridgeAwareMixin handlers (loop-based auto-discovery)
-    if mcp_bridge is not None:
-        from ouroboros.mcp.tools.bridge_mixin import inject_bridge
+    # Build the AgentRuntimeContext that #474 funnels through every
+    # handler. For now the context only exposes the EventStore, the
+    # backend labels, the optional MCP bridge, and a fresh ControlBus
+    # for #515. Subsequent migration slices move handler internals to
+    # consume context.mcp_bridge directly instead of self.mcp_manager.
+    agent_runtime_context = AgentRuntimeContext(
+        event_store=event_store,
+        runtime_backend=resolved_runtime_backend,
+        llm_backend=llm_backend,
+        mcp_bridge=mcp_bridge,
+        control=ControlBus(),
+    )
+    server.set_runtime_context(agent_runtime_context)
 
-        injected = [type(h).__name__ for h in tool_handlers if inject_bridge(h, mcp_bridge)]
+    # Inject the bridge from the runtime context into every
+    # BridgeAwareMixin handler. ``inject_runtime_context`` is byte-
+    # equivalent to the legacy ``inject_bridge`` for the same bridge —
+    # the swap is purely about giving every handler a single funnel
+    # (the context) instead of the per-handler ``mcp_manager`` plumbing
+    # this PR series is replacing.
+    if mcp_bridge is not None:
+        from ouroboros.mcp.tools.bridge_mixin import inject_runtime_context
+
+        injected = [
+            type(h).__name__
+            for h in tool_handlers
+            if inject_runtime_context(h, agent_runtime_context)
+        ]
         if injected:
             log.info("mcp.bridge.injected", handlers=injected)
         server.register_owned_resource(mcp_bridge)

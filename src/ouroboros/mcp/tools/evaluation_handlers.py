@@ -19,6 +19,7 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
     build_evaluate_subagent,
     build_subagent_result,
@@ -1183,11 +1184,18 @@ class ChecklistVerifyHandler:
 
 
 @dataclass
-class LateralThinkHandler:
+class LateralThinkHandler(BridgeAwareMixin):
     """Handler for the lateral_think tool.
 
     Generates alternative thinking approaches using lateral thinking personas
     to break through stagnation in problem-solving.
+
+    Inherits :class:`BridgeAwareMixin` (#475) so the composition root's
+    loop-injection populates ``mcp_manager`` and ``mcp_tool_prefix``
+    automatically when an MCP bridge is configured. The bridge fields
+    are not consumed by this PR — a follow-up slice forwards them into
+    the lateral-think dispatch path so dynamic external MCP servers
+    reach the unstuck pipeline.
 
     The multi-persona fan-out path emits a ``_subagents`` envelope that is
     consumed by the OpenCode bridge plugin. It is gated on

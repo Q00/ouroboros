@@ -75,7 +75,14 @@ class ReflectEngine:
     """
 
     llm_adapter: LLMAdapter
-    model: str = field(default_factory=get_reflect_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_reflect_model()
 
     async def reflect(
         self,
@@ -110,9 +117,11 @@ class ReflectEngine:
             Message(role=MessageRole.USER, content=prompt),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
             role="reflect",
+            model_is_explicit=self.model_is_explicit,
             temperature=0.5,
             max_tokens=3000,
         )

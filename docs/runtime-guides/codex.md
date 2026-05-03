@@ -70,7 +70,7 @@ uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef
 
 Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings and per-role model overrides.
 
-Use `~/.codex/config.toml` only for the Codex MCP/env hookup written by `ouroboros setup --runtime codex`.
+Use `~/.codex/config.toml` only for the Codex MCP/env hookup and Codex profile anchors written by `ouroboros setup --runtime codex`.
 
 If you want Codex-backed Ouroboros roles to use explicit models instead of inheriting Codex CLI's active default/profile, set the existing `config.yaml` keys directly:
 
@@ -97,96 +97,7 @@ consensus:
   # Optional: the simple-voting roster also lives here as `consensus.models`
 ```
 
-When these keys are left at their shipped defaults, the Codex-aware loader resolves them to Codex's `default` sentinel rather than hardcoding a mini model. In practice, Codex then uses its active global default/profile. Explicit `config.yaml` values always win.
-
-For more control, use provider-neutral Ouroboros task profiles and map Codex-specific entries to Codex CLI profiles:
-
-```yaml
-# ~/.ouroboros/config.yaml
-llm_profiles:
-  fast:
-    max_turns: 1
-    temperature: 0.2
-    providers:
-      codex:
-        profile: ouroboros-fast
-
-  standard:
-    max_turns: 3
-    temperature: 0.3
-    providers:
-      codex:
-        profile: ouroboros-standard
-
-  deep:
-    max_turns: 5
-    temperature: 0.4
-    providers:
-      codex:
-        profile: ouroboros-deep
-
-  frontier:
-    max_turns: 8
-    temperature: 0.4
-    providers:
-      codex:
-        profile: ouroboros-frontier
-
-llm_role_profiles:
-  ambiguity: deep
-  assertion_extraction: fast
-  brownfield: fast
-  context_compression: deep
-  mechanical_detection: fast
-  question_classification: deep
-  qa: frontier
-  atomicity: standard
-  brownfield_explore: frontier
-  clarification: frontier
-  decomposition: standard
-  dependency_analysis: standard
-  pm_interview: deep
-  seed_generation: deep
-  consensus_advocate: deep
-  consensus_perspective: deep
-  consensus_vote: deep
-  double_diamond: deep
-  ontology_analysis: deep
-  pm_document: deep
-  reflect: deep
-  semantic_evaluation: deep
-  wonder: frontier
-  consensus_judge: frontier
-  agent_runtime: standard
-  agent_runtime_implementation: standard
-  agent_runtime_interview: deep
-  agent_runtime_coordinator: standard
-  agent_runtime_evaluation: deep
-```
-
-When a Codex provider or agent-runtime profile is resolved, Ouroboros invokes `codex exec --profile <name>` instead of passing `--model`. If a role has no task profile, the existing `*_model` fields and Codex's default behavior are unchanged. Explicit runtime model overrides still use `--model` and do not apply the profile.
-
-`ouroboros setup --runtime codex` creates matching flat Codex profile anchors:
-
-```toml
-[profiles.ouroboros-fast]
-model = "gpt-5.4-mini"
-model_reasoning_effort = "low"
-
-[profiles.ouroboros-standard]
-model = "gpt-5.4"
-model_reasoning_effort = "medium"
-
-[profiles.ouroboros-deep]
-model = "gpt-5.5"
-model_reasoning_effort = "high"
-
-[profiles.ouroboros-frontier]
-model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
-```
-
-These are sparse anchors rather than nested/inherited Codex profiles. They keep global Codex settings in place and give Ouroboros stable profile names to target. Edit `deep` or `frontier` if your ChatGPT plan does not expose GPT-5.5.
+When these keys are left at their shipped defaults, Codex setup can install provider-neutral `llm_profiles` plus `llm_role_profiles` mappings. Those mappings target sparse Codex profile anchors named `ouroboros-fast`, `ouroboros-standard`, `ouroboros-deep`, and `ouroboros-frontier` in `~/.codex/config.toml`. Explicit `config.yaml` model values still win.
 
 ## Command Surface
 
@@ -202,15 +113,14 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
-- Preserves an existing URL-based Ouroboros MCP server in `~/.codex/config.toml`
-- Registers the stdio Ouroboros MCP/env hookup in `~/.codex/config.toml` when no URL server exists
+- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
 - Adds missing `profiles.ouroboros-*` Codex profile anchors without overwriting existing profiles
 
-`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, `consensus`, `llm_profiles`, and `llm_role_profiles` settings in `~/.ouroboros/config.yaml`.
+`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, `consensus`, `llm_profiles`, and `llm_role_profiles` settings in `~/.ouroboros/config.yaml`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
 
 ### `ooo` Skill Availability on Codex
 
-After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/` and the routing rules into `~/.codex/rules/`. The table below shows each skill and its CLI equivalent for terminal-only workflows.
+After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. The table below shows each skill and its CLI equivalent for terminal-only workflows.
 
 | `ooo` Skill | Codex session | CLI equivalent (Terminal) |
 |-------------|---------------|--------------------------|

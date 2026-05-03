@@ -3,7 +3,7 @@
 Cleanly reverses everything `ouroboros setup` did:
   1. MCP server registration  (~/.claude/mcp.json, ~/.codex/config.toml)
   2. CLAUDE.md integration block (<!-- ooo:START --> … <!-- ooo:END -->)
-  3. Codex artifacts          (~/.codex/rules/ouroboros.md, ~/.codex/skills/ouroboros/)
+  3. Codex artifacts          (current packaged rules/skills plus legacy ~/.codex/skills/ouroboros/)
   4. Data directory           (~/.ouroboros/)
 
 Does NOT remove:
@@ -33,6 +33,7 @@ from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry,
     opencode_config_dir,
 )
+from ouroboros.codex import CODEX_RULE_FILENAME, resolve_packaged_codex_assets
 
 app = typer.Typer(
     name="uninstall",
@@ -140,12 +141,28 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
     Returns True only if ALL existing artifacts were removed successfully.
     Returns False if any artifact could not be removed.
     """
-    rules_path = Path.home() / ".codex" / "rules" / "ouroboros.md"
-    skills_path = Path.home() / ".codex" / "skills" / "ouroboros"
+    codex_dir = Path.home() / ".codex"
+    try:
+        with resolve_packaged_codex_assets() as assets:
+            managed_relative_paths = set(assets.managed_relative_install_paths)
+    except FileNotFoundError:
+        managed_relative_paths = {Path("rules") / CODEX_RULE_FILENAME}
+    managed_relative_paths.add(Path("skills") / "ouroboros")  # legacy setup path
+
+    rule_paths = [
+        codex_dir / relative_path
+        for relative_path in managed_relative_paths
+        if relative_path.parts[:1] == ("rules",) and (codex_dir / relative_path).exists()
+    ]
+    skill_paths = [
+        codex_dir / relative_path
+        for relative_path in managed_relative_paths
+        if relative_path.parts[:1] == ("skills",) and (codex_dir / relative_path).exists()
+    ]
     had_work = False
     all_ok = True
 
-    if rules_path.exists():
+    for rules_path in rule_paths:
         had_work = True
         if dry_run:
             print_info(f"[dry-run] Would remove {rules_path}")
@@ -157,7 +174,7 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
                 print_warning(f"Could not remove {rules_path} — skipping.")
                 all_ok = False
 
-    if skills_path.exists():
+    for skills_path in skill_paths:
         had_work = True
         if dry_run:
             print_info(f"[dry-run] Would remove {skills_path}/")
@@ -430,9 +447,14 @@ def uninstall(
     except (json.JSONDecodeError, OSError):
         targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
 
-    codex_rules = Path.home() / ".codex" / "rules" / "ouroboros.md"
-    codex_skills = Path.home() / ".codex" / "skills" / "ouroboros"
-    if codex_rules.exists() or codex_skills.exists():
+    codex_dir = Path.home() / ".codex"
+    try:
+        with resolve_packaged_codex_assets() as assets:
+            managed_relative_paths = set(assets.managed_relative_install_paths)
+    except FileNotFoundError:
+        managed_relative_paths = {Path("rules") / CODEX_RULE_FILENAME}
+    managed_relative_paths.add(Path("skills") / "ouroboros")
+    if any((codex_dir / relative_path).exists() for relative_path in managed_relative_paths):
         targets.append("Codex rules and skills (~/.codex/)")
 
     cwd = Path.cwd()

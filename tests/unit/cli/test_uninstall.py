@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from ouroboros.cli.commands.uninstall import (
     _remove_claude_mcp,
     _remove_claude_md_block,
+    _remove_codex_artifacts,
     _remove_codex_mcp,
     _remove_data_dir,
     _remove_opencode_bridge_plugin,
@@ -190,6 +191,36 @@ class TestRemoveCodexMcp:
         with patch("pathlib.Path.home", return_value=tmp_path):
             result = _remove_codex_mcp(dry_run=False)
         assert result is False
+
+
+# ── _remove_codex_artifacts ──────────────────────────────────────
+
+
+class TestRemoveCodexArtifacts:
+    """Tests for _remove_codex_artifacts helper."""
+
+    def test_removes_namespaced_codex_artifacts(self, tmp_path: Path) -> None:
+        rules_dir = tmp_path / ".codex" / "rules"
+        skills_dir = tmp_path / ".codex" / "skills"
+        rules_dir.mkdir(parents=True)
+        skills_dir.mkdir(parents=True)
+        (rules_dir / "ouroboros.md").write_text("rules", encoding="utf-8")
+        (rules_dir / "ouroboros-extra.md").write_text("extra", encoding="utf-8")
+        (rules_dir / "other.md").write_text("other", encoding="utf-8")
+        (skills_dir / "ouroboros-interview").mkdir()
+        (skills_dir / "ouroboros-run").mkdir()
+        (skills_dir / "other").mkdir()
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_artifacts(dry_run=False)
+
+        assert result is True
+        assert not (rules_dir / "ouroboros.md").exists()
+        assert (rules_dir / "ouroboros-extra.md").exists()
+        assert (rules_dir / "other.md").exists()
+        assert not (skills_dir / "ouroboros-interview").exists()
+        assert not (skills_dir / "ouroboros-run").exists()
+        assert (skills_dir / "other").exists()
 
 
 # ── _remove_claude_md_block ──────────────────────────────────────

@@ -16,6 +16,7 @@ import typer
 from ouroboros import __version__
 from ouroboros.cli.commands import (
     cancel,
+    codex,
     config,
     detect,
     init,
@@ -44,6 +45,7 @@ app.add_typer(run.app, name="run")
 app.add_typer(config.app, name="config")
 app.add_typer(status.app, name="status")
 app.add_typer(cancel.app, name="cancel")
+app.add_typer(codex.app, name="codex")
 app.add_typer(mcp.app, name="mcp")
 app.add_typer(setup.app, name="setup")
 app.add_typer(detect.app, name="detect")

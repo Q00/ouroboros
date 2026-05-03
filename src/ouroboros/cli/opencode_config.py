@@ -10,27 +10,104 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import sys
+
+import yaml
+
+
+def _expand_config_dir(raw: str) -> Path:
+    """Expand an OpenCode config directory string into a :class:`Path`."""
+    return Path(raw).expanduser()
+
+
+def _configured_opencode_cli_path() -> Path | None:
+    """Return the setup-selected OpenCode CLI path when one is persisted.
+
+    Path discovery must be stable across setup, cleanup, and uninstall.  Do not
+    fall back to whichever ``opencode`` happens to be on ``PATH`` here: machines
+    can have several OpenCode installs, and uninstall should target the same
+    install tree that setup recorded.
+    """
+    for key in ("OUROBOROS_OPENCODE_CLI_PATH", "OPENCODE_CLI_PATH"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            return Path(raw).expanduser()
+
+    config_path = Path.home() / ".ouroboros" / "config.yaml"
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    orchestrator = config.get("orchestrator")
+    if not isinstance(orchestrator, dict):
+        return None
+    raw = orchestrator.get("opencode_cli_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw.strip()).expanduser()
+
+
+def _debug_paths_config_dir() -> Path | None:
+    """Return ``opencode debug paths`` config dir when the CLI reports one.
+
+    Current OpenCode releases expose the authoritative runtime directories via
+    ``opencode debug paths``. Querying it first avoids baking version-specific
+    platform assumptions into Ouroboros. Any failure falls back to deterministic
+    local resolution so setup still works on machines without OpenCode on PATH.
+    """
+    opencode = _configured_opencode_cli_path()
+    if not opencode:
+        return None
+    try:
+        result = subprocess.run(
+            [str(opencode), "debug", "paths"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] == "config":
+            return _expand_config_dir(parts[1])
+    return None
 
 
 def opencode_config_dir() -> Path:
-    """Return the platform-specific OpenCode global config directory.
+    """Return the active OpenCode global config directory.
 
-    Mirrors the lookup order used by OpenCode itself:
+    Resolution order:
 
-    * **Windows** – ``%APPDATA%\\OpenCode``
-      (falls back to ``~\\AppData\\Roaming\\OpenCode`` when
-      ``APPDATA`` is unset, which should not happen in practice).
-    * **macOS** – ``~/Library/Application Support/OpenCode``
-    * **Linux / other** – ``$XDG_CONFIG_HOME/opencode`` (defaults to
-      ``~/.config/opencode`` when the env-var is not set).
+    1. ``OPENCODE_CONFIG_DIR`` when explicitly set.
+    2. ``opencode debug paths`` ``config`` value when the CLI is available.
+    3. XDG-style default (``$XDG_CONFIG_HOME/opencode`` or
+       ``~/.config/opencode``) on macOS/Linux/other Unix platforms.
+    4. Windows roaming config directory for Windows.
+
+    Older Ouroboros releases wrote macOS config under
+    ``~/Library/Application Support/OpenCode``. Current OpenCode releases use
+    XDG config paths on macOS too, so that legacy directory is intentionally not
+    the default unless OpenCode itself reports it through ``debug paths``.
     """
+    explicit = os.environ.get("OPENCODE_CONFIG_DIR")
+    if explicit:
+        return _expand_config_dir(explicit)
+
+    reported = _debug_paths_config_dir()
+    if reported is not None:
+        return reported
+
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(appdata) / "OpenCode"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "OpenCode"
-    # Linux / BSD / other — honour XDG
+
     xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(xdg) / "opencode"
 
@@ -52,6 +129,13 @@ def find_opencode_config(*, allow_default: bool = True) -> Path | None:
         The first existing config path, the default path (when
         *allow_default* is ``True``), or ``None``.
     """
+    explicit_config = os.environ.get("OPENCODE_CONFIG")
+    if explicit_config:
+        config_path = Path(explicit_config).expanduser()
+        if allow_default or config_path.exists():
+            return config_path
+        return None
+
     config_dir = opencode_config_dir()
     for name in ("opencode.jsonc", "opencode.json"):
         candidate = config_dir / name
