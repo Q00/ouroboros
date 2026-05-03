@@ -124,24 +124,37 @@ def test_auto_authoring_helpers_preserve_injected_handlers() -> None:
 @pytest.mark.asyncio
 async def test_auto_handler_plugin_mode_dispatches_subagent_without_running_pipeline(
     monkeypatch,
+    tmp_path,
 ) -> None:
     async def fail_run(self, arguments):  # noqa: ARG001
         raise AssertionError("plugin mode must not run local auto pipeline")
 
     monkeypatch.setattr(AutoHandler, "_run", fail_run)
 
+    store = AutoStore(root=tmp_path)
+
     result = await AutoHandler(
         agent_runtime_backend="opencode",
         opencode_mode="plugin",
+        store=store,
     ).handle({"goal": "Build a CLI", "cwd": "/repo", "skip_run": True})
 
     assert result.is_ok
     assert not result.value.is_error
     assert result.value.meta["status"] == "delegated_to_subagent"
     assert result.value.meta["dispatch_mode"] == "plugin"
+    assert result.value.meta["auto_session_id"].startswith("auto_")
+    assert result.value.meta["resume_command"] == (
+        f"ooo auto --resume {result.value.meta['auto_session_id']}"
+    )
+    persisted = store.load(result.value.meta["auto_session_id"])
+    assert persisted.goal == "Build a CLI"
+    assert persisted.cwd == "/repo"
     subagent = result.value.meta["_subagent"]
     assert subagent["tool_name"] == "ouroboros_auto"
     assert subagent["context"]["goal"] == "Build a CLI"
+    assert subagent["context"]["auto_session_id"] == result.value.meta["auto_session_id"]
+    assert subagent["context"]["is_resume"] is False
     assert subagent["context"]["cwd"] == "/repo"
     assert subagent["context"]["skip_run"] is True
     assert "litellm-backed authoring handlers" in subagent["prompt"]
@@ -171,7 +184,11 @@ async def test_auto_handler_plugin_resume_uses_persisted_cwd(tmp_path) -> None:
 
     assert result.is_ok
     subagent = result.value.meta["_subagent"]
+    assert result.value.meta["auto_session_id"] == state.auto_session_id
+    assert result.value.meta["resume_command"] == f"ooo auto --resume {state.auto_session_id}"
     assert subagent["context"]["resume"] == state.auto_session_id
+    assert subagent["context"]["auto_session_id"] == state.auto_session_id
+    assert subagent["context"]["is_resume"] is True
     assert subagent["context"]["goal"] == "Build a CLI"
     assert subagent["context"]["cwd"] == "/original/repo"
 

@@ -200,10 +200,12 @@ class AutoHandler:
                 )
             )
 
+        store = self.store or AutoStore()
         resume_id = resume.strip() if isinstance(resume, str) and resume.strip() else None
-        if resume_id is not None:
+        is_resume = resume_id is not None
+        if is_resume:
             try:
-                state = (self.store or AutoStore()).load(resume_id)
+                state = store.load(resume_id)
             except Exception as exc:
                 return Result.err(
                     MCPToolError(
@@ -211,16 +213,28 @@ class AutoHandler:
                         tool_name="ouroboros_auto",
                     )
                 )
-            cwd = state.cwd
-            resolved_goal = state.goal
         else:
-            cwd = str(arguments.get("cwd") or _safe_default_cwd())
-            resolved_goal = goal.strip() if isinstance(goal, str) else None
+            state = AutoPipelineState(
+                goal=goal.strip() if isinstance(goal, str) else "",
+                cwd=str(arguments.get("cwd") or _safe_default_cwd()),
+            )
+            try:
+                store.save(state)
+            except Exception as exc:
+                return Result.err(
+                    MCPToolError(
+                        f"Auto pipeline failed: {exc}",
+                        tool_name="ouroboros_auto",
+                    )
+                )
+            resume_id = state.auto_session_id
 
         context = {
-            "goal": resolved_goal,
+            "goal": state.goal,
             "resume": resume_id,
-            "cwd": cwd,
+            "auto_session_id": state.auto_session_id,
+            "is_resume": is_resume,
+            "cwd": state.cwd,
             "max_interview_rounds": arguments.get("max_interview_rounds", 12),
             "max_repair_rounds": arguments.get("max_repair_rounds", 5),
             "skip_run": bool(arguments.get("skip_run", False)),
@@ -236,10 +250,8 @@ class AutoHandler:
             response_shape={
                 "status": "delegated_to_subagent",
                 "dispatch_mode": "plugin",
-                "auto_session_id": context["resume"],
-                "resume_command": (
-                    f"ooo auto --resume {context['resume']}" if context["resume"] else None
-                ),
+                "auto_session_id": context["auto_session_id"],
+                "resume_command": f"ooo auto --resume {context['auto_session_id']}",
             },
         )
 
@@ -344,11 +356,12 @@ def _format_result(result: AutoPipelineResult) -> str:
 def _plugin_auto_prompt(context: dict[str, Any]) -> str:
     goal = context.get("goal")
     resume = context.get("resume")
+    is_resume = bool(context.get("is_resume"))
     cwd = context.get("cwd")
     skip_run = context.get("skip_run")
     max_interview_rounds = context.get("max_interview_rounds")
     max_repair_rounds = context.get("max_repair_rounds")
-    target = f"Resume auto session `{resume}`" if resume else f"Goal: {goal}"
+    target = f"Resume auto session `{resume}`" if is_resume else f"Goal: {goal}"
     run_instruction = (
         "Stop after producing and validating the A-grade Seed; do not start execution."
         if skip_run
