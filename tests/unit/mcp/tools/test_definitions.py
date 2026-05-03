@@ -431,6 +431,7 @@ class TestQueryEventsHandler:
                 aggregate_type="execution",
                 aggregate_id="exec_parallel_123_sub_ac_0_0",
                 data={
+                    "execution_id": "exec_parallel_123",
                     "session_id": "native-codex-session",
                     "session_scope_id": "exec_parallel_123_sub_ac_0_0",
                 },
