@@ -228,6 +228,27 @@ def test_auto_answerer_allows_product_domain_file_removal_questions() -> None:
     assert answer.source != AutoAnswerSource.BLOCKER
 
 
+def test_auto_answerer_allows_git_product_branch_deletion_questions() -> None:
+    answer = AutoAnswerer().answer(
+        "Should users be able to delete the branch?",
+        SeedDraftLedger.from_goal("Build a Git branch manager"),
+    )
+
+    assert answer.blocker is None
+    assert answer.source != AutoAnswerSource.BLOCKER
+    assert "product behavior" in answer.text.lower()
+
+
+def test_auto_answerer_still_blocks_current_branch_deletion_authority() -> None:
+    answer = AutoAnswerer().answer(
+        "Should we delete the current branch?",
+        SeedDraftLedger.from_goal("Clean up repository branches"),
+    )
+
+    assert answer.blocker is not None
+    assert answer.source == AutoAnswerSource.BLOCKER
+
+
 def test_auto_answerer_returns_blocker_for_plain_secret_questions() -> None:
     answer = AutoAnswerer().answer(
         "Which secret should the workflow use?",

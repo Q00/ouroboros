@@ -74,6 +74,38 @@ class LedgerEntry:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LedgerEntry:
         """Deserialize from JSON-compatible data."""
+        if not isinstance(data, dict):
+            msg = "ledger entry must be an object"
+            raise ValueError(msg)
+        required = {"key", "value", "source", "confidence", "status"}
+        missing = sorted(required - data.keys())
+        if missing:
+            msg = f"ledger entry is missing required fields: {', '.join(missing)}"
+            raise ValueError(msg)
+        if not isinstance(data["key"], str) or not data["key"].strip():
+            msg = "ledger entry key must be a non-empty string"
+            raise ValueError(msg)
+        if not isinstance(data["value"], str):
+            msg = "ledger entry value must be a string"
+            raise ValueError(msg)
+        if not isinstance(data.get("rationale", ""), str):
+            msg = "ledger entry rationale must be a string"
+            raise ValueError(msg)
+        evidence = data.get("evidence", [])
+        if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
+            msg = "ledger entry evidence must be a list of strings"
+            raise ValueError(msg)
+        if "reversible" in data and not isinstance(data["reversible"], bool):
+            msg = "ledger entry reversible must be a boolean"
+            raise ValueError(msg)
+        try:
+            confidence = float(data["confidence"])
+        except (TypeError, ValueError) as exc:
+            msg = "ledger entry confidence must be numeric"
+            raise ValueError(msg) from exc
+        if confidence < 0.0 or confidence > 1.0:
+            msg = "ledger entry confidence must be between 0 and 1"
+            raise ValueError(msg)
         return cls(**data)
 
 
@@ -108,8 +140,18 @@ class LedgerSection:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LedgerSection:
         """Deserialize section data."""
-        entries = [LedgerEntry.from_dict(item) for item in data.get("entries", [])]
-        return cls(name=str(data["name"]), entries=entries)
+        if not isinstance(data, dict):
+            msg = "ledger section must be an object"
+            raise ValueError(msg)
+        if not isinstance(data.get("name"), str) or not data["name"].strip():
+            msg = "ledger section name must be a non-empty string"
+            raise ValueError(msg)
+        entries_raw = data.get("entries")
+        if not isinstance(entries_raw, list):
+            msg = "ledger section entries must be a list"
+            raise ValueError(msg)
+        entries = [LedgerEntry.from_dict(item) for item in entries_raw]
+        return cls(name=data["name"], entries=entries)
 
 
 @dataclass(slots=True)
@@ -281,13 +323,40 @@ class SeedDraftLedger:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SeedDraftLedger:
         """Deserialize the ledger."""
-        sections_raw = data.get("sections", {})
-        sections = {
-            name: LedgerSection.from_dict(section)
-            for name, section in sections_raw.items()
-            if isinstance(section, dict)
-        }
-        ledger = cls(sections=sections, question_history=list(data.get("question_history", [])))
+        if not isinstance(data, dict):
+            msg = "ledger must be an object"
+            raise ValueError(msg)
+        sections_raw = data.get("sections")
+        if not isinstance(sections_raw, dict):
+            msg = "ledger sections must be an object"
+            raise ValueError(msg)
+        sections: dict[str, LedgerSection] = {}
+        for name, section_raw in sections_raw.items():
+            if not isinstance(name, str) or not name.strip():
+                msg = "ledger section keys must be non-empty strings"
+                raise ValueError(msg)
+            section = LedgerSection.from_dict(section_raw)
+            if section.name != name:
+                msg = f"ledger section key/name mismatch: {name} != {section.name}"
+                raise ValueError(msg)
+            sections[name] = section
+
+        question_history = data.get("question_history")
+        if not isinstance(question_history, list):
+            msg = "ledger question_history must be a list"
+            raise ValueError(msg)
+        for item in question_history:
+            if not isinstance(item, dict):
+                msg = "ledger question_history entries must be objects"
+                raise ValueError(msg)
+            if set(item) != {"question", "answer"}:
+                msg = "ledger question_history entries must contain question and answer"
+                raise ValueError(msg)
+            if not isinstance(item["question"], str) or not isinstance(item["answer"], str):
+                msg = "ledger question_history question and answer must be strings"
+                raise ValueError(msg)
+
+        ledger = cls(sections=sections, question_history=[dict(item) for item in question_history])
         for required in REQUIRED_SECTIONS:
             ledger.sections.setdefault(required, LedgerSection(required))
         return ledger

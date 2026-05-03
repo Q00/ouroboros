@@ -447,8 +447,24 @@ def _latest_resolved_goal(ledger: SeedDraftLedger) -> str:
     return ""
 
 
+def _is_safe_product_branch_question(lowered: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(users?|customers?|admins?|maintainers?|owners?)\b.+\b(delete|remove)\b.+\b(branch|branches)\b",
+            lowered,
+        )
+        and _is_product_behavior_question(lowered)
+        and not re.search(
+            r"\b(current|this|production|prod|live|external|remote|local)\b.+\b(branch|branches)\b",
+            lowered,
+        )
+    )
+
+
 def _blocker_for(question: str) -> AutoBlocker | None:
     lowered = question.lower()
+    if _is_safe_product_branch_question(lowered):
+        return None
 
     external_action_patterns = (
         (

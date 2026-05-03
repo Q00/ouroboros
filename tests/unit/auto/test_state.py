@@ -151,6 +151,33 @@ def test_store_load_rejects_malformed_nested_ledger(tmp_path) -> None:
         store.load(state.auto_session_id)
 
 
+def test_store_load_rejects_dropped_ledger_sections_and_history(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["ledger"] = {"sections": {"goal": []}, "question_history": {}}
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="valid Seed Draft Ledger"):
+        store.load(state.auto_session_id)
+
+
+def test_store_load_rejects_ledger_question_history_with_non_qa_entries(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["ledger"] = {
+        "sections": {"goal": {"name": "goal", "entries": []}},
+        "question_history": [{"question": "What?"}],
+    }
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="valid Seed Draft Ledger"):
+        store.load(state.auto_session_id)
+
+
 def test_store_save_rejects_malformed_nested_ledger_before_writing(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
