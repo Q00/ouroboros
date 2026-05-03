@@ -46,6 +46,7 @@ from typing import Any, Final
 from ouroboros.events.base import BaseEvent
 
 logger = logging.getLogger(__name__)
+_WARNED_INVALID_PRIVACY_VALUES: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -111,12 +112,14 @@ def get_privacy_mode() -> PrivacyMode:
     try:
         return PrivacyMode(raw)
     except ValueError:
-        logger.warning(
-            "Invalid %s=%r; falling back to %s to avoid preserving I/O previews",
-            PRIVACY_ENV_VAR,
-            configured,
-            PrivacyMode.OFF.value,
-        )
+        if raw not in _WARNED_INVALID_PRIVACY_VALUES:
+            _WARNED_INVALID_PRIVACY_VALUES.add(raw)
+            logger.warning(
+                "Invalid %s=%r; falling back to %s to avoid preserving I/O previews",
+                PRIVACY_ENV_VAR,
+                configured,
+                PrivacyMode.OFF.value,
+            )
         return PrivacyMode.OFF
 
 

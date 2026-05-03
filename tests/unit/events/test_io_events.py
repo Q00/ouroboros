@@ -126,6 +126,24 @@ class TestPrivacyMode:
         monkeypatch.setenv(PRIVACY_ENV_VAR, "of")
         assert shape_preview("SECRET prompt") is None
 
+    def test_invalid_value_warns_once_per_normalised_value(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv(PRIVACY_ENV_VAR, " noisy ")
+        assert get_privacy_mode() is PrivacyMode.OFF
+        assert get_privacy_mode() is PrivacyMode.OFF
+        monkeypatch.setenv(PRIVACY_ENV_VAR, "NOISY")
+        assert get_privacy_mode() is PrivacyMode.OFF
+
+        warnings = [
+            record
+            for record in caplog.records
+            if "Invalid OUROBOROS_IO_JOURNAL_PREVIEWS" in record.message
+        ]
+        assert len(warnings) == 1
+
 
 class TestTruncatePreview:
     def test_short_text_passes_through(self) -> None:
