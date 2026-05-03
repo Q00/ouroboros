@@ -59,16 +59,30 @@ class WonderEngine:
     """
 
     llm_adapter: LLMAdapter
-    model: str = field(default_factory=get_wonder_model)
+    model: str | None = None
     adapter_factory: Callable[[], LLMAdapter | None] | None = field(default=None)
     adapter_backend: str | None = None
     _captured_backend: str | None = field(default=None, init=False, repr=False)
+    _model_is_explicit: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self._model_is_explicit = self.model is not None
         try:
             self._captured_backend = self.adapter_backend or get_llm_backend()
         except Exception:  # noqa: BLE001
             self._captured_backend = None
+        if self.model is None:
+            self._refresh_model(self._captured_backend)
+
+    def _refresh_model(self, backend: str | None) -> None:
+        if not self._model_is_explicit:
+            self.model = get_wonder_model(backend)
+
+    def _completion_model(self) -> str:
+        if self.model is None:
+            self._refresh_model(self._selected_backend())
+        assert self.model is not None
+        return self.model
 
     def _resolve_adapter(self) -> LLMAdapter:
         current_backend = self._selected_backend()
@@ -88,7 +102,7 @@ class WonderEngine:
                     self.llm_adapter = fresh
                     if current_backend:
                         self._captured_backend = current_backend
-                        self.model = get_wonder_model(current_backend)
+                        self._refresh_model(current_backend)
                     return fresh
             except Exception:  # noqa: BLE001
                 logger.exception("WonderEngine adapter_factory raised; using captured adapter")
@@ -104,7 +118,7 @@ class WonderEngine:
                 )
                 self.llm_adapter = rebuilt
                 self._captured_backend = current_backend
-                self.model = get_wonder_model(current_backend)
+                self._refresh_model(current_backend)
                 logger.info(
                     "wonder.adapter_rebuilt_for_backend_drift",
                     extra={"new_backend": current_backend},
@@ -158,7 +172,7 @@ class WonderEngine:
 
         adapter = self._resolve_adapter()
         config = CompletionConfig(
-            model=self.model,
+            model=self._completion_model(),
             temperature=0.7,
             max_tokens=2048,
         )
