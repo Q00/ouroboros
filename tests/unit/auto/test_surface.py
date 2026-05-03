@@ -344,6 +344,14 @@ def test_auto_handler_explicit_relative_cwd_is_persisted_as_absolute(monkeypatch
     assert _resolve_cwd("project") == tmp_path / "project"
 
 
+def test_auto_handler_explicit_cwd_rejects_regular_file(tmp_path) -> None:
+    file_path = tmp_path / "not-a-directory"
+    file_path.write_text("not a project root", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        _resolve_cwd(str(file_path))
+
+
 @pytest.mark.asyncio
 async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tmp_path) -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult

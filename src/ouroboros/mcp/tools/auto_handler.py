@@ -210,6 +210,9 @@ def _resolve_cwd(value: object) -> Path:
 
 def _require_writable_cwd(cwd: Path) -> Path:
     resolved = cwd.resolve()
+    if not resolved.is_dir():
+        msg = f"working directory is not a directory: {resolved}"
+        raise ValueError(msg)
     if not os.access(resolved, os.W_OK):
         msg = f"working directory is not writable: {resolved}"
         raise ValueError(msg)
