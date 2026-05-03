@@ -754,6 +754,49 @@ class TestSessionRelatedEvents:
         assert f"{execution_scope}_level_1_coordinator_reconciliation" in aggregate_ids
         assert "other_evolve_ac_0" not in aggregate_ids
 
+    async def test_session_related_events_do_not_join_on_lossy_normalized_scope(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """Distinct execution IDs that normalize alike must stay isolated."""
+        session_id = "sess-lossy-normalized"
+        execution_id = "evolve:foo:bar:generation:1"
+        colliding_execution_id = "evolve:foo_bar:generation:1"
+        assert normalize_execution_scope_id(execution_id) == normalize_execution_scope_id(
+            colliding_execution_id
+        )
+        colliding_scope = normalize_execution_scope_id(colliding_execution_id)
+
+        events = [
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"execution_id": execution_id, "seed_id": "seed-lossy"},
+            ),
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id=f"{colliding_scope}_ac_0",
+                data={
+                    "session_id": "other-session",
+                    "execution_id": colliding_execution_id,
+                    "ac_index": 0,
+                    "message_count": 1,
+                },
+            ),
+        ]
+        for event in events:
+            await event_store.append(event)
+
+        result = await event_store.query_session_related_events(
+            session_id,
+            execution_id=execution_id,
+            limit=None,
+        )
+
+        assert [event.aggregate_id for event in result] == [session_id]
+
     async def test_session_related_events_after_advances_one_cursor(
         self,
         event_store: EventStore,

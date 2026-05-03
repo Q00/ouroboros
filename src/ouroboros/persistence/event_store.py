@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_scope_id
 from ouroboros.persistence.schema import events_table, metadata
 
 logger = logging.getLogger(__name__)
@@ -72,39 +71,20 @@ def _looks_like_raw_subscribed_event_payload(value: object) -> bool:
     return bool(_RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS & normalized_keys)
 
 
-def _escape_sql_like(value: str) -> str:
-    """Escape SQL LIKE metacharacters while leaving caller wildcards explicit."""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
 def _session_related_event_conditions(
     session_id: str,
     execution_id: str | None,
 ) -> list[Any]:
     """Build aggregate-id predicates for a session and its execution scopes."""
-    conditions: list[Any] = [events_table.c.aggregate_id == session_id]
+    conditions: list[Any] = [
+        events_table.c.aggregate_id == session_id,
+        func.json_extract(events_table.c.payload, "$.session_id") == session_id,
+    ]
     if not execution_id:
         return conditions
 
     conditions.append(events_table.c.aggregate_id == execution_id)
-    execution_scope = normalize_execution_scope_id(execution_id)
-    if execution_scope != execution_id:
-        conditions.append(events_table.c.aggregate_id == execution_scope)
-
-    for prefix in {execution_id, execution_scope}:
-        escaped_prefix = _escape_sql_like(prefix)
-        conditions.append(
-            events_table.c.aggregate_id.like(
-                f"{escaped_prefix}\\_%",
-                escape="\\",
-            )
-        )
-        conditions.append(
-            events_table.c.aggregate_id.like(
-                f"{escaped_prefix}:%",
-                escape="\\",
-            )
-        )
+    conditions.append(func.json_extract(events_table.c.payload, "$.execution_id") == execution_id)
 
     return conditions
 
@@ -793,10 +773,14 @@ class EventStore:
         Parallel execution stores activity in several aggregate families:
         - ``session/<session_id>`` for top-level session state
         - ``execution/<execution_id>`` for workflow progress
-        - ``execution/<normalized_execution_id>_*`` for AC/Sub-AC runtime scopes
-        - ``execution/<execution_id>:*`` for coordinator level scopes
-        - ``execution/<normalized_execution_id>_*_coordinator_*`` for persisted
-          coordinator runtime scopes
+        - ``execution/*`` runtime scopes whose payload references the session
+          or exact execution ID
+
+        Related execution scopes are matched through persisted ``session_id`` /
+        ``execution_id`` payload fields instead of normalized aggregate-name
+        prefixes. Runtime aggregate names intentionally normalize dynamic IDs
+        for filesystem/path safety, so using those lossy names as join keys can
+        collide across distinct executions.
 
         Args:
             session_id: Orchestrator session ID.
@@ -864,7 +848,7 @@ class EventStore:
         """Incrementally query events across a session and related execution scopes.
 
         This is the multi-aggregate equivalent of ``get_events_after``. It uses
-        the same raw and normalized execution-scope predicates as
+        the same exact session/execution payload predicates as
         ``query_session_related_events`` while advancing a single rowid cursor.
         """
         if self._engine is None:
