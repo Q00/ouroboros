@@ -349,3 +349,49 @@ async def test_close_does_not_hang_when_cancel_is_ignored() -> None:
     await asyncio.wait_for(tasks[0], timeout=0.5)
     await asyncio.sleep(0)
     assert bus._tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_raise_when_cancelled_task_finishes_after_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale ``asyncio.wait`` pending set must not cause a false drain failure."""
+    bus = ControlBus(_close_timeout_s=0.01, _cancel_timeout_s=0.01)
+    started = asyncio.Event()
+    real_wait = asyncio.wait
+    wait_calls = 0
+
+    async def stale_second_wait(
+        awaitables: set[asyncio.Task[None]] | tuple[asyncio.Task[None], ...],
+        *,
+        timeout: float | None = None,
+    ) -> tuple[set[asyncio.Task[None]], set[asyncio.Task[None]]]:
+        nonlocal wait_calls
+        wait_calls += 1
+        done, pending = await real_wait(awaitables, timeout=timeout)
+        if wait_calls == 2 and pending:
+            stale_pending = set(pending)
+            await asyncio.wait_for(
+                asyncio.gather(*stale_pending, return_exceptions=True),
+                timeout=0.5,
+            )
+            return done, stale_pending
+        return done, pending
+
+    async def exits_after_cancel(event: BaseEvent) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(asyncio, "wait", stale_second_wait)
+    bus.subscribe(_is_directive, exits_after_cancel)
+    tasks = bus.publish(_directive_event())
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+
+    await bus.close()
+
+    assert tasks[0].done()
+    assert not tasks[0].cancelled()
+    assert bus._tasks == set()

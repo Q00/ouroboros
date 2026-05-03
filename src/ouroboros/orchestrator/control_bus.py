@@ -240,6 +240,13 @@ class ControlBus:
                 if cancelled_done:
                     await asyncio.gather(*cancelled_done, return_exceptions=True)
                 if still_running:
+                    finished_after_wait = tuple(task for task in still_running if task.done())
+                    if finished_after_wait:
+                        await asyncio.gather(*finished_after_wait, return_exceptions=True)
+                    still_running = {
+                        task for task in still_running if not task.done()
+                    }
+                if still_running:
                     logger.error(
                         "control_bus.cancel_timeout",
                         extra={
