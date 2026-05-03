@@ -89,7 +89,7 @@ def _classify_synchronous_execution_status(
         return "paused", None, False, "Seed Execution PAUSED"
     if session_status in {SessionStatus.FAILED, SessionStatus.CANCELLED}:
         return session_status.value, False, True, "Seed Execution FINISHED"
-    return "unknown", None, False, "Seed Execution FINISHED"
+    return "unknown", False, True, "Seed Execution FINISHED"
 
 
 # ---------------------------------------------------------------------------

@@ -209,6 +209,15 @@ class TestExecuteSeedHandler:
         assert is_error is True
         assert header == "Seed Execution FINISHED"
 
+    def test_synchronous_unknown_status_is_mcp_error(self) -> None:
+        """Unknown synchronous outcomes should not hide reconstruction failures."""
+        status, success, is_error, header = _classify_synchronous_execution_status(None)
+
+        assert status == "unknown"
+        assert success is False
+        assert is_error is True
+        assert header == "Seed Execution FINISHED"
+
 
 class TestSessionStatusHandler:
     """Test SessionStatusHandler class."""
