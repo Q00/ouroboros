@@ -122,7 +122,7 @@ class AutoHandler:
     async def _run(self, arguments: dict[str, Any]) -> AutoPipelineResult:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
-        requested_cwd = str(arguments.get("cwd") or _safe_default_cwd())
+        requested_cwd = str(_resolve_cwd(arguments.get("cwd")))
         requested_skip_run = bool(arguments.get("skip_run", False))
         if isinstance(resume, str) and resume:
             state = store.load(resume)
@@ -198,8 +198,21 @@ def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int
 
 def _safe_default_cwd() -> Path:
     cwd = Path.cwd()
-    if cwd == Path("/") or not os.access(cwd, os.W_OK):
+    if cwd == Path("/"):
         return Path.home()
+    return _require_writable_cwd(cwd)
+
+
+def _resolve_cwd(value: object) -> Path:
+    if value is None or value == "":
+        return _safe_default_cwd()
+    return _require_writable_cwd(Path(str(value)).expanduser())
+
+
+def _require_writable_cwd(cwd: Path) -> Path:
+    if not os.access(cwd, os.W_OK):
+        msg = f"working directory is not writable: {cwd}"
+        raise ValueError(msg)
     return cwd
 
 

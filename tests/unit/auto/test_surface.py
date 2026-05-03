@@ -14,6 +14,7 @@ from ouroboros.mcp.tools.auto_handler import (
     _authoring_interview_handler,
     _authoring_seed_handler,
     _execution_start_handler,
+    _resolve_cwd,
     _safe_default_cwd,
 )
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -321,6 +322,21 @@ def test_auto_handler_default_cwd_avoids_root(monkeypatch, tmp_path) -> None:
     assert _safe_default_cwd() == tmp_path
 
 
+def test_auto_handler_default_cwd_rejects_non_writable_project(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
+    monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.os.access", lambda *_args: False)
+
+    with pytest.raises(ValueError, match="not writable"):
+        _safe_default_cwd()
+
+
+def test_auto_handler_explicit_cwd_rejects_non_writable_project(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.os.access", lambda *_args: False)
+
+    with pytest.raises(ValueError, match="not writable"):
+        _resolve_cwd(str(tmp_path))
+
+
 @pytest.mark.asyncio
 async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tmp_path) -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
@@ -391,6 +407,24 @@ async def test_cli_resume_rejects_runtime_mismatch(monkeypatch, tmp_path) -> Non
             goal=None,
             resume=state.auto_session_id,
             runtime="opencode",
+            max_interview_rounds=1,
+            max_repair_rounds=1,
+            skip_run=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cli_fresh_auto_rejects_non_writable_project(monkeypatch, tmp_path) -> None:
+    from ouroboros.cli.commands import auto as auto_command
+
+    monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
+    monkeypatch.setattr(auto_command.os, "access", lambda *_args: False)
+
+    with pytest.raises(ValueError, match="not writable"):
+        await auto_command._run_auto(
+            goal="Build a CLI",
+            resume=None,
+            runtime=None,
             max_interview_rounds=1,
             max_repair_rounds=1,
             skip_run=False,

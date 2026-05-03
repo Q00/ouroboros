@@ -93,10 +93,13 @@ def auto_command(
 
 
 def _safe_default_cwd() -> Path:
-    """Return a writable default cwd for fresh CLI auto sessions."""
+    """Return a safe default cwd without silently retargeting projects."""
     cwd = Path.cwd()
-    if cwd == Path("/") or not os.access(cwd, os.W_OK):
+    if cwd == Path("/"):
         return Path.home()
+    if not os.access(cwd, os.W_OK):
+        msg = f"current working directory is not writable: {cwd}"
+        raise ValueError(msg)
     return cwd
 
 
