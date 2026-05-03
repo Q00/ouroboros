@@ -489,6 +489,21 @@ class TestRuntimeHelperLookups:
         ):
             assert get_runtime_profile() == "worker"
 
+    def test_get_runtime_profile_accepts_unknown_backend_profile(self) -> None:
+        """Config loading preserves future backend-local profile names."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(
+                        runtime_profile=RuntimeProfileConfig(backend_profile="future-worker")
+                    )
+                ),
+            ),
+        ):
+            assert get_runtime_profile() == "future-worker"
+
     def test_get_runtime_profile_ignores_stage_only_profile(self) -> None:
         """Stage routing fields do not imply a backend-native Codex profile."""
         with (

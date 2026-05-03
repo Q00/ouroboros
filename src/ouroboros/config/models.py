@@ -280,14 +280,28 @@ class RuntimeProfileConfig(BaseModel, frozen=True):
     """Runtime profile configuration shared by backend profiles and stage routing.
 
     ``backend_profile`` carries backend-native profile names such as PR #505's
-    Codex ``worker`` mapping. ``default`` and ``stages`` reserve the same
-    object shape used by the stage-routing contract from PR #538 so the public
-    ``orchestrator.runtime_profile`` key has one stable table/object form.
+    Codex ``worker`` mapping. Unknown names are intentionally accepted here so
+    backend-local resolvers can warn and fall back without making the shared
+    config object reject future backend slices. ``default`` and ``stages``
+    reserve the same object shape used by the stage-routing contract from PR
+    #538 so the public ``orchestrator.runtime_profile`` key has one stable
+    table/object form.
     """
 
-    backend_profile: Literal["worker"] | None = None
+    backend_profile: str | None = None
     default: str | None = None
     stages: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("backend_profile")
+    @classmethod
+    def _validate_backend_profile(cls, value: str | None) -> str | None:
+        """Normalize backend-native profile names without constraining vocabulary."""
+        if value is None:
+            return None
+        candidate = value.strip()
+        if not candidate:
+            raise ValueError("runtime_profile.backend_profile must not be empty")
+        return candidate
 
 
 class OrchestratorConfig(BaseModel, frozen=True):

@@ -19,6 +19,7 @@ from ouroboros.config.models import (
     PersistenceConfig,
     ProviderCredentials,
     ResilienceConfig,
+    RuntimeProfileConfig,
     TierConfig,
     get_config_dir,
     get_default_config,
@@ -477,6 +478,25 @@ class TestOrchestratorConfig:
         assert config.runtime_backend == "gemini"
         assert config.gemini_cli_path is not None
         assert "~" not in config.gemini_cli_path
+
+    def test_runtime_profile_backend_profile_accepts_future_values(self) -> None:
+        """Shared config allows backend-local resolvers to handle unknown names."""
+        profile = RuntimeProfileConfig(backend_profile="future-worker")
+
+        assert profile.backend_profile == "future-worker"
+
+    def test_runtime_profile_backend_profile_strips_whitespace(self) -> None:
+        """Backend-native profile names are normalized before resolver lookup."""
+        profile = RuntimeProfileConfig(backend_profile=" worker ")
+
+        assert profile.backend_profile == "worker"
+
+    def test_runtime_profile_backend_profile_rejects_empty_string(self) -> None:
+        """Empty profile names are invalid even though vocabulary is backend-local."""
+        with pytest.raises(ValidationError) as exc_info:
+            RuntimeProfileConfig(backend_profile=" ")
+
+        assert "runtime_profile.backend_profile" in str(exc_info.value)
 
 
 class TestGetDefaultConfig:
