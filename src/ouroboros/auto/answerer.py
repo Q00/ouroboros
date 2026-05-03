@@ -406,6 +406,20 @@ def _is_product_behavior_question(lowered: str) -> bool:
             r"\b(which|what)\b.+\b(can|should)\b.+\b(edit|delete|remove|update|create|view|access)\b",
             lowered,
         )
+        or re.search(
+            r"\b(should|must|can|will|do|does|is|are)\b.+\b(be|become)\s+"
+            r"(editable|trackable|tracked|enforced|configurable|visible|searchable|exportable|importable)\b",
+            lowered,
+        )
+        or re.search(
+            r"\b(should|must|can|will|do|does)\b.+\b(subscribe|track|enforce)\b",
+            lowered,
+        )
+        or re.search(
+            r"\b(which|what)\b.+\b(rules?|polic(?:y|ies)|workflows?|documents?|tiers?)\b.+"
+            r"\b(should|must|can|will|do|does|enforce|track|edit|subscribe)\b",
+            lowered,
+        )
     )
 
 

@@ -245,6 +245,24 @@ def test_auto_answerer_allows_git_product_branch_deletion_questions() -> None:
     assert all("product behavior" in answer.text.lower() for answer in answers)
 
 
+def test_auto_answerer_preserves_product_behavior_phrasing_variants() -> None:
+    answerer = AutoAnswerer()
+    ledger = SeedDraftLedger.from_goal("Build a compliance SaaS")
+
+    examples = (
+        "Should legal documents be editable?",
+        "Should users subscribe to paid service tiers?",
+        "Should legal review workflows be tracked?",
+        "Which password rules should the signup form enforce?",
+    )
+
+    answers = [answerer.answer(question, ledger) for question in examples]
+
+    assert all(answer.blocker is None for answer in answers)
+    assert all(answer.source != AutoAnswerSource.BLOCKER for answer in answers)
+    assert all("product behavior" in answer.text.lower() for answer in answers)
+
+
 def test_auto_answerer_still_blocks_current_branch_deletion_authority() -> None:
     answer = AutoAnswerer().answer(
         "Should we delete the current branch?",
