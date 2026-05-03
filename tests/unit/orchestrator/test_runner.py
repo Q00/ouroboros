@@ -1374,6 +1374,25 @@ class TestOrchestratorRunner:
         assert pause.pause_seconds == 18000
         assert pause.resume_after == now + timedelta(hours=5)
 
+    def test_recoverable_failure_sums_compound_retry_window(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Compound quota windows should not resume before the full retry duration."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please retry after 1 hour 30 minutes.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+
+        pause = runner._recoverable_failure_pause(message, now=now)
+
+        assert pause is not None
+        assert pause.pause_seconds == 5400
+        assert pause.resume_after == now + timedelta(hours=1, minutes=30)
+        assert OrchestratorRunner._duration_text_to_seconds("resets in 2h 15m") == 8100
+
     def test_recoverable_failure_propagates_invalid_usage_limit_config(
         self,
         runner: OrchestratorRunner,

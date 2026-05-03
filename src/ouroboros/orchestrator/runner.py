@@ -899,8 +899,8 @@ class OrchestratorRunner:
 
     @staticmethod
     def _duration_text_to_seconds(text: str) -> int | None:
-        """Parse the largest duration token from text into seconds."""
-        largest_seconds = 0.0
+        """Parse retry-window duration tokens from text into total seconds."""
+        total_seconds = 0.0
         for match in _DURATION_PATTERN.finditer(text):
             value = float(match.group("value"))
             unit = match.group("unit").lower()
@@ -912,10 +912,10 @@ class OrchestratorRunner:
                 seconds = value * 60
             else:
                 seconds = value
-            largest_seconds = max(largest_seconds, seconds)
-        if largest_seconds <= 0:
+            total_seconds += seconds
+        if total_seconds <= 0:
             return None
-        return max(1, int(largest_seconds))
+        return max(1, int(total_seconds))
 
     @classmethod
     def _duration_value_to_seconds(cls, value: object) -> int | None:
