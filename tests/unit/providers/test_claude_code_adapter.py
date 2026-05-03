@@ -860,6 +860,11 @@ class TestErrorDiagnostics:
 
         assert result.is_ok
         assert result.value.content == "What should the app do first?"
+        assert result.value.finish_reason == "length"
+        assert result.value.raw_response["subtype"] == "error_max_turns"
+        assert result.value.raw_response["stop_reason"] == "tool_use"
+        assert result.value.raw_response["errors"] == ["Reached maximum number of turns (5)"]
+        assert result.value.raw_response["partial_result"] is True
 
     @pytest.mark.asyncio
     async def test_error_max_turns_without_partial_content_remains_error(self) -> None:

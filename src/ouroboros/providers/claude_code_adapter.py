@@ -639,6 +639,8 @@ class ClaudeCodeAdapter:
         content = ""
         session_id = None
         error_result: ProviderError | None = None
+        finish_reason = "stop"
+        raw_response: dict[str, object] = {"session_id": None}
 
         # Wrap query() to skip unknown message types (e.g., rate_limit_event)
         # that the SDK doesn't recognize yet. Without this, a single
@@ -703,17 +705,29 @@ class ClaudeCodeAdapter:
                     is_error = getattr(sdk_message, "is_error", False)
                     if is_error:
                         subtype = getattr(sdk_message, "subtype", None)
+                        stop_reason = getattr(sdk_message, "stop_reason", None)
+                        errors = getattr(sdk_message, "errors", None)
                         if subtype == "error_max_turns" and content.strip():
                             # Claude Code can emit a useful AssistantMessage and then
                             # finish with ResultMessage(error_max_turns) after trying
-                            # to continue with tools. Treat the already-streamed text
-                            # as a graceful partial result instead of crashing the
-                            # interview loop.
+                            # to continue with tools. Surface the already-streamed
+                            # text as a truncated partial result instead of crashing
+                            # the interview loop or pretending completion was clean.
+                            finish_reason = "length"
+                            raw_response.update(
+                                {
+                                    "subtype": subtype,
+                                    "stop_reason": stop_reason,
+                                    "errors": errors,
+                                    "partial_result": True,
+                                }
+                            )
                             log.warning(
                                 "claude_code_adapter.max_turns_partial_result",
                                 session_id=session_id,
                                 content_length=len(content),
                                 max_turns=self._max_turns,
+                                stop_reason=stop_reason,
                             )
                             continue
 
@@ -736,8 +750,8 @@ class ClaudeCodeAdapter:
                                 "claudecode_present": claudecode_present,
                                 "claude_code_entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
                                 "subtype": subtype,
-                                "stop_reason": getattr(sdk_message, "stop_reason", None),
-                                "errors": getattr(sdk_message, "errors", None),
+                                "stop_reason": stop_reason,
+                                "errors": errors,
                             },
                         )
         except asyncio.CancelledError:
@@ -819,9 +833,11 @@ class ClaudeCodeAdapter:
             "claude_code_adapter.request_completed",
             content_length=len(content),
             session_id=session_id,
+            finish_reason=finish_reason,
         )
 
         # Build response
+        raw_response["session_id"] = session_id
         response = CompletionResponse(
             content=content,
             model=config.model,
@@ -830,8 +846,8 @@ class ClaudeCodeAdapter:
                 completion_tokens=0,
                 total_tokens=0,
             ),
-            finish_reason="stop",
-            raw_response={"session_id": session_id},
+            finish_reason=finish_reason,
+            raw_response=raw_response,
         )
 
         return Result.ok(response)
