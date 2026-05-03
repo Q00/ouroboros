@@ -535,12 +535,15 @@ class EventStore:
             func.json_extract(events_table.c.payload, "$.runtime_status"),
         )
 
-        started_ranked = (
+        first_session_event_ranked = (
             select(
                 events_table.c.aggregate_id.label("session_id"),
                 func.json_extract(events_table.c.payload, "$.execution_id").label("execution_id"),
                 func.json_extract(events_table.c.payload, "$.seed_id").label("seed_id"),
-                func.json_extract(events_table.c.payload, "$.start_time").label("start_time"),
+                func.coalesce(
+                    func.json_extract(events_table.c.payload, "$.start_time"),
+                    events_table.c.timestamp,
+                ).label("start_time"),
                 func.row_number()
                 .over(
                     partition_by=events_table.c.aggregate_id,
@@ -549,7 +552,6 @@ class EventStore:
                 .label("rn"),
             )
             .where(events_table.c.aggregate_type == "session")
-            .where(events_table.c.event_type == "orchestrator.session.started")
             .subquery()
         )
 
@@ -609,31 +611,33 @@ class EventStore:
             async with self._engine.begin() as conn:
                 query = (
                     select(
-                        started_ranked.c.session_id,
-                        started_ranked.c.execution_id,
-                        started_ranked.c.seed_id,
-                        started_ranked.c.start_time,
+                        first_session_event_ranked.c.session_id,
+                        first_session_event_ranked.c.execution_id,
+                        first_session_event_ranked.c.seed_id,
+                        first_session_event_ranked.c.start_time,
                         latest_activity_ranked.c.last_activity,
                         latest_status_ranked.c.status_event_type,
                         latest_status_ranked.c.runtime_status,
                     )
-                    .select_from(started_ranked)
+                    .select_from(first_session_event_ranked)
                     .join(
                         latest_activity_ranked,
                         and_(
-                            latest_activity_ranked.c.session_id == started_ranked.c.session_id,
+                            latest_activity_ranked.c.session_id
+                            == first_session_event_ranked.c.session_id,
                             latest_activity_ranked.c.rn == 1,
                         ),
                     )
                     .outerjoin(
                         latest_status_ranked,
                         and_(
-                            latest_status_ranked.c.session_id == started_ranked.c.session_id,
+                            latest_status_ranked.c.session_id
+                            == first_session_event_ranked.c.session_id,
                             latest_status_ranked.c.rn == 1,
                         ),
                     )
-                    .where(started_ranked.c.rn == 1)
-                    .order_by(started_ranked.c.session_id.asc())
+                    .where(first_session_event_ranked.c.rn == 1)
+                    .order_by(first_session_event_ranked.c.session_id.asc())
                 )
 
                 result = await conn.execute(query)
