@@ -870,41 +870,14 @@ class ClaudeCodeAdapter:
 
         Claude Code may stream natural-language preambles before attempting a tool
         call and then finish with ``error_max_turns``. Those preambles are not a
-        final answer, so only accept tool-use-stopped partials when they look like
-        a standalone user-facing response rather than planning/tool setup.
+        final answer, and this provider layer cannot reliably distinguish them by
+        inspecting text shape. Keep tool-use-stopped max-turns on the error path
+        and only surface non-tool-use partials as length-limited completions.
         """
         text = content.strip()
         if not text:
             return False
-        if stop_reason != "tool_use":
-            return True
-
-        lowered = text.lower()
-        planning_prefixes = (
-            "i'll ",
-            "i will ",
-            "i need to ",
-            "let me ",
-            "first, i'll ",
-            "first i'll ",
-            "we need to ",
-            "i should ",
-        )
-        planning_markers = (
-            " use the ",
-            " run the ",
-            " inspect ",
-            " check the ",
-            " look at ",
-            " read the ",
-            " search ",
-        )
-        if lowered.startswith(planning_prefixes) or any(
-            marker in lowered for marker in planning_markers
-        ):
-            return False
-
-        return "?" in text or "\n" in text or len(text.split()) >= 8
+        return stop_reason != "tool_use"
 
     def _format_tool_info(self, tool_name: str, tool_input: dict) -> str:
         """Format tool name and input for display.

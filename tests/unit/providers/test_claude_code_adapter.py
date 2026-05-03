@@ -842,7 +842,7 @@ class TestErrorDiagnostics:
             result_msg.is_error = True
             result_msg.subtype = "error_max_turns"
             result_msg.errors = ["Reached maximum number of turns (5)"]
-            result_msg.stop_reason = "tool_use"
+            result_msg.stop_reason = "max_turns"
             yield result_msg
 
         sdk_module = _make_sdk_mock(
@@ -862,7 +862,7 @@ class TestErrorDiagnostics:
         assert result.value.content == "What should the app do first?"
         assert result.value.finish_reason == "length"
         assert result.value.raw_response["subtype"] == "error_max_turns"
-        assert result.value.raw_response["stop_reason"] == "tool_use"
+        assert result.value.raw_response["stop_reason"] == "max_turns"
         assert result.value.raw_response["errors"] == ["Reached maximum number of turns (5)"]
         assert result.value.raw_response["partial_result"] is True
 
@@ -901,8 +901,8 @@ class TestErrorDiagnostics:
         assert result.error.details["stop_reason"] == "tool_use"
 
     @pytest.mark.asyncio
-    async def test_error_max_turns_rejects_tool_preamble_partial(self) -> None:
-        """Tool preambles before max-turns are not treated as final answers."""
+    async def test_error_max_turns_rejects_tool_use_partial(self) -> None:
+        """Tool-use-stopped partials are not guessed into final answers."""
         adapter = ClaudeCodeAdapter(max_turns=5)
         config = CompletionConfig(model="claude-sonnet-4-6")
 
@@ -915,7 +915,7 @@ class TestErrorDiagnostics:
         async def preamble_then_max_turns_query(*args, **kwargs):
             assistant_msg = MagicMock()
             type(assistant_msg).__name__ = "AssistantMessage"
-            assistant_msg.content = [TextBlock("I'll inspect the project files first.")]
+            assistant_msg.content = [TextBlock("What should the app do first?")]
             yield assistant_msg
 
             result_msg = MagicMock()
@@ -944,7 +944,7 @@ class TestErrorDiagnostics:
         assert result.is_err
         assert "usable final response" in result.error.message
         assert result.error.details["partial_rejected"] is True
-        assert result.error.details["partial_content"] == "I'll inspect the project files first."
+        assert result.error.details["partial_content"] == "What should the app do first?"
 
     @pytest.mark.asyncio
     async def test_sdk_error_message_includes_stderr(self) -> None:
