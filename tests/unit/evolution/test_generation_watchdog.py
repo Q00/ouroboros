@@ -107,6 +107,19 @@ def _ac_heartbeat(session_id: str, ac_id: str, message_count: int) -> BaseEvent:
     )
 
 
+def _subagent_started(child_execution_id: str, parent_execution_id: str) -> BaseEvent:
+    return BaseEvent(
+        type="execution.subagent.started",
+        aggregate_type="execution",
+        aggregate_id=child_execution_id,
+        data={
+            "parent_execution_id": parent_execution_id,
+            "child_ac": "child task",
+            "depth": 1,
+        },
+    )
+
+
 def _decomposition_level_event(session_id: str, event_type: str, level: int) -> BaseEvent:
     return BaseEvent(
         type=event_type,
@@ -162,7 +175,10 @@ async def test_productive_long_run_resets_material_progress_timeout(
     watchdog = _watchdog(
         event_store,
         execution_id=execution_id,
-        generation_no_progress_timeout_seconds=0.09,
+        # Keep this above one fake-clock progress interval so a scheduler
+        # poll that lands immediately before the next persisted progress event
+        # does not make the test flaky in the full-suite run.
+        generation_no_progress_timeout_seconds=0.12,
         watchdog_poll_seconds=0.005,
     )
 
@@ -262,6 +278,31 @@ async def test_ac_heartbeat_aggregate_resets_idle_timeout() -> None:
         return "done"
 
     assert await watchdog.watch(heartbeat_work()) == "done"
+
+
+@pytest.mark.asyncio
+async def test_parent_execution_child_events_reset_idle_timeout() -> None:
+    """Child execution scopes linked by parent_execution_id prove generation liveness."""
+    event_store = await _store()
+    session_id = "session-child-exec"
+    execution_id = "evolve:lin-child:generation:1"
+    watchdog = _watchdog(
+        event_store,
+        execution_id=execution_id,
+        generation_idle_timeout_seconds=0.07,
+        generation_no_progress_timeout_seconds=0,
+    )
+
+    async def child_work() -> str:
+        await event_store.append(_session_started(session_id, execution_id))
+        for count in range(1, 5):
+            await asyncio.sleep(0.04)
+            await event_store.append(
+                _subagent_started(f"evolve_lin_child_generation_1_child_{count}", execution_id)
+            )
+        return "done"
+
+    assert await watchdog.watch(child_work()) == "done"
 
 
 @pytest.mark.asyncio

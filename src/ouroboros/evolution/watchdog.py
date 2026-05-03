@@ -328,7 +328,11 @@ class GenerationProgressWatchdog:
             return True
 
         execution_id = event.data.get("execution_id")
-        return isinstance(execution_id, str) and execution_id == self.execution_id
+        if isinstance(execution_id, str) and execution_id == self.execution_id:
+            return True
+
+        parent_execution_id = event.data.get("parent_execution_id")
+        return isinstance(parent_execution_id, str) and parent_execution_id == self.execution_id
 
     def _remember_session(self, session_id: str) -> None:
         if session_id:

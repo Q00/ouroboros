@@ -732,6 +732,12 @@ class TestSessionRelatedEvents:
                 data={"session_id": session_id, "execution_id": execution_id},
             ),
             BaseEvent(
+                type="execution.subagent.started",
+                aggregate_type="execution",
+                aggregate_id=f"{execution_scope}_child_0",
+                data={"parent_execution_id": execution_id, "child_ac": "child task", "depth": 1},
+            ),
+            BaseEvent(
                 type="execution.ac.heartbeat",
                 aggregate_type="execution",
                 aggregate_id="other_evolve_ac_0",
@@ -752,6 +758,7 @@ class TestSessionRelatedEvents:
         assert execution_id in aggregate_ids
         assert f"{execution_scope}_ac_0" in aggregate_ids
         assert f"{execution_scope}_level_1_coordinator_reconciliation" in aggregate_ids
+        assert f"{execution_scope}_child_0" in aggregate_ids
         assert "other_evolve_ac_0" not in aggregate_ids
 
     async def test_session_related_events_do_not_join_on_lossy_normalized_scope(
@@ -835,6 +842,64 @@ class TestSessionRelatedEvents:
         )
 
         assert [event.type for event in second_batch] == ["execution.ac.heartbeat"]
+        assert next_cursor > cursor
+
+    async def test_session_related_events_after_includes_exact_parent_execution_children(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """Child execution scopes linked only by parent_execution_id remain visible."""
+        session_id = "sess-parent-execution"
+        execution_id = "evolve:lin-parent:generation:1"
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"execution_id": execution_id, "seed_id": "seed-parent"},
+            )
+        )
+
+        first_batch, cursor = await event_store.query_session_related_events_after(
+            session_id,
+            execution_id=execution_id,
+        )
+        assert [event.type for event in first_batch] == ["orchestrator.session.started"]
+
+        await event_store.append(
+            BaseEvent(
+                type="execution.subagent.started",
+                aggregate_type="execution",
+                aggregate_id="evolve_lin_parent_generation_1_child_0",
+                data={
+                    "parent_execution_id": execution_id,
+                    "child_ac": "child task",
+                    "depth": 1,
+                },
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.subagent.started",
+                aggregate_type="execution",
+                aggregate_id="evolve_lin_other_generation_1_child_0",
+                data={
+                    "parent_execution_id": "evolve:lin-other:generation:1",
+                    "child_ac": "other child",
+                    "depth": 1,
+                },
+            )
+        )
+
+        second_batch, next_cursor = await event_store.query_session_related_events_after(
+            session_id,
+            execution_id=execution_id,
+            last_row_id=cursor,
+        )
+
+        assert [(event.type, event.aggregate_id) for event in second_batch] == [
+            ("execution.subagent.started", "evolve_lin_parent_generation_1_child_0")
+        ]
         assert next_cursor > cursor
 
 

@@ -85,6 +85,9 @@ def _session_related_event_conditions(
 
     conditions.append(events_table.c.aggregate_id == execution_id)
     conditions.append(func.json_extract(events_table.c.payload, "$.execution_id") == execution_id)
+    conditions.append(
+        func.json_extract(events_table.c.payload, "$.parent_execution_id") == execution_id
+    )
 
     return conditions
 
@@ -773,14 +776,14 @@ class EventStore:
         Parallel execution stores activity in several aggregate families:
         - ``session/<session_id>`` for top-level session state
         - ``execution/<execution_id>`` for workflow progress
-        - ``execution/*`` runtime scopes whose payload references the session
-          or exact execution ID
+        - ``execution/*`` runtime scopes whose payload references the session,
+          exact execution ID, or exact parent execution ID
 
         Related execution scopes are matched through persisted ``session_id`` /
-        ``execution_id`` payload fields instead of normalized aggregate-name
-        prefixes. Runtime aggregate names intentionally normalize dynamic IDs
-        for filesystem/path safety, so using those lossy names as join keys can
-        collide across distinct executions.
+        ``execution_id`` / ``parent_execution_id`` payload fields instead of
+        normalized aggregate-name prefixes. Runtime aggregate names intentionally
+        normalize dynamic IDs for filesystem/path safety, so using those lossy
+        names as join keys can collide across distinct executions.
 
         Args:
             session_id: Orchestrator session ID.
