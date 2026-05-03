@@ -699,9 +699,24 @@ class ClaudeCodeAdapter:
                     elif not content:
                         content = getattr(sdk_message, "result", "") or ""
 
-                    # Check for errors - don't break, just record
+                    # Check for errors - don't break, just record.
                     is_error = getattr(sdk_message, "is_error", False)
                     if is_error:
+                        subtype = getattr(sdk_message, "subtype", None)
+                        if subtype == "error_max_turns" and content.strip():
+                            # Claude Code can emit a useful AssistantMessage and then
+                            # finish with ResultMessage(error_max_turns) after trying
+                            # to continue with tools. Treat the already-streamed text
+                            # as a graceful partial result instead of crashing the
+                            # interview loop.
+                            log.warning(
+                                "claude_code_adapter.max_turns_partial_result",
+                                session_id=session_id,
+                                content_length=len(content),
+                                max_turns=self._max_turns,
+                            )
+                            continue
+
                         error_msg = (
                             getattr(sdk_message, "result", "")
                             or "Unknown error from Claude Agent SDK"
@@ -711,6 +726,7 @@ class ClaudeCodeAdapter:
                             error=error_msg,
                             session_id=session_id,
                             stderr_lines=len(stderr_lines),
+                            subtype=subtype,
                         )
                         error_result = ProviderError(
                             message=error_msg,
@@ -719,6 +735,9 @@ class ClaudeCodeAdapter:
                                 "stderr": "\n".join(stderr_lines[-20:]) if stderr_lines else "",
                                 "claudecode_present": claudecode_present,
                                 "claude_code_entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
+                                "subtype": subtype,
+                                "stop_reason": getattr(sdk_message, "stop_reason", None),
+                                "errors": getattr(sdk_message, "errors", None),
                             },
                         )
         except asyncio.CancelledError:
