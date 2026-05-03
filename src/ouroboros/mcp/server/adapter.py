@@ -45,6 +45,14 @@ log = structlog.get_logger(__name__)
 VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "sse", "streamable-http"})
 
 
+def _is_single_segment_resource_uri(uri: str) -> bool:
+    """Return True for base URIs like ``scheme://name``."""
+    _scheme, separator, rest = uri.partition("://")
+    if not separator:
+        return "/" not in uri
+    return "/" not in rest
+
+
 def _safe_cwd() -> Path:
     """Return cwd if it looks like a usable project directory, else fall back to home.
 
@@ -391,6 +399,25 @@ class MCPServerAdapter:
             self._resource_handlers[defn.uri] = handler
             log.info("mcp.server.resource_registered", uri=defn.uri)
 
+    def _find_resource_handler(self, uri: str) -> ResourceHandler | None:
+        """Find a resource handler by exact URI or registered base URI prefix."""
+        exact_handler = self._resource_handlers.get(uri)
+        if exact_handler is not None:
+            return exact_handler
+
+        matching_base_uri = max(
+            (
+                registered_uri
+                for registered_uri in self._resource_handlers
+                if uri.startswith(f"{registered_uri}/")
+            ),
+            key=len,
+            default=None,
+        )
+        if matching_base_uri is None:
+            return None
+        return self._resource_handlers[matching_base_uri]
+
     def register_prompt(self, handler: PromptHandler) -> None:
         """Register a prompt handler.
 
@@ -513,7 +540,7 @@ class MCPServerAdapter:
         Returns:
             Result containing the resource content or an error.
         """
-        handler = self._resource_handlers.get(uri)
+        handler = self._find_resource_handler(uri)
         if not handler:
             return Result.err(
                 MCPResourceNotFoundError(
@@ -697,6 +724,24 @@ class MCPServerAdapter:
 
             wrapper = _make_resource_wrapper(res_handler, uri)
             self._mcp_server.resource(uri)(wrapper)
+
+            if _is_single_segment_resource_uri(uri):
+
+                def _make_resource_template_wrapper(h: ResourceHandler, base_uri: str) -> Any:
+                    async def resource_template_wrapper(resource_id: str) -> str:
+                        resource_uri = f"{base_uri}/{resource_id}"
+                        result = await h.handle(resource_uri)
+                        if result.is_ok:
+                            content = result.value
+                            return content.text or ""
+                        else:
+                            raise RuntimeError(str(result.error))
+
+                    return resource_template_wrapper
+
+                template = f"{uri}/{{resource_id}}"
+                template_wrapper = _make_resource_template_wrapper(res_handler, uri)
+                self._mcp_server.resource(template)(template_wrapper)
 
         log.info(
             "mcp.server.starting",
