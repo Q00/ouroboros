@@ -101,6 +101,58 @@ async def test_handler_interview_backend_start_strips_session_envelope() -> None
     assert turn.question == "What should we build?"
 
 
+class _FakeAnswerInterviewHandler:
+    async def handle(self, arguments):
+        assert arguments == {"session_id": "interview_1", "answer": "Use Codex"}
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text="Session interview_1\n\nWhich runtime should be used?",
+                    ),
+                ),
+                is_error=False,
+                meta={"session_id": "interview_1"},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_handler_interview_backend_answer_strips_session_envelope() -> None:
+    turn = await HandlerInterviewBackend(_FakeAnswerInterviewHandler(), cwd=".").answer(
+        "interview_1", "Use Codex"
+    )
+
+    assert turn.session_id == "interview_1"
+    assert turn.question == "Which runtime should be used?"
+
+
+class _NonEnvelopeInterviewHandler:
+    async def handle(self, arguments):  # noqa: ARG002
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text="Session planning\n\nWhat handoff should we produce?",
+                    ),
+                ),
+                is_error=False,
+                meta={"session_id": "interview_1"},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_handler_interview_backend_preserves_non_matching_question_text() -> None:
+    turn = await HandlerInterviewBackend(_NonEnvelopeInterviewHandler(), cwd=".").resume(
+        "interview_1"
+    )
+
+    assert turn.question == "Session planning\n\nWhat handoff should we produce?"
+
+
 class _FakeErrorInterviewHandler:
     async def handle(self, arguments):  # noqa: ARG002
         return Result.ok(
