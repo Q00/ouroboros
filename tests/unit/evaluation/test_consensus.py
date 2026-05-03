@@ -575,6 +575,22 @@ class TestDeliberativeConsensus:
         )
         return strategy
 
+    def test_default_devil_strategy_model_is_not_explicit(self, mock_llm: AsyncMock) -> None:
+        """Implicit DeliberativeConfig devil model should still allow role profile routing."""
+        evaluator = DeliberativeConsensus(mock_llm, config=DeliberativeConfig())
+
+        assert evaluator._devil_strategy.model_is_explicit is False
+
+    def test_custom_devil_strategy_model_is_explicit(self, mock_llm: AsyncMock) -> None:
+        """Caller-pinned deliberative devil models remain authoritative."""
+        evaluator = DeliberativeConsensus(
+            mock_llm,
+            config=DeliberativeConfig(devil_model="custom-devil"),
+        )
+
+        assert evaluator._devil_strategy.model_is_explicit is True
+        assert evaluator._devil_strategy.model == "custom-devil"
+
     @pytest.mark.asyncio
     async def test_deliberation_approved(
         self,

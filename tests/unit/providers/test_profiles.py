@@ -150,6 +150,26 @@ def test_resolve_completion_profile_replaces_implicit_legacy_model() -> None:
     assert resolved.config.model == "profile-model"
 
 
+def test_resolve_completion_profile_ignores_explicit_flag_for_sentinel_models() -> None:
+    """Empty/default model sentinels are not request-level pins even with explicit flags."""
+    config = OuroborosConfig(
+        llm_profiles={"deep": {"model": "profile-model"}},
+        llm_role_profiles={"consensus_perspective": "deep"},
+    )
+
+    for sentinel in ("", "default"):
+        request = CompletionConfig(
+            model=sentinel,
+            role="consensus_perspective",
+            model_is_explicit=True,
+        )
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            resolved = resolve_completion_profile(request, backend="litellm")
+
+        assert resolved.profile_name == "deep"
+        assert resolved.config.model == "profile-model"
+
+
 def test_resolve_completion_profile_resolves_empty_role_model() -> None:
     """Empty request models are adapter-default sentinels, not explicit overrides."""
     config = OuroborosConfig(

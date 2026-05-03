@@ -694,6 +694,7 @@ class DeliberativeConsensus:
         self._devil_strategy = devil_strategy or DevilAdvocateStrategy(
             llm_adapter=llm_adapter,
             model=self._config.devil_model,
+            model_is_explicit=self._config.devil_model_is_explicit,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
         )
