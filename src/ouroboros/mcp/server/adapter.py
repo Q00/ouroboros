@@ -867,9 +867,7 @@ def create_ouroboros_server(
     from ouroboros.config import (
         get_assertion_extraction_model,
         get_clarification_model,
-        get_reflect_model,
         get_semantic_model,
-        get_wonder_model,
     )
     from ouroboros.evaluation import (
         EvaluationContext,
@@ -985,13 +983,11 @@ def create_ouroboros_server(
 
     wonder_engine = WonderEngine(
         llm_adapter=llm_adapter,
-        model=get_wonder_model(llm_backend),
         adapter_factory=fresh_llm_adapter,
         adapter_backend=llm_backend,
     )
     reflect_engine = ReflectEngine(
         llm_adapter=llm_adapter,
-        model=get_reflect_model(llm_backend),
         adapter_factory=fresh_llm_adapter,
         adapter_backend=llm_backend,
     )
