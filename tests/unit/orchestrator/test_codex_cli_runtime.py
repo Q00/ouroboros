@@ -266,6 +266,62 @@ class TestCodexCliRuntime:
         assert command[command.index("--profile") + 1] == "ouroboros-standard"
         assert "--model" not in command
 
+    def test_build_command_uses_default_runtime_profile_for_resumed_roleless_handle(self) -> None:
+        """Resumed role-less agent_runtime handles keep using the documented fallback role."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="agent_runtime",
+            native_session_id="thread-123",
+            metadata={},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+                resume_session_id="thread-123",
+            )
+
+        assert "--profile" in command
+        assert command[command.index("--profile") + 1] == "ouroboros-standard"
+        assert "--model" not in command
+
+    def test_build_command_does_not_double_prefix_prefixed_runtime_handle_kind(self) -> None:
+        """Already-prefixed runtime handle kinds are treated as logical role keys."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="agent_runtime_evaluation",
+            metadata={},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "deep": {
+                    "providers": {"codex": {"profile": "ouroboros-deep"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_evaluation": "deep"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--profile" in command
+        assert command[command.index("--profile") + 1] == "ouroboros-deep"
+        assert "--model" not in command
+
     def test_build_command_uses_runtime_profile_provider_model_fallback(self) -> None:
         """Codex runtime profiles without Codex-native profile anchors should use models."""
         runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")

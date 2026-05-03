@@ -222,6 +222,10 @@ class CodexCliRuntime:
 
         if runtime_handle is not None and runtime_handle.kind:
             normalized_kind = runtime_handle.kind.strip().lower().replace("-", "_")
+            if normalized_kind == _RUNTIME_PROFILE_ROLE_PREFIX:
+                return _RUNTIME_PROFILE_ROLE_PREFIX
+            if normalized_kind.startswith(f"{_RUNTIME_PROFILE_ROLE_PREFIX}_"):
+                return normalized_kind
             if normalized_kind:
                 return f"{_RUNTIME_PROFILE_ROLE_PREFIX}_{normalized_kind}"
 
