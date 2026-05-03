@@ -232,14 +232,14 @@ def _authoring_interview_handler(
             agent_runtime_backend=agent_runtime_backend,
             opencode_mode=opencode_mode,
         )
-    if opencode_mode != "subprocess" or getattr(handler, "opencode_mode", None) != "plugin":
+    if _handler_matches_runtime(handler, agent_runtime_backend, opencode_mode):
         return handler
     return InterviewHandler(
         interview_engine=handler.interview_engine,
         event_store=handler.event_store,
         llm_adapter=handler.llm_adapter,
-        llm_backend=handler.llm_backend,
-        agent_runtime_backend=handler.agent_runtime_backend,
+        llm_backend=llm_backend if llm_backend is not None else handler.llm_backend,
+        agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
         data_dir=handler.data_dir,
     )
@@ -258,17 +258,26 @@ def _authoring_seed_handler(
             agent_runtime_backend=agent_runtime_backend,
             opencode_mode=opencode_mode,
         )
-    if opencode_mode != "subprocess" or getattr(handler, "opencode_mode", None) != "plugin":
+    if _handler_matches_runtime(handler, agent_runtime_backend, opencode_mode):
         return handler
     return GenerateSeedHandler(
         interview_engine=handler.interview_engine,
         seed_generator=handler.seed_generator,
         llm_adapter=handler.llm_adapter,
-        llm_backend=handler.llm_backend,
+        llm_backend=llm_backend if llm_backend is not None else handler.llm_backend,
         event_store=handler.event_store,
         data_dir=handler.data_dir,
-        agent_runtime_backend=handler.agent_runtime_backend,
+        agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
+    )
+
+
+def _handler_matches_runtime(
+    handler: object, agent_runtime_backend: str | None, opencode_mode: str | None
+) -> bool:
+    return (
+        getattr(handler, "agent_runtime_backend", None) == agent_runtime_backend
+        and getattr(handler, "opencode_mode", None) == opencode_mode
     )
 
 
@@ -281,9 +290,14 @@ def _execution_start_handler(
     mcp_manager: object | None,
     mcp_tool_prefix: str,
 ) -> StartExecuteSeedHandler:
-    if handler is not None:
+    if handler is not None and _handler_matches_runtime(
+        handler, agent_runtime_backend, opencode_mode
+    ):
         return handler
+    event_store = getattr(handler, "event_store", None) or getattr(handler, "_event_store", None)
+    job_manager = getattr(handler, "job_manager", None) or getattr(handler, "_job_manager", None)
     execute_seed = ExecuteSeedHandler(
+        event_store=event_store,
         llm_backend=llm_backend,
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
@@ -292,6 +306,8 @@ def _execution_start_handler(
     )
     return StartExecuteSeedHandler(
         execute_handler=execute_seed,
+        event_store=event_store,
+        job_manager=job_manager,
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
     )

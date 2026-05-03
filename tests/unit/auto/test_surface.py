@@ -17,6 +17,7 @@ from ouroboros.mcp.tools.auto_handler import (
     _resolve_cwd,
     _safe_default_cwd,
 )
+from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 
@@ -209,6 +210,54 @@ def test_auto_handler_normalizes_injected_plugin_authoring_handlers() -> None:
     assert normalized_seed.opencode_mode == "subprocess"
     assert normalized_interview.agent_runtime_backend == "opencode"
     assert normalized_seed.agent_runtime_backend == "opencode"
+
+
+def test_auto_handler_rebuilds_injected_authoring_handlers_for_persisted_runtime() -> None:
+    interview = InterviewHandler(agent_runtime_backend="codex", opencode_mode=None)
+    seed = GenerateSeedHandler(agent_runtime_backend="codex", opencode_mode=None)
+
+    normalized_interview = _authoring_interview_handler(
+        interview,
+        llm_backend=None,
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+    normalized_seed = _authoring_seed_handler(
+        seed,
+        llm_backend=None,
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+
+    assert normalized_interview is not interview
+    assert normalized_seed is not seed
+    assert normalized_interview.agent_runtime_backend == "opencode"
+    assert normalized_interview.opencode_mode == "subprocess"
+    assert normalized_seed.agent_runtime_backend == "opencode"
+    assert normalized_seed.opencode_mode == "subprocess"
+
+
+def test_auto_handler_rebuilds_injected_execution_handler_for_persisted_runtime() -> None:
+    start = StartExecuteSeedHandler(
+        agent_runtime_backend="codex",
+        opencode_mode=None,
+    )
+
+    normalized = _execution_start_handler(
+        start,
+        llm_backend=None,
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+        mcp_manager=None,
+        mcp_tool_prefix="",
+    )
+
+    assert normalized is not start
+    assert normalized.agent_runtime_backend == "opencode"
+    assert normalized.opencode_mode == "subprocess"
+    assert normalized.execute_handler is not None
+    assert normalized.execute_handler.agent_runtime_backend == "opencode"
+    assert normalized.execute_handler.opencode_mode == "subprocess"
 
 
 def test_auto_handler_fresh_execution_preserves_bridge_wiring() -> None:
@@ -539,6 +588,64 @@ async def test_auto_handler_fresh_relative_cwd_persists_absolute_project(
 
     assert result.is_ok
     assert captured["cwd"] == str(tmp_path / "project")
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runtime(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path / "project"))
+    state.runtime_backend = "opencode"
+    state.opencode_mode = "subprocess"
+    store.save(state)
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, seed_generator, **kwargs):  # noqa: ANN001, ANN003
+            captured["interview_runtime"] = driver.backend.handler.agent_runtime_backend
+            captured["interview_mode"] = driver.backend.handler.opencode_mode
+            captured["seed_runtime"] = seed_generator.handler.agent_runtime_backend
+            captured["seed_mode"] = seed_generator.handler.opencode_mode
+            run_starter = kwargs["run_starter"]
+            captured["run_runtime"] = run_starter.handler.agent_runtime_backend
+            captured["run_mode"] = run_starter.handler.opencode_mode
+
+        async def run(self, run_state):  # noqa: ANN001
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+
+    result = await AutoHandler(
+        store=store,
+        interview_handler=InterviewHandler(agent_runtime_backend="codex", opencode_mode=None),
+        generate_seed_handler=GenerateSeedHandler(
+            agent_runtime_backend="codex", opencode_mode=None
+        ),
+        start_execute_seed_handler=StartExecuteSeedHandler(
+            agent_runtime_backend="codex", opencode_mode=None
+        ),
+        agent_runtime_backend="codex",
+        opencode_mode=None,
+    ).handle({"resume": state.auto_session_id})
+
+    assert result.is_ok
+    assert captured == {
+        "interview_runtime": "opencode",
+        "interview_mode": "subprocess",
+        "seed_runtime": "opencode",
+        "seed_mode": "subprocess",
+        "run_runtime": "opencode",
+        "run_mode": "subprocess",
+    }
 
 
 @pytest.mark.asyncio
