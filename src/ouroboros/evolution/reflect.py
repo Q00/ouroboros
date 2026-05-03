@@ -115,7 +115,7 @@ class ReflectEngine:
                     # a later transient factory failure does not fall back to a
                     # stale startup adapter after backend/model state has moved.
                     self.llm_adapter = fresh
-                    if backend_drifted:
+                    if current_backend:
                         self._captured_backend = current_backend
                         self.model = get_reflect_model(current_backend)
                     return fresh
@@ -189,13 +189,14 @@ class ReflectEngine:
             Message(role=MessageRole.USER, content=prompt),
         ]
 
+        adapter = self._resolve_adapter()
         config = CompletionConfig(
             model=self.model,
             temperature=0.5,
             max_tokens=3000,
         )
 
-        result = await self._resolve_adapter().complete(messages, config)
+        result = await adapter.complete(messages, config)
 
         if result.is_err:
             logger.error("ReflectEngine LLM call failed: %s", result.error)
