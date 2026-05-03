@@ -35,6 +35,11 @@ from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
 
 
+class _FakeEventStore:
+    async def append(self, event: object) -> None:
+        pass
+
+
 class MockToolHandler:
     """Mock tool handler for testing."""
 
@@ -215,10 +220,6 @@ class TestMCPServerAdapterTools:
     async def test_call_tool_scopes_io_journal_recorder_from_runtime_context(self) -> None:
         """MCP tool calls provide per-call journal identity to shared adapters."""
 
-        class _FakeEventStore:
-            async def append(self, event: object) -> None:
-                pass
-
         class _RecorderProbeHandler(MockToolHandler):
             def __init__(self) -> None:
                 super().__init__("probe_tool")
@@ -264,6 +265,75 @@ class TestMCPServerAdapterTools:
         assert handler.recorder.phase == "reflect"
         assert handler.recorder.generation_number == 2
         assert get_current_io_journal_recorder() is None
+
+    def test_io_recorder_for_tool_call_uses_lineage_identity(self) -> None:
+        adapter = MCPServerAdapter()
+        adapter.set_runtime_context(
+            AgentRuntimeContext(
+                event_store=_FakeEventStore(),
+                runtime_backend="codex",
+                llm_backend="litellm",
+            )
+        )
+
+        recorder = adapter._io_recorder_for_tool_call(
+            "ouroboros_evolve_step",
+            {
+                "lineage_id": "lin_123",
+                "session_id": "sess_123",
+                "generation": 3,
+                "current_phase": "reflect",
+            },
+        )
+
+        assert recorder is not None
+        assert recorder.target_type == "lineage"
+        assert recorder.target_id == "lin_123"
+        assert recorder.lineage_id == "lin_123"
+        assert recorder.session_id == "sess_123"
+        assert recorder.generation_number == 3
+        assert recorder.phase == "reflect"
+
+    def test_io_recorder_for_tool_call_uses_session_identity(self) -> None:
+        adapter = MCPServerAdapter()
+        adapter.set_runtime_context(
+            AgentRuntimeContext(
+                event_store=_FakeEventStore(),
+                runtime_backend="codex",
+                llm_backend="litellm",
+            )
+        )
+
+        recorder = adapter._io_recorder_for_tool_call(
+            "ouroboros_qa",
+            {"qa_session_id": "qa_123"},
+        )
+
+        assert recorder is not None
+        assert recorder.target_type == "session"
+        assert recorder.target_id == "qa_123"
+        assert recorder.session_id == "qa_123"
+        assert recorder.execution_id is None
+        assert recorder.lineage_id is None
+
+    def test_io_recorder_for_tool_call_uses_mcp_tool_fallback_identity(self) -> None:
+        adapter = MCPServerAdapter()
+        adapter.set_runtime_context(
+            AgentRuntimeContext(
+                event_store=_FakeEventStore(),
+                runtime_backend="codex",
+                llm_backend="litellm",
+            )
+        )
+
+        recorder = adapter._io_recorder_for_tool_call("plain_tool", {})
+
+        assert recorder is not None
+        assert recorder.target_type == "mcp_tool"
+        assert recorder.target_id.startswith("plain_tool:")
+        assert recorder.session_id is None
+        assert recorder.execution_id is None
+        assert recorder.lineage_id is None
 
     async def test_call_tool_not_found(self) -> None:
         """call_tool returns error for unknown tool."""
