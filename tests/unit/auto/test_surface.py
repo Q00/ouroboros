@@ -156,8 +156,12 @@ async def test_auto_handler_plugin_mode_dispatches_subagent_without_running_pipe
     assert subagent["context"]["auto_session_id"] == result.value.meta["auto_session_id"]
     assert subagent["context"]["is_resume"] is False
     assert subagent["context"]["cwd"] == "/repo"
+    assert subagent["context"]["state_path"] == str(store.path_for(persisted.auto_session_id))
+    assert subagent["context"]["state"]["auto_session_id"] == persisted.auto_session_id
+    assert subagent["context"]["state"]["phase"] == "created"
     assert subagent["context"]["skip_run"] is True
     assert "litellm-backed authoring handlers" in subagent["prompt"]
+    assert "update the same JSON state file atomically" in subagent["prompt"]
 
 
 @pytest.mark.asyncio
@@ -191,6 +195,9 @@ async def test_auto_handler_plugin_resume_uses_persisted_cwd(tmp_path) -> None:
     assert subagent["context"]["is_resume"] is True
     assert subagent["context"]["goal"] == "Build a CLI"
     assert subagent["context"]["cwd"] == "/original/repo"
+    assert subagent["context"]["state_path"] == str(store.path_for(state.auto_session_id))
+    assert subagent["context"]["state"]["auto_session_id"] == state.auto_session_id
+    assert "resume from its\npersisted phase" in subagent["prompt"]
 
 
 @pytest.mark.asyncio

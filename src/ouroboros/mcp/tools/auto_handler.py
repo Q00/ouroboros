@@ -235,6 +235,8 @@ class AutoHandler:
             "auto_session_id": state.auto_session_id,
             "is_resume": is_resume,
             "cwd": state.cwd,
+            "state_path": str(store.path_for(state.auto_session_id)),
+            "state": state.to_dict(),
             "max_interview_rounds": arguments.get("max_interview_rounds", 12),
             "max_repair_rounds": arguments.get("max_repair_rounds", 5),
             "skip_run": bool(arguments.get("skip_run", False)),
@@ -358,6 +360,13 @@ def _plugin_auto_prompt(context: dict[str, Any]) -> str:
     resume = context.get("resume")
     is_resume = bool(context.get("is_resume"))
     cwd = context.get("cwd")
+    state_path = context.get("state_path")
+    state = context.get("state") if isinstance(context.get("state"), dict) else {}
+    phase = state.get("phase", "created")
+    seed_path = state.get("seed_path")
+    execution_id = state.get("execution_id")
+    job_id = state.get("job_id")
+    run_session_id = state.get("run_session_id")
     skip_run = context.get("skip_run")
     max_interview_rounds = context.get("max_interview_rounds")
     max_repair_rounds = context.get("max_repair_rounds")
@@ -379,6 +388,22 @@ litellm-backed authoring handlers. Do not call `ouroboros_auto` again.
 ## Working Directory
 {cwd}
 
+## Durable Auto Session
+- Auto session id: {context.get("auto_session_id")}
+- State file: {state_path}
+- Persisted phase: {phase}
+- Seed path: {seed_path}
+- Execution id: {execution_id}
+- Job id: {job_id}
+- Run session id: {run_session_id}
+
+Before doing any work, read the state file if it exists and resume from its
+persisted phase rather than restarting from the goal. After every phase change
+or external side effect, update the same JSON state file atomically with the
+new phase, seed path/artifact, run handles, blocker, and progress timestamp.
+If a run handle already exists, report it instead of starting duplicate
+execution.
+
 ## Bounds
 - Max interview rounds: {max_interview_rounds}
 - Max Seed repair rounds: {max_repair_rounds}
@@ -393,6 +418,7 @@ litellm-backed authoring handlers. Do not call `ouroboros_auto` again.
 5. Return a concise status summary including any Seed text/path, blocker,
    execution handle, and resume guidance.
 
-Preserve the auto contract: bounded loops, no hidden production side effects
-before the A-grade gate, and explicit blockers instead of silent fallback.
+Preserve the auto contract: bounded loops, durable resume through the state
+file, no hidden production side effects before the A-grade gate, and explicit
+blockers instead of silent fallback.
 """
