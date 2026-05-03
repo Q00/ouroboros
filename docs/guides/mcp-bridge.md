@@ -93,5 +93,14 @@ Checked in order:
 
 ## Known Limitations
 
-- Evolution loop (`evolve_step`) does not yet pass the bridge manager
-- No dynamic server addition after initial connection
+- **Resolved (#530, #531).** `evolve_step` and `unstuck` (LateralThinkHandler)
+  now inherit `BridgeAwareMixin` so the composition root's loop-injection
+  populates their `mcp_manager` and `mcp_tool_prefix` whenever an MCP bridge
+  is configured. Earlier releases left these two handlers without bridge
+  access; that gap is closed at the plumbing layer.
+- **Open.** No dynamic server addition after initial connection. Adding an
+  MCP server at runtime requires the orchestrator to re-publish a
+  `policy.capabilities.changed` event so subscribers re-read the runtime
+  context (per the invariant in #476 Q4). The plumbing this depends on —
+  `AgentRuntimeContext + ControlBus` (#474, #515) — is in place; the
+  re-publish wiring is the remaining work.
