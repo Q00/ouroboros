@@ -480,7 +480,7 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "credential or secret value required",
         ),
         (
-            r"\b(credential|credentials)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci|production|prod)\b",
+            r"\b(credential|credentials)\b.+\b(value|secret|token|key|password|env|environment|workflow|ci)\b",
             "credential or secret value required",
         ),
         (
@@ -512,7 +512,7 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "deployment target requires human authority",
         ),
         (
-            r"\b(production|prod|live|external)\b.+\b(credential|secret|api key)\b",
+            r"\b(provide|enter|paste|supply|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(credential|secret|api key)\b",
             "production deployment or irreversible external action required",
         ),
         (

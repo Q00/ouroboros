@@ -263,6 +263,8 @@ def test_auto_answerer_allows_benign_sensitive_domain_vocabulary() -> None:
         "Should users see payment history?",
         "Should users be able to rotate API keys?",
         "Should the app support password reset?",
+        "Should admins be able to rotate production credentials?",
+        "Should production credential status be shown in settings?",
         "Should the app support billing provider integrations?",
         "Should users subscribe to paid service tiers?",
         "Should legal review workflows be tracked?",
@@ -278,6 +280,7 @@ def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
     answerer = AutoAnswerer()
     blocking_questions = (
         "Which credential value should production use?",
+        "Which production credential should the workflow use?",
         "Which payment provider account should we charge?",
         "What legal approval is needed for liability risk?",
         "What medical advice should the app recommend?",
@@ -306,6 +309,8 @@ def test_auto_answerer_does_not_route_feature_semantics_to_io_actor_defaults() -
         "Should users see payment history?",
         "Should users be able to rotate API keys?",
         "Should the app support password reset?",
+        "Should admins be able to rotate production credentials?",
+        "Should production credential status be shown in settings?",
         "Should the app support billing provider integrations?",
         "Should users subscribe to paid service tiers?",
         "Should legal review workflows be tracked?",
