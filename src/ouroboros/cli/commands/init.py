@@ -25,7 +25,7 @@ from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.initial_context import (
     load_pm_seed_as_context as _load_pm_seed_as_context_result,
 )
@@ -33,7 +33,7 @@ from ouroboros.core.initial_context import (
     resolve_initial_context_input,
 )
 from ouroboros.observability import LoggingConfig, configure_logging
-from ouroboros.providers import create_llm_adapter
+from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
 
 
@@ -114,6 +114,20 @@ def _make_message_callback(debug: bool):
     return callback
 
 
+def _resolve_init_llm_backend(use_orchestrator: bool, backend: str | None = None) -> str:
+    """Resolve the interview LLM backend for ``init start``.
+
+    Explicit ``--llm-backend`` wins. ``--orchestrator`` remains a
+    compatibility shortcut for Claude Code. Without either flag, respect the
+    persisted ``llm.backend`` config instead of forcing LiteLLM.
+    """
+    if backend:
+        return backend
+    if use_orchestrator:
+        return "claude_code"
+    return get_llm_backend()
+
+
 def _get_adapter(
     use_orchestrator: bool,
     backend: str | None = None,
@@ -131,7 +145,7 @@ def _get_adapter(
     Returns:
         LLM adapter instance.
     """
-    resolved_backend = backend or ("claude_code" if use_orchestrator else "litellm")
+    resolved_backend = _resolve_init_llm_backend(use_orchestrator, backend)
 
     if for_interview:
         # Interview mode: request the interview-specific permission policy and
@@ -782,12 +796,20 @@ def start(
         )
 
     # Show mode info
-    if orchestrator:
+    selected_llm_backend = _resolve_init_llm_backend(
+        orchestrator,
+        llm_backend.value if llm_backend else None,
+    )
+    resolved_llm_backend = resolve_llm_backend(selected_llm_backend)
+    if resolved_llm_backend == "claude_code":
         print_info("Using Claude Code (Max Plan) - no API key required")
-        if runtime:
-            print_info(f"Workflow runtime backend: {runtime.value}")
-    else:
+    elif resolved_llm_backend == "litellm":
         print_info("Using LiteLLM - API key required")
+    else:
+        print_info(f"Using {resolved_llm_backend} interview backend")
+
+    if orchestrator and runtime:
+        print_info(f"Workflow runtime backend: {runtime.value}")
 
     if llm_backend:
         print_info(f"Interview LLM backend: {llm_backend.value}")
