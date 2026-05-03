@@ -79,10 +79,10 @@ A contract dependency graph is something different: **runtime-recorded edges bet
 
 **Decision.**
 
-- **Raw layer.** `control.directive.emitted` events stay 1:1, exactly the shape [#492](https://github.com/Q00/ouroboros/pull/492) sets up. No collapsing, no compaction.
+- **Raw layer.** `control.directive.emitted` events stay 1:1, exactly the current shape [#492](https://github.com/Q00/ouroboros/pull/492) sets up. No collapsing, no compaction. The current #492 payload carries the directive target, emitter, directive, reason, terminality, optional first-class correlation fields, and `extra`; it does **not** yet carry a first-class `caused_by` field.
 - **Aggregated layer.** `ContractLedgerProjector` exposes `contract_audit_trail(contract_id)` which folds the raw events into a per-contract narrative (timeline, terminal directive, retry budget consumed, etc.).
 
-**Rationale.** RFC #476 M2's acceptance test is *"every control decision persists `{who, what, why, when, caused_by}`"* — that requires 1:1 fidelity at the event level. M2 also requires *"any past session's directive timeline reconstructs from a single SQL query"* — that requires aggregated views. Both can be satisfied without choosing between them: keep raw events 1:1 and let the projector aggregate.
+**Rationale.** RFC #476 M2's acceptance test is *"every control decision persists `{who, what, why, when, caused_by}`"*. The Ledger preserves today's raw directive rows 1:1 and makes causal linkage an additive follow-up requirement for contract-serving directive emitters: when a decision is caused by a contract/runtime event, the emitting site must populate a future first-class `caused_by` (or an explicitly documented equivalent correlation field) before consumers rely on causal ordering. Until that field exists on a row, the projector may include it in the audit trail but must not pretend Layer 0 contains causal edges. M2 also requires *"any past session's directive timeline reconstructs from a single SQL query"* — that requires aggregated views. Both can be satisfied without choosing between them: keep raw events 1:1 and let the projector aggregate only the fidelity actually present in the journal.
 
 This is the same shape as L2 — raw lives in the journal, aggregates live in the projection.
 
@@ -110,9 +110,9 @@ timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
 3. Runtime I/O events (today `orchestrator.tool.called`, plus normalized `tool.call.*`, `llm.call.*`, and future runtime event families) whose payload or `extra` contains `contract_id=<contract_id>`; `correlation_id` may be present for ordering/causality but is not a substitute for `contract_id`.
 4. For synthetic backfilled contracts, historical rows that do not carry `contract_id` but whose stable invocation boundary maps to the same deterministic synthetic contract key from L7. Generation-only or execution-only ambiguous markers do not pull broad historical rows into Layer 0.
 
-Layer 0 returns this union in the EventStore's current canonical order (`timestamp`, then event UUID `id`). It is a raw audit slice, not a strict causal ordering guarantee across aggregates; consumers that need causal/rendered order must use Layer 2 `replay_timeline(contract_id)`, where the projector can apply `caused_by`, `correlation_id`, and domain-specific ordering rules. A future append-sequence column may strengthen Layer 0 without changing the API shape.
+Layer 0 returns this union in the EventStore's current canonical order (`timestamp`, then event UUID `id`). It is a raw audit slice, not a strict causal ordering guarantee across aggregates. Consumers that need causal/rendered order must use Layer 2 `replay_timeline(contract_id)`, where the projector can apply explicit causal fields only when present (`caused_by` or a documented equivalent), then fall back to `correlation_id` and domain-specific ordering rules. A future append-sequence column may strengthen Layer 0 without changing the API shape.
 
-Therefore Step 2's implementation work includes adding contract correlation to runtime I/O event factories/adapters whenever work is executing inside a contract. Without that correlation, Layer 0 must omit the event rather than guessing from lineage/session scope.
+Therefore Step 2's implementation work includes adding contract correlation and stable invocation identity to runtime I/O event factories/adapters whenever work is executing inside a contract. Without that correlation, Layer 0 must omit the event rather than guessing from lineage/session scope; without stable invocation identity, historical backfill must use the conservative ambiguous fallback from L7 rather than claiming deterministic invocation replay.
 
 **Invariants** (re-cited from upstream RFCs so this RFC stays consistent):
 
@@ -144,10 +144,16 @@ Step 2 — additive event family + contract-targeted directives
         for decisions whose object is the contract. Update current runtime I/O
         producers (`orchestrator.tool.called`) and normalized/future tool.call.* /
         llm.call.* producers to carry contract_id in payload or extra when emitted
-        inside a contract. A single directive decision must still produce one
+        inside a contract, and include a stable invocation identifier such as
+        `tool_call_id` on rows that should participate in deterministic historical
+        backfill. A single directive decision must still produce one
         control.directive.emitted row; lineage/session/execution context remains
         in the existing first-class payload correlation fields, with extra used
-        only for supplemental correlation. Compatibility is provided by the already-landed
+        only for supplemental correlation. Contract-serving directive emitters that
+        need causal replay must add/populate a first-class `caused_by` (or an
+        explicitly documented equivalent) in the same additive rollout; current #492
+        rows without that field remain valid but are not causally ordered by Layer 2.
+        Compatibility is provided by the already-landed
         dual-read helpers, not by duplicating directive rows.
         No event_version bump is required for the new contract.* event family;
         the factories use the current payload event_version, and only incompatible
@@ -180,12 +186,12 @@ Step 5 — non-critical consumer migration
 
 **Backfill mapping rule (deterministic first draft).**
 
-Backfill first builds **invocation-boundary clusters**, then assigns one synthetic contract key per cluster. The field-priority rule below is evaluated over the whole cluster, not independently per event row: if any row in a correlated historical call has `tool_call_id` (the concrete persisted runtime field) or its legacy/generic alias `call_id`, that selected value becomes the cluster key and sibling rows with only `correlation_id`, `invocation_id`, or `request_id` join the same boundary through shared execution/correlation evidence. Lower-priority fields are aliases used for reconciliation inside the cluster, not alternate contract keys. Rows that cannot be reconciled to a stable invocation boundary fall through to conservative ambiguous markers instead of being merged broadly.
+Backfill first builds **invocation-boundary clusters** only from fields that are actually persisted on the historical rows being processed, then assigns one synthetic contract key per cluster. The field-priority rule below is evaluated over the whole cluster, not independently per event row: if any row in a correlated historical call has `tool_call_id` (the preferred future/current field for enriched runtime rows) or its legacy/generic alias `call_id`, that selected value becomes the cluster key and sibling rows with only `correlation_id`, `invocation_id`, or `request_id` join the same boundary through shared execution/correlation evidence. Lower-priority fields are aliases used for reconciliation inside the cluster, not alternate contract keys. Rows that cannot be reconciled to a stable invocation boundary fall through to conservative ambiguous markers instead of being merged broadly. In the current snapshot, plain `orchestrator.tool.called` rows persist only session-scoped tool metadata (`tool_name`, `called_at`, optional `tool_input_preview`) and therefore usually cannot take the deterministic invocation-boundary path unless another persisted row supplies the stable evidence.
 
 The deterministic boundary rule is:
 
 1. If an event already carries `contract_id`, use that `contract_id`.
-2. Otherwise, if a correlated cluster carries `execution_id`, select exactly one stable invocation id for the **cluster** with this fixed field priority: `tool_call_id` first, then `call_id`, then `correlation_id`, then `invocation_id`, then `request_id`. `call_id` is a compatibility alias for older or normalized producers; current runtime projections should prefer `tool_call_id` when both are present. Ignore lower-priority fields when a higher-priority field is present anywhere in the cluster. If the selected field is present and non-empty, map every row reconciled into that invocation boundary to `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>`.
+2. Otherwise, if a correlated cluster carries `execution_id` **and** at least one persisted stable invocation identifier, select exactly one stable invocation id for the **cluster** with this fixed field priority: `tool_call_id` first, then `call_id`, then `correlation_id`, then `invocation_id`, then `request_id`. `call_id` is a compatibility alias for older or normalized producers; enriched runtime projections should prefer `tool_call_id` when both are present. Ignore lower-priority fields when a higher-priority field is present anywhere in the cluster. If the selected field is present and non-empty, map every row reconciled into that invocation boundary to `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>`.
 3. Otherwise, if it carries `(lineage_id, generation_number)` but no stable invocation boundary selected by rule 2, map only the synthetic envelope marker to `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` and mark it ambiguous; do **not** merge all rows from that generation into one contract.
 4. Otherwise, map it to `legacy:event:<event_id>` and mark it `synthetic=true`, `provenance="backfill:ambiguous"`.
 
@@ -200,7 +206,8 @@ Synthetic envelope rows use backfill-time append timestamps because the current 
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
 | Existing `contract_id` | existing `contract_id` | No synthetic identity; projector reads the native contract stream |
-| `execution_id` + reconciled stable invocation cluster | `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>` | Preferred historical boundary when native `contract_id` is missing; select the cluster key once using `tool_call_id`, then `call_id`, then `correlation_id`, then `invocation_id`, then `request_id`; sibling rows with lower-priority evidence join the selected boundary, not separate contracts |
+| `execution_id` + reconciled stable invocation cluster | `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>` | Preferred historical boundary when native `contract_id` is missing and persisted stable invocation evidence exists; select the cluster key once using `tool_call_id`, then `call_id`, then `correlation_id`, then `invocation_id`, then `request_id`; sibling rows with lower-priority evidence join the selected boundary, not separate contracts |
+| `orchestrator.tool.called` rows with only `tool_name` / `called_at` / `tool_input_preview` | `legacy:event:<event_id>` | Current un-enriched tool rows are not stable invocation evidence; mark ambiguous unless another persisted event correlates them into a stable cluster |
 | `lineage_id` + `generation_number` without invocation evidence | `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` | Ambiguous marker only; does not merge an entire generation into one contract |
 | `execution_id` only | `legacy:event:<event_id>` | Too broad to infer a contract; use event-level ambiguous fallback |
 | Insufficient fields | `legacy:event:<event_id>` | Marked ambiguous and visible in TUI; not silently merged |
@@ -317,7 +324,7 @@ This RFC is marked **Accepted**, so merge/review process state lives on PR #522 
 - [ ] Issue [#513](https://github.com/Q00/ouroboros/issues/513) closed with a back-link to this PR
 - [ ] At least three Phase F implementation issues opened (Contract envelope object, ledger projections, dependency edge promotion)
 - [ ] `ouroboros ledger backfill` and `ouroboros ledger verify` commands listed in the user-facing CLI docs
-- [ ] No silent change to existing event_store reads (consumer migration is opt-in per L7)
+- [ ] No silent change to existing event_store reads for unaffected consumers; directive-audit readers must use the Step 2 dual-read helpers before contract-targeted directives appear in lineage/session views
 
 ## Rollback
 
