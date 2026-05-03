@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from ouroboros.events.base import BaseEvent
 from ouroboros.tui.events import (
     ACUpdated,
@@ -536,6 +538,35 @@ class TestCreateMessageFromEvent:
 
         assert isinstance(msg, SubtaskUpdated)
         assert msg.ac_index == 2
+
+    @pytest.mark.parametrize(
+        "event_type",
+        ("execution.node.updated", "execution.subtask.updated"),
+    )
+    def test_subtask_events_prefer_full_content_over_truncated_label(
+        self,
+        event_type: str,
+    ) -> None:
+        """TUI detail consumers should keep full Sub-AC content when label is present."""
+        full_content = "Patch the event bridge and preserve the complete Sub-AC description."
+        event = BaseEvent(
+            type=event_type,
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "node_id": "node_child",
+                "parent_node_id": "node_parent",
+                "label": "Patch the event bridge and preserve...",
+                "content": full_content,
+                "status": "executing",
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, SubtaskUpdated)
+        assert msg.content == full_content
+        assert msg.content != "Patch the event bridge and preserve..."
 
     def test_cost_updated_event(self) -> None:
         """Test converting cost.updated event."""

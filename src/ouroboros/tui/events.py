@@ -853,7 +853,7 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             ac_index=_subtask_root_ac_index(data),
             sub_task_index=data.get("sub_task_index", data.get("legacy_sub_task_index", 0)),
             sub_task_id=data.get("sub_task_id", data.get("legacy_sub_task_id", "")),
-            content=data.get("label") or data.get("content", ""),
+            content=data.get("content") or data.get("label", ""),
             status=data.get("status", "pending"),
             current_tool_activity=data.get("current_tool_activity"),
             last_update=data.get("last_update"),

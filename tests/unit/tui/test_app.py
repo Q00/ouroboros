@@ -464,6 +464,56 @@ class TestOuroborosTUIMessageHandlers:
         assert app.state.ac_tree["nodes"]["node_grandchild"]["parent_id"] == ("node_missing_parent")
         assert app.state.ac_tree["nodes"]["ac_1"]["children_ids"] == []
 
+    def test_merge_ac_progress_replaces_legacy_root_with_canonical_node(self) -> None:
+        """Mixed-history resume should not keep duplicate legacy and node roots."""
+        app = OuroborosTUI()
+        app.state.ac_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": "Acceptance Criteria",
+                    "children_ids": ["ac_1"],
+                },
+                "ac_1": {
+                    "id": "ac_1",
+                    "content": "Legacy root AC",
+                    "status": "executing",
+                    "children_ids": ["node_child"],
+                    "depth": 1,
+                },
+                "node_child": {
+                    "id": "node_child",
+                    "content": "Resumed child",
+                    "status": "executing",
+                    "parent_id": "ac_1",
+                    "children_ids": [],
+                    "depth": 2,
+                },
+            },
+        }
+
+        app._merge_ac_progress(
+            [
+                {
+                    "index": 1,
+                    "node_id": "node_root",
+                    "ac_id": "ac_1",
+                    "content": "Canonical root AC",
+                    "status": "in_progress",
+                    "root_ac_index": 0,
+                },
+            ],
+            current_ac_index=1,
+        )
+
+        nodes = app.state.ac_tree["nodes"]
+        assert "ac_1" not in nodes
+        assert nodes["root"]["children_ids"] == ["node_root"]
+        assert nodes["node_root"]["children_ids"] == ["node_child"]
+        assert nodes["node_child"]["parent_id"] == "node_root"
+        assert nodes["node_root"]["content"] == "Canonical root AC"
+
     def test_on_pause_requested(self) -> None:
         """Test handling PauseRequested message."""
         app = OuroborosTUI()
