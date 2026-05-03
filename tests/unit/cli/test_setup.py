@@ -212,7 +212,7 @@ class TestCodexSetup:
                 [
                     "# Ouroboros Agent OS runtime profile for Codex worker subprocesses.",
                     "# Activated when ~/.ouroboros/config.yaml sets "
-                    "`orchestrator.runtime_profile: worker`",
+                    "`orchestrator.runtime_profile.backend_profile: worker`",
                     "# (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex",
                     "# overrides below — for example a different model, sandbox, or notify hook —",
                     "# without affecting interactive `codex` sessions that share this config file.",
@@ -357,7 +357,7 @@ class TestCodexSetup:
                 [
                     "# Ouroboros Agent OS runtime profile for Codex worker subprocesses.",
                     "# Activated when ~/.ouroboros/config.yaml sets "
-                    "`orchestrator.runtime_profile: worker`",
+                    "`orchestrator.runtime_profile.backend_profile: worker`",
                     "# (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex",
                     "# overrides below — for example a different model, sandbox, or notify hook —",
                     "# without affecting interactive `codex` sessions that share this config file.",

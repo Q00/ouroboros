@@ -76,6 +76,7 @@ from ouroboros.config.models import (
     PersistenceConfig,
     ProviderCredentials,
     ResilienceConfig,
+    RuntimeProfileConfig,
     TierConfig,
     get_config_dir,
     get_default_config,
@@ -100,6 +101,7 @@ __all__ = [
     "DriftConfig",
     "LoggingConfig",
     "OrchestratorConfig",
+    "RuntimeProfileConfig",
     # Loader functions
     "load_config",
     "load_credentials",

@@ -49,6 +49,7 @@ from ouroboros.config.models import (
     OrchestratorConfig,
     OuroborosConfig,
     ResilienceConfig,
+    RuntimeProfileConfig,
 )
 from ouroboros.core.errors import ConfigError
 
@@ -467,11 +468,41 @@ class TestRuntimeHelperLookups:
             patch(
                 "ouroboros.config.loader.load_config",
                 return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(
+                        runtime_profile=RuntimeProfileConfig(backend_profile="worker")
+                    )
+                ),
+            ),
+        ):
+            assert get_runtime_profile() == "worker"
+
+    def test_get_runtime_profile_accepts_legacy_string_shorthand(self) -> None:
+        """Legacy PR #505 string configs coerce to backend_profile."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
                     orchestrator=OrchestratorConfig(runtime_profile="worker")
                 ),
             ),
         ):
             assert get_runtime_profile() == "worker"
+
+    def test_get_runtime_profile_ignores_stage_only_profile(self) -> None:
+        """Stage routing fields do not imply a backend-native Codex profile."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(
+                        runtime_profile=RuntimeProfileConfig(default="codex")
+                    )
+                ),
+            ),
+        ):
+            assert get_runtime_profile() is None
 
     def test_get_opencode_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for OpenCode CLI path."""

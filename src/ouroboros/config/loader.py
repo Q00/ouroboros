@@ -9,7 +9,7 @@ Functions:
     create_default_config: Create default configuration files
     ensure_config_dir: Ensure ~/.ouroboros/ directory exists
     get_agent_runtime_backend: Get orchestrator runtime backend from env var or config
-    get_runtime_profile: Get orchestrator runtime profile (e.g. "worker") from env var or config
+    get_runtime_profile: Get orchestrator backend profile (e.g. "worker") from env var or config
     get_agent_permission_mode: Get orchestrator permission mode from env var or config
     get_llm_backend: Get LLM-only backend from env var or config
     get_llm_permission_mode: Get LLM-only permission mode from env var or config
@@ -588,15 +588,15 @@ def get_max_parallel_workers() -> int:
 
 
 def get_runtime_profile() -> str | None:
-    """Get the orchestrator runtime profile from env var or config file.
+    """Get the orchestrator backend profile from env var or config file.
 
     Priority:
         1. OUROBOROS_RUNTIME_PROFILE environment variable
-        2. config.yaml orchestrator.runtime_profile
+        2. config.yaml orchestrator.runtime_profile.backend_profile
         3. None (no profile — backends keep their default user-config behavior)
 
     Returns:
-        The runtime profile name (e.g. ``"worker"``) or None.
+        The backend profile name (e.g. ``"worker"``) or None.
     """
     env_value = os.environ.get("OUROBOROS_RUNTIME_PROFILE", "").strip()
     if env_value:
@@ -604,8 +604,9 @@ def get_runtime_profile() -> str | None:
 
     try:
         config = load_config()
-        if config.orchestrator.runtime_profile:
-            return config.orchestrator.runtime_profile
+        profile = config.orchestrator.runtime_profile
+        if profile is not None and profile.backend_profile:
+            return profile.backend_profile
     except ConfigError:
         pass
 

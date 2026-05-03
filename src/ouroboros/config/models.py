@@ -21,7 +21,7 @@ Classes:
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -276,17 +276,32 @@ class LoggingConfig(BaseModel, frozen=True):
     include_reasoning: bool = True
 
 
+class RuntimeProfileConfig(BaseModel, frozen=True):
+    """Runtime profile configuration shared by backend profiles and stage routing.
+
+    ``backend_profile`` carries backend-native profile names such as PR #505's
+    Codex ``worker`` mapping. ``default`` and ``stages`` reserve the same
+    object shape used by the stage-routing contract from PR #538 so the public
+    ``orchestrator.runtime_profile`` key has one stable table/object form.
+    """
+
+    backend_profile: Literal["worker"] | None = None
+    default: str | None = None
+    stages: dict[str, str] = Field(default_factory=dict)
+
+
 class OrchestratorConfig(BaseModel, frozen=True):
     """Orchestrator runtime configuration.
 
     Attributes:
         runtime_backend: Agent runtime backend to use for orchestrator execution.
-        runtime_profile: Optional Agent OS runtime profile. When set, every
-            backend that supports profiles loads its mapped profile (e.g. Codex
-            ``--profile ouroboros-worker``). Default ``None`` preserves the
-            backend's normal user-config behavior. Phase 1 only ships
-            ``"worker"``; future values should appear here as they earn a
-            mapping in each runtime adapter.
+        runtime_profile: Optional Agent OS runtime profile object.
+            ``runtime_profile.backend_profile`` selects backend-native profiles
+            such as Codex ``--profile ouroboros-worker``. Default ``None``
+            preserves the backend's normal user-config behavior. The ``default``
+            and ``stages`` fields reserve the same object contract used by the
+            stage-routing stack so this public key does not split into
+            incompatible string-vs-table meanings.
         permission_mode: Default permission mode for local agent runtimes.
         opencode_permission_mode: Default permission mode for OpenCode agent runtimes.
         cli_path: Path to Claude CLI binary. Supports:
@@ -318,7 +333,16 @@ class OrchestratorConfig(BaseModel, frozen=True):
     """
 
     runtime_backend: Literal["claude", "codex", "opencode", "hermes", "gemini"] = "claude"
-    runtime_profile: Literal["worker"] | None = None
+    runtime_profile: RuntimeProfileConfig | None = None
+
+    @field_validator("runtime_profile", mode="before")
+    @classmethod
+    def _coerce_runtime_profile(cls, value: Any) -> Any:
+        """Accept the legacy PR #505 string shorthand as backend_profile."""
+        if isinstance(value, str):
+            return {"backend_profile": value}
+        return value
+
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"

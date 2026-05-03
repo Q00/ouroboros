@@ -245,7 +245,7 @@ def _is_setup_managed_codex_mcp_entry(entry: dict[str, object]) -> bool:
 
 
 _CODEX_WORKER_PROFILE_SECTION = """# Ouroboros Agent OS runtime profile for Codex worker subprocesses.
-# Activated when ~/.ouroboros/config.yaml sets `orchestrator.runtime_profile: worker`
+# Activated when ~/.ouroboros/config.yaml sets `orchestrator.runtime_profile.backend_profile: worker`
 # (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex
 # overrides below — for example a different model, sandbox, or notify hook —
 # without affecting interactive `codex` sessions that share this config file.
@@ -255,7 +255,7 @@ _CODEX_WORKER_PROFILE_SECTION = """# Ouroboros Agent OS runtime profile for Code
 
 _CODEX_WORKER_PROFILE_COMMENT_LINES = (
     "# Ouroboros Agent OS runtime profile for Codex worker subprocesses.",
-    "# Activated when ~/.ouroboros/config.yaml sets `orchestrator.runtime_profile: worker`",
+    "# Activated when ~/.ouroboros/config.yaml sets `orchestrator.runtime_profile.backend_profile: worker`",
     "# (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex",
     "# overrides below — for example a different model, sandbox, or notify hook —",
     "# without affecting interactive `codex` sessions that share this config file.",
@@ -470,7 +470,7 @@ def _register_codex_worker_profile() -> None:
 
     Writes (or refreshes) a ``[profiles.ouroboros-worker]`` section so that
     ``codex exec --profile ouroboros-worker`` resolves cleanly when callers
-    opt in via ``orchestrator.runtime_profile = worker``. The MCP/env block
+    opt in via ``orchestrator.runtime_profile.backend_profile = worker``. The MCP/env block
     written by :func:`_register_codex_mcp_server` is preserved untouched.
     """
     import tomllib
