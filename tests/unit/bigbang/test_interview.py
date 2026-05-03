@@ -337,6 +337,8 @@ class TestInterviewEngineAskNextQuestion:
 
         assert system_message.role == MessageRole.SYSTEM
         assert "Build a task manager" in system_message.content
+        assert messages[1].role == MessageRole.USER
+        assert messages[1].content == "Build a task manager"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("context_length", [2500, 3500])
@@ -1121,6 +1123,22 @@ class TestInterviewEngineConversationHistory:
         history = engine._build_conversation_history(state)
 
         assert history == []
+
+    def test_initial_context_becomes_first_user_message_for_empty_history(self) -> None:
+        """First question generation includes a user turn for provider compatibility."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Build an iOS calculator",
+        )
+
+        history = engine._build_conversation_history(state, initial_context=state.initial_context)
+
+        assert len(history) == 1
+        assert history[0].role == MessageRole.USER
+        assert history[0].content == "Build an iOS calculator"
 
     def test_history_with_rounds(self) -> None:
         """_build_conversation_history creates message pairs."""

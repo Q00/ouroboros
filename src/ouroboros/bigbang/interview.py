@@ -904,6 +904,16 @@ class InterviewEngine:
         overflow = self._initial_context_overflow_message(context_for_prompt)
         if overflow:
             messages.append(Message(role=MessageRole.USER, content=overflow))
+        elif not state.rounds and context_for_prompt:
+            # Some chat providers reject a first request that contains only a
+            # system message. Mirror the user's initial context as the first
+            # user turn so provider adapters always receive a non-system
+            # conversation message on round one. Long contexts keep using the
+            # overflow path above to preserve prompt-budget caps.
+            user_content = context_for_prompt
+            if len(user_content) > self._MAX_USER_RESPONSE_CHARS:
+                user_content = user_content[: self._MAX_USER_RESPONSE_CHARS] + "..."
+            messages.append(Message(role=MessageRole.USER, content=user_content))
 
         for round_data in state.rounds:
             if round_data.question == self._INITIAL_CONTEXT_SUMMARY_QUESTION:
