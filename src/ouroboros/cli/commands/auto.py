@@ -117,6 +117,9 @@ async def _run_auto(
         skip_run = state.skip_run or skip_run
         max_interview_rounds = state.max_interview_rounds
         max_repair_rounds = state.max_repair_rounds
+        if skip_run != state.skip_run:
+            state.skip_run = skip_run
+            store.save(state)
     opencode_mode = get_opencode_mode() if runtime == "opencode" else None
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     execution_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode

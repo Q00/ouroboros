@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.adapters import HandlerInterviewBackend
+from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.cli.main import app
 from ouroboros.core.types import Result
@@ -238,6 +239,61 @@ async def test_auto_handler_plugin_resume_validates_session_id(tmp_path) -> None
 
     assert result.is_err
     assert "Auto session not found" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_resume_persists_skip_run_override(monkeypatch, tmp_path) -> None:
+    store = AutoStore(root=tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo", skip_run=False)
+    store.save(state)
+
+    async def fake_run(self, pipeline_state):  # noqa: ARG001
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id=pipeline_state.auto_session_id,
+            phase=pipeline_state.phase.value,
+            blocker="still blocked",
+        )
+
+    monkeypatch.setattr(AutoPipeline, "run", fake_run)
+
+    result = await AutoHandler(store=store).handle(
+        {"resume": state.auto_session_id, "skip_run": True}
+    )
+
+    assert result.is_ok
+    assert store.load(state.auto_session_id).skip_run is True
+
+
+@pytest.mark.asyncio
+async def test_cli_auto_resume_persists_skip_run_override(monkeypatch, tmp_path) -> None:
+    from ouroboros.cli.commands import auto as auto_command
+
+    store = AutoStore(root=tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo", skip_run=False)
+    store.save(state)
+
+    async def fake_run(self, pipeline_state):  # noqa: ARG001
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id=pipeline_state.auto_session_id,
+            phase=pipeline_state.phase.value,
+            blocker="still blocked",
+        )
+
+    monkeypatch.setattr(auto_command, "AutoStore", lambda: store)
+    monkeypatch.setattr(auto_command.AutoPipeline, "run", fake_run)
+
+    await auto_command._run_auto(
+        goal=None,
+        resume=state.auto_session_id,
+        runtime=None,
+        max_interview_rounds=12,
+        max_repair_rounds=5,
+        skip_run=True,
+    )
+
+    assert store.load(state.auto_session_id).skip_run is True
 
 
 def test_auto_handler_fresh_execution_preserves_bridge_wiring() -> None:

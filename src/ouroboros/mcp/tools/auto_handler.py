@@ -161,6 +161,9 @@ class AutoHandler:
             skip_run = state.skip_run or bool(arguments.get("skip_run", False))
             max_interview_rounds = state.max_interview_rounds
             max_repair_rounds = state.max_repair_rounds
+            if skip_run != state.skip_run:
+                state.skip_run = skip_run
+                store.save(state)
 
         interview_handler = _authoring_interview_handler(
             self.interview_handler,
