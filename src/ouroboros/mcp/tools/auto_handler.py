@@ -209,10 +209,11 @@ def _resolve_cwd(value: object) -> Path:
 
 
 def _require_writable_cwd(cwd: Path) -> Path:
-    if not os.access(cwd, os.W_OK):
-        msg = f"working directory is not writable: {cwd}"
+    resolved = cwd.resolve()
+    if not os.access(resolved, os.W_OK):
+        msg = f"working directory is not writable: {resolved}"
         raise ValueError(msg)
-    return cwd
+    return resolved
 
 
 def _authoring_interview_handler(

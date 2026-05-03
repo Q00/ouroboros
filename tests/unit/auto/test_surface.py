@@ -337,6 +337,13 @@ def test_auto_handler_explicit_cwd_rejects_non_writable_project(monkeypatch, tmp
         _resolve_cwd(str(tmp_path))
 
 
+def test_auto_handler_explicit_relative_cwd_is_persisted_as_absolute(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "project").mkdir()
+
+    assert _resolve_cwd("project") == tmp_path / "project"
+
+
 @pytest.mark.asyncio
 async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tmp_path) -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
@@ -483,6 +490,47 @@ def test_static_ouroboros_tools_exports_auto_handler() -> None:
     names = {handler.definition.name for handler in OUROBOROS_TOOLS}
 
     assert "ouroboros_auto" in names
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_fresh_relative_cwd_persists_absolute_project(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    (tmp_path / "project").mkdir()
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["cwd"] = run_state.cwd
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI", "cwd": "project"})
+
+    assert result.is_ok
+    assert captured["cwd"] == str(tmp_path / "project")
 
 
 @pytest.mark.asyncio

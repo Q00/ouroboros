@@ -432,5 +432,7 @@ def __getattr__(name: str) -> object:
     raise AttributeError(name)
 
 
-# List of all Ouroboros tools for registration
+# Static legacy registry for definition/name lookups.  Runtime registration that
+# needs dependency injection should call ``get_ouroboros_tools(...)`` instead;
+# the auto entry here is a lazy proxy to avoid import cycles.
 OUROBOROS_TOOLS = (*get_ouroboros_tools(include_auto=False), _LazyAutoHandler())
