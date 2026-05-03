@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.adapters import HandlerInterviewBackend
+from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.cli.main import app
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
@@ -154,6 +155,37 @@ async def test_auto_handler_plugin_mode_still_validates_goal_or_resume() -> None
     ).handle({})
 
     assert result.is_err
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_plugin_resume_uses_persisted_cwd(tmp_path) -> None:
+    store = AutoStore(root=tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/original/repo")
+    store.save(state)
+
+    result = await AutoHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        store=store,
+    ).handle({"resume": state.auto_session_id, "cwd": "/wrong/repo"})
+
+    assert result.is_ok
+    subagent = result.value.meta["_subagent"]
+    assert subagent["context"]["resume"] == state.auto_session_id
+    assert subagent["context"]["goal"] == "Build a CLI"
+    assert subagent["context"]["cwd"] == "/original/repo"
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_plugin_resume_validates_session_id(tmp_path) -> None:
+    result = await AutoHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        store=AutoStore(root=tmp_path),
+    ).handle({"resume": "auto_missing"})
+
+    assert result.is_err
+    assert "Auto session not found" in str(result.error)
 
 
 def test_auto_handler_fresh_execution_preserves_bridge_wiring() -> None:

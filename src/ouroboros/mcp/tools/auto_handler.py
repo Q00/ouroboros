@@ -200,10 +200,26 @@ class AutoHandler:
                 )
             )
 
-        cwd = str(arguments.get("cwd") or _safe_default_cwd())
+        resume_id = resume.strip() if isinstance(resume, str) and resume.strip() else None
+        if resume_id is not None:
+            try:
+                state = (self.store or AutoStore()).load(resume_id)
+            except Exception as exc:
+                return Result.err(
+                    MCPToolError(
+                        f"Auto pipeline failed: {exc}",
+                        tool_name="ouroboros_auto",
+                    )
+                )
+            cwd = state.cwd
+            resolved_goal = state.goal
+        else:
+            cwd = str(arguments.get("cwd") or _safe_default_cwd())
+            resolved_goal = goal.strip() if isinstance(goal, str) else None
+
         context = {
-            "goal": goal.strip() if isinstance(goal, str) else None,
-            "resume": resume.strip() if isinstance(resume, str) else None,
+            "goal": resolved_goal,
+            "resume": resume_id,
             "cwd": cwd,
             "max_interview_rounds": arguments.get("max_interview_rounds", 12),
             "max_repair_rounds": arguments.get("max_repair_rounds", 5),
