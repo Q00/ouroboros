@@ -96,29 +96,64 @@ def test_get_ouroboros_tools_includes_auto_for_runtime_dispatch() -> None:
     assert "ouroboros_auto" in names
 
 
-def test_auto_handler_normalizes_injected_plugin_authoring_handlers() -> None:
+def test_auto_authoring_helpers_preserve_injected_handlers() -> None:
     interview = InterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
     seed = GenerateSeedHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
 
-    normalized_interview = _authoring_interview_handler(
-        interview,
-        llm_backend=None,
-        agent_runtime_backend="opencode",
-        opencode_mode="subprocess",
+    assert (
+        _authoring_interview_handler(
+            interview,
+            llm_backend=None,
+            agent_runtime_backend="opencode",
+            opencode_mode="subprocess",
+        )
+        is interview
     )
-    normalized_seed = _authoring_seed_handler(
-        seed,
-        llm_backend=None,
-        agent_runtime_backend="opencode",
-        opencode_mode="subprocess",
+    assert (
+        _authoring_seed_handler(
+            seed,
+            llm_backend=None,
+            agent_runtime_backend="opencode",
+            opencode_mode="subprocess",
+        )
+        is seed
     )
 
-    assert normalized_interview is not interview
-    assert normalized_seed is not seed
-    assert normalized_interview.opencode_mode == "subprocess"
-    assert normalized_seed.opencode_mode == "subprocess"
-    assert normalized_interview.agent_runtime_backend == "opencode"
-    assert normalized_seed.agent_runtime_backend == "opencode"
+
+@pytest.mark.asyncio
+async def test_auto_handler_plugin_mode_dispatches_subagent_without_running_pipeline(
+    monkeypatch,
+) -> None:
+    async def fail_run(self, arguments):  # noqa: ARG001
+        raise AssertionError("plugin mode must not run local auto pipeline")
+
+    monkeypatch.setattr(AutoHandler, "_run", fail_run)
+
+    result = await AutoHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    ).handle({"goal": "Build a CLI", "cwd": "/repo", "skip_run": True})
+
+    assert result.is_ok
+    assert not result.value.is_error
+    assert result.value.meta["status"] == "delegated_to_subagent"
+    assert result.value.meta["dispatch_mode"] == "plugin"
+    subagent = result.value.meta["_subagent"]
+    assert subagent["tool_name"] == "ouroboros_auto"
+    assert subagent["context"]["goal"] == "Build a CLI"
+    assert subagent["context"]["cwd"] == "/repo"
+    assert subagent["context"]["skip_run"] is True
+    assert "litellm-backed authoring handlers" in subagent["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_plugin_mode_still_validates_goal_or_resume() -> None:
+    result = await AutoHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    ).handle({})
+
+    assert result.is_err
 
 
 def test_auto_handler_fresh_execution_preserves_bridge_wiring() -> None:

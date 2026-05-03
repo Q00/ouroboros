@@ -23,6 +23,11 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.subagent import (
+    build_subagent_payload,
+    build_subagent_result,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -88,6 +93,12 @@ class AutoHandler:
         )
 
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            dispatch = self._build_plugin_dispatch(arguments)
+            if dispatch.is_err:
+                return dispatch
+            return dispatch
+
         try:
             result = await self._run(arguments)
         except Exception as exc:
@@ -120,6 +131,9 @@ class AutoHandler:
         )
 
     async def _run(self, arguments: dict[str, Any]) -> AutoPipelineResult:
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            raise ValueError("OpenCode plugin mode must dispatch ouroboros_auto through the bridge")
+
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_cwd = str(arguments.get("cwd") or _safe_default_cwd())
@@ -133,20 +147,17 @@ class AutoHandler:
             cwd = requested_cwd
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
 
-        authoring_opencode_mode = (
-            "subprocess" if self.opencode_mode == "plugin" else self.opencode_mode
-        )
         interview_handler = _authoring_interview_handler(
             self.interview_handler,
             llm_backend=self.llm_backend,
             agent_runtime_backend=self.agent_runtime_backend,
-            opencode_mode=authoring_opencode_mode,
+            opencode_mode=self.opencode_mode,
         )
         generate_seed_handler = _authoring_seed_handler(
             self.generate_seed_handler,
             llm_backend=self.llm_backend,
             agent_runtime_backend=self.agent_runtime_backend,
-            opencode_mode=authoring_opencode_mode,
+            opencode_mode=self.opencode_mode,
         )
         start_execute = _execution_start_handler(
             self.start_execute_seed_handler,
@@ -174,6 +185,48 @@ class AutoHandler:
         )
         return await pipeline.run(state)
 
+    def _build_plugin_dispatch(
+        self, arguments: dict[str, Any]
+    ) -> Result[MCPToolResult, MCPServerError]:
+        resume = arguments.get("resume")
+        goal = arguments.get("goal")
+        if not (isinstance(resume, str) and resume.strip()) and not (
+            isinstance(goal, str) and goal.strip()
+        ):
+            return Result.err(
+                MCPToolError(
+                    "goal is required when not resuming",
+                    tool_name="ouroboros_auto",
+                )
+            )
+
+        cwd = str(arguments.get("cwd") or _safe_default_cwd())
+        context = {
+            "goal": goal.strip() if isinstance(goal, str) else None,
+            "resume": resume.strip() if isinstance(resume, str) else None,
+            "cwd": cwd,
+            "max_interview_rounds": arguments.get("max_interview_rounds", 12),
+            "max_repair_rounds": arguments.get("max_repair_rounds", 5),
+            "skip_run": bool(arguments.get("skip_run", False)),
+        }
+        payload = build_subagent_payload(
+            tool_name="ouroboros_auto",
+            title="Auto: A-grade seed pipeline",
+            prompt=_plugin_auto_prompt(context),
+            context=context,
+        )
+        return build_subagent_result(
+            payload,
+            response_shape={
+                "status": "delegated_to_subagent",
+                "dispatch_mode": "plugin",
+                "auto_session_id": context["resume"],
+                "resume_command": (
+                    f"ooo auto --resume {context['resume']}" if context["resume"] else None
+                ),
+            },
+        )
+
 
 def _safe_default_cwd() -> Path:
     cwd = Path.cwd()
@@ -189,22 +242,12 @@ def _authoring_interview_handler(
     agent_runtime_backend: str | None,
     opencode_mode: str | None,
 ) -> InterviewHandler:
-    if handler is None:
-        return InterviewHandler(
-            llm_backend=llm_backend,
-            agent_runtime_backend=agent_runtime_backend,
-            opencode_mode=opencode_mode,
-        )
-    if opencode_mode != "subprocess" or getattr(handler, "opencode_mode", None) != "plugin":
+    if handler is not None:
         return handler
     return InterviewHandler(
-        interview_engine=handler.interview_engine,
-        event_store=handler.event_store,
-        llm_adapter=handler.llm_adapter,
-        llm_backend=handler.llm_backend,
-        agent_runtime_backend=handler.agent_runtime_backend,
+        llm_backend=llm_backend,
+        agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
-        data_dir=handler.data_dir,
     )
 
 
@@ -215,22 +258,11 @@ def _authoring_seed_handler(
     agent_runtime_backend: str | None,
     opencode_mode: str | None,
 ) -> GenerateSeedHandler:
-    if handler is None:
-        return GenerateSeedHandler(
-            llm_backend=llm_backend,
-            agent_runtime_backend=agent_runtime_backend,
-            opencode_mode=opencode_mode,
-        )
-    if opencode_mode != "subprocess" or getattr(handler, "opencode_mode", None) != "plugin":
+    if handler is not None:
         return handler
     return GenerateSeedHandler(
-        interview_engine=handler.interview_engine,
-        seed_generator=handler.seed_generator,
-        llm_adapter=handler.llm_adapter,
-        llm_backend=handler.llm_backend,
-        event_store=handler.event_store,
-        data_dir=handler.data_dir,
-        agent_runtime_backend=handler.agent_runtime_backend,
+        llm_backend=llm_backend,
+        agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
     )
 
@@ -291,3 +323,47 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Blocker: {result.blocker}")
     lines.append(f"Resume: ooo auto --resume {result.auto_session_id}")
     return "\n".join(lines)
+
+
+def _plugin_auto_prompt(context: dict[str, Any]) -> str:
+    goal = context.get("goal")
+    resume = context.get("resume")
+    cwd = context.get("cwd")
+    skip_run = context.get("skip_run")
+    max_interview_rounds = context.get("max_interview_rounds")
+    max_repair_rounds = context.get("max_repair_rounds")
+    target = f"Resume auto session `{resume}`" if resume else f"Goal: {goal}"
+    run_instruction = (
+        "Stop after producing and validating the A-grade Seed; do not start execution."
+        if skip_run
+        else "After the Seed reaches A-grade, hand off execution and report the tracking handle."
+    )
+    return f"""## Ouroboros Auto Subagent
+
+You are running the full-quality `ooo auto` flow from an OpenCode bridge
+subagent. The parent MCP server is in plugin mode, so it must not run local
+litellm-backed authoring handlers. Do not call `ouroboros_auto` again.
+
+## Target
+{target}
+
+## Working Directory
+{cwd}
+
+## Bounds
+- Max interview rounds: {max_interview_rounds}
+- Max Seed repair rounds: {max_repair_rounds}
+
+## Required Flow
+1. Clarify the goal with bounded Socratic interview reasoning.
+2. Produce a precise Seed specification with assumptions, non-goals,
+   acceptance criteria, and exit conditions.
+3. Self-review and repair the Seed until it is A-grade or the repair bound is
+   exhausted.
+4. {run_instruction}
+5. Return a concise status summary including any Seed text/path, blocker,
+   execution handle, and resume guidance.
+
+Preserve the auto contract: bounded loops, no hidden production side effects
+before the A-grade gate, and explicit blockers instead of silent fallback.
+"""
