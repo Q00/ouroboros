@@ -11,7 +11,7 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 ### Recommended: Claude Code (`ooo`)
 
-No Python install required. Run these three commands to go from idea to execution:
+No Python install required. Run the install commands in your terminal, then run setup and auto inside Claude Code to go from idea to execution:
 
 **1. Install the plugin** (in your terminal):
 ```bash
@@ -84,7 +84,7 @@ When using the shell CLI directly, add `--show-ledger` to print the assumptions 
 ouroboros auto "Build a local-first habit tracker CLI" --show-ledger
 ```
 
-Auto mode is hang-resistant by design: interview and repair loops are bounded, slow tool calls transition the auto session to `blocked` or `failed`, and execution handoff returns job/session IDs instead of waiting forever for completion. If auto mode stops, resume with the printed `ooo auto --resume <auto_session_id>` command.
+Auto mode is hang-resistant by design: interview and repair loops are bounded, slow tool calls transition the auto session to `blocked` or `failed`, and execution handoff returns job/session IDs instead of waiting forever for completion. If auto mode stops, resume with the command printed by the surface you used: `ooo auto --resume <auto_session_id>` inside Claude Code, or `ouroboros auto --resume <auto_session_id>` from the standalone shell CLI.
 
 ---
 
