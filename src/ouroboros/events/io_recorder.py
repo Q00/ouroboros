@@ -75,7 +75,9 @@ def use_io_journal_recorder(recorder: IOJournalRecorder | None) -> Iterator[None
 
     This lets a shared LLM adapter resolve the right per-call
     ``target_type`` / ``target_id`` without storing that target on the
-    adapter itself.
+    adapter itself. Python copies ``ContextVar`` state into child tasks
+    created inside the scope; detached jobs that need a different
+    runtime identity should install their own recorder scope.
     """
     token = _CURRENT_IO_JOURNAL_RECORDER.set(recorder)
     try:

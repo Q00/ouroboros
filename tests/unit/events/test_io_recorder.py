@@ -64,6 +64,27 @@ def test_scoped_recorder_context_resets_after_exit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scoped_recorder_context_is_inherited_by_child_tasks() -> None:
+    recorder = IOJournalRecorder(
+        event_store=_FakeEventStore(),
+        target_type="execution",
+        target_id="exec_child",
+    )
+    release = asyncio.Event()
+
+    async def child() -> IOJournalRecorder | None:
+        await release.wait()
+        return get_current_io_journal_recorder()
+
+    with use_io_journal_recorder(recorder):
+        task = asyncio.create_task(child())
+
+    assert get_current_io_journal_recorder() is None
+    release.set()
+    assert await task is recorder
+
+
+@pytest.mark.asyncio
 async def test_record_llm_call_emits_started_and_returned() -> None:
     store = _FakeEventStore()
     recorder = IOJournalRecorder(
