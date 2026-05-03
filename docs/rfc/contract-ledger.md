@@ -180,12 +180,12 @@ Step 5 — non-critical consumer migration
 
 **Backfill mapping rule (deterministic first draft).**
 
-Backfill first builds **invocation-boundary clusters**, then assigns one synthetic contract key per cluster. The field-priority rule below is evaluated over the whole cluster, not independently per event row: if any row in a correlated historical call has `call_id`, that `call_id` becomes the cluster key and sibling rows with only `correlation_id`, `invocation_id`, or `request_id` join the same boundary through shared execution/correlation evidence. Lower-priority fields are aliases used for reconciliation inside the cluster, not alternate contract keys. Rows that cannot be reconciled to a stable invocation boundary fall through to conservative ambiguous markers instead of being merged broadly.
+Backfill first builds **invocation-boundary clusters**, then assigns one synthetic contract key per cluster. The field-priority rule below is evaluated over the whole cluster, not independently per event row: if any row in a correlated historical call has `tool_call_id` (the concrete persisted runtime field) or its legacy/generic alias `call_id`, that selected value becomes the cluster key and sibling rows with only `correlation_id`, `invocation_id`, or `request_id` join the same boundary through shared execution/correlation evidence. Lower-priority fields are aliases used for reconciliation inside the cluster, not alternate contract keys. Rows that cannot be reconciled to a stable invocation boundary fall through to conservative ambiguous markers instead of being merged broadly.
 
 The deterministic boundary rule is:
 
 1. If an event already carries `contract_id`, use that `contract_id`.
-2. Otherwise, if a correlated cluster carries `execution_id`, select exactly one stable invocation id for the **cluster** with this fixed field priority: `call_id` first, then `correlation_id`, then `invocation_id`, then `request_id`. Ignore lower-priority fields when a higher-priority field is present anywhere in the cluster. If the selected field is present and non-empty, map every row reconciled into that invocation boundary to `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>`.
+2. Otherwise, if a correlated cluster carries `execution_id`, select exactly one stable invocation id for the **cluster** with this fixed field priority: `tool_call_id` first, then `call_id`, then `correlation_id`, then `invocation_id`, then `request_id`. `call_id` is a compatibility alias for older or normalized producers; current runtime projections should prefer `tool_call_id` when both are present. Ignore lower-priority fields when a higher-priority field is present anywhere in the cluster. If the selected field is present and non-empty, map every row reconciled into that invocation boundary to `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>`.
 3. Otherwise, if it carries `(lineage_id, generation_number)` but no stable invocation boundary selected by rule 2, map only the synthetic envelope marker to `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` and mark it ambiguous; do **not** merge all rows from that generation into one contract.
 4. Otherwise, map it to `legacy:event:<event_id>` and mark it `synthetic=true`, `provenance="backfill:ambiguous"`.
 
@@ -200,7 +200,7 @@ Synthetic envelope rows use backfill-time append timestamps because the current 
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
 | Existing `contract_id` | existing `contract_id` | No synthetic identity; projector reads the native contract stream |
-| `execution_id` + reconciled stable invocation cluster | `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>` | Preferred historical boundary when native `contract_id` is missing; select the cluster key once using `call_id`, then `correlation_id`, then `invocation_id`, then `request_id`; sibling rows with lower-priority evidence join the selected boundary, not separate contracts |
+| `execution_id` + reconciled stable invocation cluster | `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>` | Preferred historical boundary when native `contract_id` is missing; select the cluster key once using `tool_call_id`, then `call_id`, then `correlation_id`, then `invocation_id`, then `request_id`; sibling rows with lower-priority evidence join the selected boundary, not separate contracts |
 | `lineage_id` + `generation_number` without invocation evidence | `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` | Ambiguous marker only; does not merge an entire generation into one contract |
 | `execution_id` only | `legacy:event:<event_id>` | Too broad to infer a contract; use event-level ambiguous fallback |
 | Insufficient fields | `legacy:event:<event_id>` | Marked ambiguous and visible in TUI; not silently merged |
@@ -297,18 +297,19 @@ sequenceDiagram
 | CheckpointStore boundary | [#338](https://github.com/Q00/ouroboros/pull/338) | The Ledger does **not** absorb CheckpointStore. |
 | Additive-only schema | [#436](https://github.com/Q00/ouroboros/pull/436), #476 S4 | Honored throughout L7. |
 
-## Pre-merge checklist
+## Acceptance record
 
-- [ ] All 5 fresh decisions present (L2 / L3 / L5 / L6 / L7) with option + rationale + risks
-- [ ] Inherited-from list cites [#511](https://github.com/Q00/ouroboros/issues/511) D2 and [#512](https://github.com/Q00/ouroboros/issues/512) C2
-- [ ] AC tree vs contract dependency graph distinction table present
-- [ ] Backfill mapping table present (at least the four-row first draft above)
-- [ ] ER + sequence diagrams render
-- [ ] Cross-references resolve to existing issues / files
-- [ ] At least two maintainer approvals
-- [ ] L7 sub-thread resolved with the backfill mapping table extended for ambiguous boundaries (`synthetic=true` + `provenance="backfill:ambiguous"`)
-- [ ] `replay()` semantics match [#511](https://github.com/Q00/ouroboros/issues/511) D6 (no LLM re-execution) and [#512](https://github.com/Q00/ouroboros/issues/512) C5 (read artifact default)
-- [ ] CheckpointStore boundary explicit: Ledger does not absorb [#338](https://github.com/Q00/ouroboros/pull/338)
+This RFC is marked **Accepted**, so merge/review process state lives on PR #522 rather than as unchecked gates inside the document. The technical acceptance criteria captured by the RFC are:
+
+- [x] All 5 fresh decisions present (L2 / L3 / L5 / L6 / L7) with option + rationale + risks
+- [x] Inherited-from list cites [#511](https://github.com/Q00/ouroboros/issues/511) D2 and [#512](https://github.com/Q00/ouroboros/issues/512) C2
+- [x] AC tree vs contract dependency graph distinction table present
+- [x] Backfill mapping table present with deterministic, conservative ambiguous-boundary handling
+- [x] ER + sequence diagrams included
+- [x] Cross-references resolve to existing issues / files
+- [x] L7 backfill mapping includes ambiguous boundaries (`synthetic=true` + `provenance="backfill:ambiguous"`)
+- [x] `replay()` semantics match [#511](https://github.com/Q00/ouroboros/issues/511) D6 (no LLM re-execution) and [#512](https://github.com/Q00/ouroboros/issues/512) C5 (read artifact default)
+- [x] CheckpointStore boundary explicit: Ledger does not absorb [#338](https://github.com/Q00/ouroboros/pull/338)
 
 ## Post-merge checklist
 
