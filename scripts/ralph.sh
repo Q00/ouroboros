@@ -19,6 +19,7 @@ RALPH_PY="${SCRIPT_DIR}/ralph.py"
 # ── Defaults ────────────────────────────────────────────────────────────────
 LINEAGE_ID=""
 SEED_FILE=""
+PROJECT_DIR=""  # Explicit target project directory
 MAX_CYCLES=30
 MAX_RETRIES=2
 NO_EXECUTE=false
@@ -34,6 +35,7 @@ Usage: ralph.sh --lineage-id ID [OPTIONS]
 
 Options:
   --lineage-id ID        Lineage identifier (required)
+  --project-dir PATH    Explicit target project directory
   --seed-file PATH       Seed YAML for Gen 1
   --max-cycles N         Max loop iterations (default: 30)
   --max-retries N        Lateral-think retries per stagnation (default: 2)
@@ -58,6 +60,7 @@ USAGE
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --lineage-id)   LINEAGE_ID="$2"; shift 2 ;;
+        --project-dir) PROJECT_DIR="$2"; shift 2 ;;
         --seed-file)    SEED_FILE="$2"; shift 2 ;;
         --max-cycles)   MAX_CYCLES="$2"; shift 2 ;;
         --max-retries)  MAX_RETRIES="$2"; shift 2 ;;
@@ -83,36 +86,42 @@ log() {
 
 # Commit changes and create a git tag for the generation.
 # Skipped when --no-execute (no code changes to snapshot).
+# Uses --project-dir when explicitly specified.
 tag_generation() {
     local gen="$1"
     local tag="ooo/${LINEAGE_ID}/gen_${gen}"
+    local git_dir="${PROJECT_DIR}"
 
     if [[ "$NO_EXECUTE" == "true" ]]; then
         return 0
     fi
 
-    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        return 0
+    if [[ -z "$git_dir" ]]; then
+        git_dir="$(pwd)"
     fi
+
+    (cd "$git_dir" && git rev-parse --is-inside-work-tree >/dev/null 2>&1) || return 0
 
     # Auto-commit: commit any changes from this generation
-    if ! git diff --quiet HEAD 2>/dev/null || \
-       ! git diff --cached --quiet 2>/dev/null || \
-       [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
-        git add -A >/dev/null 2>&1 || true
-        git commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1 || true
+    (cd "$git_dir" && git diff --quiet HEAD 2>/dev/null || \
+       git diff --cached --quiet 2>/dev/null || \
+       [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]) && {
+        (cd "$git_dir" && git add -A >/dev/null 2>&1 || true)
+        (cd "$git_dir" && git commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1 || true)
         log "Committed changes for gen ${gen}"
-    fi
+    }
 
     # Overwrite tag if it already exists (re-run scenario)
-    git tag -f "$tag" >/dev/null 2>&1 || true
+    (cd "$git_dir" && git tag -f "$tag" >/dev/null 2>&1 || true)
     log "Tagged ${tag}"
 }
 
 # Rollback working tree to previous generation on failure.
+# Uses --project-dir when explicitly specified.
 rollback_to_previous() {
     local current_gen="$1"
     local prev_gen=$((current_gen - 1))
+    local git_dir="${PROJECT_DIR}"
 
     if (( prev_gen < 1 )); then
         log "No previous generation to rollback to"
@@ -123,19 +132,21 @@ rollback_to_previous() {
         return 0
     fi
 
-    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        return 0
+    if [[ -z "$git_dir" ]]; then
+        git_dir="$(pwd)"
     fi
 
+    (cd "$git_dir" && git rev-parse --is-inside-work-tree >/dev/null 2>&1) || return 0
+
     local prev_tag="ooo/${LINEAGE_ID}/gen_${prev_gen}"
-    if git rev-parse "$prev_tag" >/dev/null 2>&1; then
+    if (cd "$git_dir" && git rev-parse "$prev_tag" >/dev/null 2>&1); then
         log "Rolling back to ${prev_tag} after failure"
-        git checkout "$prev_tag" -- . >/dev/null 2>&1 || {
+        (cd "$git_dir" && git checkout "$prev_tag" -- . >/dev/null 2>&1) || {
             log "WARNING: rollback to ${prev_tag} failed"
             return 0
         }
-        git reset HEAD >/dev/null 2>&1 || true
-        git clean -fd >/dev/null 2>&1 || true
+        (cd "$git_dir" && git reset HEAD >/dev/null 2>&1 || true)
+        (cd "$git_dir" && git clean -fd >/dev/null 2>&1 || true)
         log "Rollback complete"
     else
         log "No tag ${prev_tag} found, skipping rollback"
@@ -145,6 +156,10 @@ rollback_to_previous() {
 # ── Build common python args ────────────────────────────────────────────────
 build_py_args() {
     local -a py_args=("--lineage-id" "$LINEAGE_ID" "--max-retries" "$MAX_RETRIES")
+
+    if [[ -n "$PROJECT_DIR" ]]; then
+        py_args+=("--project-dir" "$PROJECT_DIR")
+    fi
 
     if [[ "$NO_EXECUTE" == "true" ]]; then
         py_args+=("--no-execute")
