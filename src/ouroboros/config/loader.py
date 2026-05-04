@@ -730,17 +730,25 @@ def get_kiro_cli_path() -> str | None:
         2. config.yaml orchestrator.kiro_cli_path
         3. None (resolve from PATH at runtime)
 
+    Stale env var / config values that don't point to an executable are
+    treated as missing so setup discovery can fall back to PATH instead of
+    persisting an unusable explicit path.
+
     Returns:
         Path to Kiro CLI binary or None.
     """
     env_path = os.environ.get("OUROBOROS_KIRO_CLI_PATH", "").strip()
     if env_path:
-        return str(Path(env_path).expanduser())
+        resolved = str(Path(env_path).expanduser())
+        if shutil.which(resolved):
+            return resolved
 
     try:
         config = load_config()
         if config.orchestrator.kiro_cli_path:
-            return config.orchestrator.kiro_cli_path
+            resolved = str(Path(config.orchestrator.kiro_cli_path).expanduser())
+            if shutil.which(resolved):
+                return resolved
     except ConfigError:
         pass
 
@@ -858,7 +866,8 @@ def get_llm_backend() -> str:
 
     Priority:
         1. OUROBOROS_LLM_BACKEND environment variable
-        2. OUROBOROS_RUNTIME environment variable
+        2. OUROBOROS_RUNTIME environment variable, when it names a runtime
+           that also implements the LLM adapter contract
         3. config.yaml llm.backend
         4. "claude_code"
 
@@ -870,7 +879,7 @@ def get_llm_backend() -> str:
         return env_backend
 
     env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
-    if env_runtime:
+    if env_runtime in {"claude", "claude_code", "codex", "gemini", "kiro", "opencode"}:
         return env_runtime
 
     try:

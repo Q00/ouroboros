@@ -2061,7 +2061,7 @@ class TestKiroSetup:
         with (
             patch(
                 "ouroboros.cli.commands.setup.shutil.which",
-                return_value=None,
+                side_effect=lambda name: "/custom/kiro" if name == "/custom/kiro" else None,
             ),
             patch(
                 "ouroboros.config.get_kiro_cli_path",
@@ -2071,6 +2071,22 @@ class TestKiroSetup:
             detected = setup_cmd._detect_runtimes()
 
         assert detected["kiro"] == "/custom/kiro"
+
+    def test_detect_runtimes_rejects_stale_config_kiro_path(self, tmp_path: Path) -> None:
+        """Stale explicit Kiro paths must not make setup report Kiro available."""
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                return_value=None,
+            ),
+            patch(
+                "ouroboros.config.get_kiro_cli_path",
+                return_value="/missing/kiro-cli",
+            ),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["kiro"] is None
 
     def test_register_kiro_mcp_server_creates_fresh_entry(self, tmp_path: Path) -> None:
         """Fresh setup writes a valid entry with the Kiro env vars baked in."""

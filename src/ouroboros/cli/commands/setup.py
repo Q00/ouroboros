@@ -183,13 +183,17 @@ def _detect_runtimes() -> dict[str, str | None]:
     runtimes["gemini"] = gemini_path or shutil.which("gemini")
 
     # Kiro: same explicit-path-first policy. Binary is ``kiro-cli``.
+    # Validate the helper result defensively so a stale env/config override
+    # cannot make setup persist a dead executable path.
     try:
         from ouroboros.config import get_kiro_cli_path
 
         kiro_path = get_kiro_cli_path()
     except Exception:
         kiro_path = None
-    runtimes["kiro"] = kiro_path or shutil.which("kiro-cli")
+    runtimes["kiro"] = (
+        kiro_path if kiro_path and shutil.which(kiro_path) else None
+    ) or shutil.which("kiro-cli")
 
     return runtimes
 
