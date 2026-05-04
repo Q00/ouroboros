@@ -116,6 +116,9 @@ class ProviderError(OuroborosError):
             "session_id",
             "claudecode_present",
             "claude_code_entrypoint",
+            "configured_cli_path",
+            "cwd",
+            "env_override_keys",
             "stderr",
         ):
             value = self.details.get(key)
