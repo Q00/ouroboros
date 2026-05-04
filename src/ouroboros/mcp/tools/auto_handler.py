@@ -305,15 +305,18 @@ def _execution_start_handler(
     mcp_manager: object | None,
     mcp_tool_prefix: str,
 ) -> StartExecuteSeedHandler:
-    if handler is not None and _handler_matches_runtime(
-        handler, agent_runtime_backend, opencode_mode
-    ):
-        return handler
     event_store = getattr(handler, "event_store", None) or getattr(handler, "_event_store", None)
     job_manager = getattr(handler, "job_manager", None) or getattr(handler, "_job_manager", None)
     original_execute = getattr(handler, "execute_handler", None) or getattr(
         handler, "_execute_handler", None
     )
+    if (
+        handler is not None
+        and _handler_matches_runtime(handler, agent_runtime_backend, opencode_mode)
+        and getattr(original_execute, "mcp_manager", None) is mcp_manager
+        and getattr(original_execute, "mcp_tool_prefix", "") == mcp_tool_prefix
+    ):
+        return handler
     llm_adapter = getattr(original_execute, "llm_adapter", None)
     resolved_llm_backend = (
         llm_backend if llm_backend is not None else getattr(original_execute, "llm_backend", None)

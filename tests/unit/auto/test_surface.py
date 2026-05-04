@@ -300,6 +300,32 @@ def test_auto_handler_fresh_execution_preserves_bridge_wiring() -> None:
     assert start.execute_handler.mcp_tool_prefix == "bridge__"
 
 
+def test_auto_handler_rebuilds_matching_execution_handler_for_bridge_context() -> None:
+    manager = object()
+    start = StartExecuteSeedHandler(
+        execute_handler=ExecuteSeedHandler(
+            agent_runtime_backend="codex",
+            opencode_mode=None,
+        ),
+        agent_runtime_backend="codex",
+        opencode_mode=None,
+    )
+
+    normalized = _execution_start_handler(
+        start,
+        llm_backend=None,
+        agent_runtime_backend="codex",
+        opencode_mode=None,
+        mcp_manager=manager,
+        mcp_tool_prefix="bridge__",
+    )
+
+    assert normalized is not start
+    assert normalized.execute_handler is not None
+    assert normalized.execute_handler.mcp_manager is manager
+    assert normalized.execute_handler.mcp_tool_prefix == "bridge__"
+
+
 def test_get_ouroboros_tools_forwards_bridge_wiring_to_auto_handler() -> None:
     from ouroboros.mcp.tools.definitions import get_ouroboros_tools
 
