@@ -214,6 +214,28 @@ class ClaudeCodeAdapter:
         error_lower = error_msg.lower()
         return any(pattern in error_lower for pattern in _RETRYABLE_ERROR_PATTERNS)
 
+    def _is_retryable_provider_error(self, error: ProviderError) -> bool:
+        """Check if a provider error is transient enough to retry.
+
+        Claude Code's SDK sometimes reports CLI bootstrap failures as a generic
+        subprocess exit with no stderr, especially when launched through custom
+        wrapper paths such as the macOS ``cmux.app`` Claude binary.  Retrying the
+        shared adapter keeps seed generation from failing permanently on the
+        first extraction attempt while still avoiding retries for actionable
+        stderr-bearing failures such as auth or configuration errors.
+        """
+        if self._is_retryable_error(error.message):
+            return True
+
+        error_type = str(error.details.get("error_type", ""))
+        stderr = str(error.details.get("stderr", "") or "").strip()
+        if stderr:
+            return False
+
+        message = error.message.lower()
+        is_cli_process_exit = error_type in {"ProcessError", "CalledProcessError"}
+        return is_cli_process_exit and "command failed with exit code" in message
+
     async def complete(
         self,
         messages: list[Message],
@@ -431,11 +453,12 @@ class ClaudeCodeAdapter:
 
                 # Check if error is retryable
                 error_msg = result.error.message
-                if self._is_retryable_error(error_msg) and attempt < _MAX_RETRIES - 1:
+                if self._is_retryable_provider_error(result.error) and attempt < _MAX_RETRIES - 1:
                     backoff = _INITIAL_BACKOFF_SECONDS * (2**attempt)
                     log.warning(
                         "claude_code_adapter.retryable_error",
                         error=error_msg,
+                        error_type=result.error.details.get("error_type"),
                         attempt=attempt + 1,
                         max_retries=_MAX_RETRIES,
                         backoff_seconds=backoff,
@@ -776,6 +799,10 @@ class ClaudeCodeAdapter:
                                 "errors": errors,
                                 "partial_content": partial_content or None,
                                 "partial_rejected": bool(partial_content),
+                                "configured_cli_path": (
+                                    str(self._cli_path) if self._cli_path else None
+                                ),
+                                "cwd": self._cwd,
                             },
                         )
         except asyncio.CancelledError:
@@ -805,6 +832,9 @@ class ClaudeCodeAdapter:
                         "traceback": traceback_text,
                         "claudecode_present": claudecode_present,
                         "claude_code_entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
+                        "configured_cli_path": str(self._cli_path) if self._cli_path else None,
+                        "cwd": self._cwd,
+                        "env_override_keys": sorted(env_overrides.keys()),
                     },
                 )
             )
@@ -833,6 +863,10 @@ class ClaudeCodeAdapter:
                             "session_id": session_id,
                             "content_length": 0,
                             "stderr": stderr_tail,
+                            "configured_cli_path": (
+                                str(self._cli_path) if self._cli_path else None
+                            ),
+                            "cwd": self._cwd,
                         },
                     )
                 )
@@ -851,6 +885,10 @@ class ClaudeCodeAdapter:
                             "session_id": session_id,
                             "content_length": 0,
                             "stderr": stderr_tail,
+                            "configured_cli_path": (
+                                str(self._cli_path) if self._cli_path else None
+                            ),
+                            "cwd": self._cwd,
                         },
                     )
                 )

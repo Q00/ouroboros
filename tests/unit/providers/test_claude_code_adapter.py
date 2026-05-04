@@ -693,6 +693,63 @@ class TestErrorDiagnostics:
     """Tests for error diagnostic paths in _execute_single_request."""
 
     @pytest.mark.asyncio
+    async def test_empty_stderr_cli_process_exit_is_retried(self) -> None:
+        """Transient Claude CLI exits without stderr are retried by the shared adapter."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+        transient_error = ProviderError(
+            message="Claude Agent SDK request failed: Command failed with exit code 1",
+            details={
+                "error_type": "ProcessError",
+                "stderr": "",
+                "configured_cli_path": "/Applications/cmux.app/Contents/Resources/bin/claude",
+            },
+        )
+
+        adapter._execute_single_request = AsyncMock(
+            side_effect=[
+                Result.err(transient_error),
+                _ok_completion_result("seed requirements"),
+            ]
+        )
+
+        with patch("ouroboros.providers.claude_code_adapter.asyncio.sleep", new=AsyncMock()):
+            result = await adapter._complete_with_transient_retry(
+                "test prompt",
+                config,
+                system_prompt=None,
+            )
+
+        assert result.is_ok
+        assert result.value.content == "seed requirements"
+        assert adapter._execute_single_request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stderr_cli_process_exit_is_not_retried(self) -> None:
+        """Actionable CLI failures with stderr should surface immediately."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+        auth_error = ProviderError(
+            message="Claude Agent SDK request failed: Command failed with exit code 1",
+            details={
+                "error_type": "ProcessError",
+                "stderr": "error: authentication required",
+            },
+        )
+
+        adapter._execute_single_request = AsyncMock(return_value=Result.err(auth_error))
+
+        result = await adapter._complete_with_transient_retry(
+            "test prompt",
+            config,
+            system_prompt=None,
+        )
+
+        assert result.is_err
+        assert result.error is auth_error
+        adapter._execute_single_request.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_sdk_exception_produces_provider_error_with_details(self) -> None:
         """SDK exception is caught and returns ProviderError with diagnostic details."""
         adapter = ClaudeCodeAdapter()
@@ -1041,6 +1098,7 @@ class TestProviderErrorFormatDetails:
                 "session_id": "sess_abc",
                 "claudecode_present": True,
                 "claude_code_entrypoint": "sdk-py",
+                "configured_cli_path": "/Applications/cmux.app/Contents/Resources/bin/claude",
                 "stderr": "error: auth failed",
             },
         )
@@ -1048,6 +1106,9 @@ class TestProviderErrorFormatDetails:
         assert "SDK failed" in rendered
         assert "error_type: RuntimeError" in rendered
         assert "session_id: sess_abc" in rendered
+        assert (
+            "configured_cli_path: /Applications/cmux.app/Contents/Resources/bin/claude" in rendered
+        )
         assert "stderr tail:\nerror: auth failed" in rendered
 
     def test_format_details_without_details(self) -> None:

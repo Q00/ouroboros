@@ -26,6 +26,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.config import get_clarification_model, get_llm_backend
+from ouroboros.core.errors import ProviderError
 from ouroboros.core.initial_context import (
     load_pm_seed_as_context as _load_pm_seed_as_context_result,
 )
@@ -437,7 +438,11 @@ async def _generate_seed_from_interview(
             seed_result = await generator.generate(state, forced_score)
 
     if seed_result.is_err:
-        print_error(f"Failed to generate Seed: {seed_result.error.message}")
+        error = seed_result.error
+        if isinstance(error, ProviderError):
+            print_error(f"Failed to generate Seed: {error.format_details()}")
+        else:
+            print_error(f"Failed to generate Seed: {error.message}")
         return None, SeedGenerationResult.CANCELLED
 
     seed = seed_result.value
