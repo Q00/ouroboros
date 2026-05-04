@@ -38,6 +38,7 @@ async def test_seeds_handler_lists_real_seed_files(tmp_path: Path) -> None:
     assert payload["count"] == 1
     assert payload["seeds"][0]["id"] == "seed_demo"
     assert payload["seeds"][0]["goal"] == "Demo goal"
+    assert "path" not in payload["seeds"][0]
     assert "Example Seed" not in (result.value.text or "")
 
 
@@ -58,6 +59,7 @@ async def test_seeds_handler_reads_json_seed_files(tmp_path: Path) -> None:
     list_payload = json.loads(list_result.value.text or "{}")
     assert list_payload["count"] == 1
     assert list_payload["seeds"][0]["id"] == "seed_json"
+    assert "path" not in list_payload["seeds"][0]
 
     assert detail_result.is_ok
     detail_payload = json.loads(detail_result.value.text or "{}")

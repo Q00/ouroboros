@@ -139,7 +139,6 @@ class SeedsResourceHandler:
                     "task_type": seed.task_type,
                     "created_at": seed.metadata.created_at.isoformat(),
                     "ambiguity_score": seed.metadata.ambiguity_score,
-                    "path": str(path),
                 }
             )
         return seeds
