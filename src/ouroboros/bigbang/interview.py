@@ -629,7 +629,8 @@ class InterviewEngine:
         from ouroboros.agents.loader import load_agent_prompt
 
         max_prompt_chars = max_chars or self._MAX_SYSTEM_PROMPT_CHARS
-        round_info = f"Round {state.current_round_number}"
+        effective_round_number = self._next_conversation_round_number(state)
+        round_info = f"Round {effective_round_number}"
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
@@ -639,7 +640,7 @@ class InterviewEngine:
         prompt_initial_context = self._initial_context_for_system_prompt(context_for_prompt)
 
         # For first round, add explicit instruction to start directly with a question
-        if state.current_round_number == 1:
+        if effective_round_number == 1:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"CRITICAL: Start your FIRST response with a DIRECT QUESTION about the project. "
@@ -801,14 +802,15 @@ class InterviewEngine:
 
         perspectives: list[InterviewPerspective] = [InterviewPerspective.BREADTH_KEEPER]
 
-        if state.current_round_number <= 2:
+        effective_round_number = self._next_conversation_round_number(state)
+        if effective_round_number <= 2:
             perspectives.extend(
                 [
                     InterviewPerspective.RESEARCHER,
                     InterviewPerspective.SIMPLIFIER,
                 ]
             )
-        elif state.current_round_number <= 5:
+        elif effective_round_number <= 5:
             perspectives.extend(
                 [
                     InterviewPerspective.RESEARCHER,
@@ -873,6 +875,17 @@ class InterviewEngine:
 
         return "\n".join(sections)
 
+    def _next_conversation_round_number(self, state: InterviewState) -> int:
+        """Return the next real interview round, ignoring summary sentinels."""
+        return (
+            sum(
+                1
+                for round_data in state.rounds
+                if round_data.question != self._INITIAL_CONTEXT_SUMMARY_QUESTION
+            )
+            + 1
+        )
+
     # Agent SDK CLI can return empty responses when the combined prompt
     # (system_prompt + conversation history) exceeds an internal threshold.
     # Cap each user response to keep the total prompt within safe limits.
@@ -901,10 +914,7 @@ class InterviewEngine:
             initial_context if initial_context is not None else state.initial_context
         )
 
-        has_conversation_rounds = any(
-            round_data.question != self._INITIAL_CONTEXT_SUMMARY_QUESTION
-            for round_data in state.rounds
-        )
+        has_conversation_rounds = self._next_conversation_round_number(state) > 1
         overflow = self._initial_context_overflow_message(context_for_prompt)
         if overflow:
             messages.append(Message(role=MessageRole.USER, content=overflow))

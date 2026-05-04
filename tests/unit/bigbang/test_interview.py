@@ -983,6 +983,62 @@ class TestInterviewEngineSystemPrompt:
         # Now just shows "Round N" without max limit
         assert "Round 1" in prompt
 
+    def test_system_prompt_treats_summary_recovery_as_first_real_round(self) -> None:
+        """Summary sentinel rounds should not remove first-question prompt guards."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_summary_recovery_prompt",
+            initial_context="A" * 4_000,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Short project summary",
+                )
+            ],
+        )
+
+        prompt = engine._build_system_prompt(
+            state,
+            initial_context=prompt_safe_initial_context(state),
+        )
+
+        assert "Round 1" in prompt
+        assert "Round 2" not in prompt
+        assert "CRITICAL: Start your FIRST response with a DIRECT QUESTION" in prompt
+
+    def test_system_prompt_counts_real_rounds_after_summary_recovery(self) -> None:
+        """Real rounds after a summary sentinel should advance prompt round behavior."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_summary_recovery_round_two",
+            initial_context="A" * 4_000,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Short project summary",
+                ),
+                InterviewRound(
+                    round_number=2,
+                    question="What platform should this target?",
+                    user_response="CLI",
+                ),
+            ],
+        )
+
+        prompt = engine._build_system_prompt(
+            state,
+            initial_context=prompt_safe_initial_context(state),
+        )
+
+        assert "Round 2" in prompt
+        assert "CRITICAL: Start your FIRST response with a DIRECT QUESTION" not in prompt
+
     def test_system_prompt_includes_context(self) -> None:
         """_build_system_prompt includes initial context."""
         mock_adapter = MagicMock()
