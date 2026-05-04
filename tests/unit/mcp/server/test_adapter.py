@@ -391,6 +391,17 @@ class TestMCPServerAdapterResources:
         assert result.is_ok
         assert result.value.text == "Resource content"
 
+    async def test_read_resource_routes_registered_base_uri_prefix(self) -> None:
+        """read_resource routes child URIs to handlers registered at the base URI."""
+        adapter = MCPServerAdapter()
+        handler = MockResourceHandler("test://resource")
+        adapter.register_resource(handler)
+
+        result = await adapter.read_resource("test://resource/child")
+
+        assert result.is_ok
+        handler.handle_mock.assert_awaited_once_with("test://resource/child")
+
     async def test_read_resource_not_found(self) -> None:
         """read_resource returns error for unknown resource."""
         adapter = MCPServerAdapter()
@@ -644,6 +655,51 @@ class TestServeTransport:
         # Test: Path traversal should be rejected by input validation
         with pytest.raises(RuntimeError, match="Path traversal detected"):
             await captured_wrapper(input="../../../etc/passwd")
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_registers_base_resource_uri_template(self) -> None:
+        """FastMCP path exposes child URIs for base resource handlers."""
+        from unittest.mock import MagicMock, patch
+
+        adapter = MCPServerAdapter()
+        handler = MockResourceHandler("test://resource")
+        adapter.register_resource(handler)
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        captured_resources: dict[str, Any] = {}
+
+        def capture_resource_decorator(uri: str):
+            def decorator(func):
+                captured_resources[uri] = func
+                return func
+
+            return decorator
+
+        mock_instance.tool = MagicMock(return_value=lambda f: f)
+        mock_instance.resource = capture_resource_decorator
+        mock_instance.run_stdio_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="stdio")
+
+        assert "test://resource" in captured_resources
+        assert "test://resource/{resource_id}" in captured_resources
+
+        text = await captured_resources["test://resource/{resource_id}"]("child")
+        assert text == "Resource content"
+        handler.handle_mock.assert_awaited_with("test://resource/child")
 
     @pytest.mark.asyncio
     async def test_fastmcp_rejects_auth_config_at_startup(self):
