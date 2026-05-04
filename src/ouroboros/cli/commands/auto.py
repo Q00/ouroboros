@@ -118,16 +118,16 @@ async def _run_auto(
     store = AutoStore()
     if resume:
         state = store.load(resume)
-        if runtime is not None and state.runtime_backend not in {None, runtime}:
+        persisted_runtime = state.runtime_backend
+        if persisted_runtime is None and state.opencode_mode is not None:
+            persisted_runtime = "opencode"
+        if runtime is not None and persisted_runtime not in {None, runtime}:
             msg = (
-                f"resume runtime mismatch: session uses {state.runtime_backend}, "
+                f"resume runtime mismatch: session uses {persisted_runtime}, "
                 f"but --runtime {runtime} was requested"
             )
             raise ValueError(msg)
-        runtime = runtime or state.runtime_backend
-        if runtime is None and state.opencode_mode is not None:
-            runtime = "opencode"
-        runtime = resolve_agent_runtime_backend(runtime)
+        runtime = resolve_agent_runtime_backend(runtime or persisted_runtime)
         skip_run = skip_run or state.skip_run
     else:
         if goal is None or not goal.strip():

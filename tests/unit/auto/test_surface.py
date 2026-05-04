@@ -601,6 +601,29 @@ async def test_cli_resume_infers_opencode_for_legacy_session_with_opencode_mode(
 
 
 @pytest.mark.asyncio
+async def test_cli_resume_rejects_legacy_opencode_runtime_mismatch(monkeypatch, tmp_path) -> None:
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.cli.commands import auto as auto_command
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = None
+    state.opencode_mode = "subprocess"
+    store.save(state)
+    monkeypatch.setattr(auto_command, "AutoStore", lambda: store)
+
+    with pytest.raises(ValueError, match="runtime mismatch"):
+        await auto_command._run_auto(
+            goal=None,
+            resume=state.auto_session_id,
+            runtime="codex",
+            max_interview_rounds=1,
+            max_repair_rounds=1,
+            skip_run=False,
+        )
+
+
+@pytest.mark.asyncio
 async def test_cli_resume_rejects_runtime_mismatch(monkeypatch, tmp_path) -> None:
     from ouroboros.auto.state import AutoPipelineState, AutoStore
     from ouroboros.cli.commands import auto as auto_command
