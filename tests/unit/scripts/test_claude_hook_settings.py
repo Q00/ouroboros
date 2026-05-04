@@ -24,3 +24,11 @@ def test_plugin_hooks_use_plugin_root_for_bundled_scripts() -> None:
     assert any("${CLAUDE_PLUGIN_ROOT}/scripts/drift-monitor.py" in cmd for cmd in commands)
     assert all("CLAUDE_PROJECT_DIR" not in cmd for cmd in commands)
     assert all("cd " not in cmd for cmd in commands)
+
+
+def test_plugin_hooks_fall_back_to_unversioned_python() -> None:
+    """Prefer python3 where available, but fall back for Windows installs."""
+    commands = _hook_commands()
+
+    assert all(cmd.startswith("python3 ") for cmd in commands)
+    assert all(" || python " in cmd for cmd in commands)
