@@ -414,6 +414,15 @@ def _extract_dispatch_template_values(
     parse_trailing_options = _starts_with_quoted_payload(remainder)
     seen_positional = False
     positional_count = 0
+    literal_control_cues = {
+        "document",
+        "documents",
+        "documenting",
+        "support",
+        "supports",
+        "supporting",
+        "with",
+    }
 
     def append_positional(token: str) -> None:
         nonlocal parse_trailing_options, positional_count, seen_positional
@@ -422,6 +431,34 @@ def _extract_dispatch_template_values(
         positional_count += 1
         if positional_count > 1:
             parse_trailing_options = False
+
+    def option_name_for(token: str) -> str:
+        return token[2:].split("=", 1)[0].strip().replace("-", "_")
+
+    def control_suffix_starts_at(start: int) -> bool:
+        suffix_index = start
+        while suffix_index < len(tokens):
+            suffix_token = tokens[suffix_index]
+            if not suffix_token.startswith("--") or suffix_token == "--":
+                return False
+            suffix_option_name = option_name_for(suffix_token)
+            if suffix_option_name not in _CONTROL_OPTION_NAMES:
+                return False
+            if "=" in suffix_token or suffix_option_name in _BOOLEAN_OPTION_NAMES:
+                suffix_index += 1
+                continue
+            if (
+                suffix_option_name in _VALUE_OPTION_NAMES
+                and suffix_index + 1 < len(tokens)
+                and not tokens[suffix_index + 1].startswith("--")
+            ):
+                suffix_index += 2
+                continue
+            return False
+        return True
+
+    def previous_token_marks_literal_control() -> bool:
+        return bool(positional and positional[-1].strip().lower() in literal_control_cues)
 
     index = 0
     while index < len(tokens):
@@ -432,9 +469,10 @@ def _extract_dispatch_template_values(
             continue
 
         if seen_positional and not parse_trailing_options:
-            append_positional(token)
-            index += 1
-            continue
+            if not control_suffix_starts_at(index) or previous_token_marks_literal_control():
+                append_positional(token)
+                index += 1
+                continue
 
         option = token[2:]
         if not option:

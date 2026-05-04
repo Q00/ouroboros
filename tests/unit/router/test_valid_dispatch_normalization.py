@@ -308,6 +308,31 @@ def test_valid_dispatch_preserves_control_like_tokens_after_unquoted_goal(
     }
 
 
+def test_valid_dispatch_resolves_trailing_control_after_unquoted_goal(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt="/ouroboros:auto build a local-first habit tracker CLI --skip-run",
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args == {
+        "goal": "build a local-first habit tracker CLI",
+        "resume": "",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+        "skip_run": True,
+    }
+
+
 def test_valid_dispatch_preserves_resume_like_tokens_after_unquoted_goal(
     tmp_path: Path,
 ) -> None:
