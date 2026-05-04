@@ -3,8 +3,8 @@
 This module implements the stateless resolver exported by
 :mod:`ouroboros.router`. It owns only deterministic parsing and frontmatter
 normalization: command-prefix parsing, packaged ``SKILL.md`` lookup,
-``mcp_tool``/``mcp_args`` validation, first-argument extraction, and ``$1`` /
-``$CWD`` template substitution.
+``mcp_tool``/``mcp_args`` validation, argument extraction, and deterministic
+template substitution.
 
 Runtime-specific concerns stay outside this module. The Codex CLI, Hermes, and
 Opencode runtimes pass a :class:`ResolveRequest`, inspect the returned
@@ -53,7 +53,11 @@ from ouroboros.router.types import (
 
 _MCP_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SKILL_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-_DISPATCH_TEMPLATE_PATTERN = re.compile(r"\$(?:CWD|1)(?![A-Za-z0-9_])")
+_DISPATCH_TEMPLATE_PATTERN = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|1)(?![A-Za-z0-9_])")
+_DISPATCH_TEMPLATE_EXACT_PATTERN = re.compile(
+    r"^\$(?P<name>[A-Za-z_][A-Za-z0-9_]*|1)(?![A-Za-z0-9_])$"
+)
+_INTEGER_OPTION_PATTERN = re.compile(r"^[+-]?\d+$")
 # Windows literal path payloads (drive-letter `C:\…` or UNC `\\server\share\…`)
 # must skip shell tokenization — `shlex.split` treats backslash as an escape and
 # silently drops it, so `C:\temp\seed.yaml` would dispatch as `C:tempseed.yaml`.
@@ -337,21 +341,110 @@ def extract_first_argument(remainder: str | None) -> str | None:
     return " ".join(parts) if parts else None
 
 
+def _shell_split_remainder(remainder: str | None) -> list[str]:
+    """Return shell-normalized tokens for a single-line command remainder."""
+    if remainder is None or not remainder.strip() or re.search(r"[\r\n].*\S", remainder):
+        return []
+    stripped = remainder.strip()
+    if _WINDOWS_LITERAL_PATH_PATTERN.match(stripped):
+        return [remainder]
+    quoted_windows = _try_extract_quoted_windows_literal_payload(stripped)
+    if quoted_windows is not None:
+        return shlex.split(quoted_windows) if quoted_windows.strip() else []
+    try:
+        return shlex.split(remainder)
+    except ValueError:
+        return remainder.split()
+
+
+def _coerce_named_option_value(value: str | bool) -> str | int | bool:
+    """Coerce deterministic CLI-style option values for MCP JSON payloads."""
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    if _INTEGER_OPTION_PATTERN.fullmatch(value.strip()) is not None:
+        return int(value)
+    return value
+
+
+def _extract_dispatch_template_values(
+    remainder: str | None,
+    *,
+    first_argument: str | None,
+    cwd: str | Path,
+) -> dict[str, Any]:
+    """Build template values from deterministic command arguments.
+
+    ``$1`` remains the legacy full remainder payload for compatibility. New
+    named placeholders (for example ``$resume`` or ``$skip_run``) are resolved
+    from long ``--kebab-case`` options, while ``$args``/``$goal`` contain the
+    shell-normalized positional payload with those options removed.
+    """
+    values: dict[str, Any] = {
+        "1": first_argument or "",
+        "CWD": str(cwd),
+        "resume": "",
+        "skip_run": "",
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+    }
+    tokens = _shell_split_remainder(remainder)
+    positional: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("--") or token == "--":
+            positional.append(token)
+            index += 1
+            continue
+
+        option = token[2:]
+        if not option:
+            index += 1
+            continue
+        if "=" in option:
+            raw_name, raw_value = option.split("=", 1)
+            option_value: str | bool = raw_value
+        elif index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+            raw_name = option
+            option_value = tokens[index + 1]
+            index += 1
+        else:
+            raw_name = option
+            option_value = True
+
+        name = raw_name.strip().replace("-", "_")
+        if name:
+            values[name] = _coerce_named_option_value(option_value)
+        index += 1
+
+    positional_payload = " ".join(positional)
+    values["args"] = positional_payload
+    values["goal"] = positional_payload
+    return values
+
+
 def resolve_dispatch_templates(
     value: Any,
     *,
     first_argument: str | None,
     cwd: str | Path = "",
+    template_values: Mapping[str, Any] | None = None,
 ) -> Any:
     """Resolve deterministic frontmatter template values."""
     resolved_cwd = str(cwd)
+    replacements = dict(template_values or {"1": first_argument or "", "CWD": resolved_cwd})
     if isinstance(value, str):
-        replacements = {
-            "$1": first_argument or "",
-            "$CWD": resolved_cwd,
-        }
+        exact = _DISPATCH_TEMPLATE_EXACT_PATTERN.fullmatch(value)
+        if exact is not None:
+            return replacements.get(exact.group("name"), value)
+
         return _DISPATCH_TEMPLATE_PATTERN.sub(
-            lambda match: replacements[match.group(0)],
+            lambda match: str(replacements.get(match.group(0)[1:], match.group(0))),
             value,
         )
     if isinstance(value, Mapping):
@@ -360,12 +453,18 @@ def resolve_dispatch_templates(
                 item,
                 first_argument=first_argument,
                 cwd=resolved_cwd,
+                template_values=replacements,
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
         return [
-            resolve_dispatch_templates(item, first_argument=first_argument, cwd=resolved_cwd)
+            resolve_dispatch_templates(
+                item,
+                first_argument=first_argument,
+                cwd=resolved_cwd,
+                template_values=replacements,
+            )
             for item in value
         ]
     return value
@@ -452,10 +551,16 @@ def resolve_parsed_skill_dispatch(
     first_argument = extract_first_argument(parsed.remainder)
     mcp_tool, mcp_args = normalized
     try:
+        template_values = _extract_dispatch_template_values(
+            parsed.remainder,
+            first_argument=first_argument,
+            cwd=cwd,
+        )
         resolved_mcp_args = resolve_dispatch_templates(
             mcp_args,
             first_argument=first_argument,
             cwd=cwd,
+            template_values=template_values,
         )
     except Exception as exc:
         return InvalidSkill(

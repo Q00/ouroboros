@@ -68,6 +68,29 @@ mcp_args:
     return skill_md_path
 
 
+def _write_auto_dispatchable_skill(skills_dir: Path) -> Path:
+    skill_dir = skills_dir / "auto"
+    skill_dir.mkdir(parents=True)
+    skill_md_path = skill_dir / "SKILL.md"
+    skill_md_path.write_text(
+        """---
+name: auto
+mcp_tool: ouroboros_auto
+mcp_args:
+  goal: "$goal"
+  resume: "$resume"
+  cwd: "$CWD"
+  max_interview_rounds: "$max_interview_rounds"
+  max_repair_rounds: "$max_repair_rounds"
+  skip_run: "$skip_run"
+---
+# Auto
+""",
+        encoding="utf-8",
+    )
+    return skill_md_path
+
+
 def _assert_resolved_payload(result: object, expected: Resolved) -> None:
     """Assert every canonical Resolved field, including compare=False fields."""
     assert type(result) is Resolved
@@ -147,6 +170,63 @@ def test_valid_dispatch_inputs_normalize_to_canonical_runtime_metadata(
         mcp_args=expected_args,
     )
     assert result.outcome is ResolveOutcome.MATCH
+
+
+def test_valid_dispatch_resolves_named_option_templates_without_polluting_goal(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=(
+                'ooo auto "Build a local-first habit tracker CLI" --skip-run '
+                "--max-interview-rounds 3 --max-repair-rounds=2"
+            ),
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.first_argument == (
+        "Build a local-first habit tracker CLI --skip-run "
+        "--max-interview-rounds 3 --max-repair-rounds=2"
+    )
+    assert result.mcp_args == {
+        "goal": "Build a local-first habit tracker CLI",
+        "resume": "",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": 3,
+        "max_repair_rounds": 2,
+        "skip_run": True,
+    }
+
+
+def test_valid_dispatch_resolves_resume_option_template_without_goal(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt="ooo auto --resume auto_abc123",
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args == {
+        "goal": "",
+        "resume": "auto_abc123",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+        "skip_run": "",
+    }
 
 
 def test_valid_dispatch_normalizes_trailing_line_ending_on_single_line_argument(

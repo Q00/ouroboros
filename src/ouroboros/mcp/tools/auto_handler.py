@@ -186,6 +186,8 @@ class AutoHandler:
 
 def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:
     value = arguments.get(name, default)
+    if value in {None, ""}:
+        value = default
     if isinstance(value, bool) or not isinstance(value, int):
         msg = f"{name} must be a positive integer"
         raise ValueError(msg)

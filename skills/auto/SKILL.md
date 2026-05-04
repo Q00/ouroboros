@@ -3,7 +3,7 @@ name: auto
 description: "Automatically converge from goal to A-grade Seed and execute it"
 mcp_tool: ouroboros_auto
 mcp_args:
-  goal: "$1"
+  goal: "$goal"
   resume: "$resume"
   cwd: "$CWD"
   max_interview_rounds: "$max_interview_rounds"
