@@ -117,7 +117,11 @@ class SeedsResourceHandler:
         seed_dir = self.seed_dir
         if seed_dir is None or not seed_dir.exists():
             return []
-        paths = [*seed_dir.glob("*.yaml"), *seed_dir.glob("*.yml")]
+        paths = [
+            *seed_dir.glob("*.yaml"),
+            *seed_dir.glob("*.yml"),
+            *seed_dir.glob("*.json"),
+        ]
         return sorted({path.resolve() for path in paths}, key=lambda path: path.name)
 
     async def _list_seeds(self) -> list[dict[str, Any]]:

@@ -42,6 +42,30 @@ async def test_seeds_handler_lists_real_seed_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_seeds_handler_reads_json_seed_files(tmp_path: Path) -> None:
+    seeds_dir = tmp_path / "seeds"
+    seeds_dir.mkdir()
+    (seeds_dir / "seed_json.json").write_text(
+        json.dumps(_demo_seed("seed_json").to_dict(), default=str),
+        encoding="utf-8",
+    )
+
+    handler = SeedsResourceHandler(seed_dir=seeds_dir)
+    list_result = await handler.handle("ouroboros://seeds")
+    detail_result = await handler.handle("ouroboros://seeds/seed_json")
+
+    assert list_result.is_ok
+    list_payload = json.loads(list_result.value.text or "{}")
+    assert list_payload["count"] == 1
+    assert list_payload["seeds"][0]["id"] == "seed_json"
+
+    assert detail_result.is_ok
+    detail_payload = json.loads(detail_result.value.text or "{}")
+    assert detail_payload["id"] == "seed_json"
+    assert detail_payload["seed"]["goal"] == "Demo goal"
+
+
+@pytest.mark.asyncio
 async def test_seeds_handler_reads_specific_seed_by_id(tmp_path: Path) -> None:
     seeds_dir = tmp_path / "seeds"
     save_result = save_seed_sync(_demo_seed("seed_demo"), seeds_dir / "seed_demo.yaml")
