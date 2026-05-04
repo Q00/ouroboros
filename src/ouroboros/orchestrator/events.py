@@ -147,6 +147,10 @@ def create_session_paused_event(
     session_id: str,
     reason: str,
     resume_hint: str | None = None,
+    *,
+    pause_seconds: int | None = None,
+    resume_after: datetime | None = None,
+    pause_kind: str | None = None,
 ) -> BaseEvent:
     """Create session paused event.
 
@@ -158,15 +162,23 @@ def create_session_paused_event(
     Returns:
         BaseEvent for session pause.
     """
+    data: dict[str, Any] = {
+        "reason": reason,
+        "resume_hint": resume_hint,
+        "paused_at": datetime.now(UTC).isoformat(),
+    }
+    if pause_seconds is not None:
+        data["pause_seconds"] = pause_seconds
+    if resume_after is not None:
+        data["resume_after"] = resume_after.isoformat()
+    if pause_kind is not None:
+        data["pause_kind"] = pause_kind
+
     return BaseEvent(
         type="orchestrator.session.paused",
         aggregate_type="session",
         aggregate_id=session_id,
-        data={
-            "reason": reason,
-            "resume_hint": resume_hint,
-            "paused_at": datetime.now(UTC).isoformat(),
-        },
+        data=data,
     )
 
 
@@ -613,6 +625,10 @@ def create_execution_terminal_event(
     summary: dict[str, Any] | None = None,
     error_message: str | None = None,
     messages_processed: int = 0,
+    pause_seconds: int | None = None,
+    resume_after: datetime | None = None,
+    pause_kind: str | None = None,
+    resume_hint: str | None = None,
 ) -> BaseEvent:
     """Mirror a session terminal state into the execution event stream.
 
@@ -635,6 +651,14 @@ def create_execution_terminal_event(
         data["summary"] = summary
     if error_message is not None:
         data["error_message"] = error_message
+    if pause_seconds is not None:
+        data["pause_seconds"] = pause_seconds
+    if resume_after is not None:
+        data["resume_after"] = resume_after.isoformat()
+    if pause_kind is not None:
+        data["pause_kind"] = pause_kind
+    if resume_hint is not None:
+        data["resume_hint"] = resume_hint
     return BaseEvent(
         type="execution.terminal",
         aggregate_type="execution",

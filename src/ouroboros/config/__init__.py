@@ -56,6 +56,7 @@ from ouroboros.config.loader import (
     get_reflect_model,
     get_runtime_controls_config,
     get_semantic_model,
+    get_usage_limit_pause_seconds,
     get_wonder_model,
     load_config,
     load_credentials,
@@ -141,6 +142,7 @@ __all__ = [
     "get_reflect_model",
     "get_runtime_controls_config",
     "get_semantic_model",
+    "get_usage_limit_pause_seconds",
     "get_wonder_model",
     # Model helpers
     "get_config_dir",

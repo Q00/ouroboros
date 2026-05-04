@@ -374,6 +374,31 @@ class TestSessionRepository:
         assert event.data["resume_hint"] == "Retry with --resume after fixing the CLI issue."
 
     @pytest.mark.asyncio
+    async def test_mark_paused_records_usage_limit_window(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Usage-limit pauses persist resume timing metadata."""
+        resume_after = datetime(2026, 1, 1, 5, tzinfo=UTC)
+
+        result = await repository.mark_paused(
+            session_id="sess_123",
+            reason="Usage limit reached",
+            resume_hint="Resume after the quota window resets.",
+            pause_seconds=18000,
+            resume_after=resume_after,
+            pause_kind="usage_limit",
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args[0][0]
+        assert event.type == "orchestrator.session.paused"
+        assert event.data["pause_seconds"] == 18000
+        assert event.data["resume_after"] == resume_after.isoformat()
+        assert event.data["pause_kind"] == "usage_limit"
+
+    @pytest.mark.asyncio
     async def test_mark_cancelled(
         self,
         repository: SessionRepository,
@@ -471,6 +496,30 @@ class TestSessionRepository:
         assert tracker.session_id == "sess_123"
         assert tracker.execution_id == "exec_123"
         assert tracker.messages_processed == 1
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_tolerates_invalid_start_time(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Malformed persisted start_time should not poison reconstruction."""
+        event_timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.timestamp = event_timestamp
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": "not-a-timestamp",
+        }
+
+        mock_event_store.replay.return_value = [start_event]
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        assert result.value.start_time == event_timestamp
 
     @pytest.mark.asyncio
     async def test_reconstruct_session_merges_progress_updates(
@@ -1181,6 +1230,117 @@ class TestFindOrphanedSessions:
         assert result[0].status == SessionStatus.PAUSED
 
     @pytest.mark.asyncio
+    async def test_usage_limit_paused_session_before_resume_after_not_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Usage-limit pauses should not be cancelled before the resume window."""
+        now = datetime.now(UTC)
+        paused_at = now - timedelta(hours=2)
+        resume_after = now + timedelta(hours=3)
+        start_event = self._make_start_event(
+            "sess_usage_limit",
+            timestamp=paused_at - timedelta(minutes=10),
+        )
+        paused_event = self._make_terminal_event(
+            "sess_usage_limit",
+            "orchestrator.session.paused",
+            timestamp=paused_at,
+        )
+        paused_event.data = {
+            "reason": "Usage limit reached",
+            "pause_kind": "usage_limit",
+            "pause_seconds": 18000,
+            "paused_at": paused_at.isoformat(),
+            "resume_after": resume_after.isoformat(),
+        }
+
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, paused_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_usage_limit_paused_session_after_resume_grace_is_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Usage-limit pauses can be cleaned up after resume time plus staleness."""
+        now = datetime.now(UTC)
+        resume_after = now - timedelta(hours=2)
+        paused_at = resume_after - timedelta(hours=5)
+        start_event = self._make_start_event(
+            "sess_expired_usage_limit",
+            timestamp=paused_at - timedelta(minutes=10),
+        )
+        paused_event = self._make_terminal_event(
+            "sess_expired_usage_limit",
+            "orchestrator.session.paused",
+            timestamp=paused_at,
+        )
+        paused_event.data = {
+            "reason": "Usage limit reached",
+            "pause_kind": "usage_limit",
+            "pause_seconds": 18000,
+            "paused_at": paused_at.isoformat(),
+            "resume_after": resume_after.isoformat(),
+        }
+
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, paused_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert len(result) == 1
+        assert result[0].status == SessionStatus.PAUSED
+
+    @pytest.mark.asyncio
+    async def test_snapshot_usage_limit_paused_session_before_resume_after_not_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Snapshot orphan detection should also respect usage-limit pause windows."""
+        now = datetime.now(UTC)
+        paused_at = now - timedelta(hours=2)
+        resume_after = now + timedelta(hours=3)
+        start_event = self._make_start_event(
+            "sess_snapshot_usage_limit",
+            timestamp=paused_at - timedelta(minutes=10),
+        )
+        paused_event = self._make_terminal_event(
+            "sess_snapshot_usage_limit",
+            "orchestrator.session.paused",
+            timestamp=paused_at,
+        )
+        paused_event.data = {
+            "reason": "Usage limit reached",
+            "pause_kind": "usage_limit",
+            "pause_seconds": 18000,
+            "paused_at": paused_at.isoformat(),
+            "resume_after": resume_after.isoformat(),
+        }
+        snapshot = MagicMock()
+        snapshot.session_id = "sess_snapshot_usage_limit"
+        snapshot.execution_id = "exec_sess_snapshot_usage_limit"
+        snapshot.seed_id = "seed_sess_snapshot_usage_limit"
+        snapshot.start_time = start_event.data["start_time"]
+        snapshot.last_activity = paused_at
+        snapshot.status_event_type = "orchestrator.session.paused"
+        snapshot.runtime_status = None
+
+        mock_event_store.get_session_activity_snapshots = AsyncMock(return_value=[snapshot])
+        mock_event_store.replay.return_value = [start_event, paused_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
     async def test_multiple_sessions_mixed_states(
         self,
         repository: SessionRepository,
@@ -1591,3 +1751,88 @@ class TestStaleRuntimeMetadataCleansing:
         tracker = result.value
         assert tracker.status == SessionStatus.COMPLETED
         assert tracker.progress.get("runtime_status") == "completed"
+
+    async def test_paused_session_overwrites_stale_runtime_status(self) -> None:
+        """runtime_status should reflect 'paused' after usage-limit pause replay."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_event_store = AsyncMock()
+        mock_event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="sess-paused",
+                    data={"execution_id": "exec-3", "seed_id": "seed-3"},
+                ),
+                BaseEvent(
+                    type="orchestrator.progress.updated",
+                    aggregate_type="session",
+                    aggregate_id="sess-paused",
+                    data={"progress": {"runtime_status": "running", "phase": "executing"}},
+                ),
+                BaseEvent(
+                    type="orchestrator.session.paused",
+                    aggregate_type="session",
+                    aggregate_id="sess-paused",
+                    data={
+                        "reason": "Usage limit reached",
+                        "pause_kind": "usage_limit",
+                        "pause_seconds": 18000,
+                    },
+                ),
+            ]
+        )
+        mock_event_store.query_session_related_events = None
+
+        repository = SessionRepository(mock_event_store)
+        result = await repository.reconstruct_session("sess-paused")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.status == SessionStatus.PAUSED
+        assert tracker.progress.get("runtime_status") == "paused"
+
+    async def test_resumed_session_progress_clears_stale_pause_status(self) -> None:
+        """Later running progress should clear an earlier usage-limit pause replay state."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_event_store = AsyncMock()
+        mock_event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="sess-resumed",
+                    data={"execution_id": "exec-4", "seed_id": "seed-4"},
+                ),
+                BaseEvent(
+                    type="orchestrator.session.paused",
+                    aggregate_type="session",
+                    aggregate_id="sess-resumed",
+                    data={
+                        "reason": "Usage limit reached",
+                        "pause_kind": "usage_limit",
+                        "pause_seconds": 18000,
+                        "resume_after": "2026-01-01T05:00:00+00:00",
+                    },
+                ),
+                BaseEvent(
+                    type="orchestrator.progress.updated",
+                    aggregate_type="session",
+                    aggregate_id="sess-resumed",
+                    data={"progress": {"runtime_status": "running", "phase": "resumed"}},
+                ),
+            ]
+        )
+        mock_event_store.query_session_related_events = None
+
+        repository = SessionRepository(mock_event_store)
+        result = await repository.reconstruct_session("sess-resumed")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.status == SessionStatus.RUNNING
+        assert tracker.progress.get("runtime_status") == "running"
+        assert "pause_kind" not in tracker.progress
+        assert "resume_after" not in tracker.progress

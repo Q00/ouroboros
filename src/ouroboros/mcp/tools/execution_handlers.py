@@ -65,6 +65,33 @@ from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
+
+def _pause_metadata_from_progress(progress: dict[str, Any]) -> dict[str, Any]:
+    """Extract pause metadata safe to expose in MCP tool results."""
+    metadata: dict[str, Any] = {}
+    for key in ("pause_kind", "pause_seconds", "resume_after", "resume_hint", "paused_at"):
+        value = progress.get(key)
+        if value is not None:
+            metadata[key] = value
+    reason = progress.get("pause_reason")
+    if reason is not None:
+        metadata["pause_reason"] = reason
+    return metadata
+
+
+def _classify_synchronous_execution_status(
+    session_status: SessionStatus | None,
+) -> tuple[str, bool | None, bool, str]:
+    """Map reconstructed session status to MCP tool-result semantics."""
+    if session_status == SessionStatus.COMPLETED:
+        return "completed", True, False, "Seed Execution COMPLETED"
+    if session_status == SessionStatus.PAUSED:
+        return "paused", None, False, "Seed Execution PAUSED"
+    if session_status in {SessionStatus.FAILED, SessionStatus.CANCELLED}:
+        return session_status.value, False, True, "Seed Execution FINISHED"
+    return "unknown", False, True, "Seed Execution FINISHED"
+
+
 # ---------------------------------------------------------------------------
 # Delegation context extraction
 # ---------------------------------------------------------------------------
@@ -580,6 +607,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             except Exception:
                                 log.exception("mcp.tool.execute_seed.event_store_close_error")
 
+                session_status: SessionStatus | None = None
+                pause_metadata: dict[str, Any] = {}
                 if synchronous:
                     # Run inline — the caller (StartExecuteSeedHandler / Job
                     # system) already handles backgrounding.  Pass
@@ -599,12 +628,21 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     # Derive actual outcome from session state.
                     try:
                         post_result = await session_repo.reconstruct_session(tracker.session_id)
-                        session_status = post_result.value.status if post_result.is_ok else None
+                        if post_result.is_ok:
+                            reconstructed_tracker = post_result.value
+                            session_status = reconstructed_tracker.status
+                            if session_status == SessionStatus.PAUSED:
+                                pause_metadata = _pause_metadata_from_progress(
+                                    reconstructed_tracker.progress
+                                )
+                        else:
+                            session_status = None
                     except Exception:
                         session_status = None
 
-                    status_label = session_status.value if session_status is not None else "unknown"
-                    success = session_status == SessionStatus.COMPLETED
+                    status_label, success, is_error, status_header = (
+                        _classify_synchronous_execution_status(session_status)
+                    )
                 else:
                     # Fire-and-forget: launch in a background task.
                     task = asyncio.create_task(
@@ -615,15 +653,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     task.add_done_callback(self._background_tasks.discard)
                     status_label = "running"
                     success = None  # unknown yet
+                    is_error = False
+                    status_header = "Seed Execution LAUNCHED"
 
                 # --- shared message / meta construction ---
-                header = {
-                    True: "Seed Execution COMPLETED",
-                    False: "Seed Execution FINISHED",
-                    None: "Seed Execution LAUNCHED",  # fire-and-forget
-                }[success]
                 message = (
-                    f"{header}\n"
+                    f"{status_header}\n"
                     f"{'=' * 60}\n"
                     f"Seed ID: {seed.metadata.seed_id}\n"
                     f"Session ID: {tracker.session_id}\n"
@@ -633,6 +668,15 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
                 )
+                if pause_metadata:
+                    if pause_metadata.get("pause_kind") is not None:
+                        message += f"Pause Kind: {pause_metadata['pause_kind']}\n"
+                    if pause_metadata.get("pause_seconds") is not None:
+                        message += f"Pause Seconds: {pause_metadata['pause_seconds']}\n"
+                    if pause_metadata.get("resume_after") is not None:
+                        message += f"Resume After: {pause_metadata['resume_after']}\n"
+                    if pause_metadata.get("resume_hint") is not None:
+                        message += f"Resume Hint: {pause_metadata['resume_hint']}\n"
                 if workspace is not None:
                     message += (
                         f"Task Worktree: {workspace.worktree_path}\n"
@@ -657,6 +701,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 }
                 if success is not None:
                     meta["success"] = success
+                if session_status == SessionStatus.PAUSED:
+                    meta["paused"] = True
+                    meta.update(pause_metadata)
                 if workspace is not None:
                     meta["worktree_path"] = workspace.worktree_path
                     meta["worktree_branch"] = workspace.branch
@@ -664,7 +711,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 return Result.ok(
                     MCPToolResult(
                         content=(MCPContentItem(type=ContentType.TEXT, text=message),),
-                        is_error=success is False,
+                        is_error=is_error,
                         meta=meta,
                     )
                 )

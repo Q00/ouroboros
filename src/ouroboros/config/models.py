@@ -359,6 +359,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - None: Resolve from PATH at runtime (or OUROBOROS_GEMINI_CLI_PATH)
         default_max_turns: Default max turns for agent execution
         max_parallel_workers: Default maximum concurrent AC workers
+        usage_limit_pause_hours: Default pause window for provider usage/quota limits
         use_worktrees: Whether mutating workflows run in dedicated git worktrees
         worktree_root: Root directory for managed task worktrees
         worktree_cleanup: Cleanup policy for managed task worktrees
@@ -381,6 +382,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     gemini_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
+    usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
     use_worktrees: bool = True
     worktree_root: str = "~/.ouroboros/worktrees"
     worktree_cleanup: Literal["keep"] = "keep"

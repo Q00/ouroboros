@@ -35,6 +35,7 @@ from ouroboros.config.loader import (
     get_reflect_model,
     get_runtime_controls_config,
     get_semantic_model,
+    get_usage_limit_pause_seconds,
     get_wonder_model,
     load_config,
     load_credentials,
@@ -694,7 +695,7 @@ class TestRuntimeHelperLookups:
 
         assert get_max_parallel_workers() == 5
 
-    @pytest.mark.parametrize("env_value", ["0", "-1", "five"])
+    @pytest.mark.parametrize("env_value", ["0", "-1", "five", "nan", "inf", "-inf"])
     def test_get_max_parallel_workers_rejects_invalid_env(
         self,
         env_value: str,
@@ -863,6 +864,137 @@ class TestRuntimeHelperLookups:
 
         assert "Failed to read configuration file" in str(exc_info.value)
         assert exc_info.value.details["error_type"] == "PermissionError"
+
+    def test_get_usage_limit_pause_seconds_prefers_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Environment variable overrides config for usage-limit pause windows."""
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1.5")
+
+        assert get_usage_limit_pause_seconds() == 5400
+
+    @pytest.mark.parametrize("env_value", ["0", "-1", "five", "nan", "inf", "-inf"])
+    def test_get_usage_limit_pause_seconds_rejects_invalid_env(
+        self,
+        env_value: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid pause env values fail instead of silently using the default."""
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", env_value)
+
+        with pytest.raises(ConfigError) as exc_info:
+            get_usage_limit_pause_seconds()
+
+        assert exc_info.value.config_key == "OUROBOROS_USAGE_LIMIT_PAUSE_HOURS"
+
+    def test_get_usage_limit_pause_seconds_falls_back_to_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Config is used when env override is absent for usage-limit pauses."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("orchestrator:\n  usage_limit_pause_hours: 2.0\n", encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        ):
+            assert get_usage_limit_pause_seconds() == 7200
+
+    @pytest.mark.parametrize(
+        "config_content",
+        [
+            "economics:\n  default_tier: invalid_tier\n",
+            "orchestrator:\n  runtime_backend: invalid_backend\n",
+        ],
+    )
+    def test_get_usage_limit_pause_seconds_ignores_unrelated_invalid_config(
+        self,
+        config_content: str,
+        tmp_path: Path,
+    ) -> None:
+        """Pause-window lookup should not validate unrelated config sections."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(config_content, encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        ):
+            assert get_usage_limit_pause_seconds() == 18000
+
+    @pytest.mark.parametrize(
+        "config_content",
+        [
+            "economics:\n  default_tier: invalid_tier\norchestrator:\n  usage_limit_pause_hours: 2.0\n",
+            "orchestrator:\n  runtime_backend: invalid_backend\n  usage_limit_pause_hours: 2.0\n",
+        ],
+    )
+    def test_get_usage_limit_pause_seconds_reads_value_despite_unrelated_invalid_config(
+        self,
+        config_content: str,
+        tmp_path: Path,
+    ) -> None:
+        """A valid pause window should not be blocked by unrelated invalid fields."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(config_content, encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        ):
+            assert get_usage_limit_pause_seconds() == 7200
+
+    def test_get_usage_limit_pause_seconds_defaults_when_config_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Missing config falls back to the built-in 5-hour window."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        ):
+            assert get_usage_limit_pause_seconds() == 18000
+
+    @pytest.mark.parametrize("config_value", ["0", "five", "nan", "inf", "-inf"])
+    def test_get_usage_limit_pause_seconds_rejects_invalid_config_key(
+        self,
+        config_value: str,
+        tmp_path: Path,
+    ) -> None:
+        """Invalid configured pause windows should not be silently defaulted."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            f"orchestrator:\n  usage_limit_pause_hours: {config_value}\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_usage_limit_pause_seconds()
+
+        assert exc_info.value.config_key == "orchestrator.usage_limit_pause_hours"
+
+    def test_get_usage_limit_pause_seconds_rejects_malformed_config_yaml(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Malformed config YAML should still fail clearly."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("orchestrator:\n  usage_limit_pause_hours: [\n", encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_usage_limit_pause_seconds()
+
+        assert "Failed to parse configuration file" in str(exc_info.value)
 
 
 class TestLLMHelperLookups:

@@ -353,6 +353,24 @@ class SessionRepository:
         return progress
 
     @staticmethod
+    def _pause_progress_from_event(event_data: object) -> dict[str, Any]:
+        """Normalize pause lifecycle metadata into session progress fields."""
+        if not isinstance(event_data, dict):
+            return {}
+
+        progress: dict[str, Any] = {"runtime_status": SessionStatus.PAUSED.value}
+        for key in ("pause_kind", "pause_seconds", "resume_after", "paused_at", "resume_hint"):
+            value = event_data.get(key)
+            if value is not None:
+                progress[key] = value
+
+        reason = event_data.get("reason")
+        if reason is not None:
+            progress["pause_reason"] = reason
+
+        return progress
+
+    @staticmethod
     def _coerce_snapshot_datetime(value: object) -> datetime | None:
         """Normalize timestamp values returned by snapshot queries."""
         if isinstance(value, datetime):
@@ -360,11 +378,70 @@ class SessionRepository:
                 return value.replace(tzinfo=UTC)
             return value
         if isinstance(value, str) and value:
-            parsed = datetime.fromisoformat(value)
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                log.warning(
+                    "orchestrator.session.timestamp_parse_failed",
+                    value=value,
+                )
+                return None
             if parsed.tzinfo is None:
                 return parsed.replace(tzinfo=UTC)
             return parsed
         return None
+
+    @staticmethod
+    def _coerce_positive_seconds(value: object) -> int | None:
+        """Normalize persisted positive-second values from pause metadata."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int | float):
+            seconds = int(value)
+            return seconds if seconds > 0 else None
+        if isinstance(value, str) and value.strip():
+            try:
+                seconds = int(float(value.strip()))
+            except ValueError:
+                return None
+            return seconds if seconds > 0 else None
+        return None
+
+    @classmethod
+    def _usage_limit_pause_resume_after(cls, progress: dict[str, Any]) -> datetime | None:
+        """Return the resume time for usage-limit pauses, if metadata is valid."""
+        pause_kind = progress.get("pause_kind")
+        if not isinstance(pause_kind, str) or pause_kind.strip().lower() != "usage_limit":
+            return None
+
+        resume_after = cls._coerce_snapshot_datetime(progress.get("resume_after"))
+        if resume_after is not None:
+            return resume_after
+
+        paused_at = cls._coerce_snapshot_datetime(progress.get("paused_at"))
+        pause_seconds = cls._coerce_positive_seconds(progress.get("pause_seconds"))
+        if paused_at is None or pause_seconds is None:
+            return None
+
+        return paused_at + timedelta(seconds=pause_seconds)
+
+    @classmethod
+    def _usage_limit_pause_cleanup_deferred(
+        cls,
+        tracker: SessionTracker,
+        *,
+        now: datetime,
+        staleness_threshold: timedelta,
+    ) -> bool:
+        """Return True while quota pauses should be protected from orphan cleanup."""
+        if tracker.status != SessionStatus.PAUSED:
+            return False
+
+        resume_after = cls._usage_limit_pause_resume_after(tracker.progress)
+        if resume_after is None:
+            return False
+
+        return now <= resume_after + staleness_threshold
 
     @classmethod
     def _status_from_snapshot(cls, snapshot: SessionActivitySnapshot) -> SessionStatus:
@@ -412,6 +489,12 @@ class SessionRepository:
 
             result = await self.reconstruct_session(snapshot.session_id)
             if result.is_ok:
+                if self._usage_limit_pause_cleanup_deferred(
+                    result.value,
+                    now=now,
+                    staleness_threshold=staleness_threshold,
+                ):
+                    continue
                 orphaned.append(result.value)
 
         return orphaned
@@ -673,6 +756,10 @@ class SessionRepository:
         session_id: str,
         reason: str,
         resume_hint: str | None = None,
+        *,
+        pause_seconds: int | None = None,
+        resume_after: datetime | None = None,
+        pause_kind: str | None = None,
     ) -> Result[None, PersistenceError]:
         """Mark session as paused and resumable.
 
@@ -684,15 +771,23 @@ class SessionRepository:
         Returns:
             Result indicating success or failure.
         """
+        data: dict[str, Any] = {
+            "reason": reason,
+            "resume_hint": resume_hint,
+            "paused_at": datetime.now(UTC).isoformat(),
+        }
+        if pause_seconds is not None:
+            data["pause_seconds"] = pause_seconds
+        if resume_after is not None:
+            data["resume_after"] = resume_after.isoformat()
+        if pause_kind is not None:
+            data["pause_kind"] = pause_kind
+
         event = BaseEvent(
             type="orchestrator.session.paused",
             aggregate_type="session",
             aggregate_id=session_id,
-            data={
-                "reason": reason,
-                "resume_hint": resume_hint,
-                "paused_at": datetime.now(UTC).isoformat(),
-            },
+            data=data,
         )
 
         try:
@@ -806,14 +901,18 @@ class SessionRepository:
                 )
 
             # Create initial tracker from start event
+            start_time = self._coerce_snapshot_datetime(start_event.data.get("start_time"))
+            if start_time is None:
+                start_time = self._coerce_snapshot_datetime(start_event.timestamp)
+            if start_time is None:
+                start_time = datetime.now(UTC)
+
             tracker = SessionTracker(
                 session_id=session_id,
                 execution_id=start_event.data.get("execution_id", ""),
                 seed_id=start_event.data.get("seed_id", ""),
                 status=SessionStatus.RUNNING,
-                start_time=datetime.fromisoformat(
-                    start_event.data.get("start_time", datetime.now(UTC).isoformat())
-                ),
+                start_time=start_time,
             )
 
             execution_id = start_event.data.get("execution_id", "")
@@ -864,20 +963,39 @@ class SessionRepository:
                         persisted_messages = workflow_progress.get("messages_processed")
                         if isinstance(persisted_messages, int):
                             messages_processed = max(messages_processed, persisted_messages)
+                elif event.type == "orchestrator.session.paused":
+                    pause_progress = self._pause_progress_from_event(event.data)
+                    last_progress = self._merge_progress_payloads(
+                        last_progress,
+                        pause_progress,
+                    )
                 elif event.type in _PARALLEL_ACTIVITY_EVENT_TYPES:
                     messages_processed += 1
                 status_update = self._status_from_event(event.type, event.data)
                 if status_update is not None:
                     tracker = tracker.with_status(status_update)
-                    if event.type in {
+                    if status_update == SessionStatus.RUNNING:
+                        explicit_terminal_status = None
+                        for key in (
+                            "pause_kind",
+                            "pause_seconds",
+                            "resume_after",
+                            "resume_hint",
+                            "paused_at",
+                            "pause_reason",
+                        ):
+                            last_progress.pop(key, None)
+                    elif event.type in {
                         "orchestrator.session.completed",
                         "orchestrator.session.failed",
                         "orchestrator.session.cancelled",
+                        "orchestrator.session.paused",
                     }:
                         explicit_terminal_status = status_update
 
-            # Sanitize stale runtime metadata when session reached a terminal
-            # state.  Progress events captured during execution may contain
+            # Sanitize stale runtime metadata when an explicit lifecycle event
+            # provides the authoritative session state. Progress events captured
+            # during execution may contain
             # ``runtime_status: running`` which contradicts the authoritative
             # terminal status and confuses downstream consumers (#188).
             if explicit_terminal_status is not None and last_progress.get("runtime_status"):
@@ -1011,9 +1129,11 @@ class SessionRepository:
                     # If no timestamp, use start_time from event data as fallback
                     start_time_str = start_event.data.get("start_time")
                     if start_time_str:
-                        last_activity = datetime.fromisoformat(start_time_str)
+                        last_activity = self._coerce_snapshot_datetime(start_time_str)
                     else:
                         continue
+                if last_activity is None:
+                    continue
 
                 # Ensure timezone-aware comparison
                 if last_activity.tzinfo is None:
@@ -1031,6 +1151,12 @@ class SessionRepository:
                     # Reconstruct full tracker for the orphaned session
                     result = await self.reconstruct_session(session_id)
                     if result.is_ok:
+                        if self._usage_limit_pause_cleanup_deferred(
+                            result.value,
+                            now=now,
+                            staleness_threshold=staleness_threshold,
+                        ):
+                            continue
                         orphaned.append(result.value)
 
             log.info(

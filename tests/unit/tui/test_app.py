@@ -742,6 +742,22 @@ class TestOuroborosTUIEventSubscription:
         assert app.state.iteration == 3
 
     @pytest.mark.asyncio
+    async def test_update_state_from_execution_terminal_paused(self) -> None:
+        """Paused terminal events should put the TUI into paused state."""
+        app = OuroborosTUI()
+        event = BaseEvent(
+            type="execution.terminal",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={"session_id": "sess_123", "status": "paused"},
+        )
+
+        app._update_state_from_event(event)
+
+        assert app.state.status == "paused"
+        assert app.state.is_paused is True
+
+    @pytest.mark.asyncio
     async def test_update_state_from_event_drift_measured(self) -> None:
         """Test state update from drift measured event."""
         app = OuroborosTUI()
