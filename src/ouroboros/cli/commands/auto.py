@@ -26,6 +26,7 @@ from ouroboros.cli.formatters.panels import print_error, print_info, print_succe
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.orchestrator import resolve_agent_runtime_backend
 
 
 class AgentRuntimeBackend(str, Enum):  # noqa: UP042
@@ -124,6 +125,7 @@ async def _run_auto(
         runtime = runtime or state.runtime_backend
         skip_run = skip_run or state.skip_run
     else:
+        runtime = resolve_agent_runtime_backend(runtime)
         state = AutoPipelineState(goal=goal or "", cwd=str(_safe_default_cwd()))
         state.runtime_backend = runtime
         state.skip_run = skip_run

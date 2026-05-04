@@ -518,6 +518,7 @@ async def test_cli_fresh_auto_uses_safe_default_cwd(monkeypatch, tmp_path) -> No
 
         async def run(self, run_state):  # noqa: ANN001
             captured["cwd"] = run_state.cwd
+            captured["runtime"] = run_state.runtime_backend
             return AutoPipelineResult(
                 status="complete",
                 auto_session_id=run_state.auto_session_id,
@@ -531,6 +532,9 @@ async def test_cli_fresh_auto_uses_safe_default_cwd(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(Path, "cwd", lambda: Path("/"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(auto_command, "AutoStore", lambda: AutoStore(tmp_path))
+    monkeypatch.setattr(
+        auto_command, "resolve_agent_runtime_backend", lambda value=None: value or "codex"
+    )
     monkeypatch.setattr(auto_command, "AutoPipeline", FakePipeline)
     monkeypatch.setattr(auto_command, "InterviewHandler", FakeHandler)
     monkeypatch.setattr(auto_command, "GenerateSeedHandler", FakeHandler)
@@ -548,6 +552,7 @@ async def test_cli_fresh_auto_uses_safe_default_cwd(monkeypatch, tmp_path) -> No
 
     assert result.status == "complete"
     assert captured["cwd"] == str(tmp_path)
+    assert captured["runtime"] == "codex"
 
 
 def test_static_ouroboros_tools_exports_auto_handler() -> None:
