@@ -615,6 +615,7 @@ class TestJsonSchemaHandling:
 
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert "allowed_tools" not in options_call_kwargs
+        assert "tools" not in options_call_kwargs
         assert options_call_kwargs["cwd"] == "/tmp/project"
         assert "Write" in options_call_kwargs["disallowed_tools"]
 
@@ -647,7 +648,45 @@ class TestJsonSchemaHandling:
 
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert options_call_kwargs["allowed_tools"] == []
+        assert options_call_kwargs["tools"] == []
         assert "Read" in options_call_kwargs["disallowed_tools"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_allowed_tools_sets_visible_sdk_tools(self) -> None:
+        """Explicit tool envelopes restrict both permissions and exposed SDK tools."""
+        allowed_tools = ["Read", "Grep", "mcp__ouroboros__qa"]
+        adapter = ClaudeCodeAdapter(allowed_tools=allowed_tools)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert options_call_kwargs["allowed_tools"] == allowed_tools
+        assert options_call_kwargs["tools"] == allowed_tools
+        assert "Read" not in options_call_kwargs["disallowed_tools"]
+        assert "Grep" not in options_call_kwargs["disallowed_tools"]
+        assert "ToolSearch" not in options_call_kwargs["tools"]
+        assert "AskUserQuestion" not in options_call_kwargs["tools"]
+        assert "Write" in options_call_kwargs["disallowed_tools"]
 
 
 class TestErrorDiagnostics:
@@ -682,6 +721,8 @@ class TestErrorDiagnostics:
         assert isinstance(error, ProviderError)
         assert "SDK connection lost" in error.message
         assert error.details["error_type"] == "RuntimeError"
+        assert "traceback" in error.details
+        assert "RuntimeError: SDK connection lost" in error.details["traceback"]
 
     @pytest.mark.asyncio
     async def test_sdk_exception_includes_stderr_in_details(self) -> None:

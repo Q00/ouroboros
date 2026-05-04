@@ -33,6 +33,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import traceback
 
 import structlog
 
@@ -592,7 +593,12 @@ class ClaudeCodeAdapter:
             "env": env_overrides,
         }
         if self._allowed_tools is not None:
-            options_kwargs["allowed_tools"] = self._allowed_tools
+            # The SDK distinguishes the visible tool catalog (tools) from
+            # permission filtering (allowed_tools). Passing both keeps explicit
+            # envelopes, such as the interview read-only tool set, from exposing
+            # default built-ins like AskUserQuestion/ToolSearch.
+            options_kwargs["allowed_tools"] = list(self._allowed_tools)
+            options_kwargs["tools"] = list(self._allowed_tools)
 
         # Pass model from CompletionConfig if specified
         # "default" is not a valid SDK model — treat it as None (use SDK default)
@@ -725,6 +731,7 @@ class ClaudeCodeAdapter:
             raise
         except Exception as exc:
             stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
+            traceback_text = traceback.format_exc()
             error_message = f"Claude Agent SDK request failed: {exc}"
             if stderr_tail and "Check stderr output for details" in str(exc):
                 error_message = f"{error_message}\nstderr tail:\n{stderr_tail}"
@@ -744,6 +751,7 @@ class ClaudeCodeAdapter:
                         "error_type": type(exc).__name__,
                         "session_id": session_id,
                         "stderr": stderr_tail,
+                        "traceback": traceback_text,
                         "claudecode_present": claudecode_present,
                         "claude_code_entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
                     },
