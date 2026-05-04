@@ -39,6 +39,17 @@ log = structlog.get_logger(__name__)
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _TOOL_USE_MARKER_RE = re.compile(r'"type"\s*:\s*"tool_use"|tool_use')
 _TOOL_NAME_RE = re.compile(r'"(?:name|tool)"\s*:\s*"([^"]+)"')
+_KIRO_TOOL_NAME_MAP: dict[str, str] = {
+    "bash": "shell",
+    "edit": "write",
+    "glob": "read",
+    "grep": "grep",
+    "ls": "read",
+    "multiedit": "write",
+    "read": "read",
+    "shell": "shell",
+    "write": "write",
+}
 
 
 def _strip_ansi(text: str) -> str:
@@ -224,10 +235,30 @@ class KiroCodeAdapter:
 
     def _build_cmd(self, prompt: str, config: CompletionConfig) -> list[str]:
         cmd = [self._cli_path, "chat", "--no-interactive"]
+        if self._allowed_tools is not None:
+            # Kiro's headless mode exposes native trust flags.  Passing the
+            # flag even for an empty list makes the caller's explicit
+            # no-tools envelope visible at the CLI boundary instead of relying
+            # only on prompt wording.
+            cmd.append(f"--trust-tools={self._kiro_trust_tools_arg()}")
         if config.model and config.model != "default":
             cmd.extend(["--model", _map_model_name(config.model)])
         cmd.append(prompt)
         return cmd
+
+    def _kiro_trust_tools_arg(self) -> str:
+        if not self._allowed_tools:
+            return ""
+
+        mapped_tools: list[str] = []
+        seen: set[str] = set()
+        for tool in self._allowed_tools:
+            normalized = tool.strip().lower().replace("_", "-")
+            mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
+            if mapped not in seen:
+                mapped_tools.append(mapped)
+                seen.add(mapped)
+        return ",".join(mapped_tools)
 
     def _build_prompt(self, messages: list[Message], config: CompletionConfig | None = None) -> str:
         parts: list[str] = []

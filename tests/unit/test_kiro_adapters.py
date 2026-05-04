@@ -273,6 +273,33 @@ class TestKiroCodeAdapterComplete:
 
         assert "Tool constraints" not in prompt
 
+    def test_empty_allowed_tools_sets_empty_trust_tools_flag(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=[])
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert "--trust-tools=" in cmd
+        assert "--trust-all-tools" not in cmd
+
+    def test_allowed_tools_maps_to_kiro_trust_tools_flag(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=["Read", "Grep", "Bash"])
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert "--trust-tools=read,grep,shell" in cmd
+        assert "--trust-all-tools" not in cmd
+
+    def test_allowed_tools_none_omits_trust_tools_flag(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=None)
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert not any(arg.startswith("--trust-tools") for arg in cmd)
+        assert "--trust-all-tools" not in cmd
+
     def test_audit_flags_tool_use_outside_envelope(self) -> None:
         captured: list[dict] = []
 
