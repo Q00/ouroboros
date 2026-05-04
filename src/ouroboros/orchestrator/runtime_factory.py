@@ -10,6 +10,7 @@ from ouroboros.config import (
     get_cli_path,
     get_codex_cli_path,
     get_hermes_cli_path,
+    get_kiro_cli_path,
     get_llm_backend,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
@@ -19,11 +20,12 @@ from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 
 _CLAUDE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
+_KIRO_BACKENDS = {"kiro", "kiro_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _HERMES_BACKENDS = {"hermes", "hermes_cli"}
 _GEMINI_BACKENDS = {"gemini", "gemini_cli"}
 
-_SUPPORTED_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini")
+_SUPPORTED_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini", "kiro")
 
 
 def resolve_agent_runtime_backend(backend: str | None = None) -> str:
@@ -33,6 +35,8 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
         return "claude"
     if candidate in _CODEX_BACKENDS:
         return "codex"
+    if candidate in _KIRO_BACKENDS:
+        return "kiro"
     if candidate in _OPENCODE_BACKENDS:
         return "opencode"
     if candidate in _HERMES_BACKENDS:
@@ -116,6 +120,14 @@ def create_agent_runtime(
 
         return GeminiCLIRuntime(
             cli_path=cli_path or get_gemini_cli_path(),
+            **runtime_kwargs,
+        )
+
+    if resolved_backend == "kiro":
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        return KiroAgentAdapter(
+            cli_path=cli_path or get_kiro_cli_path(),
             **runtime_kwargs,
         )
 

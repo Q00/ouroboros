@@ -55,8 +55,10 @@ from ouroboros.config.models import (  # noqa: E402
 from ouroboros.core.errors import ConfigError  # noqa: E402
 
 _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
+_KIRO_LLM_BACKENDS = frozenset({"kiro", "kiro_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
+_KIRO_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -533,8 +535,9 @@ def get_agent_runtime_backend() -> str:
 
     Priority:
         1. OUROBOROS_AGENT_RUNTIME environment variable
-        2. config.yaml orchestrator.runtime_backend
-        3. "claude"
+        2. OUROBOROS_RUNTIME environment variable
+        3. config.yaml orchestrator.runtime_backend
+        4. "claude"
 
     Returns:
         Normalized runtime backend name.
@@ -543,11 +546,20 @@ def get_agent_runtime_backend() -> str:
     if env_backend:
         return env_backend
 
+    env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
+    if env_runtime:
+        return env_runtime
+
     try:
         config = load_config()
         return config.orchestrator.runtime_backend
     except ConfigError:
         return "claude"
+
+
+def get_runtime() -> str:
+    """Alias for get_agent_runtime_backend."""
+    return get_agent_runtime_backend()
 
 
 def _uses_opencode_backend(backend: str | None) -> bool:
@@ -710,6 +722,31 @@ def get_codex_cli_path() -> str | None:
     return None
 
 
+def get_kiro_cli_path() -> str | None:
+    """Get Kiro CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_KIRO_CLI_PATH environment variable
+        2. config.yaml orchestrator.kiro_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to Kiro CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_KIRO_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.kiro_cli_path:
+            return config.orchestrator.kiro_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_opencode_cli_path() -> str | None:
     """Get OpenCode CLI path from environment variable or config file.
 
@@ -821,8 +858,9 @@ def get_llm_backend() -> str:
 
     Priority:
         1. OUROBOROS_LLM_BACKEND environment variable
-        2. config.yaml llm.backend
-        3. "claude_code"
+        2. OUROBOROS_RUNTIME environment variable
+        3. config.yaml llm.backend
+        4. "claude_code"
 
     Returns:
         Normalized LLM backend name.
@@ -830,6 +868,10 @@ def get_llm_backend() -> str:
     env_backend = os.environ.get("OUROBOROS_LLM_BACKEND", "").strip().lower()
     if env_backend:
         return env_backend
+
+    env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
+    if env_runtime:
+        return env_runtime
 
     try:
         config = load_config()
@@ -877,8 +919,11 @@ def _default_model_for_backend(
     backend: str | None = None,
 ) -> str:
     """Map generic defaults to a backend-safe sentinel when needed."""
-    if _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS:
+    resolved = _resolve_llm_backend_for_models(backend)
+    if resolved in _CODEX_LLM_BACKENDS:
         return _CODEX_DEFAULT_MODEL
+    if resolved in _KIRO_LLM_BACKENDS:
+        return _KIRO_DEFAULT_MODEL
     return default_model
 
 
@@ -902,11 +947,11 @@ def _normalize_configured_model_for_backend(
     if not candidate:
         return _default_model_for_backend(default_model, backend=backend)
 
-    if (
-        _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS
-        and candidate == default_model
-    ):
+    resolved = _resolve_llm_backend_for_models(backend)
+    if resolved in _CODEX_LLM_BACKENDS and candidate == default_model:
         return _CODEX_DEFAULT_MODEL
+    if resolved in _KIRO_LLM_BACKENDS and candidate == default_model:
+        return _KIRO_DEFAULT_MODEL
 
     return candidate
 
