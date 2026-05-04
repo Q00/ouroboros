@@ -59,6 +59,8 @@ _DISPATCH_TEMPLATE_EXACT_PATTERN = re.compile(
 )
 _INTEGER_OPTION_PATTERN = re.compile(r"^[+-]?\d+$")
 _BOOLEAN_OPTION_NAMES = frozenset({"skip_run"})
+_VALUE_OPTION_NAMES = frozenset({"resume", "max_interview_rounds", "max_repair_rounds"})
+_CONTROL_OPTION_NAMES = _BOOLEAN_OPTION_NAMES | _VALUE_OPTION_NAMES
 # Windows literal path payloads (drive-letter `C:\…` or UNC `\\server\share\…`)
 # must skip shell tokenization — `shlex.split` treats backslash as an escape and
 # silently drops it, so `C:\temp\seed.yaml` would dispatch as `C:tempseed.yaml`.
@@ -408,6 +410,10 @@ def _extract_dispatch_template_values(
             index += 1
             continue
         option_name = option.split("=", 1)[0].strip().replace("-", "_")
+        if option_name not in _CONTROL_OPTION_NAMES:
+            positional.append(token)
+            index += 1
+            continue
         if "=" in option:
             raw_name, raw_value = option.split("=", 1)
             option_value: str | bool = raw_value
