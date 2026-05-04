@@ -624,6 +624,8 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
             captured["run_runtime"] = run_starter.handler.agent_runtime_backend
             captured["run_mode"] = run_starter.handler.opencode_mode
             captured["run_adapter"] = run_starter.handler.execute_handler.llm_adapter
+            captured["run_mcp_manager"] = run_starter.handler.execute_handler.mcp_manager
+            captured["run_mcp_prefix"] = run_starter.handler.execute_handler.mcp_tool_prefix
 
         async def run(self, run_state):  # noqa: ANN001
             return AutoPipelineResult(
@@ -635,6 +637,7 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
     monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
 
     adapter = object()
+    manager = object()
     result = await AutoHandler(
         store=store,
         interview_handler=InterviewHandler(agent_runtime_backend="codex", opencode_mode=None),
@@ -652,6 +655,8 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
         ),
         agent_runtime_backend="codex",
         opencode_mode=None,
+        mcp_manager=manager,
+        mcp_tool_prefix="bridge__",
     ).handle({"resume": state.auto_session_id})
 
     assert result.is_ok
@@ -663,6 +668,8 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
         "run_runtime": "opencode",
         "run_mode": "subprocess",
         "run_adapter": adapter,
+        "run_mcp_manager": manager,
+        "run_mcp_prefix": "bridge__",
     }
 
 

@@ -512,6 +512,22 @@ class TestCreateOuroborosServer:
         tool_names = {tool.name for tool in server.info.tools}
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
 
+    def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
+        """Auto resume rebuilds should retain bridge access from server wiring."""
+        from ouroboros.mcp.tools.auto_handler import AutoHandler
+
+        class FakeBridge:
+            manager = object()
+            tool_prefix = "bridge__"
+
+        bridge = FakeBridge()
+        server = create_ouroboros_server(mcp_bridge=bridge)
+        auto = server._tool_handlers["ouroboros_auto"]
+
+        assert isinstance(auto, AutoHandler)
+        assert auto.mcp_manager is bridge.manager
+        assert auto.mcp_tool_prefix == "bridge__"
+
     def test_creates_server_with_custom_config(self) -> None:
         """Factory creates server with custom configuration."""
         server = create_ouroboros_server(

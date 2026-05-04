@@ -1346,6 +1346,13 @@ def create_ouroboros_server(
         agent_runtime_backend=resolved_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    auto_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
+    auto_mcp_prefix = (
+        mcp_bridge.tool_prefix
+        if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
+        else ""
+    )
+
     tool_handlers = [
         execute_seed,
         StartExecuteSeedHandler(
@@ -1380,6 +1387,8 @@ def create_ouroboros_server(
             llm_backend=llm_backend,
             agent_runtime_backend=resolved_runtime_backend,
             opencode_mode=opencode_mode,
+            mcp_manager=auto_mcp_manager,
+            mcp_tool_prefix=auto_mcp_prefix,
         ),
         SessionStatusHandler(
             event_store=event_store,
