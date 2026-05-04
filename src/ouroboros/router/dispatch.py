@@ -415,12 +415,23 @@ def _extract_dispatch_template_values(
     seen_positional = False
     positional_count = 0
     literal_control_cues = {
+        "about",
+        "around",
         "document",
         "documents",
         "documenting",
+        "explain",
+        "explains",
+        "explaining",
+        "for",
+        "mention",
+        "mentions",
+        "mentioning",
+        "regarding",
         "support",
         "supports",
         "supporting",
+        "to",
         "with",
     }
 

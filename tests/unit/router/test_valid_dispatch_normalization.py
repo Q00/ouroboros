@@ -358,6 +358,31 @@ def test_valid_dispatch_preserves_resume_like_tokens_after_unquoted_goal(
     }
 
 
+def test_valid_dispatch_preserves_literal_control_flag_after_preposition(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt="ooo auto Build docs for --skip-run",
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args == {
+        "goal": "Build docs for --skip-run",
+        "resume": "",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+        "skip_run": "",
+    }
+
+
 def test_valid_dispatch_preserves_control_like_tokens_after_quoted_goal_extension(
     tmp_path: Path,
 ) -> None:
