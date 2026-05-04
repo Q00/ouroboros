@@ -296,8 +296,13 @@ def _execution_start_handler(
         return handler
     event_store = getattr(handler, "event_store", None) or getattr(handler, "_event_store", None)
     job_manager = getattr(handler, "job_manager", None) or getattr(handler, "_job_manager", None)
+    original_execute = getattr(handler, "execute_handler", None) or getattr(
+        handler, "_execute_handler", None
+    )
+    llm_adapter = getattr(original_execute, "llm_adapter", None)
     execute_seed = ExecuteSeedHandler(
         event_store=event_store,
+        llm_adapter=llm_adapter,
         llm_backend=llm_backend,
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,

@@ -17,7 +17,7 @@ from ouroboros.mcp.tools.auto_handler import (
     _resolve_cwd,
     _safe_default_cwd,
 )
-from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 
@@ -238,10 +238,18 @@ def test_auto_handler_rebuilds_injected_authoring_handlers_for_persisted_runtime
 
 
 def test_auto_handler_rebuilds_injected_execution_handler_for_persisted_runtime() -> None:
-    start = StartExecuteSeedHandler(
+    adapter = object()
+    execute_handler = ExecuteSeedHandler(
+        llm_adapter=adapter,
         agent_runtime_backend="codex",
         opencode_mode=None,
     )
+    start = StartExecuteSeedHandler(
+        execute_handler=execute_handler,
+        agent_runtime_backend="codex",
+        opencode_mode=None,
+    )
+    assert execute_handler.llm_adapter is adapter
 
     normalized = _execution_start_handler(
         start,
@@ -258,6 +266,7 @@ def test_auto_handler_rebuilds_injected_execution_handler_for_persisted_runtime(
     assert normalized.execute_handler is not None
     assert normalized.execute_handler.agent_runtime_backend == "opencode"
     assert normalized.execute_handler.opencode_mode == "subprocess"
+    assert normalized.execute_handler.llm_adapter is adapter
 
 
 def test_auto_handler_fresh_execution_preserves_bridge_wiring() -> None:
@@ -614,6 +623,7 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
             run_starter = kwargs["run_starter"]
             captured["run_runtime"] = run_starter.handler.agent_runtime_backend
             captured["run_mode"] = run_starter.handler.opencode_mode
+            captured["run_adapter"] = run_starter.handler.execute_handler.llm_adapter
 
         async def run(self, run_state):  # noqa: ANN001
             return AutoPipelineResult(
@@ -624,6 +634,7 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
 
     monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
 
+    adapter = object()
     result = await AutoHandler(
         store=store,
         interview_handler=InterviewHandler(agent_runtime_backend="codex", opencode_mode=None),
@@ -631,7 +642,13 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
             agent_runtime_backend="codex", opencode_mode=None
         ),
         start_execute_seed_handler=StartExecuteSeedHandler(
-            agent_runtime_backend="codex", opencode_mode=None
+            execute_handler=ExecuteSeedHandler(
+                llm_adapter=adapter,
+                agent_runtime_backend="codex",
+                opencode_mode=None,
+            ),
+            agent_runtime_backend="codex",
+            opencode_mode=None,
         ),
         agent_runtime_backend="codex",
         opencode_mode=None,
@@ -645,6 +662,7 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
         "seed_mode": "subprocess",
         "run_runtime": "opencode",
         "run_mode": "subprocess",
+        "run_adapter": adapter,
     }
 
 
