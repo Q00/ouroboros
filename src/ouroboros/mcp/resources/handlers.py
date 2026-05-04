@@ -295,10 +295,9 @@ class SessionsResourceHandler:
         active_sessions = [
             session for session in sessions if session.get("status") in {"running", "paused"}
         ]
-        candidates = active_sessions or sessions
-        if not candidates:
+        if not active_sessions:
             return None
-        return max(candidates, key=_session_activity_key)
+        return max(active_sessions, key=_session_activity_key)
 
     async def _session_activity_by_id(self) -> dict[str, object]:
         if self.event_store is None:
@@ -381,6 +380,14 @@ class EventsResourceHandler:
             if uri.startswith("ouroboros://events/"):
                 session_id = uri.replace("ouroboros://events/", "")
                 events = await self._session_events(session_id)
+                if events is None:
+                    return Result.err(
+                        MCPResourceNotFoundError(
+                            f"Session events not found: {session_id}",
+                            resource_type="events",
+                            resource_id=session_id,
+                        )
+                    )
                 return Result.ok(
                     MCPResourceContent(
                         uri=uri,
@@ -409,13 +416,15 @@ class EventsResourceHandler:
         events = await self.event_store.get_recent_events(limit=100)
         return [_event_to_dict(event) for event in events]
 
-    async def _session_events(self, session_id: str) -> list[dict[str, Any]]:
+    async def _session_events(self, session_id: str) -> list[dict[str, Any]] | None:
         if self.event_store is None:
-            return []
+            return None
         events = await self.event_store.query_session_related_events(
             session_id=session_id,
             limit=100,
         )
+        if not events:
+            return None
         return [_event_to_dict(event) for event in events]
 
 

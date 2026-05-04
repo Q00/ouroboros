@@ -288,6 +288,29 @@ async def test_sessions_current_sorts_mixed_offset_activity_as_datetimes(
 
 
 @pytest.mark.asyncio
+async def test_sessions_current_returns_null_when_no_session_is_active(
+    tmp_path: Path,
+) -> None:
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+
+    repo = SessionRepository(store)
+    created = await repo.create_session("exec_done", "seed_done", "orch_done")
+    assert created.is_ok
+    completed = await repo.mark_completed("orch_done")
+    assert completed.is_ok
+
+    handler = SessionsResourceHandler(event_store=store)
+    result = await handler.handle("ouroboros://sessions/current")
+
+    assert result.is_ok
+    payload = json.loads(result.value.text or "{}")
+    assert payload["session"] is None
+
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_sessions_handler_reads_specific_session(tmp_path: Path) -> None:
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
     await store.initialize()
@@ -324,6 +347,22 @@ async def test_events_handler_reads_recent_events(tmp_path: Path) -> None:
     assert payload["count"] >= 1
     assert payload["events"][0]["aggregate_id"] == "orch_1"
     assert payload["events"][0]["type"] == "orchestrator.session.started"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_events_handler_rejects_unknown_session_events(
+    tmp_path: Path,
+) -> None:
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+
+    handler = EventsResourceHandler(event_store=store)
+    result = await handler.handle("ouroboros://events/missing_session")
+
+    assert result.is_err
+    assert "Session events not found: missing_session" in str(result.error)
 
     await store.close()
 
