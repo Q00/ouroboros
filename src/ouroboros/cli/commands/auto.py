@@ -125,6 +125,9 @@ async def _run_auto(
             )
             raise ValueError(msg)
         runtime = runtime or state.runtime_backend
+        if runtime is None and state.opencode_mode is not None:
+            runtime = "opencode"
+        runtime = resolve_agent_runtime_backend(runtime)
         skip_run = skip_run or state.skip_run
     else:
         runtime = resolve_agent_runtime_backend(runtime)
