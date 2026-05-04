@@ -92,7 +92,24 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Claude Code와 Codex CLI 모두 지원합니다. 런타임 감지, MCP 서버 등록, 스킬 설치까지 자동으로 처리됩니다.
+> Claude Code, Codex CLI, Kiro CLI 모두 지원합니다. 런타임 감지, MCP 서버 등록, 스킬 설치까지 자동으로 처리됩니다.
+
+<details>
+<summary><strong>Kiro CLI 빠른 시작</strong></summary>
+
+```bash
+pip install ouroboros-ai
+ouroboros setup            # Kiro CLI 감지 및 MCP 서버 등록
+```
+
+`.env`에 런타임 설정:
+```
+OUROBOROS_RUNTIME=kiro
+```
+
+이후 Kiro CLI 세션에서 `ooo` 명령어를 사용합니다.
+
+</details>
 
 <details>
 <summary><strong>다른 설치 방법</strong></summary>

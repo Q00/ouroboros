@@ -72,7 +72,24 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, OpenCode, and Hermes. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
+> Works with Claude Code, Codex CLI, OpenCode, Hermes, and Kiro CLI. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
+
+<details>
+<summary><strong>Kiro CLI quick start</strong></summary>
+
+```bash
+pip install ouroboros-ai
+ouroboros setup            # detects Kiro CLI and registers MCP server
+```
+
+Set runtime in `.env`:
+```
+OUROBOROS_RUNTIME=kiro
+```
+
+Then use `ooo` commands inside a Kiro CLI session.
+
+</details>
 
 <details>
 <summary><strong>Other install methods</strong></summary>

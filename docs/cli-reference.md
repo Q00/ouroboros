@@ -68,7 +68,7 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 | `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
@@ -85,13 +85,16 @@ ouroboros setup --runtime codex
 # Explicitly select Claude Code as runtime backend
 ouroboros setup --runtime claude
 
+# Explicitly select Kiro CLI as runtime backend (writes ~/.kiro/settings/mcp.json)
+ouroboros setup --runtime kiro
+
 # Non-interactive setup (for CI or scripted installs)
 ouroboros setup --non-interactive
 ```
 
 **What setup does:**
 
-- Scans PATH for `claude`, `codex`, and `opencode` CLI binaries
+- Scans PATH for `claude`, `codex`, `opencode`, `hermes`, `gemini`, and `kiro-cli` CLI binaries
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
 - For Claude Code: registers the MCP server in `~/.claude/mcp.json`
@@ -101,6 +104,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
+- For Kiro CLI: sets `orchestrator.kiro_cli_path` and `llm.backend: kiro` in `~/.ouroboros/config.yaml`, and registers the Ouroboros MCP server in `~/.kiro/settings/mcp.json` with `OUROBOROS_RUNTIME=kiro` / `OUROBOROS_LLM_BACKEND=kiro` baked into the entry's `env` so `ooo <skill>` shortcuts route to the Kiro adapter on the very next `kiro-cli chat`. The detector prefers the resolved `ouroboros` binary over `uvx` to stay within Kiro's MCP init timeout
 
 > **Codex config split:** put persistent Ouroboros per-role model overrides in `~/.ouroboros/config.yaml` (`clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, `consensus.models`, `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model`). `~/.codex/config.toml` is only the Codex MCP/env hookup file used by setup. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
 
@@ -148,8 +152,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
-| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `opencode`) |
+| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`. Custom adapters registered in `runtime_factory.py` are also accepted. |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `opencode`, `kiro`) |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -221,7 +225,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | Option | Description |
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
-| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`). Uses configured default if omitted |
+| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`). Uses configured default if omitted |
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
@@ -659,7 +663,7 @@ ouroboros mcp serve [OPTIONS]
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
 | `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` is only a client config alias for outbound MCP connections and is NOT a valid serve transport. |
 | `--db TEXT` | Path to the EventStore database file |
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`). Affects which tool variants are instantiated |
 | `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |
 
 **Examples:**
@@ -724,7 +728,7 @@ If Ouroboros is installed directly (not via `uvx`), use:
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # or "codex" or "opencode"
+  runtime_backend: claude   # or "codex", "opencode", "hermes", "gemini", or "kiro"
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
@@ -741,7 +745,7 @@ ouroboros mcp info [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`). Affects which tool variants are instantiated |
 | `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |
 
 **Available Tools:**
@@ -780,7 +784,9 @@ The table below covers the most commonly used variables. For the full list — i
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude models |
 | `OPENAI_API_KEY` | — | OpenAI API key for LiteLLM / Codex CLI |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`) |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`) |
+| `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
+| `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for Claude Code / Codex runtimes (no-op for OpenCode) |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Maximum concurrent Acceptance Criteria workers for parallel execution |
 | `OUROBOROS_LLM_BACKEND` | `llm.backend` | Override the LLM-only flow backend |

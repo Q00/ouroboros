@@ -116,6 +116,7 @@ uv run ouroboros --version            # verify CLI
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
 | OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
+| Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), `pip install ouroboros-ai[claude]` (shares the Claude extras for the Agent SDK types). Then `ouroboros setup --runtime kiro` to register the Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
 
 ---
 
@@ -139,10 +140,10 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex | opencode
+  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | kiro
 
 llm:
-  backend: claude_code      # claude_code | codex | litellm
+  backend: claude_code      # claude_code | codex | litellm | kiro
 
 logging:
   level: info
