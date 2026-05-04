@@ -12,7 +12,20 @@ requires calling /ouroboros:status with the MCP server.
 """
 
 from pathlib import Path
+import sys
 import time
+
+
+def _configure_utf8_stdio() -> None:
+    """Keep hook output safe on non-UTF-8 Windows locales."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if encoding and encoding.lower().replace("-", "") != "utf8" and reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_utf8_stdio()
 
 
 def check_active_session() -> dict:
