@@ -413,17 +413,26 @@ def _extract_dispatch_template_values(
     positional: list[str] = []
     parse_trailing_options = _starts_with_quoted_payload(remainder)
     seen_positional = False
+    positional_count = 0
+
+    def append_positional(token: str) -> None:
+        nonlocal parse_trailing_options, positional_count, seen_positional
+        positional.append(token)
+        seen_positional = True
+        positional_count += 1
+        if positional_count > 1:
+            parse_trailing_options = False
+
     index = 0
     while index < len(tokens):
         token = tokens[index]
         if not token.startswith("--") or token == "--":
-            positional.append(token)
-            seen_positional = True
+            append_positional(token)
             index += 1
             continue
 
         if seen_positional and not parse_trailing_options:
-            positional.append(token)
+            append_positional(token)
             index += 1
             continue
 
@@ -433,7 +442,7 @@ def _extract_dispatch_template_values(
             continue
         option_name = option.split("=", 1)[0].strip().replace("-", "_")
         if option_name not in _CONTROL_OPTION_NAMES:
-            positional.append(token)
+            append_positional(token)
             index += 1
             continue
         if "=" in option:
