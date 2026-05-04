@@ -57,6 +57,46 @@ async def test_seeds_handler_reads_specific_seed_by_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_seeds_handler_uses_metadata_identity_for_specific_seed(
+    tmp_path: Path,
+) -> None:
+    seeds_dir = tmp_path / "seeds"
+    mismatched_save = save_seed_sync(
+        _demo_seed("seed_actual"),
+        seeds_dir / "seed_alias.yaml",
+    )
+    assert mismatched_save.is_ok
+    matching_save = save_seed_sync(
+        _demo_seed("seed_alias"),
+        seeds_dir / "other_name.yaml",
+    )
+    assert matching_save.is_ok
+
+    handler = SeedsResourceHandler(seed_dir=seeds_dir)
+    result = await handler.handle("ouroboros://seeds/seed_alias")
+
+    assert result.is_ok
+    payload = json.loads(result.value.text or "{}")
+    assert payload["id"] == "seed_alias"
+    assert payload["seed"]["metadata"]["seed_id"] == "seed_alias"
+
+
+@pytest.mark.asyncio
+async def test_seeds_handler_rejects_filename_match_with_wrong_metadata(
+    tmp_path: Path,
+) -> None:
+    seeds_dir = tmp_path / "seeds"
+    save_result = save_seed_sync(_demo_seed("seed_actual"), seeds_dir / "seed_alias.yaml")
+    assert save_result.is_ok
+
+    handler = SeedsResourceHandler(seed_dir=seeds_dir)
+    result = await handler.handle("ouroboros://seeds/seed_alias")
+
+    assert result.is_err
+    assert "Seed not found: seed_alias" in str(result.error)
+
+
+@pytest.mark.asyncio
 async def test_sessions_handler_reads_event_store_sessions(tmp_path: Path) -> None:
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
     await store.initialize()

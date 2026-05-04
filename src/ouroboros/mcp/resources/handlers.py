@@ -93,11 +93,7 @@ class SeedsResourceHandler:
                             resource_id=seed_id,
                         )
                     )
-                payload = (
-                    {"id": seed_id, "seed": seed.to_dict()}
-                    if seed.metadata.seed_id == seed_id
-                    else {"id": seed.metadata.seed_id, "requested_id": seed_id, "seed": seed.to_dict()}
-                )
+                payload = {"id": seed.metadata.seed_id, "seed": seed.to_dict()}
                 return Result.ok(
                     MCPResourceContent(
                         uri=uri,
@@ -146,23 +142,23 @@ class SeedsResourceHandler:
 
     async def _load_seed_by_id(self, seed_id: str):
         for path in self._seed_paths():
-            if path.stem != seed_id and path.name != seed_id:
-                # Metadata is authoritative, but this cheap name filter handles
-                # the common path without reading every file when names differ.
-                result = await load_seed(path)
-                if result.is_err:
-                    log.warning("mcp.resource.seeds.skip_invalid", path=str(path))
-                    continue
-                seed = result.value
-                if seed.metadata.seed_id == seed_id:
-                    return seed
-                continue
-
+            name_matches = path.stem == seed_id or path.name == seed_id
             result = await load_seed(path)
             if result.is_err:
                 log.warning("mcp.resource.seeds.skip_invalid", path=str(path))
                 continue
-            return result.value
+
+            seed = result.value
+            if seed.metadata.seed_id == seed_id:
+                return seed
+
+            if name_matches:
+                log.warning(
+                    "mcp.resource.seeds.metadata_mismatch",
+                    path=str(path),
+                    requested_seed_id=seed_id,
+                    actual_seed_id=seed.metadata.seed_id,
+                )
         return None
 
 
