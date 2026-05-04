@@ -11,6 +11,8 @@ from ouroboros.mcp.resources.handlers import (
     EventsResourceHandler,
     SeedsResourceHandler,
     SessionsResourceHandler,
+    events_handler,
+    sessions_handler,
 )
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
@@ -22,6 +24,14 @@ def _demo_seed(seed_id: str) -> Seed:
         ontology_schema=OntologySchema(name="demo", description="demo ontology"),
         metadata=SeedMetadata(seed_id=seed_id),
     )
+
+
+def test_session_and_event_factories_wire_default_event_stores() -> None:
+    session_resource = sessions_handler()
+    event_resource = events_handler()
+
+    assert session_resource.event_store is not None
+    assert event_resource.event_store is not None
 
 
 @pytest.mark.asyncio

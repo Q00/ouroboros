@@ -922,6 +922,11 @@ def create_ouroboros_server(
         SemanticConfig,
     )
     from ouroboros.mcp.job_manager import JobManager
+    from ouroboros.mcp.resources.handlers import (
+        EventsResourceHandler,
+        SeedsResourceHandler,
+        SessionsResourceHandler,
+    )
     from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
     from ouroboros.mcp.tools.definitions import (
         ACDashboardHandler,
@@ -1594,6 +1599,12 @@ def create_ouroboros_server(
         ),
     ]
 
+    resource_handlers = [
+        SeedsResourceHandler(),
+        SessionsResourceHandler(event_store=event_store),
+        EventsResourceHandler(event_store=event_store),
+    ]
+
     # Create server adapter
     server = MCPServerAdapter(
         name=name,
@@ -1647,11 +1658,15 @@ def create_ouroboros_server(
         server.register_tool(handler)
         registry.register(handler, category="ouroboros")
 
+    for handler in resource_handlers:
+        server.register_resource(handler)
+
     log.info(
         "mcp.server.composition_root_complete",
         name=name,
         version=version,
         tools_registered=len(tool_handlers),
+        resources_registered=len(resource_handlers),
         tool_names=[h.definition.name for h in tool_handlers],
     )
 

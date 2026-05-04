@@ -266,12 +266,13 @@ class SessionsResourceHandler:
             return Result.err(MCPServerError(f"Failed to read session resource: {e}"))
 
     async def _list_sessions(self) -> list[dict[str, Any]]:
-        if self.event_store is None:
+        event_store = await self._ensure_event_store()
+        if event_store is None:
             return []
 
-        repo = SessionRepository(self.event_store)
+        repo = SessionRepository(event_store)
         activity_by_session = await self._session_activity_by_id()
-        start_events = await self.event_store.get_all_sessions()
+        start_events = await event_store.get_all_sessions()
         session_ids = list(dict.fromkeys(event.aggregate_id for event in start_events))
         sessions: list[dict[str, Any]] = []
         for session_id in session_ids:
@@ -285,10 +286,11 @@ class SessionsResourceHandler:
         return sessions
 
     async def _load_session(self, session_id: str) -> dict[str, Any] | None:
-        if self.event_store is None:
+        event_store = await self._ensure_event_store()
+        if event_store is None:
             return None
 
-        result = await SessionRepository(self.event_store).reconstruct_session(session_id)
+        result = await SessionRepository(event_store).reconstruct_session(session_id)
         if result.is_err:
             return None
         return _session_to_dict(result.value)
@@ -303,16 +305,17 @@ class SessionsResourceHandler:
         return max(active_sessions, key=_session_activity_key)
 
     async def _session_activity_by_id(self) -> dict[str, object]:
-        if self.event_store is None:
+        event_store = await self._ensure_event_store()
+        if event_store is None:
             return {}
 
-        snapshots = await self.event_store.get_session_activity_snapshots()
+        snapshots = await event_store.get_session_activity_snapshots()
         activity_by_session: dict[str, object] = {}
         for snapshot in snapshots:
             activity = snapshot.last_activity or snapshot.start_time
             if activity is not None:
                 activity_by_session[snapshot.session_id] = activity
-            related_events = await self.event_store.query_session_related_events(
+            related_events = await event_store.query_session_related_events(
                 session_id=snapshot.session_id,
                 execution_id=snapshot.execution_id,
                 limit=1,
@@ -325,6 +328,13 @@ class SessionsResourceHandler:
                     related_activity,
                 )
         return activity_by_session
+
+    async def _ensure_event_store(self) -> EventStore | None:
+        if self.event_store is None:
+            self.event_store = EventStore()
+        if getattr(self.event_store, "_engine", None) is None:
+            await self.event_store.initialize()
+        return self.event_store
 
 
 @dataclass
@@ -414,21 +424,30 @@ class EventsResourceHandler:
             return Result.err(MCPServerError(f"Failed to read events resource: {e}"))
 
     async def _recent_events(self) -> list[dict[str, Any]]:
-        if self.event_store is None:
+        event_store = await self._ensure_event_store()
+        if event_store is None:
             return []
-        events = await self.event_store.get_recent_events(limit=100)
+        events = await event_store.get_recent_events(limit=100)
         return [_event_to_dict(event) for event in events]
 
     async def _session_events(self, session_id: str) -> list[dict[str, Any]] | None:
-        if self.event_store is None:
+        event_store = await self._ensure_event_store()
+        if event_store is None:
             return None
-        events = await self.event_store.query_session_related_events(
+        events = await event_store.query_session_related_events(
             session_id=session_id,
             limit=100,
         )
         if not events:
             return None
         return [_event_to_dict(event) for event in events]
+
+    async def _ensure_event_store(self) -> EventStore | None:
+        if self.event_store is None:
+            self.event_store = EventStore()
+        if getattr(self.event_store, "_engine", None) is None:
+            await self.event_store.initialize()
+        return self.event_store
 
 
 def _session_to_dict(session: SessionTracker) -> dict[str, Any]:
@@ -502,21 +521,21 @@ def seeds_handler() -> SeedsResourceHandler:
     return SeedsResourceHandler()
 
 
-def sessions_handler() -> SessionsResourceHandler:
+def sessions_handler(event_store: EventStore | None = None) -> SessionsResourceHandler:
     """Create a SessionsResourceHandler instance."""
-    return SessionsResourceHandler()
+    return SessionsResourceHandler(event_store=event_store or EventStore())
 
 
-def events_handler() -> EventsResourceHandler:
+def events_handler(event_store: EventStore | None = None) -> EventsResourceHandler:
     """Create an EventsResourceHandler instance."""
-    return EventsResourceHandler()
+    return EventsResourceHandler(event_store=event_store or EventStore())
 
 
 # List of all Ouroboros resources for registration
 OUROBOROS_RESOURCES: tuple[
     SeedsResourceHandler | SessionsResourceHandler | EventsResourceHandler, ...
 ] = (
-    SeedsResourceHandler(),
-    SessionsResourceHandler(),
-    EventsResourceHandler(),
+    seeds_handler(),
+    sessions_handler(),
+    events_handler(),
 )
