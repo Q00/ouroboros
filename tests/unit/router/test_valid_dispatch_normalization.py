@@ -281,6 +281,56 @@ def test_valid_dispatch_preserves_unknown_double_dash_tokens_in_goal(
     }
 
 
+def test_valid_dispatch_preserves_control_like_tokens_after_unquoted_goal(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt="ooo auto build a CLI that supports --skip-run",
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args == {
+        "goal": "build a CLI that supports --skip-run",
+        "resume": "",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+        "skip_run": "",
+    }
+
+
+def test_valid_dispatch_preserves_resume_like_tokens_after_unquoted_goal(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt="ooo auto build resume support with --resume auto_abc123",
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args == {
+        "goal": "build resume support with --resume auto_abc123",
+        "resume": "",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+        "skip_run": "",
+    }
+
+
 def test_valid_dispatch_resolves_resume_option_template_without_goal(
     tmp_path: Path,
 ) -> None:

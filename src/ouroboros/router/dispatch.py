@@ -360,6 +360,11 @@ def _shell_split_remainder(remainder: str | None) -> list[str]:
         return remainder.split()
 
 
+def _starts_with_quoted_payload(remainder: str | None) -> bool:
+    """Return whether the single-line payload begins with a shell-quoted argument."""
+    return bool(remainder and remainder.lstrip().startswith(("'", '"')))
+
+
 def _coerce_named_option_value(value: str | bool) -> str | int | bool:
     """Coerce deterministic CLI-style option values for MCP JSON payloads."""
     if isinstance(value, bool):
@@ -406,10 +411,18 @@ def _extract_dispatch_template_values(
         return values
 
     positional: list[str] = []
+    parse_trailing_options = _starts_with_quoted_payload(remainder)
+    seen_positional = False
     index = 0
     while index < len(tokens):
         token = tokens[index]
         if not token.startswith("--") or token == "--":
+            positional.append(token)
+            seen_positional = True
+            index += 1
+            continue
+
+        if seen_positional and not parse_trailing_options:
             positional.append(token)
             index += 1
             continue
