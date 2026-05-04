@@ -95,3 +95,63 @@ def test_ralph_sh_scopes_git_snapshot_to_project_dir(tmp_path: Path) -> None:
     assert "ooo/lin_scope/gen_1" not in _git(cwd_repo, "tag", "--list")
     assert (target_repo / "ralph-output.txt").exists()
     assert not (cwd_repo / "ralph-output.txt").exists()
+
+
+def test_ralph_sh_scopes_rollback_to_project_dir(tmp_path: Path) -> None:
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    shutil.copy2(RALPH_SH, script_dir / "ralph.sh")
+    (script_dir / "ralph.py").write_text(
+        textwrap.dedent(
+            """
+            #!/usr/bin/env python3
+            import argparse, json
+            from pathlib import Path
+
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--lineage-id', required=True)
+            parser.add_argument('--max-retries')
+            parser.add_argument('--project-dir', required=True)
+            args = parser.parse_args()
+
+            Path(args.project_dir, 'README.md').write_text('bad generation\\n')
+            Path(args.project_dir, 'untracked.txt').write_text('remove me\\n')
+            print(json.dumps({
+                'action': 'failed',
+                'generation': 2,
+                'lineage_id': args.lineage_id,
+                'error': 'fake failure',
+            }))
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cwd_repo = tmp_path / "cwd-repo"
+    target_repo = tmp_path / "rollback target"
+    _init_repo(cwd_repo)
+    _init_repo(target_repo)
+    _git(target_repo, "tag", "ooo/lin_scope/gen_1")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_dir / "ralph.sh"),
+            "--lineage-id",
+            "lin_scope",
+            "--max-cycles",
+            "1",
+            "--project-dir",
+            str(target_repo),
+        ],
+        cwd=cwd_repo,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+
+    assert result.returncode == 12
+    assert (target_repo / "README.md").read_text(encoding="utf-8") == "initial\n"
+    assert not (target_repo / "untracked.txt").exists()
+    assert not (cwd_repo / "untracked.txt").exists()
