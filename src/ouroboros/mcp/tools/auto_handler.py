@@ -194,8 +194,7 @@ class AutoHandler:
 def _resolved_opencode_mode(runtime_backend: str | None, opencode_mode: str | None) -> str | None:
     if runtime_backend != "opencode":
         return None
-    resolved = opencode_mode or get_opencode_mode()
-    return "subprocess" if resolved == "plugin" else resolved
+    return opencode_mode or get_opencode_mode()
 
 
 def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:

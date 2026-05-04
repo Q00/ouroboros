@@ -748,6 +748,47 @@ def test_static_ouroboros_tools_exports_auto_handler() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_handler_preserves_plugin_mode_for_execution_handoff(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003
+            run_starter = kwargs["run_starter"]
+            captured["authoring_mode"] = driver.backend.handler.opencode_mode
+            captured["run_mode"] = run_starter.handler.opencode_mode
+            captured["execute_mode"] = run_starter.handler.execute_handler.opencode_mode
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["state_mode"] = run_state.opencode_mode
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+
+    result = await AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin").handle(
+        {"goal": "Build a CLI", "cwd": str(tmp_path)}
+    )
+
+    assert result.is_ok
+    assert captured == {
+        "authoring_mode": "subprocess",
+        "run_mode": "plugin",
+        "execute_mode": "plugin",
+        "state_mode": "plugin",
+    }
+
+
+@pytest.mark.asyncio
 async def test_auto_handler_fresh_session_persists_resolved_runtime(monkeypatch, tmp_path) -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.auto.state import AutoStore
