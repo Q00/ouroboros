@@ -121,6 +121,23 @@ class TestCreateLLMAdapterKiro:
         assert isinstance(adapter, KiroCodeAdapter)
         assert adapter._max_retries == 5
 
+    def test_passes_tool_envelope_to_kiro_adapter(self) -> None:
+        messages: list[tuple[str, str]] = []
+
+        def _on_message(kind: str, content: str) -> None:
+            messages.append((kind, content))
+
+        adapter = create_llm_adapter(
+            backend="kiro",
+            allowed_tools=[],
+            max_turns=2,
+            on_message=_on_message,
+        )
+        assert isinstance(adapter, KiroCodeAdapter)
+        assert adapter._allowed_tools == []
+        assert adapter._max_turns == 2
+        assert adapter._on_message is _on_message
+
     def test_uses_configured_cli_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("ouroboros.config.get_kiro_cli_path", lambda: "/custom/kiro-cli")
         adapter = create_llm_adapter(backend="kiro")
@@ -227,6 +244,76 @@ class TestKiroCodeAdapterComplete:
         assert "<system>" in prompt
         assert "Be concise" in prompt
         assert "User: Hello" in prompt
+
+    def test_empty_allowed_tools_forces_text_only_prompt(self) -> None:
+        from ouroboros.providers.base import Message, MessageRole
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=[])
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Question")])
+
+        assert "Tool constraints" in prompt
+        assert "Do NOT use any tools" in prompt
+        assert "Respond with text only" in prompt
+
+    def test_allowed_tools_lists_permitted_tools(self) -> None:
+        from ouroboros.providers.base import Message, MessageRole
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=["Read", "Grep"])
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Question")])
+
+        assert "Limit tool usage to ONLY" in prompt
+        assert "- Read" in prompt
+        assert "- Grep" in prompt
+
+    def test_allowed_tools_none_omits_tool_constraints(self) -> None:
+        from ouroboros.providers.base import Message, MessageRole
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=None)
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Question")])
+
+        assert "Tool constraints" not in prompt
+
+    def test_audit_flags_tool_use_outside_envelope(self) -> None:
+        captured: list[dict] = []
+
+        def _warning(event: str, **kwargs) -> None:
+            captured.append({"event": event, **kwargs})
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=["Read"])
+        with patch("ouroboros.providers.kiro_adapter.log.warning", side_effect=_warning):
+            adapter._audit_tool_envelope_violations(
+                '{"type":"tool_use","name":"Read"}\n{"type":"tool_use","name":"Edit"}'
+            )
+
+        violations = [
+            item for item in captured if item["event"] == "kiro_adapter.tool_envelope_violation"
+        ]
+        assert len(violations) == 1
+        assert violations[0]["tool"] == "Edit"
+        assert violations[0]["allowed_tools"] == ["Read"]
+
+    @pytest.mark.asyncio
+    async def test_on_message_receives_assistant_response(self) -> None:
+        from ouroboros.providers.base import CompletionConfig, Message, MessageRole
+
+        proc = _make_proc(stdout=b"Hello world", returncode=0)
+        messages: list[tuple[str, str]] = []
+
+        with patch(
+            "ouroboros.providers.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            adapter = KiroCodeAdapter(
+                cli_path="kiro-cli",
+                on_message=lambda kind, content: messages.append((kind, content)),
+            )
+            result = await adapter.complete(
+                messages=[Message(role=MessageRole.USER, content="Hi")],
+                config=CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert messages == [("assistant", "Hello world")]
 
     @pytest.mark.asyncio
     async def test_strips_ansi_prompt_marker_from_response(self) -> None:

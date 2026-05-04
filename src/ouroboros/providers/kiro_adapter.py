@@ -7,6 +7,7 @@ Follows the same contract as CodexCliLLMAdapter / ClaudeCodeAdapter.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,8 @@ log = structlog.get_logger(__name__)
 # escape sequences and silently fail. Stripping SGR/CSI escapes here keeps
 # response content clean without losing the underlying text.
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_TOOL_USE_MARKER_RE = re.compile(r'"type"\s*:\s*"tool_use"|tool_use')
+_TOOL_NAME_RE = re.compile(r'"(?:name|tool)"\s*:\s*"([^"]+)"')
 
 
 def _strip_ansi(text: str) -> str:
@@ -83,14 +86,31 @@ class KiroCodeAdapter:
         *,
         cli_path: str | Path | None = None,
         cwd: str | Path | None = None,
+        allowed_tools: list[str] | None = None,
+        max_turns: int = 1,
+        on_message: Callable[[str, str], None] | None = None,
         timeout: float | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else None
+        self._allowed_tools = list(allowed_tools) if allowed_tools is not None else None
+        self._max_turns = max_turns
+        self._on_message = on_message
         self._timeout = timeout if timeout and timeout > 0 else _DEFAULT_TIMEOUT
         self._max_retries = max_retries
         log.info("kiro_adapter.init", cli_path=self._cli_path, cwd=self._cwd)
+        if self._allowed_tools is not None:
+            log.warning(
+                "kiro_adapter.soft_tool_enforcement",
+                allowed_tools=list(self._allowed_tools),
+                reason=(
+                    "Kiro CLI has no native allowed_tools flag; the envelope "
+                    "is injected as a prompt directive and detectable tool-use "
+                    "markers are audited post-hoc. Enforcement is cooperative, "
+                    "not mandatory."
+                ),
+            )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
         if cli_path:
@@ -187,6 +207,10 @@ class KiroCodeAdapter:
                     continue
                 content = extracted
 
+            self._audit_tool_envelope_violations(content)
+            if self._on_message:
+                self._on_message("assistant", content)
+
             return Result.ok(
                 CompletionResponse(
                     content=content,
@@ -215,6 +239,24 @@ class KiroCodeAdapter:
             elif msg.role == MessageRole.ASSISTANT:
                 parts.append(f"Assistant: {msg.content}")
 
+        if self._allowed_tools is not None:
+            if self._allowed_tools:
+                parts.append(
+                    "Tool constraints: Limit tool usage to ONLY the following tools:\n"
+                    + "\n".join(f"- {tool}" for tool in self._allowed_tools)
+                )
+            else:
+                parts.append("Tool constraints: Do NOT use any tools. Respond with text only.")
+
+        if self._max_turns == 1:
+            parts.append(
+                "Execution constraints: Respond in a single turn. Do not ask follow-up questions."
+            )
+        elif self._max_turns > 1:
+            parts.append(
+                f"Execution constraints: Complete your response within {self._max_turns} turns maximum."
+            )
+
         # Inject JSON schema instruction when response_format requires it
         if config and config.response_format:
             fmt_type = config.response_format.get("type")
@@ -236,6 +278,36 @@ class KiroCodeAdapter:
                 )
 
         return "\n\n".join(parts)
+
+    def _audit_tool_envelope_violations(self, content: str) -> None:
+        """Warn when Kiro output exposes tool-use markers outside the envelope.
+
+        Kiro's non-interactive stdout is not a structured event stream, so this
+        is intentionally best-effort. The prompt directive is the primary soft
+        envelope; this hook catches JSON-ish ``tool_use`` markers if Kiro
+        surfaces them in output.
+        """
+        if self._allowed_tools is None or not _TOOL_USE_MARKER_RE.search(content):
+            return
+
+        allowed = frozenset(self._allowed_tools)
+        tool_names = _TOOL_NAME_RE.findall(content)
+        if not tool_names and not allowed:
+            log.warning(
+                "kiro_adapter.tool_envelope_violation",
+                tool=None,
+                allowed_tools=[],
+                reason="Kiro output included a tool_use marker despite an empty allowed_tools envelope.",
+            )
+            return
+
+        for tool_name in tool_names:
+            if tool_name not in allowed:
+                log.warning(
+                    "kiro_adapter.tool_envelope_violation",
+                    tool=tool_name,
+                    allowed_tools=list(self._allowed_tools),
+                )
 
 
 # Ensure protocol compliance

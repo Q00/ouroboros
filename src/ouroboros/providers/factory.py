@@ -59,7 +59,7 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # completion-only API that never executes tools from the adapter, so an
 # envelope has nothing to restrict on that path (enforcement is
 # vacuously satisfied).
-_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini", "opencode"})
+_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini", "kiro", "opencode"})
 
 
 def resolve_llm_backend(backend: str | None = None) -> str:
@@ -204,6 +204,9 @@ def create_llm_adapter(
         return KiroCodeAdapter(
             cli_path=cli_path or get_kiro_cli_path(),
             cwd=cwd,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
             timeout=timeout,
             max_retries=max_retries,
         )
