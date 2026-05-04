@@ -89,6 +89,8 @@ class AutoPipelineState:
     runtime_backend: str | None = None
     opencode_mode: str | None = None
     skip_run: bool = False
+    max_interview_rounds: int = 12
+    max_repair_rounds: int = 5
     interview_session_id: str | None = None
     interview_completed: bool = False
     seed_id: str | None = None
@@ -182,12 +184,17 @@ class AutoPipelineState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AutoPipelineState:
         """Deserialize from a dictionary and reject malformed persisted state."""
+        payload = dict(data)
+        # Older auto sessions predate durable loop-bound policy. Preserve
+        # resume compatibility by assigning the historical defaults once, then
+        # persisting them with subsequent saves.
+        payload.setdefault("max_interview_rounds", 12)
+        payload.setdefault("max_repair_rounds", 5)
         required_fields = {item.name for item in fields(cls)}
-        missing_fields = sorted(required_fields - data.keys())
+        missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
             msg = f"state is missing required fields: {', '.join(missing_fields)}"
             raise ValueError(msg)
-        payload = dict(data)
         payload["phase"] = AutoPhase(payload["phase"])
         payload["policy"] = AutoPolicy(payload["policy"])
         state = cls(**payload)
@@ -210,6 +217,11 @@ class AutoPipelineState:
         if self.required_grade not in {"A", "B", "C"}:
             msg = "required_grade must be one of A, B, or C"
             raise ValueError(msg)
+        for field_name in ("max_interview_rounds", "max_repair_rounds"):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                msg = f"{field_name} must be a positive integer"
+                raise ValueError(msg)
 
         for field_name in (
             "phase_started_at",

@@ -3,8 +3,8 @@
 This module implements the stateless resolver exported by
 :mod:`ouroboros.router`. It owns only deterministic parsing and frontmatter
 normalization: command-prefix parsing, packaged ``SKILL.md`` lookup,
-``mcp_tool``/``mcp_args`` validation, first-argument extraction, and ``$1`` /
-``$CWD`` template substitution.
+``mcp_tool``/``mcp_args`` validation, argument extraction, and deterministic
+template substitution.
 
 Runtime-specific concerns stay outside this module. The Codex CLI, Hermes, and
 Opencode runtimes pass a :class:`ResolveRequest`, inspect the returned
@@ -53,7 +53,14 @@ from ouroboros.router.types import (
 
 _MCP_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SKILL_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-_DISPATCH_TEMPLATE_PATTERN = re.compile(r"\$(?:CWD|1)(?![A-Za-z0-9_])")
+_DISPATCH_TEMPLATE_PATTERN = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|1)(?![A-Za-z0-9_])")
+_DISPATCH_TEMPLATE_EXACT_PATTERN = re.compile(
+    r"^\$(?P<name>[A-Za-z_][A-Za-z0-9_]*|1)(?![A-Za-z0-9_])$"
+)
+_INTEGER_OPTION_PATTERN = re.compile(r"^[+-]?\d+$")
+_BOOLEAN_OPTION_NAMES = frozenset({"skip_run"})
+_VALUE_OPTION_NAMES = frozenset({"resume", "max_interview_rounds", "max_repair_rounds"})
+_CONTROL_OPTION_NAMES = _BOOLEAN_OPTION_NAMES | _VALUE_OPTION_NAMES
 # Windows literal path payloads (drive-letter `C:\…` or UNC `\\server\share\…`)
 # must skip shell tokenization — `shlex.split` treats backslash as an escape and
 # silently drops it, so `C:\temp\seed.yaml` would dispatch as `C:tempseed.yaml`.
@@ -337,21 +344,200 @@ def extract_first_argument(remainder: str | None) -> str | None:
     return " ".join(parts) if parts else None
 
 
+def _shell_split_remainder(remainder: str | None) -> list[str]:
+    """Return shell-normalized tokens for a single-line command remainder."""
+    if remainder is None or not remainder.strip() or re.search(r"[\r\n].*\S", remainder):
+        return []
+    stripped = remainder.strip()
+    if _WINDOWS_LITERAL_PATH_PATTERN.match(stripped):
+        return [remainder]
+    quoted_windows = _try_extract_quoted_windows_literal_payload(stripped)
+    if quoted_windows is not None:
+        return shlex.split(quoted_windows) if quoted_windows.strip() else []
+    try:
+        return shlex.split(remainder)
+    except ValueError:
+        return remainder.split()
+
+
+def _starts_with_quoted_payload(remainder: str | None) -> bool:
+    """Return whether the single-line payload begins with a shell-quoted argument."""
+    return bool(remainder and remainder.lstrip().startswith(("'", '"')))
+
+
+def _coerce_named_option_value(value: str | bool) -> str | int | bool:
+    """Coerce deterministic CLI-style option values for MCP JSON payloads."""
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    if _INTEGER_OPTION_PATTERN.fullmatch(value.strip()) is not None:
+        return int(value)
+    return value
+
+
+def _extract_dispatch_template_values(
+    remainder: str | None,
+    *,
+    first_argument: str | None,
+    cwd: str | Path,
+) -> dict[str, Any]:
+    """Build template values from deterministic command arguments.
+
+    ``$1`` remains the legacy full remainder payload for compatibility. New
+    named placeholders (for example ``$resume`` or ``$skip_run``) are resolved
+    from long ``--kebab-case`` options, while ``$args``/``$goal`` contain the
+    shell-normalized positional payload with those options removed.
+    """
+    values: dict[str, Any] = {
+        "1": first_argument or "",
+        "CWD": str(cwd),
+        "resume": "",
+        "skip_run": "",
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+    }
+    tokens = _shell_split_remainder(remainder)
+    if not tokens and first_argument:
+        # Multiline payloads intentionally skip shell tokenization so Seed YAML
+        # and free-form goals keep their original bytes. Named-template skills
+        # must therefore fall back to the legacy full-remainder payload instead
+        # of treating the goal as empty.
+        values["args"] = first_argument
+        values["goal"] = first_argument
+        return values
+
+    positional: list[str] = []
+    parse_trailing_options = _starts_with_quoted_payload(remainder)
+    seen_positional = False
+    positional_count = 0
+    literal_control_cues = {
+        "about",
+        "around",
+        "document",
+        "documents",
+        "documenting",
+        "explain",
+        "explains",
+        "explaining",
+        "for",
+        "mention",
+        "mentions",
+        "mentioning",
+        "regarding",
+        "support",
+        "supports",
+        "supporting",
+        "to",
+        "with",
+    }
+
+    def append_positional(token: str) -> None:
+        nonlocal parse_trailing_options, positional_count, seen_positional
+        positional.append(token)
+        seen_positional = True
+        positional_count += 1
+        if positional_count > 1:
+            parse_trailing_options = False
+
+    def option_name_for(token: str) -> str:
+        return token[2:].split("=", 1)[0].strip().replace("-", "_")
+
+    def control_suffix_starts_at(start: int) -> bool:
+        suffix_index = start
+        while suffix_index < len(tokens):
+            suffix_token = tokens[suffix_index]
+            if not suffix_token.startswith("--") or suffix_token == "--":
+                return False
+            suffix_option_name = option_name_for(suffix_token)
+            if suffix_option_name not in _CONTROL_OPTION_NAMES:
+                return False
+            if "=" in suffix_token or suffix_option_name in _BOOLEAN_OPTION_NAMES:
+                suffix_index += 1
+                continue
+            if (
+                suffix_option_name in _VALUE_OPTION_NAMES
+                and suffix_index + 1 < len(tokens)
+                and not tokens[suffix_index + 1].startswith("--")
+            ):
+                suffix_index += 2
+                continue
+            return False
+        return True
+
+    def previous_token_marks_literal_control() -> bool:
+        return bool(positional and positional[-1].strip().lower() in literal_control_cues)
+
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("--") or token == "--":
+            append_positional(token)
+            index += 1
+            continue
+
+        if seen_positional and not parse_trailing_options:
+            if not control_suffix_starts_at(index) or previous_token_marks_literal_control():
+                append_positional(token)
+                index += 1
+                continue
+
+        option = token[2:]
+        if not option:
+            index += 1
+            continue
+        option_name = option.split("=", 1)[0].strip().replace("-", "_")
+        if option_name not in _CONTROL_OPTION_NAMES:
+            append_positional(token)
+            index += 1
+            continue
+        if "=" in option:
+            raw_name, raw_value = option.split("=", 1)
+            option_value: str | bool = raw_value
+        elif option_name in _BOOLEAN_OPTION_NAMES:
+            raw_name = option
+            option_value = True
+        elif index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+            raw_name = option
+            option_value = tokens[index + 1]
+            index += 1
+        elif option_name in _VALUE_OPTION_NAMES:
+            raise ValueError(f"--{option} requires a value")
+        else:
+            raw_name = option
+            option_value = True
+
+        name = raw_name.strip().replace("-", "_")
+        if name:
+            values[name] = _coerce_named_option_value(option_value)
+        index += 1
+
+    positional_payload = " ".join(positional)
+    values["args"] = positional_payload
+    values["goal"] = positional_payload
+    return values
+
+
 def resolve_dispatch_templates(
     value: Any,
     *,
     first_argument: str | None,
     cwd: str | Path = "",
+    template_values: Mapping[str, Any] | None = None,
 ) -> Any:
     """Resolve deterministic frontmatter template values."""
     resolved_cwd = str(cwd)
+    replacements = dict(template_values or {"1": first_argument or "", "CWD": resolved_cwd})
     if isinstance(value, str):
-        replacements = {
-            "$1": first_argument or "",
-            "$CWD": resolved_cwd,
-        }
+        exact = _DISPATCH_TEMPLATE_EXACT_PATTERN.fullmatch(value)
+        if exact is not None:
+            return replacements.get(exact.group("name"), value)
+
         return _DISPATCH_TEMPLATE_PATTERN.sub(
-            lambda match: replacements[match.group(0)],
+            lambda match: str(replacements.get(match.group(0)[1:], match.group(0))),
             value,
         )
     if isinstance(value, Mapping):
@@ -360,12 +546,18 @@ def resolve_dispatch_templates(
                 item,
                 first_argument=first_argument,
                 cwd=resolved_cwd,
+                template_values=replacements,
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
         return [
-            resolve_dispatch_templates(item, first_argument=first_argument, cwd=resolved_cwd)
+            resolve_dispatch_templates(
+                item,
+                first_argument=first_argument,
+                cwd=resolved_cwd,
+                template_values=replacements,
+            )
             for item in value
         ]
     return value
@@ -452,10 +644,16 @@ def resolve_parsed_skill_dispatch(
     first_argument = extract_first_argument(parsed.remainder)
     mcp_tool, mcp_args = normalized
     try:
+        template_values = _extract_dispatch_template_values(
+            parsed.remainder,
+            first_argument=first_argument,
+            cwd=cwd,
+        )
         resolved_mcp_args = resolve_dispatch_templates(
             mcp_args,
             first_argument=first_argument,
             cwd=cwd,
+            template_values=template_values,
         )
     except Exception as exc:
         return InvalidSkill(
