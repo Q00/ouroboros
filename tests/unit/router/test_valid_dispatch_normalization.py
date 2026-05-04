@@ -204,6 +204,31 @@ def test_valid_dispatch_resolves_named_option_templates_without_polluting_goal(
     }
 
 
+def test_valid_dispatch_preserves_goal_after_boolean_option(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt='ooo auto --skip-run "Build a local-first habit tracker CLI"',
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args == {
+        "goal": "Build a local-first habit tracker CLI",
+        "resume": "",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+        "skip_run": True,
+    }
+
+
 def test_valid_dispatch_resolves_resume_option_template_without_goal(
     tmp_path: Path,
 ) -> None:
