@@ -19,6 +19,7 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
@@ -31,6 +32,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator import resolve_agent_runtime_backend
 
 
 @dataclass(slots=True)
@@ -127,15 +129,20 @@ class AutoHandler:
             state = store.load(resume)
             cwd = state.cwd
             runtime_backend = state.runtime_backend or self.agent_runtime_backend
-            opencode_mode = state.opencode_mode or self.opencode_mode
+            if runtime_backend is None and state.opencode_mode is not None:
+                runtime_backend = "opencode"
+            runtime_backend = resolve_agent_runtime_backend(runtime_backend)
+            opencode_mode = _resolved_opencode_mode(
+                runtime_backend, state.opencode_mode or self.opencode_mode
+            )
             skip_run = requested_skip_run or state.skip_run
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
                 raise ValueError("goal is required when not resuming")
             cwd = str(_resolve_cwd(arguments.get("cwd")))
-            runtime_backend = self.agent_runtime_backend
-            opencode_mode = self.opencode_mode
+            runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
+            opencode_mode = _resolved_opencode_mode(runtime_backend, self.opencode_mode)
             skip_run = requested_skip_run
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
         state.runtime_backend = runtime_backend
@@ -182,6 +189,13 @@ class AutoHandler:
             skip_run=skip_run,
         )
         return await pipeline.run(state)
+
+
+def _resolved_opencode_mode(runtime_backend: str | None, opencode_mode: str | None) -> str | None:
+    if runtime_backend != "opencode":
+        return None
+    resolved = opencode_mode or get_opencode_mode()
+    return "subprocess" if resolved == "plugin" else resolved
 
 
 def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:

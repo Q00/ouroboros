@@ -691,6 +691,47 @@ def test_static_ouroboros_tools_exports_auto_handler() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_handler_fresh_session_persists_resolved_runtime(monkeypatch, tmp_path) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["runtime"] = run_state.runtime_backend
+            captured["opencode_mode"] = run_state.opencode_mode
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(
+        auto_module, "resolve_agent_runtime_backend", lambda value=None: value or "codex"
+    )
+
+    result = await AutoHandler().handle({"goal": "Build a CLI", "cwd": str(tmp_path)})
+
+    assert result.is_ok
+    assert captured == {"runtime": "codex", "opencode_mode": None}
+
+
+@pytest.mark.asyncio
 async def test_auto_handler_fresh_relative_cwd_persists_absolute_project(
     monkeypatch, tmp_path
 ) -> None:
