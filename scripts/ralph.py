@@ -48,7 +48,7 @@ _QA_VERDICT_RE = re.compile(r"Verdict:\s*(\w+)")
 
 
 def _resolve_project_dir(project_dir: str | None) -> str | None:
-    """Return an absolute project directory path for MCP calls."""
+    """Return the containing git worktree root for MCP calls."""
     if not project_dir:
         return None
     resolved = Path(project_dir).expanduser().resolve()
@@ -56,7 +56,19 @@ def _resolve_project_dir(project_dir: str | None) -> str | None:
         raise ValueError(f"--project-dir does not exist: {resolved}")
     if not resolved.is_dir():
         raise ValueError(f"--project-dir is not a directory: {resolved}")
-    return str(resolved)
+
+    import subprocess
+
+    try:
+        repo_root = subprocess.check_output(
+            ["git", "-C", str(resolved), "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"--project-dir must be inside a git worktree: {resolved}") from exc
+
+    return str(Path(repo_root).resolve())
 
 
 def parse_evolve_text(text: str) -> dict[str, Any]:

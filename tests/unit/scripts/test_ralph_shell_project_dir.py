@@ -37,6 +37,27 @@ def test_ralph_sh_help_documents_project_dir() -> None:
     assert "--project-dir PATH" in result.stdout
 
 
+def test_ralph_sh_rejects_project_dir_outside_git_worktree(tmp_path: Path) -> None:
+    project_dir = tmp_path / "plain-dir"
+    project_dir.mkdir()
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RALPH_SH),
+            "--lineage-id",
+            "lin_scope",
+            "--project-dir",
+            str(project_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "must be inside a git worktree" in result.stderr
+
+
 def test_ralph_sh_scopes_git_snapshot_to_project_dir(tmp_path: Path) -> None:
     script_dir = tmp_path / "scripts"
     script_dir.mkdir()
@@ -130,8 +151,13 @@ def test_ralph_sh_scopes_rollback_to_project_dir(tmp_path: Path) -> None:
 
     cwd_repo = tmp_path / "cwd-repo"
     target_repo = tmp_path / "rollback target"
+    nested_project_dir = target_repo / "packages" / "app"
     _init_repo(cwd_repo)
     _init_repo(target_repo)
+    nested_project_dir.mkdir(parents=True)
+    (target_repo / "outside-nested.txt").write_text("safe baseline\n", encoding="utf-8")
+    _git(target_repo, "add", "outside-nested.txt")
+    _git(target_repo, "commit", "-m", "add outside nested baseline")
     _git(target_repo, "tag", "ooo/lin_scope/gen_1")
 
     result = subprocess.run(
@@ -143,7 +169,7 @@ def test_ralph_sh_scopes_rollback_to_project_dir(tmp_path: Path) -> None:
             "--max-cycles",
             "1",
             "--project-dir",
-            str(target_repo),
+            str(nested_project_dir),
         ],
         cwd=cwd_repo,
         capture_output=True,
@@ -153,5 +179,6 @@ def test_ralph_sh_scopes_rollback_to_project_dir(tmp_path: Path) -> None:
 
     assert result.returncode == 12
     assert (target_repo / "README.md").read_text(encoding="utf-8") == "initial\n"
+    assert (target_repo / "outside-nested.txt").read_text(encoding="utf-8") == "safe baseline\n"
     assert not (target_repo / "untracked.txt").exists()
     assert not (cwd_repo / "untracked.txt").exists()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -18,6 +19,11 @@ sys.modules["ralph"] = _ralph
 _spec.loader.exec_module(_ralph)
 
 parse_evolve_text = _ralph.parse_evolve_text
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.DEVNULL)
 
 
 # ---------------------------------------------------------------------------
@@ -222,10 +228,27 @@ def test_resolve_project_dir_rejects_missing_path(tmp_path: Path) -> None:
         _ralph._resolve_project_dir(str(missing))
 
 
+def test_resolve_project_dir_rejects_non_git_directory(tmp_path: Path) -> None:
+    project_dir = tmp_path / "not-a-repo"
+    project_dir.mkdir()
+
+    with pytest.raises(ValueError, match="git worktree"):
+        _ralph._resolve_project_dir(str(project_dir))
+
+
+def test_resolve_project_dir_normalizes_nested_path_to_repo_root(tmp_path: Path) -> None:
+    project_dir = tmp_path / "target repo"
+    nested_dir = project_dir / "nested" / "pkg"
+    _init_git_repo(project_dir)
+    nested_dir.mkdir(parents=True)
+
+    assert _ralph._resolve_project_dir(str(nested_dir)) == str(project_dir.resolve())
+
+
 @pytest.mark.asyncio
 async def test_call_evolve_forwards_project_dir(tmp_path: Path) -> None:
     project_dir = tmp_path / "target repo"
-    project_dir.mkdir()
+    _init_git_repo(project_dir)
     session = _FakeSession([CONTINUE_TEXT])
     args = _ralph.build_parser().parse_args(
         ["--lineage-id", "lin_task_mgr", "--project-dir", str(project_dir)]
@@ -245,7 +268,7 @@ async def test_call_evolve_forwards_project_dir(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_stagnation_retry_preserves_project_dir_and_execution_flags(tmp_path: Path) -> None:
     project_dir = tmp_path / "target"
-    project_dir.mkdir()
+    _init_git_repo(project_dir)
     session = _FakeSession([STAGNATED_TEXT, CONTINUE_TEXT])
     args = _ralph.build_parser().parse_args(
         [

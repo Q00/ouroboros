@@ -85,6 +85,11 @@ if [[ -n "$PROJECT_DIR" ]]; then
         exit 2
     fi
     PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+    if ! PROJECT_REPO_ROOT="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
+        echo "Error: --project-dir must be inside a git worktree: $PROJECT_DIR" >&2
+        exit 2
+    fi
+    PROJECT_DIR="$(cd "$PROJECT_REPO_ROOT" && pwd -P)"
 fi
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
