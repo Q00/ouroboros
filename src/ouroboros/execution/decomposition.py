@@ -367,6 +367,8 @@ async def decompose_ac(
 
     config = CompletionConfig(
         model=model or get_decomposition_model(),
+        role="decomposition",
+        model_is_explicit=model is not None,
         temperature=0.5,  # Balanced creativity and consistency
         max_tokens=1000,
     )

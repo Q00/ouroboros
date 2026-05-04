@@ -59,6 +59,7 @@ from ouroboros.providers.codex_cli_stream import (
     iter_stream_lines,
     terminate_process,
 )
+from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
 
@@ -226,7 +227,7 @@ class OpenCodeLLMAdapter:
             raise ValueError(msg)
         return candidate
 
-    def _build_prompt(self, messages: list[Message]) -> str:
+    def _build_prompt(self, messages: list[Message], *, max_turns: int | None = None) -> str:
         """Build a plain-text prompt from conversation messages.
 
         System messages are grouped under a ``## System Instructions``
@@ -261,12 +262,13 @@ class OpenCodeLLMAdapter:
                 parts.append("## Tool Constraints")
                 parts.append("Do NOT use any tools. Respond with text only.")
 
-        if self._max_turns == 1:
+        effective_max_turns = max_turns if max_turns is not None else self._max_turns
+        if effective_max_turns == 1:
             parts.append("## Execution Constraints")
             parts.append("Respond in a single turn. Do not ask follow-up questions.")
-        elif self._max_turns > 1:
+        elif effective_max_turns > 1:
             parts.append("## Execution Constraints")
-            parts.append(f"Complete your response within {self._max_turns} turns maximum.")
+            parts.append(f"Complete your response within {effective_max_turns} turns maximum.")
 
         conversation_parts: list[str] = []
         for message in messages:
@@ -462,7 +464,11 @@ class OpenCodeLLMAdapter:
             :class:`~ouroboros.providers.base.CompletionResponse` or
             a :class:`~ouroboros.core.errors.ProviderError`.
         """
-        prompt = self._build_prompt(messages)
+        profile_result = resolve_completion_profile_result(config, backend="opencode")
+        if profile_result.is_err:
+            return Result.err(profile_result.error)
+        config = profile_result.value.config
+        prompt = self._build_prompt(messages, max_turns=config.max_turns)
         if len(prompt) > MAX_LLM_RESPONSE_LENGTH:
             return Result.err(
                 ProviderError(

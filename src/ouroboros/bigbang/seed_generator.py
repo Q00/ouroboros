@@ -74,13 +74,17 @@ class SeedGenerator:
     """
 
     llm_adapter: LLMAdapter
-    model: str = field(default_factory=get_clarification_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     temperature: float = EXTRACTION_TEMPERATURE
     max_tokens: int = 4096
     output_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "seeds")
 
     def __post_init__(self) -> None:
         """Ensure output directory exists."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_clarification_model()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     async def generate(
@@ -322,8 +326,11 @@ class SeedGenerator:
             Message(role=MessageRole.USER, content=user_prompt),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="seed_generation",
+            model_is_explicit=self.model_is_explicit,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )

@@ -126,6 +126,33 @@ class LLMConfig(BaseModel, frozen=True):
     context_compression_model: str = "gpt-4"
 
 
+class LLMProviderProfileConfig(BaseModel, frozen=True):
+    """Backend-specific overrides for an Ouroboros LLM task profile.
+
+    ``profile`` is intentionally generic here: for Codex it maps to a
+    ``codex exec --profile`` name, while other backends can ignore it and use
+    portable fields such as ``model`` or ``temperature``.
+    """
+
+    profile: str | None = None
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_turns: int | None = Field(default=None, ge=1)
+
+
+class LLMTaskProfileConfig(BaseModel, frozen=True):
+    """Provider-neutral LLM task profile with optional backend overrides."""
+
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_turns: int | None = Field(default=None, ge=1)
+    providers: dict[str, LLMProviderProfileConfig] = Field(default_factory=dict)
+
+
 class ClarificationConfig(BaseModel, frozen=True):
     """Phase 0 (Big Bang) configuration.
 
@@ -394,6 +421,8 @@ class OuroborosConfig(BaseModel, frozen=True):
         resilience: Phase 3 configuration
         evaluation: Phase 4 configuration
         consensus: Phase 5 configuration
+        llm_profiles: Named provider-neutral profiles for LLM-only tasks
+        llm_role_profiles: Mapping from logical task roles to profile names
         persistence: Storage configuration
         drift: Drift monitoring configuration
         runtime_controls: Long-running workflow timeout/progress controls
@@ -407,6 +436,8 @@ class OuroborosConfig(BaseModel, frozen=True):
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     consensus: ConsensusConfig = Field(default_factory=ConsensusConfig)
+    llm_profiles: dict[str, LLMTaskProfileConfig] = Field(default_factory=dict)
+    llm_role_profiles: dict[str, str] = Field(default_factory=dict)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     drift: DriftConfig = Field(default_factory=DriftConfig)
     runtime_controls: RuntimeControlsConfig = Field(default_factory=RuntimeControlsConfig)

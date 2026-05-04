@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -20,6 +21,9 @@ import ouroboros.orchestrator.codex_cli_runtime as codex_cli_runtime_module
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router.dispatch import SkillDispatchRouter as SharedSkillDispatchRouter
+
+_EXPECTED_CODEX_PATH = str(Path("/usr/local/bin/codex"))
+_EXPECTED_PROJECT_CWD = str(Path("/tmp/project"))
 
 
 class _FakeStream:
@@ -209,13 +213,13 @@ class TestCodexCliRuntime:
             output_last_message_path="/tmp/out.txt",
         )
 
-        assert command[:2] == ["/usr/local/bin/codex", "exec"]
+        assert command[:2] == [_EXPECTED_CODEX_PATH, "exec"]
         assert "--json" in command
         assert "--full-auto" in command
         assert "--model" in command
         assert "o3" in command
         assert "-C" in command
-        assert "/tmp/project" in command
+        assert _EXPECTED_PROJECT_CWD in command
 
     def test_build_command_for_resume(self) -> None:
         """Builds an exec resume command when a session id is provided."""
@@ -233,7 +237,212 @@ class TestCodexCliRuntime:
         assert command.index("--skip-git-repo-check") < resume_index
         assert command.index("--output-last-message") < resume_index
         assert command.index("-C") < resume_index
-        assert command[command.index("-C") + 1] == "/tmp/project"
+        assert command[command.index("-C") + 1] == _EXPECTED_PROJECT_CWD
+
+    def test_build_command_uses_profile_for_runtime_session_role(self) -> None:
+        """Agent runtime sessions should resolve Codex profiles from session_role."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--profile" in command
+        assert command[command.index("--profile") + 1] == "ouroboros-standard"
+        assert "--model" not in command
+
+    def test_build_command_uses_default_runtime_profile_for_resumed_roleless_handle(self) -> None:
+        """Resumed role-less agent_runtime handles keep using the documented fallback role."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="agent_runtime",
+            native_session_id="thread-123",
+            metadata={},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+                resume_session_id="thread-123",
+            )
+
+        assert "--profile" in command
+        assert command[command.index("--profile") + 1] == "ouroboros-standard"
+        assert "--model" not in command
+
+    def test_build_command_does_not_double_prefix_prefixed_runtime_handle_kind(self) -> None:
+        """Already-prefixed runtime handle kinds are treated as logical role keys."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="agent_runtime_evaluation",
+            metadata={},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "deep": {
+                    "providers": {"codex": {"profile": "ouroboros-deep"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_evaluation": "deep"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--profile" in command
+        assert command[command.index("--profile") + 1] == "ouroboros-deep"
+        assert "--model" not in command
+
+    def test_build_command_uses_runtime_profile_provider_model_fallback(self) -> None:
+        """Codex runtime profiles without Codex-native profile anchors should use models."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"model": "gpt-5.3-codex"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--model" in command
+        assert command[command.index("--model") + 1] == "gpt-5.3-codex"
+        assert "--profile" not in command
+
+    def test_build_command_uses_runtime_profile_top_level_model_fallback(self) -> None:
+        """Agent runtime should honor provider-neutral profile model fallback."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={"standard": {"model": "gpt-5.3-codex"}},
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--model" in command
+        assert command[command.index("--model") + 1] == "gpt-5.3-codex"
+        assert "--profile" not in command
+
+    def test_build_command_explicit_model_wins_over_runtime_profile(self) -> None:
+        """Explicit runtime model overrides keep existing --model behavior."""
+        runtime = CodexCliRuntime(cli_path="codex", model="gpt-5.5", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--model" in command
+        assert command[command.index("--model") + 1] == "gpt-5.5"
+        assert "--profile" not in command
+
+    def test_build_command_uses_explicit_runtime_profile_metadata(self) -> None:
+        """Runtime metadata can directly select an Ouroboros profile."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="evaluation_session",
+            metadata={"llm_profile": "deep"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "deep": {
+                    "providers": {"codex": {"profile": "ouroboros-deep"}},
+                },
+            },
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--profile" in command
+        assert command[command.index("--profile") + 1] == "ouroboros-deep"
+
+    def test_build_command_uses_explicit_runtime_profile_model_fallback(self) -> None:
+        """Explicit Ouroboros profile metadata should still fall back to model."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="evaluation_session",
+            metadata={"llm_profile": "deep"},
+        )
+        config = OuroborosConfig(llm_profiles={"deep": {"model": "gpt-5.5"}})
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--model" in command
+        assert command[command.index("--model") + 1] == "gpt-5.5"
+        assert "--profile" not in command
 
     def test_resolve_cli_path_falls_back_from_wrapper(self, tmp_path: Path) -> None:
         """Runtime should bypass wrappers the same way provider adapters do."""
@@ -354,7 +563,7 @@ class TestCodexCliRuntime:
         assert message.resume_handle is not None
         assert message.resume_handle.native_session_id == "thread-123"
         assert message.resume_handle.kind == "level_coordinator"
-        assert message.resume_handle.cwd == "/tmp/project"
+        assert message.resume_handle.cwd == seeded_handle.cwd
         assert message.resume_handle.approval_mode == "acceptEdits"
         assert message.resume_handle.metadata == seeded_handle.metadata
 
@@ -452,7 +661,7 @@ class TestCodexCliRuntime:
         request = mock_resolve.call_args.args[1]
         assert isinstance(request, ResolveRequest)
         assert request.prompt == "ooo run seed.yaml"
-        assert request.cwd == "/tmp/project"
+        assert request.cwd == _EXPECTED_PROJECT_CWD
         assert request.skills_dir == tmp_path
         dispatcher.assert_awaited_once()
         intercept_request = dispatcher.await_args.args[0]
@@ -1122,7 +1331,7 @@ class TestCodexCliRuntime:
         assert intercept_request.first_argument == "Build a REST API"
         assert intercept_request.mcp_args == {
             "initial_context": "Build a REST API",
-            "cwd": "/tmp/project",
+            "cwd": _EXPECTED_PROJECT_CWD,
         }
         mock_exec.assert_not_called()
         assert [message.content for message in messages] == [

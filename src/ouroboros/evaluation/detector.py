@@ -153,6 +153,7 @@ async def ensure_mechanical_toml(
     Returns:
         True on success (toml exists after the call), False otherwise.
     """
+    model_is_explicit = model is not None
     if model is None:
         from ouroboros.config.loader import get_mechanical_detector_model
 
@@ -166,7 +167,13 @@ async def ensure_mechanical_toml(
         log.info("detector.skipped", reason="no_manifests", working_dir=str(working_dir))
         return False
 
-    proposal = await _ask_llm(adapter, working_dir, manifests, model)
+    proposal = await _ask_llm(
+        adapter,
+        working_dir,
+        manifests,
+        model,
+        model_is_explicit=model_is_explicit,
+    )
     if proposal is None:
         return False
 
@@ -360,6 +367,8 @@ async def _ask_llm(
     working_dir: Path,
     manifests: dict[str, str],
     model: str,
+    *,
+    model_is_explicit: bool = False,
 ) -> dict[str, str] | None:
     """Send one detect prompt and return a parsed JSON proposal."""
     payload_parts = [f"Working directory: {working_dir.name}", ""]
@@ -378,6 +387,8 @@ async def _ask_llm(
     ]
     config = CompletionConfig(
         model=model,
+        role="mechanical_detection",
+        model_is_explicit=model_is_explicit,
         temperature=0.0,
         max_tokens=512,
         response_format={"type": "json_object"},

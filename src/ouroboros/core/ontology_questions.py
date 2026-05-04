@@ -362,6 +362,7 @@ async def analyze_ontologically(
     model: str | None = None,
     temperature: float = 0.3,
     max_tokens: int = 2048,
+    model_is_explicit: bool | None = None,
 ) -> Result[OntologicalInsight, ProviderError | ValidationError]:
     """Central ontological analysis function.
 
@@ -382,6 +383,7 @@ async def analyze_ontologically(
         model: Model to use for analysis
         temperature: Sampling temperature (lower = more deterministic)
         max_tokens: Maximum tokens for LLM response
+        model_is_explicit: Whether ``model`` is a caller pin. ``None`` infers from model.
 
     Returns:
         Result containing OntologicalInsight or error
@@ -417,8 +419,13 @@ async def analyze_ontologically(
         ),
     ]
 
+    inferred_model_is_explicit = model is not None
     config = CompletionConfig(
         model=model or get_ontology_analysis_model(),
+        role="ontology_analysis",
+        model_is_explicit=(
+            inferred_model_is_explicit if model_is_explicit is None else model_is_explicit
+        ),
         temperature=temperature,
         max_tokens=max_tokens,
     )

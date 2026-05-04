@@ -462,6 +462,7 @@ class DoubleDiamond:
             enable_stagnation_detection: Enable stagnation pattern detection.
         """
         self._llm_adapter = llm_adapter
+        self._default_model_is_explicit = default_model is not None
         self._default_model = default_model or get_double_diamond_model()
         self._temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
         self._max_tokens = max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
@@ -755,6 +756,8 @@ class DoubleDiamond:
 
         config = CompletionConfig(
             model=self._default_model,
+            role="double_diamond",
+            model_is_explicit=self._default_model_is_explicit,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
         )

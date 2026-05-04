@@ -278,7 +278,8 @@ class InterviewEngine:
 
     llm_adapter: LLMAdapter
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
-    model: str = field(default_factory=get_clarification_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     temperature: float = 0.7
     max_tokens: int = 2048
     _MAX_TOTAL_PROMPT_CHARS = 4800
@@ -290,6 +291,9 @@ class InterviewEngine:
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_clarification_model()
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def _state_file_path(self, interview_id: str) -> Path:
@@ -406,8 +410,11 @@ class InterviewEngine:
             *conversation_history,
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="clarification",
+            model_is_explicit=self.model_is_explicit,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )

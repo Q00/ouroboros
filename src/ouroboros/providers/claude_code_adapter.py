@@ -47,6 +47,7 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger(__name__)
 
@@ -242,6 +243,11 @@ class ClaudeCodeAdapter:
                 )
             )
 
+        profile_result = resolve_completion_profile_result(config, backend="claude_code")
+        if profile_result.is_err:
+            return Result.err(profile_result.error)
+        config = profile_result.value.config
+
         # Extract system messages and pass as system_prompt (not embedded in user prompt)
         system_msgs = [m for m in messages if m.role == MessageRole.SYSTEM]
         non_system_msgs = [m for m in messages if m.role != MessageRole.SYSTEM]
@@ -296,7 +302,7 @@ class ClaudeCodeAdapter:
             prompt_preview=prompt[:100],
             message_count=len(messages),
             has_system_prompt=system_prompt is not None,
-            max_turns=self._max_turns,
+            max_turns=config.max_turns if config.max_turns is not None else self._max_turns,
             model=config.model,
             cwd=str(self._cwd) if self._cwd else None,
             cli_path=str(self._cli_path) if self._cli_path else None,
@@ -584,7 +590,7 @@ class ClaudeCodeAdapter:
 
         options_kwargs: dict = {
             "disallowed_tools": disallowed,
-            "max_turns": self._max_turns,
+            "max_turns": config.max_turns if config.max_turns is not None else self._max_turns,
             # Allow MCP and other ~/.claude/ settings to be inherited
             "permission_mode": self._permission_mode,
             "cwd": self._cwd,
@@ -629,7 +635,7 @@ class ClaudeCodeAdapter:
 
         log.debug(
             "claude_code_adapter.sdk_request_configured",
-            max_turns=self._max_turns,
+            max_turns=options_kwargs["max_turns"],
             model=options_kwargs.get("model"),
             cwd=str(self._cwd) if self._cwd else None,
             cli_path=str(self._cli_path) if self._cli_path else None,

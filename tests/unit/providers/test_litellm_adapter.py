@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import litellm
 
 from ouroboros.config.models import CredentialsConfig, ProviderCredentials
-from ouroboros.core.errors import ProviderError
+from ouroboros.core.errors import ConfigError, ProviderError
 from ouroboros.providers.base import (
     CompletionConfig,
     Message,
@@ -452,6 +452,26 @@ class TestLiteLLMAdapterComplete:
 
         assert result.is_ok
         assert result.value.content == "Hi there!"
+
+    async def test_profile_config_error_returns_result_err(self) -> None:
+        """Bad profile config should not escape adapter.complete as ConfigError."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        config = CompletionConfig(model="gpt-4", profile="missing-profile")
+
+        with (
+            patch(
+                "ouroboros.providers.profiles.load_config", side_effect=ConfigError("bad config")
+            ),
+            patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion,
+        ):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_err
+        assert isinstance(result.error, ProviderError)
+        assert result.error.provider == "litellm"
+        assert "Invalid LLM profile configuration" in result.error.message
+        mock_acompletion.assert_not_called()
 
     async def test_rate_limit_error_returns_result_err(self) -> None:
         """Returns Result.err on rate limit error after retries."""

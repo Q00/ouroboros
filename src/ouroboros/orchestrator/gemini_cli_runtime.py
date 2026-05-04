@@ -155,6 +155,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
         *,
         resume_session_id: str | None = None,
         prompt: str | None = None,
+        runtime_handle: RuntimeHandle | None = None,
     ) -> list[str]:
         """Build the Gemini CLI command arguments for non-interactive execution.
 
@@ -164,7 +165,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
         - ``--output-format stream-json`` emits NDJSON events on stdout.
         - ``--approval-mode yolo`` skips interactive approvals (required for headless).
         """
-        del output_last_message_path, resume_session_id
+        del output_last_message_path, resume_session_id, runtime_handle
 
         command = [
             self._cli_path,

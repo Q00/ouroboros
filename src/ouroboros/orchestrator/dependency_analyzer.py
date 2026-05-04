@@ -346,6 +346,7 @@ class DependencyAnalyzer:
         model: str | None = None,
     ) -> None:
         self._llm = llm_adapter
+        self._model_is_explicit = model is not None
         self._model = model or get_dependency_analysis_model()
 
     async def analyze(
@@ -515,6 +516,8 @@ class DependencyAnalyzer:
             messages=[Message(role=MessageRole.USER, content=prompt)],
             config=CompletionConfig(
                 model=self._model,
+                role="dependency_analysis",
+                model_is_explicit=self._model_is_explicit,
                 temperature=0.0,
                 max_tokens=1000,
             ),

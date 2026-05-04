@@ -130,11 +130,18 @@ class ConsensusConfig:
         diversity_required: Require different providers
     """
 
-    models: tuple[str, ...] = field(default_factory=get_consensus_models)
+    models: tuple[str, ...] | None = None
+    models_are_explicit: bool = field(default=False, init=False)
     temperature: float = 0.3
     max_tokens: int = 1024
     majority_threshold: float = 0.66  # 2/3 = 0.6666...
     diversity_required: bool = True
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default models while preserving explicit caller pins."""
+        object.__setattr__(self, "models_are_explicit", self.models is not None)
+        if self.models is None:
+            object.__setattr__(self, "models", get_consensus_models())
 
 
 def _get_consensus_system_prompt() -> str:
@@ -294,6 +301,7 @@ class ConsensusEvaluator:
         - Models are NOT openrouter/* (custom models, tests), OR
         - OPENROUTER_API_KEY is properly configured
         """
+        assert self._config.models is not None
         needs_openrouter = any(m.startswith("openrouter/") for m in self._config.models)
         if not needs_openrouter:
             return True  # Custom models (e.g., tests) — use as-is
@@ -306,6 +314,7 @@ class ConsensusEvaluator:
     ) -> Result[tuple[ConsensusResult, list[BaseEvent]], ProviderError | ValidationError]:
         """Multi-model consensus: each model votes independently."""
         events: list[BaseEvent] = []
+        assert self._config.models is not None
         models = list(self._config.models)
 
         events.append(
@@ -415,6 +424,7 @@ class ConsensusEvaluator:
 
         config = CompletionConfig(
             model="",  # Use adapter's default model
+            role="consensus_perspective",
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
@@ -498,6 +508,8 @@ class ConsensusEvaluator:
         """
         config = CompletionConfig(
             model=model,
+            role="consensus_vote",
+            model_is_explicit=self._config.models_are_explicit,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
@@ -537,11 +549,26 @@ class DeliberativeConfig:
         max_tokens: Maximum tokens per response
     """
 
-    advocate_model: str = field(default_factory=get_consensus_advocate_model)
-    devil_model: str = field(default_factory=get_consensus_devil_model)
-    judge_model: str = field(default_factory=get_consensus_judge_model)
+    advocate_model: str | None = None
+    devil_model: str | None = None
+    judge_model: str | None = None
+    advocate_model_is_explicit: bool = field(default=False, init=False)
+    devil_model_is_explicit: bool = field(default=False, init=False)
+    judge_model_is_explicit: bool = field(default=False, init=False)
     temperature: float = 0.3
     max_tokens: int = 2048
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default models while preserving explicit caller pins."""
+        object.__setattr__(self, "advocate_model_is_explicit", self.advocate_model is not None)
+        object.__setattr__(self, "devil_model_is_explicit", self.devil_model is not None)
+        object.__setattr__(self, "judge_model_is_explicit", self.judge_model is not None)
+        if self.advocate_model is None:
+            object.__setattr__(self, "advocate_model", get_consensus_advocate_model())
+        if self.devil_model is None:
+            object.__setattr__(self, "devil_model", get_consensus_devil_model())
+        if self.judge_model is None:
+            object.__setattr__(self, "judge_model", get_consensus_judge_model())
 
 
 def _parse_judgment_response(
@@ -663,9 +690,11 @@ class DeliberativeConsensus:
         """
         self._llm = llm_adapter
         self._config = config or DeliberativeConfig()
+        assert self._config.devil_model is not None
         self._devil_strategy = devil_strategy or DevilAdvocateStrategy(
             llm_adapter=llm_adapter,
             model=self._config.devil_model,
+            model_is_explicit=self._config.devil_model_is_explicit,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
         )
@@ -790,6 +819,7 @@ class DeliberativeConsensus:
             # Advocate uses direct LLM call with role-specific prompt
             system_prompt = _get_advocate_system_prompt()
             model = self._config.advocate_model
+            assert model is not None
 
             messages = [
                 Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -798,6 +828,8 @@ class DeliberativeConsensus:
 
             config = CompletionConfig(
                 model=model,
+                role="consensus_advocate",
+                model_is_explicit=self._config.advocate_model_is_explicit,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
                 response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
@@ -937,8 +969,11 @@ Based on both positions above, make your final judgment."""
             Message(role=MessageRole.USER, content=user_prompt),
         ]
 
+        assert self._config.judge_model is not None
         config = CompletionConfig(
             model=self._config.judge_model,
+            role="consensus_judge",
+            model_is_explicit=self._config.judge_model_is_explicit,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={"type": "json_schema", "json_schema": JUDGMENT_SCHEMA},
@@ -948,6 +983,7 @@ Based on both positions above, make your final judgment."""
         if llm_result.is_err:
             return Result.err(llm_result.error)
 
+        assert self._config.judge_model is not None
         return _parse_judgment_response(llm_result.value.content, self._config.judge_model)
 
 

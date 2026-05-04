@@ -45,6 +45,7 @@ from ouroboros.providers.codex_cli_stream import (
     iter_stream_lines,
     terminate_process,
 )
+from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
 
@@ -135,9 +136,10 @@ class CodexCliLLMAdapter:
             raise ValueError(msg)
         return candidate
 
-    def _build_prompt(self, messages: list[Message]) -> str:
+    def _build_prompt(self, messages: list[Message], *, max_turns: int | None = None) -> str:
         """Build a plain-text prompt from conversation messages."""
         parts: list[str] = []
+        effective_max_turns = max_turns if max_turns is not None else self._max_turns
 
         system_messages = [
             message.content for message in messages if message.role == MessageRole.SYSTEM
@@ -157,7 +159,7 @@ class CodexCliLLMAdapter:
             parts.append("## Tool Constraints")
             parts.append("Do NOT use any tools or MCP calls. Respond with plain text only.")
 
-        if self._max_turns > 0:
+        if effective_max_turns > 0:
             parts.append("## Execution Budget")
             if self._allowed_tools == []:
                 parts.append(
@@ -166,7 +168,7 @@ class CodexCliLLMAdapter:
                 )
             else:
                 parts.append(
-                    f"Keep the work within at most {self._max_turns} tool-assisted turns if possible."
+                    f"Keep the work within at most {effective_max_turns} tool-assisted turns if possible."
                 )
 
         for message in messages:
@@ -350,6 +352,7 @@ class CodexCliLLMAdapter:
         output_last_message_path: str,
         output_schema_path: str | None,
         model: str | None,
+        profile: str | None = None,
     ) -> list[str]:
         """Build the `codex exec` command for a one-shot completion.
 
@@ -374,7 +377,9 @@ class CodexCliLLMAdapter:
         if output_schema_path:
             command.extend(["--output-schema", output_schema_path])
 
-        if model:
+        if profile:
+            command.extend(["--profile", profile])
+        elif model:
             command.extend(["--model", model])
 
         return command
@@ -679,8 +684,15 @@ class CodexCliLLMAdapter:
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
         """Execute a single Codex CLI completion request."""
-        prompt = self._build_prompt(messages)
-        normalized_model = self._normalize_model(config.model)
+        profile_result = resolve_completion_profile_result(config, backend="codex")
+        if profile_result.is_err:
+            return Result.err(profile_result.error)
+        resolved = profile_result.value
+        effective_config = resolved.config
+        prompt = self._build_prompt(messages, max_turns=effective_config.max_turns)
+        normalized_model = (
+            None if resolved.backend_profile else self._normalize_model(effective_config.model)
+        )
         output_fd, output_path_str = tempfile.mkstemp(prefix=self._tempfile_prefix, suffix=".txt")
         os.close(output_fd)
         output_path = Path(output_path_str)
@@ -700,6 +712,7 @@ class CodexCliLLMAdapter:
             output_last_message_path=str(output_path),
             output_schema_path=str(schema_path) if schema_path else None,
             model=normalized_model,
+            profile=resolved.backend_profile,
         )
 
         prompt_bytes = prompt.encode("utf-8")

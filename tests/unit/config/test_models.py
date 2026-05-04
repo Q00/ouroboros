@@ -12,6 +12,8 @@ from ouroboros.config.models import (
     EvaluationConfig,
     ExecutionConfig,
     LLMConfig,
+    LLMProviderProfileConfig,
+    LLMTaskProfileConfig,
     LoggingConfig,
     ModelConfig,
     OrchestratorConfig,
@@ -212,6 +214,37 @@ class TestLLMConfig:
         """LLMConfig accepts OpenCode as a local CLI backend."""
         config = LLMConfig(backend="opencode")
         assert config.backend == "opencode"
+
+
+class TestLLMTaskProfileConfig:
+    """Test provider-neutral LLM task profile configuration."""
+
+    def test_llm_task_profile_config_creation(self) -> None:
+        """Task profiles store portable defaults and provider overrides."""
+        profile = LLMTaskProfileConfig(
+            temperature=0.2,
+            max_tokens=2048,
+            max_turns=1,
+            providers={
+                "codex": LLMProviderProfileConfig(
+                    profile="ouroboros-fast",
+                    model="gpt-5.3-codex-spark",
+                ),
+            },
+        )
+
+        assert profile.temperature == 0.2
+        assert profile.max_tokens == 2048
+        assert profile.max_turns == 1
+        assert profile.providers["codex"].profile == "ouroboros-fast"
+        assert profile.providers["codex"].model == "gpt-5.3-codex-spark"
+
+    def test_llm_task_profile_bounds(self) -> None:
+        """Task profile numeric fields are validated."""
+        with pytest.raises(ValidationError):
+            LLMTaskProfileConfig(temperature=3.0)
+        with pytest.raises(ValidationError):
+            LLMProviderProfileConfig(max_turns=0)
 
 
 class TestExecutionConfig:
@@ -460,10 +493,28 @@ class TestOuroborosConfig:
         assert config.resilience is not None
         assert config.evaluation is not None
         assert config.consensus is not None
+        assert config.llm_profiles == {}
+        assert config.llm_role_profiles == {}
         assert config.persistence is not None
         assert config.drift is not None
         assert config.runtime_controls is not None
         assert config.logging is not None
+
+    def test_ouroboros_config_accepts_llm_profiles(self) -> None:
+        """OuroborosConfig stores task profiles and role mappings."""
+        config = OuroborosConfig(
+            llm_profiles={
+                "fast": {
+                    "temperature": 0.2,
+                    "providers": {"codex": {"profile": "ouroboros-fast"}},
+                },
+            },
+            llm_role_profiles={"qa": "fast"},
+        )
+
+        assert config.llm_role_profiles["qa"] == "fast"
+        assert config.llm_profiles["fast"].temperature == 0.2
+        assert config.llm_profiles["fast"].providers["codex"].profile == "ouroboros-fast"
 
     def test_ouroboros_config_is_frozen(self) -> None:
         """OuroborosConfig is immutable."""

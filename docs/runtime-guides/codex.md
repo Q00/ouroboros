@@ -70,7 +70,7 @@ uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef
 
 Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings and per-role model overrides.
 
-Use `~/.codex/config.toml` only for the Codex MCP/env hookup written by `ouroboros setup --runtime codex`.
+Use `~/.codex/config.toml` only for the Codex MCP/env hookup and Codex profile anchors written by `ouroboros setup --runtime codex`.
 
 If you want Codex-backed Ouroboros roles to use explicit models instead of inheriting Codex CLI's active default/profile, set the existing `config.yaml` keys directly:
 
@@ -97,7 +97,7 @@ consensus:
   # Optional: the simple-voting roster also lives here as `consensus.models`
 ```
 
-When these keys are left at their shipped defaults, the Codex-aware loader resolves them to Codex's `default` sentinel rather than hardcoding a mini model. In practice, Codex then uses its active global default/profile. Explicit `config.yaml` values always win.
+When these keys are left at their shipped defaults, Codex setup can install provider-neutral `llm_profiles` plus `llm_role_profiles` mappings. Those mappings target sparse Codex profile anchors named `ouroboros-fast`, `ouroboros-standard`, `ouroboros-deep`, and `ouroboros-frontier` in `~/.codex/config.toml`. Explicit `config.yaml` model values still win.
 
 ## Command Surface
 
@@ -109,12 +109,14 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 
 - Detects the `codex` binary on your `PATH`
 - Writes `orchestrator.runtime_backend: codex` and `llm.backend: codex` to `~/.ouroboros/config.yaml`
+- Adds missing provider-neutral `llm_profiles` and `llm_role_profiles` defaults for Codex LLM calls and agent-runtime sessions
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
 - Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
+- Adds missing `profiles.ouroboros-*` Codex profile anchors without overwriting existing profiles
 
-`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, and `consensus` model settings in `~/.ouroboros/config.yaml`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
+`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, `consensus`, `llm_profiles`, and `llm_role_profiles` settings in `~/.ouroboros/config.yaml`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
 
 ### `ooo` Skill Availability on Codex
 
