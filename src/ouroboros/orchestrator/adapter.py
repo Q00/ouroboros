@@ -249,6 +249,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "opencode_cli": "opencode",
     "hermes": "hermes_cli",
     "hermes_cli": "hermes_cli",
+    "kiro": "kiro",
+    "kiro_cli": "kiro",
 }
 
 
@@ -684,6 +686,40 @@ class TaskResult:
     resume_handle: RuntimeHandle | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeCapabilities:
+    """Declarative feature contract surfaced by an ``AgentRuntime``.
+
+    Added to move backend differences from implicit "silent degradation" to
+    explicit metadata the orchestrator can branch on. Upstream code should
+    prefer ``runtime.capabilities.<feature>`` over backend-name checks.
+
+    Attributes:
+        skill_dispatch: Runtime honors ``ooo <skill>`` / ``/ouroboros:<skill>``
+            prefixes by invoking the matching MCP tool instead of passing
+            the prompt through to the underlying CLI.
+        targeted_resume: Runtime can resume a specific session by id
+            (as opposed to "resume most recent" or no-resume).
+        structured_output: Runtime emits structured JSONL events
+            (tool calls, thread ids, per-item events). ``False`` means
+            plain-text stdout lines only.
+    """
+
+    skill_dispatch: bool
+    targeted_resume: bool
+    structured_output: bool
+
+
+# Default capability profile for first-class backends (Claude, Codex).
+# New backends should declare capabilities explicitly; silently inheriting
+# this default would recreate the gap this dataclass exists to prevent.
+FULL_CAPABILITIES = RuntimeCapabilities(
+    skill_dispatch=True,
+    targeted_resume=True,
+    structured_output=True,
+)
+
+
 class AgentRuntime(Protocol):
     """Protocol for autonomous agent runtimes used by the orchestrator."""
 
@@ -691,6 +727,21 @@ class AgentRuntime(Protocol):
     def runtime_backend(self) -> str:
         """Canonical backend identifier (e.g. ``"claude"``, ``"codex_cli"``)."""
         ...
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        """Feature contract surfaced by this runtime.
+
+        Default: ``FULL_CAPABILITIES`` (skill_dispatch + targeted_resume +
+        structured_output all True). Runtimes override this property to
+        declare a narrower surface — see ``KiroAgentAdapter`` for the
+        canonical example. Providing a default implementation keeps
+        pre-existing runtime adapters (Codex, Hermes, OpenCode, Gemini)
+        structurally compatible with the Protocol without forcing a
+        change to each one in this PR; callers can still branch on
+        capability flags rather than backend names.
+        """
+        return FULL_CAPABILITIES
 
     @property
     def llm_backend(self) -> str | None:
@@ -854,6 +905,10 @@ class ClaudeAgentAdapter:
     @property
     def permission_mode(self) -> str | None:
         return self._permission_mode
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        return FULL_CAPABILITIES
 
     def _is_transient_error(self, error: Exception) -> bool:
         """Check if an error is transient and worth retrying.
@@ -1604,6 +1659,8 @@ __all__ = [
     "ClaudeAgentAdapter",
     "ClaudeCodeRuntime",
     "DEFAULT_TOOLS",
+    "FULL_CAPABILITIES",
+    "RuntimeCapabilities",
     "RuntimeHandle",
     "SkillDispatchHandler",
     "TaskResult",
