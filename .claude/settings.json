@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && python3 scripts/keyword-detector.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/keyword-detector.py\"",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && python3 scripts/drift-monitor.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/drift-monitor.py\"",
             "timeout": 3
           }
         ]
