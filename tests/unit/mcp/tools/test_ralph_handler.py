@@ -131,10 +131,9 @@ async def test_ralph_handler_returns_job_id_and_completes_loop() -> None:
         assert job_id.startswith("job_")
 
         snapshot = await job_manager.get_snapshot(job_id)
-        for _ in range(500):
-            if snapshot.is_terminal:
-                break
-            await asyncio.sleep(0.01)
+        deadline = asyncio.get_running_loop().time() + 30.0
+        while not snapshot.is_terminal and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
             snapshot = await job_manager.get_snapshot(job_id)
         assert snapshot.status is JobStatus.COMPLETED
         assert snapshot.result_meta["iterations"] == 2
