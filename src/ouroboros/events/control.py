@@ -52,6 +52,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ouroboros.core.control_contract import ControlContract
 from ouroboros.core.directive import Directive
 from ouroboros.events.base import BaseEvent
 
@@ -69,6 +70,8 @@ def create_control_directive_emitted_event(
     generation_number: int | None = None,
     phase: str | None = None,
     context_snapshot_id: str | None = None,
+    parent_directive_id: str | None = None,
+    idempotency_key: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> BaseEvent:
     """Create an event recording a control-plane directive emission.
@@ -102,6 +105,9 @@ def create_control_directive_emitted_event(
         context_snapshot_id: Optional reference to a context snapshot
             captured at emission time. Omitted from the payload when
             ``None`` to keep stored rows compact.
+        parent_directive_id: Optional causal parent directive event id.
+        idempotency_key: Optional effective decision key for projection-level
+            dedupe across replay/backfill/mesh delivery.
         extra: Optional forward-compatibility slot. Prefer promoting
             fields to named arguments as they stabilize.
 
@@ -121,35 +127,26 @@ def create_control_directive_emitted_event(
             phase="reflecting",
         )
     """
-    data: dict[str, Any] = {
-        "target_type": target_type,
-        "target_id": target_id,
-        "emitted_by": emitted_by,
-        "directive": directive.value,
-        "is_terminal": directive.is_terminal,
-        "reason": reason,
-    }
-    # Optional correlation + context fields land in the payload only when
-    # provided, so absence is distinguishable from an explicit None and
-    # stored rows stay compact.
-    if session_id is not None:
-        data["session_id"] = session_id
-    if execution_id is not None:
-        data["execution_id"] = execution_id
-    if lineage_id is not None:
-        data["lineage_id"] = lineage_id
-    if generation_number is not None:
-        data["generation_number"] = generation_number
-    if phase is not None:
-        data["phase"] = phase
-    if context_snapshot_id is not None:
-        data["context_snapshot_id"] = context_snapshot_id
-    if extra:
-        data["extra"] = dict(extra)
+    contract = ControlContract(
+        target_type=target_type,
+        target_id=target_id,
+        emitted_by=emitted_by,
+        directive=directive,
+        reason=reason,
+        session_id=session_id,
+        execution_id=execution_id,
+        lineage_id=lineage_id,
+        generation_number=generation_number,
+        phase=phase,
+        context_snapshot_id=context_snapshot_id,
+        parent_directive_id=parent_directive_id,
+        idempotency_key=idempotency_key,
+        extra=extra or {},
+    )
 
     return BaseEvent(
-        type="control.directive.emitted",
-        aggregate_type=target_type,
-        aggregate_id=target_id,
-        data=data,
+        type=ControlContract.EVENT_TYPE,
+        aggregate_type=contract.target_type,
+        aggregate_id=contract.target_id,
+        data=contract.to_event_data(),
     )
