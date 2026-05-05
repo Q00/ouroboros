@@ -843,6 +843,32 @@ class TestKiroResumeContract:
     silent degradation. These tests pin the fix: session id → ``--resume-id``.
     """
 
+    @pytest.mark.asyncio
+    async def test_resume_handle_native_session_id_uses_resume_id_flag(self) -> None:
+        from ouroboros.orchestrator.adapter import RuntimeHandle
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli")
+        captured_cmd: tuple[str, ...] | None = None
+        proc = _make_proc(stdout=b"resumed\n", returncode=0)
+
+        async def _capture_spawn(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal captured_cmd
+            captured_cmd = args
+            return proc
+
+        handle = RuntimeHandle(backend="kiro", native_session_id="sess_123")
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            side_effect=_capture_spawn,
+        ):
+            messages = [msg async for msg in adapter.execute_task("continue", resume_handle=handle)]
+
+        assert messages[-1].type == "result"
+        assert captured_cmd is not None
+        assert "--resume-id" in captured_cmd
+        assert captured_cmd[captured_cmd.index("--resume-id") + 1] == "sess_123"
+
     def test_resume_session_id_uses_resume_id_flag(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 

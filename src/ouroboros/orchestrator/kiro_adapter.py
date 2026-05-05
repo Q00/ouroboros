@@ -344,8 +344,12 @@ class KiroAgentAdapter:
                 yield message
             return
 
+        effective_resume_session_id = resume_session_id
+        if effective_resume_session_id is None and current_handle is not None:
+            effective_resume_session_id = current_handle.native_session_id
+
         try:
-            cmd = self._build_cmd(prompt, system_prompt, tools, resume_session_id)
+            cmd = self._build_cmd(prompt, system_prompt, tools, effective_resume_session_id)
             env = self._build_child_env()
         except Exception as exc:
             yield AgentMessage(
