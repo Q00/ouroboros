@@ -253,6 +253,231 @@ def _looks_like_project_root(path: object) -> bool:
     return any((path / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
 
 
+def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None:
+    """Parse legacy parallel execution output into task completion results.
+
+    Legacy reports render worker execution as ``### AC N: [PASS|FAIL]``.  Those
+    lines describe execution completion, not formal evaluator/verifier AC
+    verdicts, so they populate ``task_results`` instead of ``ac_results``.
+    """
+    from ouroboros.core.lineage import EvaluationSummary, TaskResult
+
+    task_line_matches = re.findall(r"### AC (\d+): \[(PASS|FAIL)\]\s*(.*)", artifact)
+    if not task_line_matches:
+        return None
+
+    seed_acs = getattr(seed, "acceptance_criteria", None) or ()
+    feedback_metadata = _extract_feedback_metadata_from_artifact(artifact)
+
+    task_results: list[TaskResult] = []
+    for ac_num_str, status, description in task_line_matches:
+        task_idx = int(ac_num_str) - 1
+        task_content = seed_acs[task_idx] if task_idx < len(seed_acs) else description.strip()
+        completed = status == "PASS"
+        task_results.append(
+            TaskResult(
+                task_index=task_idx,
+                task_content=task_content,
+                status="completed" if completed else "failed",
+                completed=completed,
+                source_ac_index=task_idx,
+                evidence=description.strip(),
+                execution_method="legacy_parallel_report",
+            )
+        )
+
+    total = len(task_results)
+    completed_count = sum(1 for result in task_results if result.completed)
+    score = completed_count / total if total > 0 else 0.0
+
+    total_expected_tasks = len(seed_acs) if seed_acs else total
+    all_expected_tasks_reported = total >= total_expected_tasks
+    all_tasks_completed = completed_count == total and all_expected_tasks_reported
+
+    failed_indices = [result.task_index + 1 for result in task_results if not result.completed]
+    failure_reason = None
+    if not all_tasks_completed:
+        if failed_indices:
+            failure_reason = (
+                f"{len(failed_indices)}/{total} tasks failed "
+                f"(Task {', '.join(str(i) for i in failed_indices)})"
+            )
+        else:
+            failure_reason = (
+                f"{completed_count}/{total_expected_tasks} tasks completed; "
+                "formal AC evaluation not run"
+            )
+
+    execution_completion_status = "completed" if all_tasks_completed else "failed"
+
+    return EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=2 if all_tasks_completed else 1,
+        score=score,
+        drift_score=None,
+        failure_reason=failure_reason,
+        ac_results=(),
+        task_results=tuple(task_results),
+        feedback_metadata=feedback_metadata,
+        execution_completion_status=execution_completion_status,
+        approval_status="not_evaluated",
+    )
+
+
+def _agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
+    """Return legacy agent-reported AC outcomes for spec verification.
+
+    Formal ``ACResult`` values take precedence when present.  For legacy
+    execution-only summaries, preserve the worker task completion signal via
+    ``source_ac_index`` so skipped/unverifiable assertions do not convert a
+    worker-reported failure into formal approval.
+    """
+    agent_results = {ac.ac_index: ac.passed for ac in mechanical.ac_results}
+    for task in mechanical.task_results:
+        source_ac_index = task.source_ac_index
+        if source_ac_index is None:
+            source_ac_index = task.task_index
+        agent_results.setdefault(source_ac_index, task.completed)
+    return agent_results
+
+
+def _evaluation_summary_from_spec_verification(
+    mechanical: Any,
+    verification_summary: Any,
+) -> Any | None:
+    """Promote complete verifier coverage into formal AC verdict results.
+
+    Spec verification may only return reports for ACs that produced extractable
+    assertions. Missing reports and reports with no concrete verification
+    results are not formal approval: they become failed/not-evaluated AC
+    results so a partial verifier pass cannot approve the whole run.
+    """
+    from ouroboros.core.lineage import ACResult, EvaluationSummary
+
+    reports = tuple(getattr(verification_summary, "reports", ()) or ())
+    if not reports:
+        return None
+
+    expected_ac_content: dict[int, str] = {
+        ac.ac_index: ac.ac_content for ac in mechanical.ac_results
+    }
+    expected_agent_results = _agent_results_from_execution_summary(mechanical)
+    for task in mechanical.task_results:
+        source_ac_index = task.source_ac_index
+        if source_ac_index is None:
+            source_ac_index = task.task_index
+        expected_ac_content.setdefault(source_ac_index, task.task_content)
+
+    reports_by_index = {report.ac_index: report for report in reports}
+    expected_indices = set(expected_ac_content) | set(expected_agent_results)
+    result_indices = sorted(expected_indices | set(reports_by_index))
+
+    ac_results: list[ACResult] = []
+    missing_indices: list[int] = []
+    unverifiable_indices: list[int] = []
+    for ac_index in result_indices:
+        report = reports_by_index.get(ac_index)
+        if report is None:
+            missing_indices.append(ac_index)
+            ac_results.append(
+                ACResult(
+                    ac_index=ac_index,
+                    ac_content=expected_ac_content.get(
+                        ac_index, f"Acceptance criterion {ac_index + 1}"
+                    ),
+                    passed=False,
+                    score=0.0,
+                    evidence="No spec verification report was produced for this AC.",
+                    verification_method="spec_verifier",
+                    ac_verdict_state="not_evaluated",
+                    final_verdict="fail",
+                    rendered_verdict="NOT_EVALUATED",
+                )
+            )
+            continue
+
+        details = [result.detail for result in report.results if result.detail]
+        evidence = "; ".join(details)
+        if not report.results:
+            unverifiable_indices.append(ac_index)
+            evidence = "No independently verifiable assertions; formal AC verdict not evaluated."
+            passed = False
+            verdict_state = "not_evaluated"
+            rendered_verdict = "NOT_EVALUATED"
+        else:
+            passed = bool(report.verified_pass)
+            verifier_overrode_pass = bool(report.agent_reported_pass) and not passed
+            verdict_state = "overridden" if verifier_overrode_pass else "evaluated"
+            rendered_verdict = "PASS" if passed else "FAIL"
+            if not evidence:
+                evidence = "Spec verifier produced no evidence details."
+
+        ac_results.append(
+            ACResult(
+                ac_index=report.ac_index,
+                ac_content=report.ac_text,
+                passed=passed,
+                score=1.0 if passed else 0.0,
+                evidence=evidence,
+                verification_method="spec_verifier",
+                ac_verdict_state=verdict_state,
+                final_verdict="pass" if passed else "fail",
+                rendered_verdict=rendered_verdict,
+            )
+        )
+
+    total = len(ac_results)
+    passed_count = sum(1 for result in ac_results if result.passed)
+    score = passed_count / total if total > 0 else 0.0
+    complete_coverage = bool(expected_indices) and expected_indices.issubset(reports_by_index)
+    execution_completed = mechanical.execution_completion_status == "completed"
+    approved = complete_coverage and passed_count == total and total > 0 and execution_completed
+
+    failure_reason = None
+    if not approved:
+        failed_indices = [result.ac_index + 1 for result in ac_results if not result.passed]
+        discrepancy_count = getattr(verification_summary, "discrepancy_count", 0)
+        reason_parts = []
+        if failed_indices:
+            reason_parts.append(
+                f"{len(failed_indices)}/{total} ACs failed "
+                f"(AC {', '.join(str(i) for i in failed_indices)})"
+            )
+        if discrepancy_count:
+            reason_parts.append(f"{discrepancy_count} spec verification override(s)")
+        if missing_indices:
+            reason_parts.append(
+                "missing verifier report for AC " + ", ".join(str(i + 1) for i in missing_indices)
+            )
+        if unverifiable_indices:
+            reason_parts.append(
+                "no independently verifiable assertions for AC "
+                + ", ".join(str(i + 1) for i in unverifiable_indices)
+            )
+        if not execution_completed:
+            reason_parts.append(
+                f"execution_completion_status={mechanical.execution_completion_status}"
+            )
+        if not reason_parts:
+            reason_parts.append("spec verification did not approve the run")
+        failure_reason = reason_parts[0]
+        if len(reason_parts) > 1:
+            failure_reason += f" [{'; '.join(reason_parts[1:])}]"
+
+    return EvaluationSummary(
+        final_approved=approved,
+        highest_stage_passed=3 if approved else 2,
+        score=score,
+        drift_score=None,
+        failure_reason=failure_reason,
+        ac_results=tuple(ac_results),
+        task_results=mechanical.task_results,
+        feedback_metadata=mechanical.feedback_metadata,
+        execution_completion_status=mechanical.execution_completion_status,
+        approval_status="approved" if approved else "rejected",
+    )
+
+
 def _project_dir_from_seed(seed: Any) -> str | None:
     """Extract a likely project directory from seed metadata or brownfield context."""
     if seed is None:
@@ -1019,7 +1244,7 @@ def create_ouroboros_server(
     )
 
     # Create evolution engines for evolve_step
-    from ouroboros.core.lineage import ACResult, EvaluationSummary
+    from ouroboros.core.lineage import EvaluationSummary
     from ouroboros.evaluation.artifact_collector import ArtifactCollector
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.reflect import ReflectEngine
@@ -1114,61 +1339,13 @@ def create_ouroboros_server(
         )
 
     def _evaluate_mechanically(artifact: str, seed: Any) -> EvaluationSummary | None:
-        """Parse structured AC results from execution output.
+        """Parse legacy execution completion output without fabricating AC verdicts.
 
-        The parallel executor emits '### AC N: [PASS/FAIL] ...' lines.
-        When these are present, we can score mechanically without an LLM call,
-        which is more reliable in MCP stdio mode where nested CLI spawning
-        is unstable.
-
-        Returns None if the output doesn't contain parseable AC results.
+        The parallel executor historically emits ``### AC N: [PASS/FAIL]`` lines
+        for worker execution completion.  Keep that output parseable, but map it
+        to task completion results rather than formal ``ACResult`` verdicts.
         """
-        import re
-
-        # Match full AC lines: "### AC 3: [PASS] Some description..."
-        ac_line_matches = re.findall(r"### AC (\d+): \[(PASS|FAIL)\]\s*(.*)", artifact)
-        if not ac_line_matches:
-            return None
-
-        seed_acs = getattr(seed, "acceptance_criteria", None) or ()
-        feedback_metadata = _extract_feedback_metadata_from_artifact(artifact)
-
-        ac_results: list[ACResult] = []
-        for ac_num_str, status, description in ac_line_matches:
-            ac_idx = int(ac_num_str) - 1  # 0-based index
-            ac_content = seed_acs[ac_idx] if ac_idx < len(seed_acs) else description.strip()
-            ac_results.append(
-                ACResult(
-                    ac_index=ac_idx,
-                    ac_content=ac_content,
-                    passed=status == "PASS",
-                    score=1.0 if status == "PASS" else 0.0,
-                    evidence=description.strip(),
-                    verification_method="mechanical",
-                )
-            )
-
-        total = len(ac_results)
-        passed = sum(1 for r in ac_results if r.passed)
-        score = passed / total if total > 0 else 0.0
-
-        total_acs = len(seed_acs) if seed_acs else total
-        approved = passed >= total_acs and passed == total
-
-        failure_reason = None
-        if not approved:
-            failed_indices = [r.ac_index + 1 for r in ac_results if not r.passed]
-            failure_reason = f"{len(failed_indices)}/{total} ACs failed (AC {', '.join(str(i) for i in failed_indices)})"
-
-        return EvaluationSummary(
-            final_approved=approved,
-            highest_stage_passed=3 if approved else 2,
-            score=score,
-            drift_score=1.0 - score,
-            failure_reason=failure_reason,
-            ac_results=tuple(ac_results),
-            feedback_metadata=feedback_metadata,
-        )
+        return _parse_legacy_execution_task_summary(artifact, seed)
 
     spec_extractor = AssertionExtractor(
         llm_adapter=llm_adapter,
@@ -1226,71 +1403,21 @@ def create_ouroboros_server(
         if not assertions:
             return None
 
-        # Build agent results map from mechanical evaluation
-        agent_results = {ac.ac_index: ac.passed for ac in mechanical.ac_results}
+        # Build agent results map from formal AC results or legacy task completion.
+        agent_results = _agent_results_from_execution_summary(mechanical)
 
         # Run verification
         verifier = SpecVerifier(project_dir=project_dir)
         summary = verifier.verify_all(assertions, agent_results)
 
-        if not summary.has_discrepancies:
-            return None
+        if summary.has_discrepancies:
+            log.warning(
+                "spec_verification.discrepancies_found",
+                count=summary.discrepancy_count,
+                project_dir=project_dir,
+            )
 
-        # Override: rebuild ac_results with verification corrections
-        log.warning(
-            "spec_verification.discrepancies_found",
-            count=summary.discrepancy_count,
-            project_dir=project_dir,
-        )
-
-        corrected_results: list[ACResult] = []
-        discrepant_indices: set[int] = set()
-        for report in summary.reports:
-            if report.has_discrepancy:
-                discrepant_indices.add(report.ac_index)
-
-        for ac in mechanical.ac_results:
-            if ac.ac_index in discrepant_indices:
-                # Find the verification detail for evidence
-                detail = ""
-                for report in summary.reports:
-                    if report.ac_index == ac.ac_index:
-                        details = [r.detail for r in report.results if r.discrepancy]
-                        detail = "; ".join(details)
-                        break
-
-                corrected_results.append(
-                    ACResult(
-                        ac_index=ac.ac_index,
-                        ac_content=ac.ac_content,
-                        passed=False,
-                        score=0.0,
-                        evidence=f"Spec verification override: {detail}",
-                        verification_method="spec_verifier",
-                    )
-                )
-            else:
-                corrected_results.append(ac)
-
-        total = len(corrected_results)
-        passed = sum(1 for r in corrected_results if r.passed)
-        score = passed / total if total > 0 else 0.0
-
-        failed_indices = [r.ac_index + 1 for r in corrected_results if not r.passed]
-        failure_reason = (
-            f"{len(failed_indices)}/{total} ACs failed "
-            f"(AC {', '.join(str(i) for i in failed_indices)}) "
-            f"[{summary.discrepancy_count} spec verification override(s)]"
-        )
-
-        return EvaluationSummary(
-            final_approved=False,
-            highest_stage_passed=2,
-            score=score,
-            drift_score=1.0 - score,
-            failure_reason=failure_reason,
-            ac_results=tuple(corrected_results),
-        )
+        return _evaluation_summary_from_spec_verification(mechanical, summary)
 
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()

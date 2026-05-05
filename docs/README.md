@@ -39,6 +39,7 @@ replayable execution contract on your choice of runtime backend.
 - [Seed Authoring Guide](./guides/seed-authoring.md) - YAML structure, field reference, examples
 - [Evolutionary Loop & Ralph](./guides/evolution-loop.md) - Wonder/Reflect cycle, convergence detection, persistent evolution
 - [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md) - Three-stage evaluation, failure modes, and configuration
+- [Execution vs. Evaluation Contract](./guides/execution-vs-evaluation.md) - Task completion, AC verdict, and drift terminology boundaries
 - [Shared `ooo` Skill Dispatch Router](./guides/ooo-skill-dispatch-router.md) - Runtime setup boundary for Codex CLI, Hermes, and OpenCode skill dispatch
 - [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
 - [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
@@ -49,6 +50,7 @@ replayable execution contract on your choice of runtime backend.
 - [Contributing Guide](../CONTRIBUTING.md) - How to set up, code, test, and submit PRs
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
 - [Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md) - Locked vocabulary for `AgentRuntimeContext`, `ControlPlane`, `ControlContract`, `Directive`, `ControlBus`, and `IOJournal`
+- [ControlContract](./contributing/control-contract.md) - Control-plane schema, terminality, replay, and idempotency invariants
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
