@@ -178,6 +178,10 @@ class KiroAgentAdapter:
         return self._permission_mode
 
     @property
+    def llm_backend(self) -> str | None:
+        return self._llm_backend
+
+    @property
     def capabilities(self) -> RuntimeCapabilities:
         return _KIRO_CAPABILITIES
 
@@ -390,9 +394,9 @@ class KiroAgentAdapter:
                     detail = "\n".join(stderr_lines).strip()
                     yield AgentMessage(
                         type="result",
-                        content=f"Kiro CLI became unresponsive ({phase} timeout): {detail}"
+                        content=f"Kiro CLI timed out ({phase} timeout): {detail}"
                         if detail
-                        else f"Kiro CLI became unresponsive ({phase} timeout after {timeout}s)",
+                        else f"Kiro CLI timed out ({phase} timeout after {timeout}s)",
                         data={"subtype": "error", "error_type": "TimeoutError"},
                         resume_handle=current_handle,
                     )
@@ -502,8 +506,11 @@ class KiroAgentAdapter:
 
     @staticmethod
     def _is_retryable(error_msg: str) -> bool:
-        return "timed out" in error_msg.lower() or any(
-            f"exit {code}" in error_msg for code in _RETRYABLE_EXIT_CODES
+        lowered = error_msg.lower()
+        return (
+            "timed out" in lowered
+            or "timeout" in lowered
+            or any(f"exit {code}" in error_msg for code in _RETRYABLE_EXIT_CODES)
         )
 
 

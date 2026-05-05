@@ -613,6 +613,12 @@ class TestKiroAgentAdapterExecuteTask:
 
 
 class TestKiroAgentAdapterExecuteTaskToResult:
+    def test_timeout_messages_are_retryable(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        assert KiroAgentAdapter._is_retryable("Kiro CLI timed out (startup timeout after 60s)")
+        assert KiroAgentAdapter._is_retryable("Kiro CLI became unresponsive (idle timeout)")
+
     @pytest.mark.asyncio
     async def test_success_returns_ok(self) -> None:
         proc = _make_proc(stdout=b"done\n", returncode=0)
@@ -693,6 +699,13 @@ class TestOuroborosRuntimeFallback:
 
 
 class TestKiroPermissionModeContract:
+    def test_public_llm_backend_property_exposes_configured_backend(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", llm_backend="litellm")
+
+        assert adapter.llm_backend == "litellm"
+
     def test_default_mode_uses_trust_tools_empty(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 
