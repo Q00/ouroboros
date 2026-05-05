@@ -117,7 +117,7 @@ class RalphHandler:
 
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
         """Start the Ralph loop job and return a job handle immediately."""
-        lineage_id = arguments.get("lineage_id")
+        lineage_id = _normalize_lineage_id(arguments.get("lineage_id"))
         if not lineage_id:
             text = (
                 "Ralph needs structured lineage input before it can start.\n\n"
@@ -161,7 +161,7 @@ class RalphHandler:
             )
 
         config = RalphLoopConfig(
-            lineage_id=str(lineage_id),
+            lineage_id=lineage_id,
             seed_content=arguments.get("seed_content"),
             execute=bool(arguments.get("execute", True)),
             parallel=bool(arguments.get("parallel", True)),
@@ -231,3 +231,8 @@ class RalphHandler:
                 },
             )
         )
+
+
+def _normalize_lineage_id(value: Any) -> str:
+    """Normalize user-provided lineage IDs before starting a mutating Ralph loop."""
+    return value.strip() if isinstance(value, str) else ""

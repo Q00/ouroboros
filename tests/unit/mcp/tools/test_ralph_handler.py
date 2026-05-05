@@ -159,6 +159,19 @@ async def test_ralph_handler_guides_plain_request_without_lineage_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ralph_handler_guides_whitespace_only_lineage_id() -> None:
+    evolve = _FakeEvolveHandler(["converged"])
+    handler = RalphHandler(evolve_handler=evolve)  # type: ignore[arg-type]
+
+    result = await handler.handle({"lineage_id": "   "})
+
+    assert result.is_ok
+    assert result.value.is_error is True
+    assert result.value.meta["status"] == "input_required"
+    assert evolve.calls == []
+
+
+@pytest.mark.asyncio
 async def test_ralph_handler_plugin_mode_delegates_without_local_job() -> None:
     store = EventStore("sqlite+aiosqlite:///:memory:")
     job_manager = JobManager(store)
