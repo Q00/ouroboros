@@ -166,9 +166,11 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      This keeps the main session available often enough for a live relay while
      still avoiding noisy polling.
    - Use `view: "compact"` for very long jobs or when the user only wants a
-     heartbeat. It returns one-line state such as `job_x | running | Task 3/17`.
+     heartbeat. The raw tool may still return legacy text such as
+     `job_x | running | AC 3/17`; relay that to users as Task progress.
    - Use `view: "summary"` for normal monitoring. It includes the job message
-     plus Task/Subtask counts derived from legacy `ac_completed`/`sub_ac_completed` metadata fields.
+     plus Task/Subtask counts derived from legacy `ac_completed`/`sub_ac_completed`
+     metadata fields.
    - Use `view: "full"` only when the user asks for detailed job status.
 
    Relay style examples:
