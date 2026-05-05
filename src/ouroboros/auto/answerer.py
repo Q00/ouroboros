@@ -34,18 +34,26 @@ class AutoAnswerContext:
     evidence: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     def runtime_fact(self) -> tuple[str, Sequence[str]] | None:
-        """Return a bounded runtime/project fact when one was supplied."""
-        for key in (
-            "runtime_context",
-            "project_runtime",
-            "framework",
-            "package_manager",
-            "project_structure",
-        ):
+        """Return a complete runtime/project fact when one was supplied.
+
+        Narrow facts such as ``framework`` or ``package_manager`` are useful
+        evidence, but they do not by themselves answer the stronger
+        ``runtime_context`` ledger contract.
+        """
+        for key in ("runtime_context", "project_runtime"):
             value = self.repo_facts.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip(), self.evidence.get(key, ())
         return None
+
+    def partial_runtime_facts(self) -> tuple[tuple[str, str, Sequence[str]], ...]:
+        """Return bounded runtime-adjacent facts that are not complete context."""
+        facts: list[tuple[str, str, Sequence[str]]] = []
+        for key in ("framework", "package_manager", "project_structure"):
+            value = self.repo_facts.get(key)
+            if isinstance(value, str) and value.strip():
+                facts.append((key, value.strip(), self.evidence.get(key, ())))
+        return tuple(facts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +243,29 @@ class AutoAnswerer:
 
     def _runtime_answer(self, question: str, context: AutoAnswerContext) -> AutoAnswer:  # noqa: ARG002
         supplied_fact = context.runtime_fact()
+        partial_facts = context.partial_runtime_facts()
+        partial_evidence = [
+            evidence for _, _, evidence_items in partial_facts for evidence in evidence_items
+        ]
+        partial_summary = "; ".join(f"{key}: {value}" for key, value, _ in partial_facts)
+        partial_entries = [
+            (
+                "runtime_context",
+                LedgerEntry(
+                    key=f"runtime.partial.{key}",
+                    value=value,
+                    source=LedgerSource.REPO_FACT,
+                    confidence=0.72,
+                    status=LedgerStatus.WEAK,
+                    rationale=(
+                        "Bounded repository fact informs runtime selection but does not "
+                        "fully confirm the runtime_context contract."
+                    ),
+                    evidence=list(evidence_items),
+                ),
+            )
+            for key, value, evidence_items in partial_facts
+        ]
         if supplied_fact is not None:
             value, evidence = supplied_fact
             runtime_entry = LedgerEntry(
@@ -250,21 +281,34 @@ class AutoAnswerer:
             confidence = 0.9
         else:
             value = "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria."
+            if partial_summary:
+                value = f"{value} Supplied repo facts: {partial_summary}."
             runtime_entry = LedgerEntry(
                 key="runtime.existing_project",
                 value=value,
                 source=LedgerSource.EXISTING_CONVENTION,
-                confidence=0.78,
+                confidence=0.8 if partial_facts else 0.78,
                 status=LedgerStatus.DEFAULTED,
-                rationale="Auto mode should avoid unnecessary stack choices.",
+                rationale=(
+                    "Auto mode should avoid unnecessary stack choices; supplied partial "
+                    "repo facts are recorded separately and do not confirm full runtime context."
+                    if partial_facts
+                    else "Auto mode should avoid unnecessary stack choices."
+                ),
+                evidence=partial_evidence,
             )
-            answer_source = AutoAnswerSource.EXISTING_CONVENTION
-            confidence = 0.78
+            answer_source = (
+                AutoAnswerSource.REPO_FACT
+                if partial_facts
+                else AutoAnswerSource.EXISTING_CONVENTION
+            )
+            confidence = 0.8 if partial_facts else 0.78
         updates = [
             (
                 "runtime_context",
                 runtime_entry,
             ),
+            *partial_entries,
             (
                 "constraints",
                 LedgerEntry(

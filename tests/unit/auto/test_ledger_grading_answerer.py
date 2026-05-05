@@ -98,6 +98,57 @@ def test_auto_answerer_runtime_question_falls_back_without_repo_fact() -> None:
     assert runtime_entries[0].status == LedgerStatus.DEFAULTED
 
 
+def test_auto_answerer_partial_runtime_facts_do_not_confirm_runtime_context() -> None:
+    ledger = SeedDraftLedger.from_goal("Update the CLI")
+    context = AutoAnswerContext(
+        repo_facts={
+            "framework": "Typer CLI",
+            "package_manager": "uv",
+            "project_structure": "src/ouroboros package with tests/unit coverage",
+        },
+        evidence={
+            "framework": ("src/ouroboros/cli/main.py",),
+            "package_manager": ("pyproject.toml", "uv.lock"),
+            "project_structure": ("src/ouroboros/", "tests/unit/"),
+        },
+    )
+
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
+
+    assert answer.source == AutoAnswerSource.REPO_FACT
+    assert answer.confidence == 0.8
+    assert "Typer CLI" in answer.text
+    runtime_entries = [
+        entry for section, entry in answer.ledger_updates if section == "runtime_context"
+    ]
+    assert [entry.key for entry in runtime_entries] == [
+        "runtime.existing_project",
+        "runtime.partial.framework",
+        "runtime.partial.package_manager",
+        "runtime.partial.project_structure",
+    ]
+    assert runtime_entries[0].source == LedgerSource.EXISTING_CONVENTION
+    assert runtime_entries[0].status == LedgerStatus.DEFAULTED
+    assert runtime_entries[0].evidence == [
+        "src/ouroboros/cli/main.py",
+        "pyproject.toml",
+        "uv.lock",
+        "src/ouroboros/",
+        "tests/unit/",
+    ]
+    partial_entries = runtime_entries[1:]
+    assert {entry.source for entry in partial_entries} == {LedgerSource.REPO_FACT}
+    assert {entry.status for entry in partial_entries} == {LedgerStatus.WEAK}
+    assert not any(
+        entry.source == LedgerSource.REPO_FACT and entry.status == LedgerStatus.CONFIRMED
+        for entry in runtime_entries
+    )
+
+    AutoAnswerer().apply(answer, ledger, question="Which runtime and framework should we use?")
+
+    assert ledger.sections["runtime_context"].status() == LedgerStatus.DEFAULTED
+
+
 def test_auto_answerer_context_does_not_override_blockers() -> None:
     context = AutoAnswerContext(
         repo_facts={"runtime_context": "Production deployment uses AWS."},
