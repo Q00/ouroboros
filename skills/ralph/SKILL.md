@@ -1,6 +1,9 @@
 ---
 name: ralph
 description: "MCP-owned Ralph loop around background evolve_step jobs"
+mcp_tool: ouroboros_ralph
+mcp_args:
+  lineage_id: "$1"
 ---
 
 # /ouroboros:ralph
