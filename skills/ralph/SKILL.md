@@ -3,7 +3,7 @@ name: ralph
 description: "MCP-owned Ralph loop around background evolve_step jobs"
 mcp_tool: ouroboros_ralph
 mcp_args:
-  lineage_id: "$1"
+  lineage_id: "$lineage_id"
 ---
 
 # /ouroboros:ralph
@@ -13,8 +13,8 @@ MCP-owned Ralph loop around background `evolve_step` jobs. "The boulder never st
 ## Usage
 
 ```
-ooo ralph <lineage_id>
-/ouroboros:ralph <lineage_id>
+ooo ralph --lineage-id <lineage_id>
+/ouroboros:ralph --lineage-id <lineage_id>
 
 # For a plain natural-language request, run `ooo interview` + `ooo seed` first,
 # then call the MCP tool with a fresh lineage_id and the validated Seed YAML.
@@ -33,12 +33,14 @@ terminal evolution action occurs, cancellation is requested, or
 a child Task session that owns the loop instead of creating a local JobManager
 job.
 
-The client skill should not reimplement the loop or expose deterministic
-frontmatter dispatch: raw natural-language `ooo ralph "<request>"` input must
-flow through the validated Seed path before any `ouroboros_ralph` call. Once a
-lineage id and optional Seed YAML are prepared, start the MCP-owned Ralph
-surface once, then follow either the returned job tools path or the OpenCode
-Task widget path.
+The client skill should not reimplement the loop. The deterministic
+frontmatter dispatch is intentionally limited to lineage continuation, so it
+passes only the `lineage_id` supplied by the caller and does not bind the
+continuation to the caller's current working directory. Raw natural-language
+`ooo ralph "<request>"` input must flow through the validated Seed path before
+any `ouroboros_ralph` call. Once a lineage id and optional Seed YAML are
+prepared, start the MCP-owned Ralph surface once, then follow either the
+returned job tools path or the OpenCode Task widget path.
 
 ## Instructions
 
