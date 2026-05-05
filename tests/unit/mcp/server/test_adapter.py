@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ouroboros.core.lineage import EvaluationSummary, TaskResult
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import get_current_io_journal_recorder
@@ -14,8 +15,11 @@ from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
     MCPServerAdapter,
+    _agent_results_from_execution_summary,
     _build_tool_signature_with_aliases,
+    _evaluation_summary_from_spec_verification,
     _extract_feedback_metadata_from_artifact,
+    _parse_legacy_execution_task_summary,
     _project_dir_from_artifact,
     _project_dir_from_seed,
     _safe_cwd,
@@ -33,6 +37,13 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
+from ouroboros.verification.models import (
+    ACVerificationReport,
+    SpecAssertion,
+    SpecVerificationResult,
+    SpecVerificationSummary,
+    VerificationTier,
+)
 
 
 class _FakeEventStore:
@@ -158,6 +169,476 @@ class TestMCPServerAdapter:
             "max_tokens": "max.tokens",
             "_class": "class",
         }
+
+    def test_legacy_execution_report_maps_to_task_results_not_ac_verdicts(self) -> None:
+        """Legacy AC PASS/FAIL execution lines are worker task completion signals."""
+        seed = SimpleNamespace(acceptance_criteria=("Implement feature", "Add tests"))
+        artifact = """
+Parallel Execution Verification Report
+
+## AC Results
+### AC 1: [PASS] Implement feature
+### AC 2: [FAIL] Add tests
+""".strip()
+
+        summary = _parse_legacy_execution_task_summary(artifact, seed)
+
+        assert summary is not None
+        assert summary.ac_results == ()
+        assert [task.status for task in summary.task_results] == ["completed", "failed"]
+        assert [task.source_ac_index for task in summary.task_results] == [0, 1]
+        assert summary.score == 0.5
+        assert summary.drift_score is None
+        assert summary.approval_status == "not_evaluated"
+        assert summary.execution_completion_status == "failed"
+        assert summary.run_verdict_passed is False
+
+    def test_legacy_execution_report_completion_does_not_approve_without_evaluation(self) -> None:
+        """All worker tasks completing still requires a separate formal AC verdict."""
+        seed = SimpleNamespace(acceptance_criteria=("Implement feature",))
+        artifact = "### AC 1: [PASS] Implement feature"
+
+        summary = _parse_legacy_execution_task_summary(artifact, seed)
+
+        assert summary is not None
+        assert len(summary.task_results) == 1
+        assert summary.task_results[0].completed is True
+        assert summary.ac_results == ()
+        assert summary.execution_completion_status == "completed"
+        assert summary.approval_status == "not_evaluated"
+        assert summary.drift_score is None
+        assert summary.run_verdict == "FAIL"
+
+    def test_agent_results_preserve_failed_legacy_task_for_spec_verification(self) -> None:
+        """Legacy task failures must remain visible to the verifier input map."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Implement feature",
+                    status="failed",
+                    completed=False,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
+
+        assert _agent_results_from_execution_summary(mechanical) == {0: False}
+
+    def test_unverifiable_report_preserves_legacy_task_failure_as_ac_failure(self) -> None:
+        """Skipped verifier assertions must not upgrade a failed task to approval."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Implement feature",
+                    status="failed",
+                    completed=False,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Implement feature",
+                    results=(),
+                    agent_reported_pass=False,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.task_results[0].completed is False
+        assert summary.ac_results[0].passed is False
+        assert summary.execution_completion_status == "failed"
+        assert summary.approval_status == "rejected"
+        assert summary.run_verdict == "FAIL"
+
+    def test_partial_spec_verification_coverage_does_not_approve_run(self) -> None:
+        """Verifier reports must cover every expected AC before run approval."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+                TaskResult(
+                    task_index=1,
+                    task_content="Add docs",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=1,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found file: config.py",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert [ac.passed for ac in summary.ac_results] == [True, False]
+        assert summary.ac_results[1].ac_content == "Add docs"
+        assert "No spec verification report" in summary.ac_results[1].evidence
+        assert summary.approval_status == "rejected"
+        assert summary.run_verdict == "FAIL"
+
+    def test_spec_verification_promotes_checked_reports_to_formal_ac_results(self) -> None:
+        """Verifier-checked reports become formal AC verdicts without synthetic drift."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found file: config.py",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert len(summary.task_results) == 1
+        assert len(summary.ac_results) == 1
+        assert summary.ac_results[0].passed is True
+        assert summary.ac_results[0].verification_method == "spec_verifier"
+        assert summary.approval_status == "approved"
+        assert summary.drift_score is None
+        assert summary.run_verdict == "PASS"
+
+    def test_spec_verification_plain_failure_reason_has_no_dangling_bracket(self) -> None:
+        """Ordinary verifier failures should render a clean failure reason."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=False,
+                            detail="Structure 'config' not found",
+                        ),
+                    ),
+                    agent_reported_pass=False,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.failure_reason == "1/1 ACs failed (AC 1)"
+
+    def test_spec_verification_does_not_approve_failed_execution(self) -> None:
+        """Passing verifier results must not approve a run whose execution failed."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="failed",
+                    completed=False,
+                    source_ac_index=0,
+                    evidence="Worker failed before completing the task",
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found file: config.py",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is True
+        assert summary.execution_completion_status == "failed"
+        assert summary.approval_status == "rejected"
+        assert summary.final_approved is False
+        assert summary.run_verdict == "FAIL"
+        assert summary.failure_reason == "execution_completion_status=failed"
+
+    def test_spec_verification_discrepancy_becomes_formal_ac_failure(self) -> None:
+        """False-positive legacy PASS claims remain catchable by spec verification."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=False,
+                            discrepancy=True,
+                            detail="Structure 'config' not found",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.task_results[0].completed is True
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_verdict_state == "overridden"
+        assert summary.ac_results[0].provisional_verdict == "pass"
+        assert summary.ac_results[0].override_source == "spec_verifier"
+        assert summary.ac_results[0].override_reason == "Structure 'config' not found"
+        assert summary.approval_status == "rejected"
+        assert summary.failure_reason == "1/1 ACs failed (AC 1) [1 spec verification override(s)]"
+        assert summary.drift_score is None
+        assert summary.run_verdict == "FAIL"
+
+    def test_spec_verification_rejects_partial_ac_coverage(self) -> None:
+        """A subset of verifier reports must not approve unverified ACs."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+                TaskResult(
+                    task_index=1,
+                    task_content="Add docs",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=1,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found file: config.py",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert len(summary.ac_results) == 2
+        assert summary.ac_results[0].passed is True
+        assert summary.ac_results[1].passed is False
+        assert summary.ac_results[1].ac_verdict_state == "not_evaluated"
+        assert summary.ac_results[1].rendered_verdict == "NOT_EVALUATED"
+        assert summary.approval_status == "rejected"
+        assert "missing verifier report for AC 2" in (summary.failure_reason or "")
+        assert summary.run_verdict == "FAIL"
+
+    def test_spec_verification_rejects_unverifiable_completed_task(self) -> None:
+        """A completed task is not an AC approval when no assertions ran."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Improve UX",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Improve UX",
+                    results=(),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_verdict_state == "not_evaluated"
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert summary.approval_status == "rejected"
+        assert "no independently verifiable assertions for AC 1" in (summary.failure_reason or "")
+        assert summary.run_verdict == "FAIL"
 
     def test_extract_feedback_metadata_from_artifact_parses_structured_warning(self) -> None:
         """Execution artifacts should expose structured evaluation feedback metadata."""
