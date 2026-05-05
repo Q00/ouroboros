@@ -13,6 +13,12 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
+from ouroboros.mcp.tools.subagent import (
+    build_ralph_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -23,6 +29,8 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.ralph_loop import EvolveStepLike, RalphLoopConfig, RalphLoopRunner
+
+MAX_RALPH_GENERATIONS = 10
 
 
 @dataclass
@@ -98,9 +106,9 @@ class RalphHandler:
                 MCPToolParameter(
                     name="max_generations",
                     type=ToolInputType.INTEGER,
-                    description="Maximum generations to run before stopping. Default: 10.",
+                    description="Maximum generations to run before stopping. Default: 10. Range: 1-10.",
                     required=False,
-                    default=10,
+                    default=MAX_RALPH_GENERATIONS,
                 ),
             ),
         )
@@ -112,14 +120,25 @@ class RalphHandler:
             return Result.err(MCPToolError("lineage_id is required", tool_name="ouroboros_ralph"))
 
         try:
-            max_generations = int(arguments.get("max_generations", 10))
+            max_generations = int(arguments.get("max_generations", MAX_RALPH_GENERATIONS))
         except (TypeError, ValueError):
             return Result.err(
                 MCPToolError("max_generations must be an integer", tool_name="ouroboros_ralph")
             )
-        if max_generations < 1:
+        if max_generations < 1 or max_generations > MAX_RALPH_GENERATIONS:
             return Result.err(
-                MCPToolError("max_generations must be >= 1", tool_name="ouroboros_ralph")
+                MCPToolError(
+                    f"max_generations must be between 1 and {MAX_RALPH_GENERATIONS}",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+
+        if arguments.get("delegation_depth", 0):
+            return Result.err(
+                MCPToolError(
+                    "nested ouroboros_ralph delegation is not allowed",
+                    tool_name="ouroboros_ralph",
+                )
             )
 
         config = RalphLoopConfig(
@@ -131,6 +150,34 @@ class RalphHandler:
             project_dir=arguments.get("project_dir"),
             max_generations=max_generations,
         )
+
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            payload = build_ralph_subagent(
+                lineage_id=config.lineage_id,
+                seed_content=config.seed_content,
+                execute=config.execute,
+                parallel=config.parallel,
+                skip_qa=config.skip_qa,
+                project_dir=config.project_dir,
+                max_generations=config.max_generations,
+            )
+            await self._event_store.initialize()
+            await emit_subagent_dispatched_event(
+                self._event_store,
+                session_id=config.lineage_id,
+                payload=payload,
+            )
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "job_id": None,
+                    "lineage_id": config.lineage_id,
+                    "status": "delegated_to_plugin",
+                    "dispatch_mode": "plugin",
+                    "max_generations": config.max_generations,
+                },
+            )
+
         runner = RalphLoopRunner(self._evolve_handler)
 
         async def _run_loop() -> MCPToolResult:

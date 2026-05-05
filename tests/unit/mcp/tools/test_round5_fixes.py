@@ -189,10 +189,30 @@ class TestGetOuroborosToolsPluginWiring:
         assert inner.agent_runtime_backend == "opencode"
         assert inner.opencode_mode == "plugin"
 
+    def test_ralph_handler_wired(self) -> None:
+        from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+        from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+
+        tools = get_ouroboros_tools(runtime_backend="opencode", opencode_mode="plugin")
+        h = next(t for t in tools if isinstance(t, RalphHandler))
+        assert h.agent_runtime_backend == "opencode"
+        assert h.opencode_mode == "plugin"
+
+    def test_ralph_inner_evolve_handler_also_wired(self) -> None:
+        from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+        from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+
+        tools = get_ouroboros_tools(runtime_backend="opencode", opencode_mode="plugin")
+        h = next(t for t in tools if isinstance(t, RalphHandler))
+        inner = h._evolve_handler
+        assert inner.agent_runtime_backend == "opencode"
+        assert inner.opencode_mode == "plugin"
+
     def test_factory_fns_accept_kwargs(self) -> None:
         from ouroboros.mcp.tools.definitions import (
             evolve_step_handler,
             lateral_think_handler,
+            ralph_handler,
             start_evolve_step_handler,
         )
 
@@ -207,6 +227,10 @@ class TestGetOuroborosToolsPluginWiring:
         sev = start_evolve_step_handler(runtime_backend="opencode", opencode_mode="plugin")
         assert sev.agent_runtime_backend == "opencode"
         assert sev.opencode_mode == "plugin"
+
+        ralph = ralph_handler(runtime_backend="opencode", opencode_mode="plugin")
+        assert ralph.agent_runtime_backend == "opencode"
+        assert ralph.opencode_mode == "plugin"
 
     def test_total_tool_count_excludes_removed_channel_workflow(self) -> None:
         from ouroboros.mcp.tools.definitions import get_ouroboros_tools
