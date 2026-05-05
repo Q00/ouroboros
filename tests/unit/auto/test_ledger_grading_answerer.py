@@ -98,6 +98,21 @@ def test_auto_answerer_runtime_question_falls_back_without_repo_fact() -> None:
     assert runtime_entries[0].status == LedgerStatus.DEFAULTED
 
 
+def test_auto_answerer_routes_stack_selection_to_runtime_context() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Which runtime stack, repo, and project patterns should be used?",
+        "What project structure should we use?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Update the CLI"))
+
+        assert answer.source == AutoAnswerSource.EXISTING_CONVENTION
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert "runtime_context" in updated_sections
+
+
 def test_auto_answerer_partial_runtime_facts_do_not_confirm_runtime_context() -> None:
     ledger = SeedDraftLedger.from_goal("Update the CLI")
     context = AutoAnswerContext(
