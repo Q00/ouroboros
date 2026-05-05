@@ -111,6 +111,57 @@ def test_build_command_uses_stream_json_output_format() -> None:
     assert cmd[idx + 1] == "stream-json"
 
 
+def _approval_flag(cmd: list[str]) -> str:
+    idx = cmd.index("--approval-mode")
+    return cmd[idx + 1]
+
+
+def test_build_command_maps_bypass_permissions_to_yolo() -> None:
+    runtime = GeminiCLIRuntime(
+        cli_path="/usr/bin/gemini",
+        permission_mode="bypassPermissions",
+    )
+    cmd = runtime._build_command("/tmp/unused", prompt="x")
+    assert _approval_flag(cmd) == "yolo"
+
+
+def test_build_command_maps_accept_edits_to_auto_edit() -> None:
+    runtime = GeminiCLIRuntime(
+        cli_path="/usr/bin/gemini",
+        permission_mode="acceptEdits",
+    )
+    cmd = runtime._build_command("/tmp/unused", prompt="x")
+    assert _approval_flag(cmd) == "auto_edit"
+
+
+def test_build_command_maps_default_to_default() -> None:
+    runtime = GeminiCLIRuntime(
+        cli_path="/usr/bin/gemini",
+        permission_mode="default",
+    )
+    cmd = runtime._build_command("/tmp/unused", prompt="x")
+    assert _approval_flag(cmd) == "default"
+
+
+def test_build_command_uses_yolo_when_permission_mode_omitted() -> None:
+    """No explicit permission_mode → safe headless default (``yolo``)."""
+    runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini")
+    cmd = runtime._build_command("/tmp/unused", prompt="x")
+    assert _approval_flag(cmd) == "yolo"
+
+
+def test_unknown_permission_mode_resolves_to_yolo() -> None:
+    """Unknown modes are coerced to ``bypassPermissions`` by
+    ``_resolve_permission_mode`` and emit ``yolo`` at command-build time."""
+    runtime = GeminiCLIRuntime(
+        cli_path="/usr/bin/gemini",
+        permission_mode="totally-unknown-mode",
+    )
+    assert runtime.permission_mode == "bypassPermissions"
+    cmd = runtime._build_command("/tmp/unused", prompt="x")
+    assert _approval_flag(cmd) == "yolo"
+
+
 def test_runtime_does_not_feed_prompt_via_stdin() -> None:
     runtime = _make_runtime()
     assert runtime._feeds_prompt_via_stdin() is False

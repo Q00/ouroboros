@@ -30,10 +30,17 @@ from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
 
 log = structlog.get_logger(__name__)
 
-# Gemini CLI has no Codex-style permission mode flags.
-# The mode names are kept for interface compatibility.
-_GEMINI_PERMISSION_MODES = frozenset({"default", "acceptEdits", "bypassPermissions"})
-_GEMINI_DEFAULT_PERMISSION_MODE = "default"
+# Gemini CLI exposes ``--approval-mode {default|auto_edit|yolo}`` (see
+# google-gemini/gemini-cli ``docs/reference/configuration.md``). Map the
+# Ouroboros permission vocabulary to those native modes so the runtime honours
+# the configured trust level instead of defaulting to ``yolo`` (full bypass).
+_GEMINI_PERMISSION_MODE_TO_FLAG = {
+    "default": "default",
+    "acceptEdits": "auto_edit",
+    "bypassPermissions": "yolo",
+}
+_GEMINI_PERMISSION_MODES = frozenset(_GEMINI_PERMISSION_MODE_TO_FLAG)
+_GEMINI_DEFAULT_PERMISSION_MODE = "bypassPermissions"
 
 #: Maximum Ouroboros nesting depth to prevent fork bombs
 _MAX_OUROBOROS_DEPTH = 5
@@ -78,7 +85,12 @@ class GeminiCLIRuntime(CodexCliRuntime):
 
         Args:
             cli_path: Optional path to the gemini binary.
-            permission_mode: Optional permission mode (ignored by Gemini).
+            permission_mode: Ouroboros permission level — one of
+                ``default``, ``acceptEdits``, ``bypassPermissions``. Mapped
+                to Gemini's ``--approval-mode`` flag at command-build time
+                (``default``/``auto_edit``/``yolo`` respectively). Falls
+                back to ``bypassPermissions`` (``yolo``) when omitted so
+                headless runs do not stall on an interactive prompt.
             model: Optional model identifier.
             cwd: Optional working directory for the subprocess.
             skills_dir: Optional directory for skill definitions.
@@ -163,10 +175,20 @@ class GeminiCLIRuntime(CodexCliRuntime):
         - ``--prompt`` carries the request (Gemini's documented headless trigger).
         - ``--non-interactive`` disables TTY prompts so the subprocess never blocks.
         - ``--output-format stream-json`` emits NDJSON events on stdout.
-        - ``--approval-mode yolo`` skips interactive approvals (required for headless).
+        - ``--approval-mode`` is mapped from ``self._permission_mode``:
+          ``default`` → ``default``, ``acceptEdits`` → ``auto_edit``,
+          ``bypassPermissions`` → ``yolo`` (full bypass; the default when no
+          mode is configured so headless runs do not deadlock on a prompt).
+          Selecting ``default`` in a fully headless environment may stall on
+          the first approval prompt — use ``acceptEdits`` to keep the
+          conservative path while remaining non-blocking.
         """
         del output_last_message_path, resume_session_id, runtime_handle
 
+        approval_flag = _GEMINI_PERMISSION_MODE_TO_FLAG.get(
+            self._permission_mode,
+            "yolo",
+        )
         command = [
             self._cli_path,
             "--prompt",
@@ -175,7 +197,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
             "--output-format",
             "stream-json",
             "--approval-mode",
-            "yolo",
+            approval_flag,
         ]
         normalized_model = self._normalize_model(self._model)
         if normalized_model:
