@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ouroboros.auto.answerer import AutoAnswerer, AutoAnswerSource
+from ouroboros.auto.answerer import AutoAnswerContext, AutoAnswerer, AutoAnswerSource
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
@@ -61,6 +61,129 @@ def _seed(*, ac: tuple[str, ...], goal: str = "Build a habit tracker") -> Seed:
         ),
         metadata=SeedMetadata(ambiguity_score=0.12),
     )
+
+
+def test_auto_answerer_uses_supplied_repo_fact_for_runtime_questions() -> None:
+    ledger = SeedDraftLedger.from_goal("Update the CLI")
+    context = AutoAnswerContext(
+        repo_facts={"runtime_context": "Python 3.12 project managed with uv and Typer CLI."},
+        evidence={"runtime_context": ("pyproject.toml", "src/ouroboros/cli/main.py")},
+    )
+
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
+
+    assert answer.source == AutoAnswerSource.REPO_FACT
+    assert answer.confidence == 0.9
+    assert "Python 3.12" in answer.text
+    runtime_entries = [
+        entry for section, entry in answer.ledger_updates if section == "runtime_context"
+    ]
+    assert len(runtime_entries) == 1
+    assert runtime_entries[0].source == LedgerSource.REPO_FACT
+    assert runtime_entries[0].status == LedgerStatus.CONFIRMED
+    assert runtime_entries[0].evidence == ["pyproject.toml", "src/ouroboros/cli/main.py"]
+
+
+def test_auto_answerer_runtime_question_falls_back_without_repo_fact() -> None:
+    answer = AutoAnswerer().answer(
+        "Which runtime and framework should we use?",
+        SeedDraftLedger.from_goal("Update the CLI"),
+    )
+
+    assert answer.source == AutoAnswerSource.EXISTING_CONVENTION
+    runtime_entries = [
+        entry for section, entry in answer.ledger_updates if section == "runtime_context"
+    ]
+    assert runtime_entries[0].source == LedgerSource.EXISTING_CONVENTION
+    assert runtime_entries[0].status == LedgerStatus.DEFAULTED
+
+
+def test_auto_answerer_routes_stack_selection_to_runtime_context() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Which runtime stack, repo, and project patterns should be used?",
+        "What project structure should we use?",
+        "Which repo should we use?",
+        "What framework is this repo using?",
+        "Which framework?",
+        "What runtime?",
+        "What package manager?",
+        "Which project structure?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Update the CLI"))
+
+        assert answer.source == AutoAnswerSource.EXISTING_CONVENTION
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert "runtime_context" in updated_sections
+
+
+def test_auto_answerer_partial_runtime_facts_do_not_confirm_runtime_context() -> None:
+    ledger = SeedDraftLedger.from_goal("Update the CLI")
+    context = AutoAnswerContext(
+        repo_facts={
+            "framework": "Typer CLI",
+            "package_manager": "uv",
+            "project_structure": "src/ouroboros package with tests/unit coverage",
+        },
+        evidence={
+            "framework": ("src/ouroboros/cli/main.py",),
+            "package_manager": ("pyproject.toml", "uv.lock"),
+            "project_structure": ("src/ouroboros/", "tests/unit/"),
+        },
+    )
+
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
+
+    assert answer.source == AutoAnswerSource.EXISTING_CONVENTION
+    assert answer.confidence == 0.8
+    assert "Typer CLI" in answer.text
+    runtime_entries = [
+        entry for section, entry in answer.ledger_updates if section == "runtime_context"
+    ]
+    assert [entry.key for entry in runtime_entries] == [
+        "runtime.existing_project",
+        "runtime.partial.framework",
+        "runtime.partial.package_manager",
+        "runtime.partial.project_structure",
+    ]
+    assert runtime_entries[0].source == LedgerSource.EXISTING_CONVENTION
+    assert runtime_entries[0].status == LedgerStatus.DEFAULTED
+    assert runtime_entries[0].evidence == [
+        "src/ouroboros/cli/main.py",
+        "pyproject.toml",
+        "uv.lock",
+        "src/ouroboros/",
+        "tests/unit/",
+    ]
+    partial_entries = runtime_entries[1:]
+    assert {entry.source for entry in partial_entries} == {LedgerSource.REPO_FACT}
+    assert {entry.status for entry in partial_entries} == {LedgerStatus.WEAK}
+    assert not any(
+        entry.source == LedgerSource.REPO_FACT and entry.status == LedgerStatus.CONFIRMED
+        for entry in runtime_entries
+    )
+
+    AutoAnswerer().apply(answer, ledger, question="Which runtime and framework should we use?")
+
+    assert ledger.sections["runtime_context"].status() == LedgerStatus.DEFAULTED
+
+
+def test_auto_answerer_context_does_not_override_blockers() -> None:
+    context = AutoAnswerContext(
+        repo_facts={"runtime_context": "Production deployment uses AWS."},
+        evidence={"runtime_context": ("docs/deploy.md",)},
+    )
+
+    answer = AutoAnswerer().answer(
+        "Which production environment should we deploy to?",
+        SeedDraftLedger.from_goal("Deploy a service"),
+        context,
+    )
+
+    assert answer.blocker is not None
+    assert answer.source == AutoAnswerSource.BLOCKER
 
 
 def test_ledger_not_ready_until_required_sections_are_resolved() -> None:
@@ -415,6 +538,26 @@ def test_auto_answerer_allows_safe_production_and_project_feature_questions() ->
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a project app"))
         assert answer.blocker is None
         updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert "runtime_context" not in updated_sections
+
+
+def test_auto_answerer_preserves_product_runtime_status_semantics() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Should the app display runtime status?",
+        "What runtime status should the app display?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(
+            question,
+            SeedDraftLedger.from_goal("Build an operations dashboard"),
+        )
+
+        assert answer.blocker is None
+        assert "product behavior" in answer.text.lower()
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert {"constraints", "acceptance_criteria"} <= updated_sections
         assert "runtime_context" not in updated_sections
 
 

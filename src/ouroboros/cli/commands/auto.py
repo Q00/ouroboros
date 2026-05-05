@@ -66,12 +66,26 @@ def auto_command(
     show_ledger: Annotated[
         bool, typer.Option("--show-ledger", help="Print assumptions and non-goals.")
     ] = False,
+    status: Annotated[
+        bool, typer.Option("--status", help="Print persisted auto session status without running.")
+    ] = False,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
     The command returns execution IDs after the run starts; it does not wait
     indefinitely for long-running execution completion.
     """
+    if status:
+        if not resume:
+            print_error("--status requires --resume auto_<id>")
+            raise typer.Exit(1)
+        try:
+            _print_status(AutoStore().load(resume))
+        except Exception as exc:
+            print_error(f"Auto status failed: {exc}")
+            raise typer.Exit(1) from exc
+        return
+
     if not resume and (goal is None or not goal.strip()):
         print_error("goal is required unless --resume is provided")
         raise typer.Exit(1)
@@ -179,6 +193,35 @@ async def _run_auto(
     )
     result = await pipeline.run(state)
     return result
+
+
+def _print_status(state: AutoPipelineState) -> None:
+    """Print a compact read-only summary for a persisted auto session."""
+    print_info("Auto session status")
+    console.print(f"Auto session: [cyan]{state.auto_session_id}[/]")
+    console.print(f"Phase: [bold]{state.phase.value}[/]")
+    console.print(f"Last progress: {state.last_progress_message}")
+    console.print(f"Last progress at: {state.last_progress_at}")
+    if state.interview_session_id:
+        console.print(f"Interview session: {state.interview_session_id}")
+    console.print(f"Current interview round: {state.current_round}")
+    if state.pending_question:
+        question = state.pending_question.replace("\n", " ").strip()
+        if len(question) > 160:
+            question = f"{question[:157]}..."
+        console.print(f"Pending question: {question}")
+    if state.seed_path:
+        console.print(f"Seed: {state.seed_path}")
+    if state.last_grade:
+        console.print(f"Seed grade: [bold]{state.last_grade}[/]")
+    if state.job_id or state.execution_id or state.run_session_id:
+        console.print("Execution:")
+        console.print(f"  Job ID: {state.job_id}")
+        console.print(f"  Execution ID: {state.execution_id}")
+        console.print(f"  Session ID: {state.run_session_id}")
+    if state.last_error:
+        console.print(f"Blocker: [yellow]{state.last_error}[/]")
+    console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
 
 
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
