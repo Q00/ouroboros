@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
@@ -19,6 +20,32 @@ class AutoAnswerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     BLOCKER = "blocker"
+
+
+@dataclass(frozen=True, slots=True)
+class AutoAnswerContext:
+    """Bounded facts supplied by a caller before answering interview questions.
+
+    The answerer remains deterministic and does not inspect the repository on its
+    own; callers can pass already-collected facts with optional evidence labels.
+    """
+
+    repo_facts: Mapping[str, str] = field(default_factory=dict)
+    evidence: Mapping[str, Sequence[str]] = field(default_factory=dict)
+
+    def runtime_fact(self) -> tuple[str, Sequence[str]] | None:
+        """Return a bounded runtime/project fact when one was supplied."""
+        for key in (
+            "runtime_context",
+            "project_runtime",
+            "framework",
+            "package_manager",
+            "project_structure",
+        ):
+            value = self.repo_facts.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip(), self.evidence.get(key, ())
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +81,14 @@ class AutoAnswerer:
     exploration.  Later integrations may pass bounded repo facts into it.
     """
 
-    def answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:
-        """Answer ``question`` using a conservative policy."""
+    def answer(
+        self,
+        question: str,
+        ledger: SeedDraftLedger,
+        context: AutoAnswerContext | None = None,
+    ) -> AutoAnswer:
+        """Answer ``question`` using a conservative policy and optional bounded facts."""
+        context = context or AutoAnswerContext()
         lowered = question.lower()
         blocker = _blocker_for(question)
         if blocker is not None:
@@ -76,20 +109,20 @@ class AutoAnswerer:
             return self._feature_acceptance_answer(question)
         if _is_actor_or_io_question(lowered):
             return self._io_actor_answer(question)
-        if _is_product_behavior_question(lowered):
-            return self._product_behavior_answer(question)
         if _matches_any(
             lowered,
             (
                 r"\bruntime\b",
                 r"\bstack\b",
-                r"\brepo\b",
+                r"\brepository runtime\b",
                 r"\bframework\b",
                 r"\bproject structure\b",
                 r"\bproject runtime\b",
             ),
         ):
-            return self._runtime_answer(question)
+            return self._runtime_answer(question, context)
+        if _is_product_behavior_question(lowered):
+            return self._product_behavior_answer(question)
 
         return self._default_answer(question, ledger)
 
@@ -200,19 +233,37 @@ class AutoAnswerer:
         ]
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
 
-    def _runtime_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
-        value = "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria."
+    def _runtime_answer(self, question: str, context: AutoAnswerContext) -> AutoAnswer:  # noqa: ARG002
+        supplied_fact = context.runtime_fact()
+        if supplied_fact is not None:
+            value, evidence = supplied_fact
+            runtime_entry = LedgerEntry(
+                key="runtime.repo_fact",
+                value=value,
+                source=LedgerSource.REPO_FACT,
+                confidence=0.9,
+                status=LedgerStatus.CONFIRMED,
+                rationale="Bounded repository context was supplied to auto answerer.",
+                evidence=list(evidence),
+            )
+            answer_source = AutoAnswerSource.REPO_FACT
+            confidence = 0.9
+        else:
+            value = "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria."
+            runtime_entry = LedgerEntry(
+                key="runtime.existing_project",
+                value=value,
+                source=LedgerSource.EXISTING_CONVENTION,
+                confidence=0.78,
+                status=LedgerStatus.DEFAULTED,
+                rationale="Auto mode should avoid unnecessary stack choices.",
+            )
+            answer_source = AutoAnswerSource.EXISTING_CONVENTION
+            confidence = 0.78
         updates = [
             (
                 "runtime_context",
-                LedgerEntry(
-                    key="runtime.existing_project",
-                    value=value,
-                    source=LedgerSource.EXISTING_CONVENTION,
-                    confidence=0.78,
-                    status=LedgerStatus.DEFAULTED,
-                    rationale="Auto mode should avoid unnecessary stack choices.",
-                ),
+                runtime_entry,
             ),
             (
                 "constraints",
@@ -226,7 +277,7 @@ class AutoAnswerer:
                 ),
             ),
         ]
-        return AutoAnswer(value, AutoAnswerSource.EXISTING_CONVENTION, 0.78, updates)
+        return AutoAnswer(value, answer_source, confidence, updates)
 
     def _io_actor_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
         value = "Assume a single local user operating through the requested interface; inputs and outputs should be explicit command/API arguments and stable returned text or artifacts."
