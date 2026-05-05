@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
 from ouroboros.config.models import RuntimeControlsConfig
+from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_failed
 import ouroboros.evolution.watchdog as watchdog_module
@@ -32,7 +36,8 @@ class _FakeMonotonicClock:
 
 
 async def _store() -> EventStore:
-    event_store = EventStore("sqlite+aiosqlite:///:memory:")
+    db_path = Path(tempfile.gettempdir()) / f"ouroboros-watchdog-{uuid4().hex}.db"
+    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
     await event_store.initialize()
     return event_store
 
@@ -214,14 +219,21 @@ async def test_busy_run_without_material_progress_times_out() -> None:
                 await asyncio.sleep(0.02)
                 await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
-            await event_store.append(
-                lineage_generation_failed(
-                    lineage_id,
-                    1,
-                    "cancelled",
-                    "Generation cancelled",
+            try:
+                await event_store.append(
+                    lineage_generation_failed(
+                        lineage_id,
+                        1,
+                        "cancelled",
+                        "Generation cancelled",
+                    )
                 )
-            )
+            except PersistenceError:
+                # The cancellation cleanup event is incidental to this watchdog
+                # test.  Python 3.14 can cancel while the in-memory SQLite
+                # connection is being recycled, so do not let cleanup
+                # persistence mask the expected watchdog timeout.
+                pass
             raise
 
     with pytest.raises(GenerationWatchdogTimeout) as exc_info:

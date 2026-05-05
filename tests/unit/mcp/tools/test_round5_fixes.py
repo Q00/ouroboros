@@ -213,7 +213,7 @@ class TestGetOuroborosToolsPluginWiring:
 
         tools = get_ouroboros_tools()
         names = {tool.definition.name for tool in tools}
-        assert len(tools) == 24
+        assert len(tools) == 25
         assert "ouroboros_auto" in names
         assert "ouroboros_channel_workflow" not in names
 

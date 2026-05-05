@@ -498,6 +498,7 @@ class TestCreateOuroborosServer:
         "ouroboros_pm_interview",
         "ouroboros_qa",
         "ouroboros_query_events",
+        "ouroboros_ralph",
         "ouroboros_session_status",
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
