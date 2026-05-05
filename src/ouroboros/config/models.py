@@ -344,6 +344,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "hermes_cli",
         "gemini",
         "gemini_cli",
+        "kiro",
+        "kiro_cli",
     }
 )
 
