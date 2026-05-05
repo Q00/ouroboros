@@ -206,6 +206,30 @@ class TestHermesCliRuntime:
         runtime = HermesCliRuntime(cli_path="hermes")
         assert runtime._stdout_idle_timeout_seconds == HermesCliRuntime._stdout_idle_timeout_seconds
 
+    @pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "Infinity", "-inf"])
+    def test_non_finite_env_var_falls_back_to_class_default(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """``float()`` parses ``nan``/``inf`` but they break ``asyncio.wait_for``."""
+        monkeypatch.setenv("OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS", raw)
+        runtime = HermesCliRuntime(cli_path="hermes")
+        assert runtime._stdout_idle_timeout_seconds == HermesCliRuntime._stdout_idle_timeout_seconds
+
+    def test_non_finite_kwarg_falls_back_to_class_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_timeout_env(monkeypatch)
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            startup_output_timeout_seconds=float("nan"),
+            stdout_idle_timeout_seconds=float("inf"),
+        )
+        assert (
+            runtime._startup_output_timeout_seconds
+            == HermesCliRuntime._startup_output_timeout_seconds
+        )
+        assert runtime._stdout_idle_timeout_seconds == HermesCliRuntime._stdout_idle_timeout_seconds
+
     def test_runtime_does_not_expose_local_dispatch_parser_helpers(self) -> None:
         """Dispatch parsing and metadata resolution live in the shared router."""
         obsolete_helpers = {

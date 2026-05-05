@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Mapping
 import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
+import math
 import os
 from pathlib import Path
 import re
@@ -57,6 +58,9 @@ def _resolve_timeout_override(
     Priority: explicit kwarg → environment variable → class-attribute fallback.
     Non-positive values (``0`` or negative) disable the guard so the
     generation watchdog — not the runtime's own stream loop — owns liveness.
+    Non-finite floats (``nan`` / ``inf`` / ``-inf``) are *not* a valid
+    liveness window — ``asyncio.wait_for(timeout=nan)`` raises immediately
+    — so they are rejected with a warning and the fallback is used.
     """
     candidate: float | None
     if explicit is not None:
@@ -77,7 +81,17 @@ def _resolve_timeout_override(
                 )
                 candidate = fallback
 
-    if candidate is None or candidate <= 0:
+    if candidate is None:
+        return None
+    if not math.isfinite(candidate):
+        log.warning(
+            "hermes_cli_runtime.timeout_non_finite_rejected",
+            env=env_name,
+            value=candidate,
+            fallback=fallback,
+        )
+        candidate = fallback
+    if candidate <= 0:
         return None
     return candidate
 
