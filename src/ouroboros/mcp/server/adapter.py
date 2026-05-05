@@ -406,7 +406,8 @@ def _evaluation_summary_from_spec_verification(
             rendered_verdict = "NOT_EVALUATED"
         else:
             passed = bool(report.verified_pass)
-            verdict_state = "evaluated"
+            verifier_overrode_pass = bool(report.agent_reported_pass) and not passed
+            verdict_state = "overridden" if verifier_overrode_pass else "evaluated"
             rendered_verdict = "PASS" if passed else "FAIL"
             if not evidence:
                 evidence = "Spec verifier produced no evidence details."
@@ -436,10 +437,12 @@ def _evaluation_summary_from_spec_verification(
     if not approved:
         failed_indices = [result.ac_index + 1 for result in ac_results if not result.passed]
         discrepancy_count = getattr(verification_summary, "discrepancy_count", 0)
-        reason_parts = [
-            f"{len(failed_indices)}/{total} ACs failed "
-            f"(AC {', '.join(str(i) for i in failed_indices)})"
-        ]
+        reason_parts = []
+        if failed_indices:
+            reason_parts.append(
+                f"{len(failed_indices)}/{total} ACs failed "
+                f"(AC {', '.join(str(i) for i in failed_indices)})"
+            )
         if discrepancy_count:
             reason_parts.append(f"{discrepancy_count} spec verification override(s)")
         if missing_indices:
@@ -455,6 +458,8 @@ def _evaluation_summary_from_spec_verification(
             reason_parts.append(
                 f"execution_completion_status={mechanical.execution_completion_status}"
             )
+        if not reason_parts:
+            reason_parts.append("spec verification did not approve the run")
         failure_reason = reason_parts[0]
         if len(reason_parts) > 1:
             failure_reason += f" [{'; '.join(reason_parts[1:])}]"

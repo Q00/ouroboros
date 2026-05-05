@@ -479,7 +479,7 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.final_approved is False
         assert summary.run_verdict == "FAIL"
-        assert "execution_completion_status=failed" in (summary.failure_reason or "")
+        assert summary.failure_reason == "execution_completion_status=failed"
 
     def test_spec_verification_discrepancy_becomes_formal_ac_failure(self) -> None:
         """False-positive legacy PASS claims remain catchable by spec verification."""
@@ -529,6 +529,10 @@ Parallel Execution Verification Report
         assert summary is not None
         assert summary.task_results[0].completed is True
         assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_verdict_state == "overridden"
+        assert summary.ac_results[0].provisional_verdict == "pass"
+        assert summary.ac_results[0].override_source == "spec_verifier"
+        assert summary.ac_results[0].override_reason == "Structure 'config' not found"
         assert summary.approval_status == "rejected"
         assert summary.failure_reason == "1/1 ACs failed (AC 1) [1 spec verification override(s)]"
         assert summary.drift_score is None
