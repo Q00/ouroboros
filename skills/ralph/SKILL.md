@@ -1,6 +1,10 @@
 ---
 name: ralph
 description: "MCP-owned Ralph loop around background evolve_step jobs"
+mcp_tool: ouroboros_ralph
+mcp_args:
+  lineage_id: "$1"
+  project_dir: "$CWD"
 ---
 
 # /ouroboros:ralph
@@ -10,8 +14,9 @@ MCP-owned Ralph loop around background `evolve_step` jobs. "The boulder never st
 ## Usage
 
 ```
-ooo ralph "<your request>"
-/ouroboros:ralph "<your request>"
+ooo ralph <lineage_id>
+ooo ralph "<your request>"        # requires validated Seed preparation before tool start
+/ouroboros:ralph <lineage_id>
 ```
 
 **Trigger keywords:** "ralph", "don't stop", "must complete", "until it works", "keep going"
