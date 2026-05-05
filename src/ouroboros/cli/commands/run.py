@@ -112,7 +112,18 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
 def _resolve_cli_project_dir(seed: "Seed", seed_file: Path) -> Path:
     """Resolve the project directory for CLI execution and verification."""
     stable_base = seed_file.parent.resolve()
-    return resolve_seed_project_path(seed, stable_base=stable_base) or stable_base
+    resolution = resolve_seed_project_path(seed, stable_base=stable_base)
+    if resolution.path is not None:
+        return resolution.path
+    if resolution.rejected:
+        print_error(
+            "Seed encodes a project_dir/brownfield path that escapes the seed "
+            f"file's directory ({stable_base}). Refusing to fall back silently — "
+            "edit the seed to use a path inside the seed directory or rerun "
+            "with the seed copied next to the target project."
+        )
+        raise typer.Exit(1)
+    return stable_base
 
 
 def _coerce_non_negative_int(value: object, *, source: str) -> int:
