@@ -122,14 +122,13 @@ class KiroCodeAdapter:
         self._max_retries = max_retries
         log.info("kiro_adapter.init", cli_path=self._cli_path, cwd=self._cwd)
         if self._allowed_tools is not None:
-            log.warning(
-                "kiro_adapter.soft_tool_enforcement",
+            log.info(
+                "kiro_adapter.native_tool_enforcement",
                 allowed_tools=list(self._allowed_tools),
                 reason=(
-                    "Kiro CLI has no native allowed_tools flag; the envelope "
-                    "is injected as a prompt directive and detectable tool-use "
-                    "markers are audited post-hoc. Enforcement is cooperative, "
-                    "not mandatory."
+                    "Kiro CLI trust categories are constrained with --trust-tools; "
+                    "the prompt directive and marker audit provide additional "
+                    "observability."
                 ),
             )
 
@@ -283,8 +282,7 @@ class KiroCodeAdapter:
         mapped_tools: list[str] = []
         seen: set[str] = set()
         for tool in self._allowed_tools:
-            normalized = tool.strip().lower().replace("_", "-")
-            mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
+            mapped = _kiro_tool_category(tool)
             if mapped not in seen:
                 mapped_tools.append(mapped)
                 seen.add(mapped)
@@ -351,7 +349,7 @@ class KiroCodeAdapter:
         if self._allowed_tools is None or not _TOOL_USE_MARKER_RE.search(content):
             return
 
-        allowed = frozenset(self._allowed_tools)
+        allowed = frozenset(_kiro_tool_category(tool) for tool in self._allowed_tools)
         tool_names = _TOOL_NAME_RE.findall(content)
         if not tool_names and not allowed:
             log.warning(
@@ -363,7 +361,7 @@ class KiroCodeAdapter:
             return
 
         for tool_name in tool_names:
-            if tool_name not in allowed:
+            if _kiro_tool_category(tool_name) not in allowed:
                 log.warning(
                     "kiro_adapter.tool_envelope_violation",
                     tool=tool_name,
@@ -373,5 +371,11 @@ class KiroCodeAdapter:
 
 # Ensure protocol compliance
 _: type[LLMAdapter] = KiroCodeAdapter  # type: ignore[assignment]
+
+
+def _kiro_tool_category(tool: str) -> str:
+    normalized = tool.strip().lower().replace("_", "-")
+    return _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
+
 
 __all__ = ["KiroCodeAdapter"]

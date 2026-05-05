@@ -363,6 +363,39 @@ class TestKiroCodeAdapterComplete:
         assert violations[0]["tool"] == "Edit"
         assert violations[0]["allowed_tools"] == ["Read"]
 
+    def test_audit_normalizes_kiro_native_tool_categories(self) -> None:
+        captured: list[dict] = []
+
+        def _warning(event: str, **kwargs) -> None:
+            captured.append({"event": event, **kwargs})
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=["Bash"])
+        with patch("ouroboros.providers.kiro_adapter.log.warning", side_effect=_warning):
+            adapter._audit_tool_envelope_violations('{"type":"tool_use","name":"shell"}')
+
+        assert [
+            item for item in captured if item["event"] == "kiro_adapter.tool_envelope_violation"
+        ] == []
+
+    def test_init_logs_native_tool_enforcement_not_soft_warning(self) -> None:
+        info_events: list[str] = []
+        warning_events: list[str] = []
+
+        with (
+            patch(
+                "ouroboros.providers.kiro_adapter.log.info",
+                side_effect=lambda event, **_kwargs: info_events.append(event),
+            ),
+            patch(
+                "ouroboros.providers.kiro_adapter.log.warning",
+                side_effect=lambda event, **_kwargs: warning_events.append(event),
+            ),
+        ):
+            KiroCodeAdapter(cli_path="kiro-cli", allowed_tools=[])
+
+        assert "kiro_adapter.native_tool_enforcement" in info_events
+        assert "kiro_adapter.soft_tool_enforcement" not in warning_events
+
     @pytest.mark.asyncio
     async def test_on_message_receives_assistant_response(self) -> None:
         from ouroboros.providers.base import CompletionConfig, Message, MessageRole
