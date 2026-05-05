@@ -31,10 +31,13 @@ and monitor it with the normal job tools.
 When the user invokes this skill:
 
 1. **Prepare lineage input**:
-   - If the user provides an existing `lineage_id`, continue that lineage and omit
-     `seed_content` unless they explicitly provide an updated Seed.
-   - If the user provides Seed YAML, use it as `seed_content` and use its stable
-     id/session id as `lineage_id` when available.
+   - If the user provides an existing `lineage_id` and explicitly wants to
+     continue it, reuse that `lineage_id` and omit `seed_content` unless they
+     explicitly provide an updated Seed.
+   - If the user provides Seed YAML for a new Ralph run, use it as
+     `seed_content` and generate a fresh `lineage_id` for this run. Keep
+     `lineage_id` separate from Seed, interview, and session IDs so separate
+     Ralph runs over the same Seed do not collide.
    - If the user provides only a plain request (`ooo ralph "<request>"`), first
      convert it into a valid Seed YAML using the same Seed contract as
      `ooo seed`: goal, constraints, acceptance criteria, ontology schema,
@@ -44,8 +47,9 @@ When the user invokes this skill:
      `ooo seed` instead of inventing requirements.
 
 2. **Start Ralph** by calling `ouroboros_ralph` with:
-   - `lineage_id`: existing lineage id, Seed id, or a generated stable id for a
-     new Seed-backed loop
+   - `lineage_id`: existing lineage id for an explicit continuation, otherwise a
+     freshly generated stable id for this Ralph run, such as
+     `ralph-<short-slug>-<uuid>`; do not use a Seed/interview id by itself
    - `seed_content`: valid Seed YAML for generation 1 when starting a new lineage
    - `execute`: default `true`
    - `parallel`: default `true`
@@ -70,12 +74,15 @@ When the user invokes this skill:
 
 5. **On termination**, fetch `ouroboros_job_result(job_id)` and summarize the
    final job result and next step:
-   - Success / convergence: preserve the final result text as the evaluation
-     artifact and surface the concrete evaluation handoff:
-     `Next: ooo evaluate <lineage_id> <final generation output/artifact>`.
+   - Success / convergence: extract the actual final artifact from the final
+     generation output, not the full Ralph job wrapper. Prefer concrete changed
+     files or execution output from the final generation/worktree when available;
+     otherwise use only the text after the `## Final generation output` section
+     in the job result. Surface the concrete evaluation handoff:
+     `Next: ooo evaluate <lineage_id> <actual final artifact>`.
      When calling the MCP tool directly, pass `session_id=<lineage_id>`,
-     `artifact=<final generation output/artifact>`, and the original
-     `seed_content` when available.
+     `artifact=<actual final artifact>`, and the original `seed_content` when
+     available.
    - Max generations / failure: summarize the stop reason and suggest
      `ooo unstuck`, `ooo interview`, or a narrower Ralph retry
    - Cancelled: confirm cancellation and preserve the job id for later inspection
