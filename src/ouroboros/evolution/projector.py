@@ -218,13 +218,19 @@ class LineageProjector:
                     # via event_store directly for postmortem.
                     continue
                 schema_version = data.get("schema_version")
-                if schema_version is not None and not isinstance(schema_version, int):
+                if schema_version is not None and (
+                    not isinstance(schema_version, int) or schema_version < 1
+                ):
                     continue
                 target_type = data.get("target_type")
-                if target_type is not None and not isinstance(target_type, str):
+                if target_type is not None and (
+                    not isinstance(target_type, str) or not target_type.strip()
+                ):
                     continue
                 target_id = data.get("target_id")
-                if target_id is not None and not isinstance(target_id, str):
+                if target_id is not None and (
+                    not isinstance(target_id, str) or not target_id.strip()
+                ):
                     continue
                 generation_number = data.get("generation_number")
                 if generation_number is not None and not isinstance(generation_number, int):
@@ -236,10 +242,14 @@ class LineageProjector:
                 if not isinstance(is_terminal, bool):
                     continue
                 parent_directive_id = data.get("parent_directive_id")
-                if parent_directive_id is not None and not isinstance(parent_directive_id, str):
+                if parent_directive_id is not None and (
+                    not isinstance(parent_directive_id, str) or not parent_directive_id.strip()
+                ):
                     continue
                 idempotency_key = data.get("idempotency_key")
-                if idempotency_key is not None and not isinstance(idempotency_key, str):
+                if idempotency_key is not None and (
+                    not isinstance(idempotency_key, str) or not idempotency_key.strip()
+                ):
                     continue
                 directive_emissions.append(
                     ControlDirectiveEmission(

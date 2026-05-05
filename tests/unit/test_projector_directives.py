@@ -341,6 +341,42 @@ class TestDirectiveProjection:
             _event(
                 "control.directive.emitted",
                 {
+                    "directive": "cancel",
+                    "reason": "Bad schema version value.",
+                    "emitted_by": "orchestrator",
+                    "schema_version": 0,
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Empty target id.",
+                    "emitted_by": "evolver",
+                    "target_id": "  ",
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Empty parent directive id.",
+                    "emitted_by": "evolver",
+                    "parent_directive_id": "",
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Empty idempotency key.",
+                    "emitted_by": "evolver",
+                    "idempotency_key": " ",
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
                     "directive": "continue",
                     "reason": "Healthy row.",
                     "emitted_by": "evolver",
