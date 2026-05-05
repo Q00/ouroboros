@@ -4,6 +4,8 @@ description: "MCP-owned Ralph loop around background evolve_step jobs"
 mcp_tool: ouroboros_ralph
 mcp_args:
   lineage_id: "$lineage_id"
+mcp_required_args:
+  - lineage_id
 ---
 
 # /ouroboros:ralph

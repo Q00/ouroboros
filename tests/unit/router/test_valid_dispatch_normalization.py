@@ -9,6 +9,7 @@ from ouroboros.router import (
     InvalidSkill,
     MCPDispatchTarget,
     NormalizedMCPFrontmatter,
+    NotHandled,
     ParsedOooCommand,
     Resolved,
     ResolveOutcome,
@@ -103,6 +104,8 @@ name: ralph
 mcp_tool: ouroboros_ralph
 mcp_args:
   lineage_id: "$lineage_id"
+mcp_required_args:
+  - lineage_id
 ---
 # Ralph
 """,
@@ -258,10 +261,27 @@ def test_valid_dispatch_leaves_lineage_id_empty_for_plain_ralph_request(
         )
     )
 
+    assert isinstance(result, NotHandled)
+    assert result.reason == "missing required MCP argument: lineage_id"
+
+
+def test_valid_dispatch_preserves_lineage_id_option_for_skills_that_do_not_use_it(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_auto_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt='ooo auto "Build docs" --lineage-id lin_123',
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
     assert isinstance(result, Resolved)
-    assert result.mcp_tool == "ouroboros_ralph"
-    assert result.mcp_args == {"lineage_id": ""}
-    assert result.first_argument == "build a CLI"
+    assert result.mcp_args["goal"] == "Build docs --lineage-id lin_123"
+    assert "lineage_id" not in result.mcp_args
 
 
 def test_valid_dispatch_preserves_goal_after_boolean_option(
