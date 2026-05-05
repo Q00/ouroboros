@@ -52,13 +52,14 @@ reference migrations in slices 4–6 of #518.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 import logging
 from typing import Any, Final, Protocol
 from uuid import uuid4
 
+from ouroboros.core.control_contract import ControlContract
 from ouroboros.core.directive import Directive
 from ouroboros.events.control import create_control_directive_emitted_event
 
@@ -84,6 +85,28 @@ class AgentProcessStatus(StrEnum):
     FAILED = "failed"
 
 
+@dataclass(frozen=True, slots=True)
+class AgentProcessSnapshot:
+    """Replayable read model for one agent-process lifecycle.
+
+    This is the durable state-model slice for #518. It intentionally projects
+    only fields already present in ``control.directive.emitted`` rows so future
+    checkpoint/replay work can build on an additive contract instead of
+    inspecting live ``AgentProcessHandle`` instances.
+    """
+
+    process_id: str
+    status: AgentProcessStatus
+    intent: str | None = None
+    directive_count: int = 0
+    last_reason: str | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether the reconstructed lifecycle is terminal."""
+        return self.status in _TERMINAL_STATUSES
+
+
 _TERMINAL_STATUSES: Final[frozenset[AgentProcessStatus]] = frozenset(
     {
         AgentProcessStatus.CANCELLED,
@@ -107,6 +130,70 @@ _TRANSITION_DIRECTIVE: Final[dict[AgentProcessStatus, Directive]] = {
     # specific reason directive (e.g. RETRY exhaustion → CANCEL via
     # the evolution mapping in #525).
 }
+
+
+def project_agent_process_snapshot(
+    events: Iterable[Any], *, process_id: str | None = None
+) -> AgentProcessSnapshot | None:
+    """Project an :class:`AgentProcessSnapshot` from lifecycle directive events.
+
+    Only ``control.directive.emitted`` events targeted at ``agent_process`` are
+    considered. Malformed rows are skipped rather than corrupting replay state;
+    the raw events remain available from the EventStore for diagnostics.
+
+    Args:
+        events: EventStore rows or event-like test fakes.
+        process_id: Optional process id filter. If omitted, the first valid
+            event determines the snapshot process id and later events for other
+            processes are ignored.
+
+    Returns:
+        Reconstructed snapshot, or ``None`` when no valid agent-process
+        lifecycle event is present.
+    """
+    snapshot: AgentProcessSnapshot | None = None
+    target_process_id = process_id
+
+    for event in events:
+        if getattr(event, "type", None) != ControlContract.EVENT_TYPE:
+            continue
+        if getattr(event, "aggregate_type", None) != _TARGET_TYPE:
+            continue
+
+        event_process_id = getattr(event, "aggregate_id", None)
+        if not isinstance(event_process_id, str) or not event_process_id:
+            continue
+        if target_process_id is None:
+            target_process_id = event_process_id
+        if event_process_id != target_process_id:
+            continue
+
+        data = getattr(event, "data", None)
+        if not isinstance(data, dict):
+            continue
+        extra = data.get("extra")
+        if not isinstance(extra, dict):
+            continue
+        raw_status = extra.get("lifecycle_status")
+        if not isinstance(raw_status, str):
+            continue
+        try:
+            status = AgentProcessStatus(raw_status)
+        except ValueError:
+            continue
+
+        raw_intent = extra.get("intent")
+        intent = raw_intent if isinstance(raw_intent, str) and raw_intent else None
+        reason = data.get("reason")
+        snapshot = AgentProcessSnapshot(
+            process_id=event_process_id,
+            status=status,
+            intent=intent,
+            directive_count=(snapshot.directive_count if snapshot is not None else 0) + 1,
+            last_reason=reason if isinstance(reason, str) else None,
+        )
+
+    return snapshot
 
 
 class _AppendableEventStore(Protocol):

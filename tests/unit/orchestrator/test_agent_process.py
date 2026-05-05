@@ -15,6 +15,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import (
     AgentProcess,
     AgentProcessStatus,
+    project_agent_process_snapshot,
 )
 from ouroboros.persistence.event_store import EventStore
 
@@ -336,6 +337,68 @@ async def test_lifecycle_directive_carries_target_type_agent_process() -> None:
         assert event.data["emitted_by"] == "agent_process"
         assert event.data["extra"]["intent"] == "evolve_step"
         assert "lifecycle_status" in event.data["extra"]
+
+
+@pytest.mark.asyncio
+async def test_agent_process_snapshot_projects_lifecycle_status_from_events() -> None:
+    """AgentProcess state should be reconstructable from directive events."""
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+
+    release = asyncio.Event()
+
+    async def work(handle):
+        while not release.is_set():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await handle.pause()
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    await handle.resume()
+    release.set()
+    await handle.wait_until_complete(timeout=1.0)
+
+    snapshot = project_agent_process_snapshot(store.appended, process_id=handle.process_id)
+
+    assert snapshot is not None
+    assert snapshot.process_id == handle.process_id
+    assert snapshot.intent == "ralph"
+    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.directive_count == 4
+    assert snapshot.last_reason == "ralph: work returned"
+    assert snapshot.is_terminal is True
+
+
+@pytest.mark.asyncio
+async def test_agent_process_snapshot_ignores_other_processes_and_malformed_rows() -> None:
+    """Projection should skip malformed/foreign rows instead of corrupting state."""
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):
+        return None
+
+    wanted = await process.spawn(intent="evolve_step", work_fn=work, process_id="proc-wanted")
+    other = await process.spawn(intent="ralph", work_fn=work, process_id="proc-other")
+    await wanted.wait_until_complete(timeout=1.0)
+    await other.wait_until_complete(timeout=1.0)
+    malformed = BaseEvent(
+        type="control.directive.emitted",
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={"extra": {"lifecycle_status": "not-a-status", "intent": "bad"}},
+    )
+
+    snapshot = project_agent_process_snapshot(
+        [malformed, *store.appended], process_id="proc-wanted"
+    )
+
+    assert snapshot is not None
+    assert snapshot.process_id == "proc-wanted"
+    assert snapshot.intent == "evolve_step"
+    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.directive_count == 2
 
 
 @pytest.mark.asyncio
