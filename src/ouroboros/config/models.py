@@ -476,7 +476,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
         worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
     """
 
-    runtime_backend: Literal["claude", "codex", "opencode", "hermes", "gemini", "kiro"] = "claude"
+    runtime_backend: Literal[
+        "claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot"
+    ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
     @field_validator("runtime_profile", mode="before")
