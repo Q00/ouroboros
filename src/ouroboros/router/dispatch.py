@@ -399,14 +399,6 @@ def _collect_dispatch_template_names(value: Any) -> set[str]:
     return names
 
 
-def _required_dispatch_args(frontmatter: Mapping[str, Any]) -> tuple[str, ...]:
-    """Read optional required resolved-argument names from skill frontmatter."""
-    raw = frontmatter.get("mcp_required_args", ())
-    if not isinstance(raw, list):
-        return ()
-    return tuple(item for item in raw if isinstance(item, str) and item.strip())
-
-
 def _extract_dispatch_template_values(
     remainder: str | None,
     *,
@@ -696,22 +688,6 @@ def resolve_parsed_skill_dispatch(
     except Exception as exc:
         return InvalidSkill(
             reason=f"template resolution failed: {str(exc) or type(exc).__name__}",
-            skill_path=resolved_skill_path,
-            category=InvalidInputReason.TEMPLATE_RESOLUTION_ERROR,
-        )
-
-    missing_required_args = [
-        arg_name
-        for arg_name in _required_dispatch_args(frontmatter)
-        if resolved_mcp_args.get(arg_name) in ("", None)
-    ]
-    if missing_required_args:
-        return InvalidSkill(
-            reason=(
-                f"missing required MCP argument: {', '.join(missing_required_args)}. "
-                "For natural-language Ralph requests, run the validated interview/seed "
-                "flow before invoking ouroboros_ralph with seed_content."
-            ),
             skill_path=resolved_skill_path,
             category=InvalidInputReason.TEMPLATE_RESOLUTION_ERROR,
         )

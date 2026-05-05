@@ -103,8 +103,6 @@ name: ralph
 mcp_tool: ouroboros_ralph
 mcp_args:
   lineage_id: "$lineage_id"
-mcp_required_args:
-  - lineage_id
 ---
 # Ralph
 """,
@@ -246,7 +244,7 @@ def test_valid_dispatch_resolves_lineage_id_option_without_using_plain_request(
     assert result.first_argument == "build a CLI --lineage-id lin_123"
 
 
-def test_valid_dispatch_rejects_plain_ralph_request_without_losing_skill_ownership(
+def test_valid_dispatch_routes_plain_ralph_request_to_input_guidance(
     tmp_path: Path,
 ) -> None:
     skills_dir = tmp_path / "skills"
@@ -260,10 +258,9 @@ def test_valid_dispatch_rejects_plain_ralph_request_without_losing_skill_ownersh
         )
     )
 
-    assert isinstance(result, InvalidSkill)
-    assert result.category is InvalidInputReason.TEMPLATE_RESOLUTION_ERROR
-    assert "missing required MCP argument: lineage_id" in result.reason
-    assert "validated interview/seed flow" in result.reason
+    assert isinstance(result, Resolved)
+    assert result.mcp_tool == "ouroboros_ralph"
+    assert result.mcp_args == {"lineage_id": ""}
 
 
 def test_valid_dispatch_preserves_lineage_id_option_for_skills_that_do_not_use_it(

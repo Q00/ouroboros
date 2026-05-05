@@ -119,7 +119,24 @@ class RalphHandler:
         """Start the Ralph loop job and return a job handle immediately."""
         lineage_id = arguments.get("lineage_id")
         if not lineage_id:
-            return Result.err(MCPToolError("lineage_id is required", tool_name="ouroboros_ralph"))
+            text = (
+                "Ralph needs structured lineage input before it can start.\n\n"
+                "For an existing Ralph lineage, invoke `ooo ralph --lineage-id <lineage_id>`.\n"
+                "For a plain natural-language request, run `ooo interview` and `ooo seed` "
+                "first, then call `ouroboros_ralph` with a fresh lineage_id and the "
+                "validated Seed YAML as seed_content."
+            )
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                    is_error=True,
+                    meta={
+                        "status": "input_required",
+                        "missing": ["lineage_id"],
+                        "next_step": "interview_seed_or_lineage_id",
+                    },
+                )
+            )
 
         try:
             max_generations = int(arguments.get("max_generations", MAX_RALPH_GENERATIONS))

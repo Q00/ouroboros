@@ -144,6 +144,21 @@ async def test_ralph_handler_returns_job_id_and_completes_loop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ralph_handler_guides_plain_request_without_lineage_id() -> None:
+    handler = RalphHandler(evolve_handler=_FakeEvolveHandler(["converged"]))  # type: ignore[arg-type]
+
+    result = await handler.handle({"lineage_id": ""})
+
+    assert result.is_ok
+    tool_result = result.value
+    assert tool_result.is_error is True
+    assert tool_result.meta["status"] == "input_required"
+    assert tool_result.meta["missing"] == ["lineage_id"]
+    assert "ooo interview" in tool_result.text_content
+    assert "ooo seed" in tool_result.text_content
+
+
+@pytest.mark.asyncio
 async def test_ralph_handler_plugin_mode_delegates_without_local_job() -> None:
     store = EventStore("sqlite+aiosqlite:///:memory:")
     job_manager = JobManager(store)
