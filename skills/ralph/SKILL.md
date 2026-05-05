@@ -1,10 +1,6 @@
 ---
 name: ralph
 description: "MCP-owned Ralph loop around background evolve_step jobs"
-mcp_tool: ouroboros_ralph
-mcp_args:
-  lineage_id: "$1"
-  project_dir: "$CWD"
 ---
 
 # /ouroboros:ralph
@@ -34,9 +30,12 @@ terminal evolution action occurs, cancellation is requested, or
 a child Task session that owns the loop instead of creating a local JobManager
 job.
 
-The client skill should not reimplement the loop. It should start the MCP-owned
-Ralph surface once, then follow either the returned job tools path or the
-OpenCode Task widget path.
+The client skill should not reimplement the loop or expose deterministic
+frontmatter dispatch: raw natural-language `ooo ralph "<request>"` input must
+flow through the validated Seed path before any `ouroboros_ralph` call. Once a
+lineage id and optional Seed YAML are prepared, start the MCP-owned Ralph
+surface once, then follow either the returned job tools path or the OpenCode
+Task widget path.
 
 ## Instructions
 
@@ -77,9 +76,8 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      `ouroboros_generate_seed` to produce validated Seed YAML with the normal
      ambiguity gate. After Seed generation, call the MCP tool with a fresh
      `lineage_id` and that validated Seed YAML as `seed_content`; do not use the
-     exact frontmatter shorthand for the raw request text. If an interview/seed
-     session already exists in context, reuse that validated Seed output instead
-     of regenerating it.
+     raw request text. If an interview/seed session already exists in context,
+     reuse that validated Seed output instead of regenerating it.
 
 2. **Start Ralph** by calling `ouroboros_ralph` with:
    - `lineage_id`: existing lineage id for an explicit continuation, otherwise a
