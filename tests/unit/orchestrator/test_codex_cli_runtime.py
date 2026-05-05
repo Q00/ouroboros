@@ -1695,13 +1695,292 @@ class TestCodexCliRuntime:
         assert messages[0].is_error is True
         assert messages[0].content.startswith("Cannot run ooo auto")
         assert "`ouroboros_auto` is unavailable" in messages[0].content
+        assert "ouroboros mcp doctor" in messages[0].content
+        assert mock_warning.call_args.kwargs["fallback"] == "terminal_error"
         assert messages[0].data == {
             "subtype": "error",
             "error_type": "SkillDispatchUnavailable",
             "skill_name": "auto",
             "tool_name": "ouroboros_auto",
             "command_prefix": "ooo auto",
+            "dispatch_error_type": "LookupError",
+            "dispatch_error": "No local handler registered",
         }
+
+    @pytest.mark.asyncio
+    async def test_execute_task_auto_connection_error_preserves_real_cause(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Auto transport failures must fail closed without being rewritten as setup issues."""
+        self._write_skill(
+            tmp_path,
+            "auto",
+            [
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock(
+            return_value=(
+                AgentMessage(type="assistant", content="Calling tool: ouroboros_auto"),
+                AgentMessage(
+                    type="result",
+                    content="Auto MCP server unavailable",
+                    data={
+                        "subtype": "error",
+                        "recoverable": True,
+                        "error_type": "MCPConnectionError",
+                    },
+                ),
+            )
+        )
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        with (
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            ) as mock_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+
+        dispatcher.assert_awaited_once()
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["recoverable"] is True
+        assert mock_warning.call_args.kwargs["fallback"] == "terminal_error"
+        assert mock_warning.call_args.kwargs["error_type"] == "MCPConnectionError"
+        mock_exec.assert_not_called()
+        assert [message.content for message in messages] == [
+            "Calling tool: ouroboros_auto",
+            "Auto MCP server unavailable",
+        ]
+        assert messages[-1].data["error_type"] == "MCPConnectionError"
+        assert messages[-1].data["error_type"] != "SkillDispatchUnavailable"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_auto_resource_not_found_dispatch_error_does_not_fall_back(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Missing production MCP tool registrations hard-fail as dispatch unavailable."""
+        self._write_skill(
+            tmp_path,
+            "auto",
+            [
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock(
+            return_value=(
+                AgentMessage(type="assistant", content="Calling tool: ouroboros_auto"),
+                AgentMessage(
+                    type="result",
+                    content="Tool ouroboros_auto not found",
+                    data={
+                        "subtype": "error",
+                        "recoverable": True,
+                        "error_type": "MCPResourceNotFoundError",
+                    },
+                ),
+            )
+        )
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        with (
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            ) as mock_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+
+        dispatcher.assert_awaited_once()
+        assert mock_warning.call_args.kwargs["fallback"] == "terminal_error"
+        mock_exec.assert_not_called()
+        assert len(messages) == 1
+        assert messages[0].data["error_type"] == "SkillDispatchUnavailable"
+        assert messages[0].data["dispatch_error_type"] == "MCPResourceNotFoundError"
+        assert messages[0].data["dispatch_error"] == "Tool ouroboros_auto not found"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_auto_recoverable_pipeline_error_preserves_real_cause(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Auto pipeline failures must not be rewritten as dispatch-unavailable errors."""
+        self._write_skill(
+            tmp_path,
+            "auto",
+            [
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock(
+            return_value=(
+                AgentMessage(type="assistant", content="Calling tool: ouroboros_auto"),
+                AgentMessage(
+                    type="result",
+                    content="Auto pipeline failed: model provider crashed",
+                    data={
+                        "subtype": "error",
+                        "recoverable": True,
+                        "error_type": "MCPToolError",
+                    },
+                ),
+            )
+        )
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        with (
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            ) as mock_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+
+        dispatcher.assert_awaited_once()
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["recoverable"] is True
+        assert mock_warning.call_args.kwargs["fallback"] == "terminal_error"
+        assert mock_warning.call_args.kwargs["error_type"] == "MCPToolError"
+        mock_exec.assert_not_called()
+        assert [message.content for message in messages] == [
+            "Calling tool: ouroboros_auto",
+            "Auto pipeline failed: model provider crashed",
+        ]
+        assert messages[-1].data["error_type"] == "MCPToolError"
+        assert messages[-1].data["error_type"] != "SkillDispatchUnavailable"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_auto_key_error_falls_back_with_real_cause(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """LookupError subclasses such as KeyError must not be treated as missing tools."""
+        self._write_skill(
+            tmp_path,
+            "auto",
+            [
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock(side_effect=KeyError("internal_state"))
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Codex fallback", encoding="utf-8")
+            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+        with (
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ) as mock_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+
+        dispatcher.assert_awaited_once()
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["error_type"] == "KeyError"
+        assert mock_warning.call_args.kwargs["fallback"] == "pass_through_to_codex"
+        mock_exec.assert_called_once()
+        assert messages[-1].content == "Codex fallback"
+        assert all(
+            message.data.get("error_type") != "SkillDispatchUnavailable" for message in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_task_auto_unexpected_dispatch_error_falls_back_with_real_cause(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Unexpected auto dispatch errors must not be misreported as missing MCP tools."""
+        self._write_skill(
+            tmp_path,
+            "auto",
+            [
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock(side_effect=RuntimeError("handler crashed"))
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Codex fallback", encoding="utf-8")
+            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+        with (
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ) as mock_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+
+        dispatcher.assert_awaited_once()
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["error_type"] == "RuntimeError"
+        assert mock_warning.call_args.kwargs["error"] == "handler crashed"
+        mock_exec.assert_called_once()
+        assert messages[-1].content == "Codex fallback"
+        assert all(
+            message.data.get("error_type") != "SkillDispatchUnavailable" for message in messages
+        )
 
     @pytest.mark.asyncio
     async def test_execute_task_falls_through_when_interview_intercept_dispatcher_raises(
