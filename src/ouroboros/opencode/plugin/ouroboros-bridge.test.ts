@@ -23,6 +23,9 @@ import {
   dupe,
   fnv,
   id,
+  isRalphOwnedSession,
+  isNestedRalphDispatch,
+  markRalphChild,
   notify,
   num,
   parse,
@@ -470,6 +473,44 @@ describe("dupe", () => {
   })
 })
 
+describe("ralph recursion guard", () => {
+  beforeEach(() => _resetDedupe())
+
+  const sub = (tool: string) => ({
+    tool,
+    title: "t",
+    agent: "general",
+    prompt: "p",
+    truncated: false,
+    hash: "h",
+  })
+
+  test("blocks ouroboros_ralph from a Ralph child session", () => {
+    markRalphChild("ses_child")
+
+    expect(isNestedRalphDispatch("ses_child", [sub("ouroboros_ralph")])).toBe(true)
+  })
+
+  test("allows non-Ralph tools from a Ralph child session", () => {
+    markRalphChild("ses_child")
+
+    expect(isNestedRalphDispatch("ses_child", [sub("ouroboros_evolve_step")])).toBe(false)
+  })
+
+  test("allows top-level Ralph dispatch from ordinary sessions", () => {
+    expect(isNestedRalphDispatch("ses_parent", [sub("ouroboros_ralph")])).toBe(false)
+  })
+
+  test("propagates Ralph ownership to descendants", () => {
+    markRalphChild("ses_child")
+    markRalphChild("ses_grandchild")
+
+    expect(isRalphOwnedSession("ses_child")).toBe(true)
+    expect(isRalphOwnedSession("ses_grandchild")).toBe(true)
+    expect(isNestedRalphDispatch("ses_grandchild", [sub("ouroboros_ralph")])).toBe(true)
+  })
+})
+
 describe("base", () => {
   test("returns inner client when session._client.patch present", () => {
     const fake = { session: { _client: { patch: () => Promise.resolve({}) } } }
@@ -707,5 +748,25 @@ describe("_dispatch — child session lifecycle", () => {
     await expect(
       _dispatch(cli as never, b as never, "pid", "mid", sub as never),
     ).rejects.toThrow(/PATCH failed/)
+  })
+
+  test("marks descendants created from Ralph-owned sessions", async () => {
+    _resetDedupe()
+    markRalphChild("ralph_child")
+    const cli = mockCli({ create: async () => ({ data: { id: "grandchild_123" } }) })
+    const b = mockBase()
+    const sub = {
+      tool: "ouroboros_evolve_step",
+      title: "Evolve",
+      prompt: "next",
+      agent: "general",
+      truncated: false,
+      hash: "h",
+    }
+
+    await _dispatch(cli as never, b as never, "ralph_child", "mid", sub as never)
+
+    expect(isRalphOwnedSession("grandchild_123")).toBe(true)
+    expect(isNestedRalphDispatch("grandchild_123", [{ ...sub, tool: "ouroboros_ralph" }])).toBe(true)
   })
 })
