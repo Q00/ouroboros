@@ -40,7 +40,12 @@ _GEMINI_PERMISSION_MODE_TO_FLAG = {
     "bypassPermissions": "yolo",
 }
 _GEMINI_PERMISSION_MODES = frozenset(_GEMINI_PERMISSION_MODE_TO_FLAG)
-_GEMINI_DEFAULT_PERMISSION_MODE = "bypassPermissions"
+# Match the orchestrator-wide ``acceptEdits`` default. Gemini's ``auto_edit``
+# is non-blocking under ``--non-interactive`` (no approval prompts), so
+# headless safety does not require silently jumping to ``yolo`` (full bypass)
+# when ``permission_mode`` is omitted — operators must opt in to
+# ``bypassPermissions`` explicitly.
+_GEMINI_DEFAULT_PERMISSION_MODE = "acceptEdits"
 
 #: Maximum Ouroboros nesting depth to prevent fork bombs
 _MAX_OUROBOROS_DEPTH = 5
@@ -89,8 +94,10 @@ class GeminiCLIRuntime(CodexCliRuntime):
                 ``default``, ``acceptEdits``, ``bypassPermissions``. Mapped
                 to Gemini's ``--approval-mode`` flag at command-build time
                 (``default``/``auto_edit``/``yolo`` respectively). Falls
-                back to ``bypassPermissions`` (``yolo``) when omitted so
-                headless runs do not stall on an interactive prompt.
+                back to ``acceptEdits`` (``auto_edit``) when omitted —
+                non-blocking under ``--non-interactive`` and matching the
+                orchestrator-wide default; operators must opt in to
+                ``bypassPermissions`` explicitly.
             model: Optional model identifier.
             cwd: Optional working directory for the subprocess.
             skills_dir: Optional directory for skill definitions.
@@ -115,13 +122,13 @@ class GeminiCLIRuntime(CodexCliRuntime):
         """Validate and normalize the Gemini CLI permission mode.
 
         ``None`` resolves to :data:`_GEMINI_DEFAULT_PERMISSION_MODE`
-        (``bypassPermissions``) so headless runs do not stall on a
-        prompt; recognized Ouroboros modes (``default``, ``acceptEdits``,
-        ``bypassPermissions``) pass through. Anything else raises
-        ``ValueError`` instead of silently falling back — fail-open on a
-        permission boundary would let a typo (or unchecked
-        ``OUROBOROS_AGENT_PERMISSION_MODE`` value) escalate the runtime
-        to ``yolo``. Matches the Codex permission parser contract.
+        (``acceptEdits`` → ``auto_edit``, non-blocking under
+        ``--non-interactive``); recognized Ouroboros modes (``default``,
+        ``acceptEdits``, ``bypassPermissions``) pass through. Anything
+        else raises ``ValueError`` instead of silently falling back —
+        fail-open on a permission boundary would let a typo (or
+        unchecked ``OUROBOROS_AGENT_PERMISSION_MODE`` value) escalate
+        the runtime. Matches the Codex permission parser contract.
         """
         if permission_mode is None:
             return _GEMINI_DEFAULT_PERMISSION_MODE

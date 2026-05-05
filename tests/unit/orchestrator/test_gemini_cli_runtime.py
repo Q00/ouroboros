@@ -143,16 +143,20 @@ def test_build_command_maps_default_to_default() -> None:
     assert _approval_flag(cmd) == "default"
 
 
-def test_build_command_uses_yolo_when_permission_mode_omitted() -> None:
-    """No explicit permission_mode → safe headless default (``yolo``)."""
+def test_build_command_uses_auto_edit_when_permission_mode_omitted() -> None:
+    """Default = ``acceptEdits`` (matches orchestrator default) → ``auto_edit``.
+
+    ``auto_edit`` is non-blocking under ``--non-interactive`` so this stays
+    headless-safe without escalating to full ``yolo`` bypass.
+    """
     runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini")
     cmd = runtime._build_command("/tmp/unused", prompt="x")
-    assert _approval_flag(cmd) == "yolo"
+    assert _approval_flag(cmd) == "auto_edit"
 
 
 def test_unknown_permission_mode_raises_value_error() -> None:
     """An unrecognized mode (e.g. typo) must fail fast — silent fallback to
-    ``bypassPermissions`` would escalate any unchecked input to full bypass."""
+    a permissive default would escalate any unchecked input."""
     with pytest.raises(ValueError, match="Unsupported Gemini permission mode"):
         GeminiCLIRuntime(
             cli_path="/usr/bin/gemini",
@@ -160,16 +164,47 @@ def test_unknown_permission_mode_raises_value_error() -> None:
         )
 
 
-def test_omitted_permission_mode_resolves_to_bypass() -> None:
-    """``None`` keeps the headless-safe default (``bypassPermissions`` → yolo)."""
+def test_omitted_permission_mode_resolves_to_accept_edits() -> None:
+    """``None`` aligns with the orchestrator-wide ``acceptEdits`` default."""
     runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini")
-    assert runtime.permission_mode == "bypassPermissions"
+    assert runtime.permission_mode == "acceptEdits"
 
 
 def test_empty_string_permission_mode_raises() -> None:
     """Empty/whitespace-only strings are not a valid mode either."""
     with pytest.raises(ValueError, match="Unsupported Gemini permission mode"):
         GeminiCLIRuntime(cli_path="/usr/bin/gemini", permission_mode="   ")
+
+
+def test_factory_built_runtime_uses_accept_edits_default() -> None:
+    """``create_agent_runtime(backend="gemini")`` must inherit the orchestrator
+    ``acceptEdits`` default rather than escalate to ``yolo``."""
+    from unittest.mock import patch
+
+    from ouroboros.orchestrator import create_agent_runtime
+
+    with (
+        patch(
+            "ouroboros.orchestrator.runtime_factory.get_agent_permission_mode",
+            return_value=None,
+        ),
+        patch(
+            "ouroboros.orchestrator.runtime_factory.get_llm_backend",
+            return_value="gemini",
+        ),
+        patch(
+            "ouroboros.config.get_gemini_cli_path",
+            return_value="/usr/bin/gemini",
+        ),
+        patch(
+            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+            return_value=None,
+        ),
+    ):
+        runtime = create_agent_runtime(backend="gemini")
+
+    assert isinstance(runtime, GeminiCLIRuntime)
+    assert runtime.permission_mode == "acceptEdits"
 
 
 def test_runtime_does_not_feed_prompt_via_stdin() -> None:
