@@ -344,6 +344,21 @@ class TestKiroCodeAdapterComplete:
             with pytest.raises(RuntimeError, match="Maximum Ouroboros nesting depth"):
                 adapter._build_child_env()
 
+    @pytest.mark.asyncio
+    async def test_depth_guard_returns_provider_error(self) -> None:
+        from ouroboros.providers.base import CompletionConfig, Message, MessageRole
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli")
+        with patch.dict("os.environ", {"_OUROBOROS_DEPTH": "5"}):
+            result = await adapter.complete(
+                messages=[Message(role=MessageRole.USER, content="Hi")],
+                config=CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert "Maximum Ouroboros nesting depth" in result.error.message
+        assert result.error.details == {"error_type": "RuntimeError"}
+
     def test_audit_flags_tool_use_outside_envelope(self) -> None:
         captured: list[dict] = []
 
@@ -712,6 +727,20 @@ class TestKiroPermissionModeContract:
         assert "OUROBOROS_RUNTIME" not in env
         assert "CLAUDECODE" not in env
         assert env["_OUROBOROS_DEPTH"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_runtime_depth_guard_yields_error_message(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli")
+        with patch.dict("os.environ", {"_OUROBOROS_DEPTH": "5"}):
+            messages = [message async for message in adapter.execute_task("hello")]
+
+        assert len(messages) == 1
+        assert messages[0].type == "result"
+        assert messages[0].is_error
+        assert "Maximum Ouroboros nesting depth" in messages[0].content
+        assert messages[0].data["error_type"] == "RuntimeError"
 
 
 class TestKiroFactoryDispatcherContract:

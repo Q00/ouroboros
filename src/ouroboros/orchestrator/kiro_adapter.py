@@ -336,8 +336,17 @@ class KiroAgentAdapter:
                 yield message
             return
 
-        cmd = self._build_cmd(prompt, system_prompt, tools, resume_session_id)
-        env = self._build_child_env()
+        try:
+            cmd = self._build_cmd(prompt, system_prompt, tools, resume_session_id)
+            env = self._build_child_env()
+        except Exception as exc:
+            yield AgentMessage(
+                type="result",
+                content=f"Failed to prepare Kiro CLI: {exc}",
+                data={"subtype": "error", "error_type": type(exc).__name__},
+                resume_handle=current_handle,
+            )
+            return
 
         yield AgentMessage(
             type="system",

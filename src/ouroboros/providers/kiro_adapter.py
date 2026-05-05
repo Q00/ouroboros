@@ -150,7 +150,15 @@ class KiroCodeAdapter:
         """Make a completion request via Kiro CLI subprocess."""
         prompt = self._build_prompt(messages, config)
         cmd = self._build_cmd(prompt, config)
-        env = self._build_child_env()
+        try:
+            env = self._build_child_env()
+        except RuntimeError as exc:
+            return Result.err(
+                ProviderError(
+                    str(exc),
+                    details={"error_type": type(exc).__name__},
+                )
+            )
         cwd = self._cwd or os.getcwd()
         requires_json = bool(
             config.response_format
