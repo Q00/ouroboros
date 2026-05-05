@@ -114,15 +114,6 @@ _TERMINAL_STATUSES: Final[frozenset[AgentProcessStatus]] = frozenset(
         AgentProcessStatus.FAILED,
     }
 )
-_LIFECYCLE_REPLAY_ORDER: Final[dict[AgentProcessStatus, int]] = {
-    AgentProcessStatus.RUNNING: 0,
-    AgentProcessStatus.PAUSED: 1,
-    AgentProcessStatus.CANCELLED: 2,
-    AgentProcessStatus.FAILED: 2,
-    AgentProcessStatus.COMPLETED: 2,
-}
-
-
 # Mapping from a status transition to the directive that lands on the
 # journal. Per the body of #518, only externally-observed lifecycle
 # transitions emit directives; *internal* loop semantics (RETRY,
@@ -200,7 +191,7 @@ def project_agent_process_snapshot(
     valid_events.sort(
         key=lambda item: (
             getattr(item[1], "timestamp", None),
-            _LIFECYCLE_REPLAY_ORDER[item[3]],
+            getattr(item[1], "id", ""),
             item[0],
         )
     )

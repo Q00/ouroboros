@@ -437,8 +437,8 @@ def test_agent_process_snapshot_accepts_minimal_lifecycle_rows() -> None:
     assert snapshot.is_terminal is True
 
 
-def test_agent_process_snapshot_keeps_terminal_state_for_timestamp_ties() -> None:
-    """Replay ordering by timestamp/id must not let spawn rows overwrite terminal rows."""
+def test_agent_process_snapshot_matches_event_store_order_for_timestamp_ties() -> None:
+    """Timestamp ties should follow EventStore's timestamp/id replay contract."""
     same_time = datetime(2026, 1, 1, tzinfo=UTC)
     completed = BaseEvent(
         id="00000000-0000-0000-0000-000000000001",
@@ -466,9 +466,9 @@ def test_agent_process_snapshot_keeps_terminal_state_for_timestamp_ties() -> Non
     snapshot = project_agent_process_snapshot([completed, running], process_id="proc-wanted")
 
     assert snapshot is not None
-    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.status is AgentProcessStatus.RUNNING
     assert snapshot.intent == "ralph"
-    assert snapshot.last_reason == "ralph: work returned"
+    assert snapshot.last_reason == "ralph: spawned"
 
 
 @pytest.mark.asyncio
