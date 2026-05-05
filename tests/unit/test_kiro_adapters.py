@@ -865,6 +865,8 @@ class TestKiroResumeContract:
             messages = [msg async for msg in adapter.execute_task("continue", resume_handle=handle)]
 
         assert messages[-1].type == "result"
+        assert messages[-1].resume_handle is not None
+        assert messages[-1].resume_handle.native_session_id == "sess_123"
         assert captured_cmd is not None
         assert "--resume-id" in captured_cmd
         assert captured_cmd[captured_cmd.index("--resume-id") + 1] == "sess_123"

@@ -310,10 +310,14 @@ class KiroAgentAdapter:
             pass
         return list(lines)
 
-    def _build_runtime_handle(self, proc: asyncio.subprocess.Process) -> RuntimeHandle:
+    def _build_runtime_handle(
+        self,
+        proc: asyncio.subprocess.Process,
+        native_session_id: str | None = None,
+    ) -> RuntimeHandle:
         return RuntimeHandle(
             backend=self._runtime_backend_name,
-            native_session_id=None,
+            native_session_id=native_session_id,
             metadata={"pid": getattr(proc, "pid", None)},
         )
 
@@ -377,7 +381,7 @@ class KiroAgentAdapter:
                 cwd=self._cwd,
                 env=env,
             )
-            current_handle = self._build_runtime_handle(proc)
+            current_handle = self._build_runtime_handle(proc, effective_resume_session_id)
 
             # H2: drain stderr concurrently to prevent pipe buffer deadlock
             stderr_task = asyncio.create_task(self._collect_stderr(proc.stderr))
