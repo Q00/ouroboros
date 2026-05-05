@@ -119,13 +119,16 @@ tag_generation() {
         return 0
     fi
 
-    # Auto-commit: commit any changes from this generation
+    # Auto-commit: commit any changes from this generation. Keep the dirty
+    # predicate explicit so clean trees are not reported as committed and
+    # staged-only changes still trigger a snapshot.
     if ! git_in_project diff --quiet HEAD 2>/dev/null || \
        ! git_in_project diff --cached --quiet 2>/dev/null || \
        [ -n "$(git_in_project ls-files --others --exclude-standard 2>/dev/null)" ]; then
         git_in_project add -A >/dev/null 2>&1 || true
-        git_in_project commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1 || true
-        log "Committed changes for gen ${gen}"
+        if git_in_project commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1; then
+            log "Committed changes for gen ${gen}"
+        fi
     fi
 
     # Overwrite tag if it already exists (re-run scenario)
