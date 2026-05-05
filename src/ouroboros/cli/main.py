@@ -40,8 +40,8 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 
-# Register command groups
-app.add_typer(auto.app, name="auto")
+# Register direct commands and command groups
+app.command(name="auto", help="Run bounded full-quality ooo auto pipeline.")(auto.auto_command)
 app.add_typer(init.app, name="init")
 app.add_typer(run.app, name="run")
 app.add_typer(config.app, name="config")

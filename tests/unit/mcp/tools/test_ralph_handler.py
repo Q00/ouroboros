@@ -51,6 +51,30 @@ class _FakeEvolveHandler:
         )
 
 
+@dataclass
+class _BlockingEvolveHandler:
+    """Fake evolve handler that blocks until the Ralph job is cancelled."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    calls: int = 0
+
+    async def handle(self, arguments: dict[str, Any]):  # noqa: ARG002 - protocol fixture
+        self.calls += 1
+        self.started.set()
+        await asyncio.sleep(60)
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                is_error=False,
+                meta={
+                    "lineage_id": arguments["lineage_id"],
+                    "generation": self.calls,
+                    "action": "continue",
+                },
+            )
+        )
+
+
 @pytest.mark.asyncio
 async def test_ralph_loop_runs_multiple_generations_until_converged() -> None:
     evolve = _FakeEvolveHandler(["continue", "continue", "converged"])
@@ -169,6 +193,46 @@ async def test_ralph_handler_guides_whitespace_only_lineage_id() -> None:
     assert result.value.is_error is True
     assert result.value.meta["status"] == "input_required"
     assert evolve.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ralph_job_can_be_cancelled_with_job_manager() -> None:
+    """Ralph jobs should use the standard job cancellation/status contract."""
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    job_manager = JobManager(store)
+    evolve = _BlockingEvolveHandler()
+    handler = RalphHandler(
+        evolve_handler=evolve,  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=job_manager,
+    )
+
+    try:
+        started = await handler.handle(
+            {
+                "lineage_id": "lin_cancel",
+                "seed_content": "goal: cancel",
+                "max_generations": 5,
+            }
+        )
+        assert started.is_ok
+        job_id = started.value.meta["job_id"]
+
+        await asyncio.wait_for(evolve.started.wait(), timeout=1.0)
+        cancel_snapshot = await job_manager.cancel_job(job_id)
+        assert cancel_snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+
+        for _ in range(500):
+            snapshot = await job_manager.get_snapshot(job_id)
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+
+        assert snapshot.status is JobStatus.CANCELLED
+        assert snapshot.links.lineage_id == "lin_cancel"
+        assert evolve.calls == 1
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

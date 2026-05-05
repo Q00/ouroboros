@@ -8,6 +8,7 @@ deferred-implementation surface (replay raises NotImplementedError).
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
@@ -15,6 +16,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import (
     AgentProcess,
     AgentProcessStatus,
+    project_agent_process_snapshot,
 )
 from ouroboros.persistence.event_store import EventStore
 
@@ -336,6 +338,172 @@ async def test_lifecycle_directive_carries_target_type_agent_process() -> None:
         assert event.data["emitted_by"] == "agent_process"
         assert event.data["extra"]["intent"] == "evolve_step"
         assert "lifecycle_status" in event.data["extra"]
+
+
+@pytest.mark.asyncio
+async def test_agent_process_snapshot_projects_lifecycle_status_from_events() -> None:
+    """AgentProcess state should be reconstructable from directive events."""
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+
+    release = asyncio.Event()
+
+    async def work(handle):
+        while not release.is_set():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await handle.pause()
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    await handle.resume()
+    release.set()
+    await handle.wait_until_complete(timeout=1.0)
+
+    snapshot = project_agent_process_snapshot(store.appended, process_id=handle.process_id)
+
+    assert snapshot is not None
+    assert snapshot.process_id == handle.process_id
+    assert snapshot.intent == "ralph"
+    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.directive_count == 4
+    assert snapshot.last_reason == "ralph: work returned"
+    assert snapshot.is_terminal is True
+
+
+@pytest.mark.asyncio
+async def test_agent_process_snapshot_ignores_other_processes_and_malformed_rows() -> None:
+    """Projection should skip malformed/foreign rows instead of corrupting state."""
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):
+        return None
+
+    wanted = await process.spawn(intent="evolve_step", work_fn=work, process_id="proc-wanted")
+    other = await process.spawn(intent="ralph", work_fn=work, process_id="proc-other")
+    await wanted.wait_until_complete(timeout=1.0)
+    await other.wait_until_complete(timeout=1.0)
+    malformed = BaseEvent(
+        type="control.directive.emitted",
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={"extra": {"lifecycle_status": "not-a-status", "intent": "bad"}},
+    )
+
+    snapshot = project_agent_process_snapshot(
+        [malformed, *store.appended], process_id="proc-wanted"
+    )
+
+    assert snapshot is not None
+    assert snapshot.process_id == "proc-wanted"
+    assert snapshot.intent == "evolve_step"
+    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.directive_count == 2
+
+
+def test_agent_process_snapshot_accepts_minimal_lifecycle_rows() -> None:
+    """Replay requires lifecycle status; descriptive metadata is optional."""
+    same_time = datetime(2026, 1, 1, tzinfo=UTC)
+    minimal_running = BaseEvent(
+        id="00000000-0000-0000-0000-000000000001",
+        type="control.directive.emitted",
+        timestamp=same_time,
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={
+            "reason": "ralph: spawned",
+            "extra": {"lifecycle_status": "running", "intent": "ralph"},
+        },
+    )
+    minimal_cancelled = BaseEvent(
+        id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        type="control.directive.emitted",
+        timestamp=same_time,
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={"extra": {"lifecycle_status": "cancelled"}},
+    )
+
+    snapshot = project_agent_process_snapshot(
+        [minimal_running, minimal_cancelled],
+        process_id="proc-wanted",
+    )
+
+    assert snapshot is not None
+    assert snapshot.process_id == "proc-wanted"
+    assert snapshot.intent == "ralph"
+    assert snapshot.status is AgentProcessStatus.CANCELLED
+    assert snapshot.directive_count == 2
+    assert snapshot.last_reason == "ralph: spawned"
+    assert snapshot.is_terminal is True
+
+
+def test_agent_process_snapshot_matches_event_store_order_for_timestamp_ties() -> None:
+    """Timestamp ties should follow EventStore's timestamp/id replay contract."""
+    same_time = datetime(2026, 1, 1, tzinfo=UTC)
+    completed = BaseEvent(
+        id="00000000-0000-0000-0000-000000000001",
+        type="control.directive.emitted",
+        timestamp=same_time,
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={
+            "reason": "ralph: work returned",
+            "extra": {"lifecycle_status": "completed", "intent": "ralph"},
+        },
+    )
+    running = BaseEvent(
+        id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        type="control.directive.emitted",
+        timestamp=same_time,
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={
+            "reason": "ralph: spawned",
+            "extra": {"lifecycle_status": "running", "intent": "ralph"},
+        },
+    )
+
+    snapshot = project_agent_process_snapshot([completed, running], process_id="proc-wanted")
+
+    assert snapshot is not None
+    assert snapshot.status is AgentProcessStatus.RUNNING
+    assert snapshot.intent == "ralph"
+    assert snapshot.last_reason == "ralph: spawned"
+
+
+def test_agent_process_snapshot_skips_rows_without_comparable_ordering() -> None:
+    """Malformed event-like rows without timestamp/id should not crash sorting."""
+
+    class _NoTimestampEvent:
+        type = "control.directive.emitted"
+        aggregate_type = "agent_process"
+        aggregate_id = "proc-wanted"
+        data = {
+            "reason": "bad",
+            "extra": {"lifecycle_status": "completed", "intent": "bad"},
+        }
+
+    valid = BaseEvent(
+        id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        type="control.directive.emitted",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={
+            "reason": "ralph: spawned",
+            "extra": {"lifecycle_status": "running", "intent": "ralph"},
+        },
+    )
+
+    snapshot = project_agent_process_snapshot(
+        [_NoTimestampEvent(), valid], process_id="proc-wanted"
+    )
+
+    assert snapshot is not None
+    assert snapshot.status is AgentProcessStatus.RUNNING
+    assert snapshot.intent == "ralph"
 
 
 @pytest.mark.asyncio

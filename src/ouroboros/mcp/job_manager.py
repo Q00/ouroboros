@@ -125,31 +125,49 @@ class JobManager:
         )
 
         self._known_job_ids.add(job_id)
-        if inspect.iscoroutine(runner):
-            runner = asyncio.create_task(runner)
-            self._runner_tasks[job_id] = runner
-        task = asyncio.create_task(self._run_job(job_id, job_type, runner))
+        # Normalise ``runner`` to a Task so ``_run_job`` can rely on Task
+        # semantics (cancellation, ``done()``). Coroutines are wrapped via
+        # ``create_task``; pre-built Tasks are reused; bare awaitables (e.g.
+        # ``Future``) are wrapped through an inner coroutine so cancellation
+        # and GC remain consistent.
+        if isinstance(runner, asyncio.Task):
+            runner_task = runner
+        elif inspect.iscoroutine(runner):
+            runner_task = asyncio.create_task(runner)
+        else:
+
+            async def _await_runner(_awaitable: Any = runner) -> Any:
+                return await _awaitable
+
+            runner_task = asyncio.create_task(_await_runner())
+        self._runner_tasks[job_id] = runner_task
+        task = asyncio.create_task(self._run_job(job_id, job_type, runner_task))
         self._tasks[job_id] = task
         self._monitors[job_id] = asyncio.create_task(self._monitor_job(job_id))
 
         return await self.get_snapshot(job_id)
 
-    async def _run_job(self, job_id: str, job_type: str, runner: Any) -> None:
-        """Run the actual background job and persist terminal state."""
-        runner_task: asyncio.Task[Any] | None = runner if isinstance(runner, asyncio.Task) else None
-        runner_awaitable = runner_task or runner
+    async def _run_job(
+        self,
+        job_id: str,
+        job_type: str,
+        runner: asyncio.Task[Any],
+    ) -> None:
+        """Run the actual background job and persist terminal state.
+
+        ``runner`` is always a Task — :meth:`start_job` converts coroutines
+        at the boundary, so the finally-block here does not need to manage
+        coroutine ``close()`` cleanup.
+        """
         await self.update_status(job_id, JobStatus.RUNNING, f"Running {job_type}")
 
         try:
-            if runner_task is None and inspect.iscoroutine(runner):
-                runner_task = asyncio.create_task(runner)
-                runner_awaitable = runner_task
-            result = await runner_awaitable
+            result = await runner
         except asyncio.CancelledError:
-            if runner_task is not None and not runner_task.done():
-                runner_task.cancel()
+            if not runner.done():
+                runner.cancel()
                 try:
-                    await runner_task
+                    await runner
                 except asyncio.CancelledError:
                     pass
             await self._append_event(
@@ -201,8 +219,6 @@ class JobManager:
                 },
             )
         finally:
-            if runner_task is None and inspect.iscoroutine(runner):
-                runner.close()
             self._tasks.pop(job_id, None)
             self._runner_tasks.pop(job_id, None)
             monitor = self._monitors.pop(job_id, None)
