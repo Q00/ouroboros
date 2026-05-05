@@ -93,6 +93,24 @@ mcp_args:
     return skill_md_path
 
 
+def _write_ralph_dispatchable_skill(skills_dir: Path) -> Path:
+    skill_dir = skills_dir / "ralph"
+    skill_dir.mkdir(parents=True)
+    skill_md_path = skill_dir / "SKILL.md"
+    skill_md_path.write_text(
+        """---
+name: ralph
+mcp_tool: ouroboros_ralph
+mcp_args:
+  lineage_id: "$lineage_id"
+---
+# Ralph
+""",
+        encoding="utf-8",
+    )
+    return skill_md_path
+
+
 def _assert_resolved_payload(result: object, expected: Resolved) -> None:
     """Assert every canonical Resolved field, including compare=False fields."""
     assert type(result) is Resolved
@@ -204,6 +222,46 @@ def test_valid_dispatch_resolves_named_option_templates_without_polluting_goal(
         "max_repair_rounds": 2,
         "skip_run": True,
     }
+
+
+def test_valid_dispatch_resolves_lineage_id_option_without_using_plain_request(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_ralph_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt='ooo ralph "build a CLI" --lineage-id lin_123',
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_tool == "ouroboros_ralph"
+    assert result.mcp_args == {"lineage_id": "lin_123"}
+    assert result.first_argument == "build a CLI --lineage-id lin_123"
+
+
+def test_valid_dispatch_leaves_lineage_id_empty_for_plain_ralph_request(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_ralph_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt='ooo ralph "build a CLI"',
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_tool == "ouroboros_ralph"
+    assert result.mcp_args == {"lineage_id": ""}
+    assert result.first_argument == "build a CLI"
 
 
 def test_valid_dispatch_preserves_goal_after_boolean_option(

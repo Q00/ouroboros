@@ -59,7 +59,9 @@ _DISPATCH_TEMPLATE_EXACT_PATTERN = re.compile(
 )
 _INTEGER_OPTION_PATTERN = re.compile(r"^[+-]?\d+$")
 _BOOLEAN_OPTION_NAMES = frozenset({"skip_run"})
-_VALUE_OPTION_NAMES = frozenset({"resume", "max_interview_rounds", "max_repair_rounds"})
+_VALUE_OPTION_NAMES = frozenset(
+    {"resume", "max_interview_rounds", "max_repair_rounds", "lineage_id"}
+)
 _CONTROL_OPTION_NAMES = _BOOLEAN_OPTION_NAMES | _VALUE_OPTION_NAMES
 # Windows literal path payloads (drive-letter `C:\…` or UNC `\\server\share\…`)
 # must skip shell tokenization — `shlex.split` treats backslash as an escape and
@@ -399,6 +401,7 @@ def _extract_dispatch_template_values(
         "skip_run": "",
         "max_interview_rounds": "",
         "max_repair_rounds": "",
+        "lineage_id": "",
     }
     tokens = _shell_split_remainder(remainder)
     if not tokens and first_argument:
