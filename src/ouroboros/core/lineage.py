@@ -404,16 +404,23 @@ class ControlDirectiveEmission(BaseModel, frozen=True):
     Captures the audit-level "who/what/why/when" of a control-plane
     decision so it appears in the lineage timeline alongside state events
     (per RFC #476 M2 / sub-RFC #511). The full event row remains in the
-    EventStore; this is the projected view used by callers.
+    EventStore; this projected view preserves the stable ControlContract
+    identity fields callers need for replay, idempotency inspection, and
+    future UI rendering without pretending to be the durable source of truth.
     """
 
     directive: str
     reason: str
     emitted_by: str
     timestamp: datetime
+    schema_version: int | None = None
+    target_type: str | None = None
+    target_id: str | None = None
     generation_number: int | None = None
     phase: str | None = None
     is_terminal: bool = False
+    parent_directive_id: str | None = None
+    idempotency_key: str | None = None
 
 
 class OntologyLineage(BaseModel, frozen=True):
