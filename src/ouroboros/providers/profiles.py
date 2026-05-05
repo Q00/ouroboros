@@ -17,6 +17,8 @@ _BACKEND_ALIASES = {
     "claude_code": "claude_code",
     "codex": "codex",
     "codex_cli": "codex",
+    "copilot": "copilot",
+    "copilot_cli": "copilot",
     "gemini": "gemini",
     "gemini_cli": "gemini",
     "opencode": "opencode",

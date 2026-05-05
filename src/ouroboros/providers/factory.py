@@ -18,6 +18,7 @@ from ouroboros.config import (
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
@@ -28,6 +29,7 @@ log = structlog.get_logger(__name__)
 
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
+_COPILOT_BACKENDS = {"copilot", "copilot_cli"}
 _GEMINI_BACKENDS = {"gemini", "gemini_cli"}
 _KIRO_BACKENDS = {"kiro", "kiro_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
@@ -73,6 +75,8 @@ def resolve_llm_backend(backend: str | None = None) -> str:
         return "claude_code"
     if candidate in _CODEX_BACKENDS:
         return "codex"
+    if candidate in _COPILOT_BACKENDS:
+        return "copilot"
     if candidate in _GEMINI_BACKENDS:
         return "gemini"
     if candidate in _KIRO_BACKENDS:
@@ -101,7 +105,13 @@ def resolve_llm_permission_mode(
         raise ValueError(msg)
 
     resolved = resolve_llm_backend(backend)
-    if use_case == "interview" and resolved in ("claude_code", "codex", "gemini", "opencode"):
+    if use_case == "interview" and resolved in (
+        "claude_code",
+        "codex",
+        "copilot",
+        "gemini",
+        "opencode",
+    ):
         # Interview uses LLM to generate questions — no file writes, but
         # CLI sandbox modes block LLM output entirely. Must bypass.
         return "bypassPermissions"
@@ -169,6 +179,20 @@ def create_llm_adapter(
     if resolved_backend == "codex":
         return CodexCliLLMAdapter(
             cli_path=cli_path or get_codex_cli_path(),
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+            runtime_profile=get_runtime_profile(),
+        )
+    if resolved_backend == "copilot":
+        from ouroboros.config import get_copilot_cli_path
+
+        return CopilotCliLLMAdapter(
+            cli_path=cli_path or get_copilot_cli_path(),
             cwd=cwd,
             permission_mode=resolved_permission_mode,
             allowed_tools=allowed_tools,

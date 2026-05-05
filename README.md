@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, OpenCode, Hermes, and Kiro CLI. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
+> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, and Kiro CLI. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation. For GitHub Copilot CLI, set `OUROBOROS_LLM_BACKEND=copilot` (requires `GH_TOKEN` or `GITHUB_TOKEN` to be set; see [GitHub Copilot CLI docs](https://docs.github.com/copilot/concepts/agents/about-copilot-cli)).
 
 <details>
 <summary><strong>Kiro CLI quick start</strong></summary>
