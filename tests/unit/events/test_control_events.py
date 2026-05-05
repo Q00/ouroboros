@@ -8,6 +8,8 @@ Tests cover:
 - Coverage across every Directive member
 """
 
+import pytest
+
 from ouroboros.core.directive import Directive
 from ouroboros.events.control import create_control_directive_emitted_event
 
@@ -52,6 +54,7 @@ class TestControlDirectiveEmittedCoreShape:
             reason="All checks passed.",
         )
 
+        assert event.data["schema_version"] == 1
         assert event.data["target_type"] == "execution"
         assert event.data["target_id"] == "exec_xyz"
 
@@ -211,6 +214,49 @@ class TestOptionalCorrelationFields:
         )
 
         assert "extra" not in event.data
+
+
+class TestControlContractValidation:
+    """The event factory enforces the ControlContract before persistence."""
+
+    @pytest.mark.parametrize("field", ["target_type", "target_id", "emitted_by", "reason"])
+    def test_blank_required_fields_are_rejected(self, field: str) -> None:
+        kwargs = {
+            "target_type": "execution",
+            "target_id": "exec_1",
+            "emitted_by": "evaluator",
+            "directive": Directive.RETRY,
+            "reason": "Retry budget remains.",
+        }
+        kwargs[field] = ""
+
+        with pytest.raises(ValueError, match=field):
+            create_control_directive_emitted_event(**kwargs)
+
+    def test_invalid_generation_number_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="generation_number"):
+            create_control_directive_emitted_event(
+                target_type="lineage",
+                target_id="lin_1",
+                emitted_by="evolver",
+                directive=Directive.RETRY,
+                reason="retry",
+                generation_number=0,
+            )
+
+    def test_idempotency_metadata_is_recorded(self) -> None:
+        event = create_control_directive_emitted_event(
+            target_type="execution",
+            target_id="exec_1",
+            emitted_by="evaluator",
+            directive=Directive.RETRY,
+            reason="Stage 1 failed.",
+            parent_directive_id="evt_parent",
+            idempotency_key="exec_1:stage1:retry1",
+        )
+
+        assert event.data["parent_directive_id"] == "evt_parent"
+        assert event.data["idempotency_key"] == "exec_1:stage1:retry1"
 
 
 class TestTargetTypeIsForwardCompatible:

@@ -22,8 +22,13 @@ class TestStepActionMapping:
     def test_converged_maps_to_converge(self) -> None:
         assert step_action_to_directive(StepAction.CONVERGED) == Directive.CONVERGE
 
-    def test_stagnated_maps_to_unstuck(self) -> None:
-        assert step_action_to_directive(StepAction.STAGNATED) == Directive.UNSTUCK
+    def test_stagnated_maps_to_unstuck_not_terminal_success(self) -> None:
+        directive = step_action_to_directive(StepAction.STAGNATED)
+
+        assert directive == Directive.UNSTUCK
+        assert directive is not Directive.CONVERGE
+        assert directive is not None
+        assert directive.is_terminal is False
 
     def test_exhausted_maps_to_cancel(self) -> None:
         assert step_action_to_directive(StepAction.EXHAUSTED) == Directive.CANCEL

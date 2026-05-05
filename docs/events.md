@@ -77,12 +77,21 @@ Emitted when a session terminates due to an error.
 
 ### execution.ac.completed
 
-Emitted when an individual Acceptance Criterion finishes execution.
+Legacy execution event emitted when a worker execution unit associated with a
+source acceptance criterion finishes. Despite the `ac` name and the historical
+`passed`/`failed` status values, this event records **worker task completion**,
+not a formal acceptance-criterion verdict. Formal AC verdicts are produced by
+the evaluation pipeline (`ACResult` / `EvaluationSummary.ac_results`).
+
+The event name and payload remain documented for compatibility with existing
+EventStore consumers. New code that needs task-native execution events should
+prefer an additive task/node event family instead of overloading this legacy
+name further.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `ac_id` | `string` | Acceptance criterion identifier |
-| `status` | `string` | `"passed"` or `"failed"` |
+| `ac_id` | `string` | Legacy source acceptance-criterion identifier for the execution unit |
+| `status` | `string` | Legacy worker completion status: `"passed"` means completed, `"failed"` means failed |
 
 ### mcp.job.cancelled
 
