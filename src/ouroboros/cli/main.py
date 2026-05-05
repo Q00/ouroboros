@@ -15,6 +15,7 @@ import typer
 
 from ouroboros import __version__
 from ouroboros.cli.commands import (
+    auto,
     cancel,
     codex,
     config,
@@ -40,6 +41,7 @@ app = typer.Typer(
 )
 
 # Register command groups
+app.add_typer(auto.app, name="auto")
 app.add_typer(init.app, name="init")
 app.add_typer(run.app, name="run")
 app.add_typer(config.app, name="config")

@@ -77,8 +77,12 @@ class TestCompletionConfig:
         config = CompletionConfig(model="gpt-4")
 
         assert config.model == "gpt-4"
+        assert config.role is None
+        assert config.profile is None
         assert config.temperature == 0.7
         assert config.max_tokens == 4096
+        assert config.max_turns is None
+        assert config.model_is_explicit is False
         assert config.stop is None
         assert config.top_p == 1.0
 
@@ -86,17 +90,47 @@ class TestCompletionConfig:
         """CompletionConfig accepts custom values."""
         config = CompletionConfig(
             model="openrouter/anthropic/claude-3-opus",
+            role="qa",
+            profile="fast",
             temperature=0.3,
             max_tokens=1000,
+            max_turns=2,
+            model_is_explicit=True,
             stop=["###", "END"],
             top_p=0.9,
         )
 
         assert config.model == "openrouter/anthropic/claude-3-opus"
+        assert config.role == "qa"
+        assert config.profile == "fast"
         assert config.temperature == 0.3
         assert config.max_tokens == 1000
+        assert config.max_turns == 2
+        assert config.model_is_explicit is True
         assert config.stop == ["###", "END"]
         assert config.top_p == 0.9
+
+    def test_completion_config_preserves_existing_positional_order(self) -> None:
+        """New profile fields do not break older positional callers."""
+        config = CompletionConfig(
+            "gpt-4",
+            0.2,
+            1000,
+            ["END"],
+            0.9,
+            {"type": "json_object"},
+        )
+
+        assert config.model == "gpt-4"
+        assert config.temperature == 0.2
+        assert config.max_tokens == 1000
+        assert config.stop == ["END"]
+        assert config.top_p == 0.9
+        assert config.response_format == {"type": "json_object"}
+        assert config.role is None
+        assert config.profile is None
+        assert config.max_turns is None
+        assert config.model_is_explicit is False
 
     def test_completion_config_is_frozen(self) -> None:
         """CompletionConfig is immutable."""

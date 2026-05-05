@@ -281,11 +281,18 @@ class AmbiguityScorer:
     """
 
     llm_adapter: LLMAdapter
-    model: str = field(default_factory=get_clarification_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     temperature: float = SCORING_TEMPERATURE
     initial_max_tokens: int = 2048
     max_retries: int | None = 10  # Default to 10 retries (None = unlimited)
     max_format_error_retries: int = 5  # Stop after N format errors (non-truncation)
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_clarification_model()
 
     async def score(
         self,
@@ -363,8 +370,11 @@ class AmbiguityScorer:
 
             attempt += 1
 
+            assert self.model is not None
             config = CompletionConfig(
                 model=self.model,
+                role="ambiguity",
+                model_is_explicit=self.model_is_explicit,
                 temperature=self.temperature,
                 max_tokens=current_max_tokens,
             )

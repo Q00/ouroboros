@@ -8,12 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.config.models import RuntimeControlsConfig
+from ouroboros.core.directive import Directive
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.lineage import (
     EvaluationSummary,
     FeedbackMetadata,
     GenerationPhase,
     GenerationRecord,
+    LineageStatus,
     OntologyDelta,
     OntologyLineage,
 )
@@ -27,7 +29,13 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import WorktreeError
-from ouroboros.events.lineage import lineage_created, lineage_generation_completed
+from ouroboros.events.lineage import (
+    lineage_created,
+    lineage_generation_completed,
+    lineage_generation_failed,
+    lineage_generation_phase_changed,
+    lineage_generation_started,
+)
 from ouroboros.evolution.convergence import ConvergenceSignal
 from ouroboros.evolution.loop import (
     EvolutionaryLoop,
@@ -36,6 +44,7 @@ from ouroboros.evolution.loop import (
     StepAction,
     StepResult,
 )
+from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectOutput
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifact
@@ -638,6 +647,91 @@ class TestEvolveStepConvergence:
         assert step.convergence_signal.converged
 
     @pytest.mark.asyncio
+    async def test_stagnation_emits_unstuck_and_keeps_lineage_resumable(self) -> None:
+        """Stagnation routes to UNSTUCK rather than terminal convergence."""
+        store = await create_event_store()
+        seed_v1 = make_seed(
+            seed_id="seed_stag_1",
+            ontology_name="TaskManagerA",
+            fields=(
+                OntologyField(
+                    name="items",
+                    field_type="array",
+                    description="List of items",
+                    required=True,
+                ),
+            ),
+        )
+        seed_v2 = make_seed(
+            seed_id="seed_stag_2",
+            parent_seed_id="seed_stag_1",
+            ontology_name="TaskManagerB",
+            fields=(
+                OntologyField(
+                    name="tasks",
+                    field_type="array",
+                    description="List of tasks",
+                    required=True,
+                ),
+            ),
+        )
+        seed_v3 = make_seed(
+            seed_id="seed_stag_3",
+            parent_seed_id="seed_stag_2",
+            ontology_name="TaskManagerA",
+            fields=seed_v1.ontology_schema.fields,
+        )
+
+        await store.append(lineage_created("lin_stag", seed_v1.goal))
+        for generation, seed in enumerate((seed_v1, seed_v2, seed_v3), 1):
+            await store.append(
+                lineage_generation_completed(
+                    "lin_stag",
+                    generation,
+                    seed.metadata.seed_id,
+                    seed.ontology_schema.model_dump(mode="json"),
+                    make_eval_summary(score=0.85).model_dump(mode="json"),
+                    [f"Q{generation}"],
+                    json.dumps(seed.to_dict()),
+                )
+            )
+
+        seed_v4 = make_seed(
+            seed_id="seed_stag_4",
+            parent_seed_id="seed_stag_3",
+            ontology_name="TaskManagerB",
+            fields=seed_v2.ontology_schema.fields,
+        )
+        gen_result = GenerationResult(
+            generation_number=4,
+            seed=seed_v4,
+            evaluation_summary=make_eval_summary(score=0.85),
+            wonder_output=make_wonder_output(),
+            ontology_delta=OntologyDelta(similarity=0.0),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        loop = make_loop(store, gen_result=gen_result)
+
+        result = await loop.evolve_step("lin_stag")
+
+        assert result.is_ok
+        step = result.value
+        assert step.action == StepAction.STAGNATED
+        assert step.lineage.status == LineageStatus.ACTIVE
+
+        events = await store.replay_lineage("lin_stag")
+        directive = [event for event in events if event.type == "control.directive.emitted"][-1]
+        assert directive.data["directive"] == Directive.UNSTUCK.value
+        assert directive.data["is_terminal"] is False
+        assert directive.data["extra"]["step_action"] == StepAction.STAGNATED.value
+        assert directive.data["extra"]["is_terminal"] is False
+
+        replayed = LineageProjector().project(events)
+        assert replayed is not None
+        assert replayed.status == LineageStatus.ACTIVE
+
+    @pytest.mark.asyncio
     async def test_exhaustion_at_max_generations(self) -> None:
         """When max_generations reached, action=EXHAUSTED."""
         store = await create_event_store()
@@ -894,6 +988,87 @@ class TestRunGenerationFailures:
         assert len(failed) == 1
         assert failed[0].data["phase"] == GenerationPhase.SEEDING.value
         assert "synthetic seed generation failure" in failed[0].data["error"]
+
+    @pytest.mark.asyncio
+    async def test_failed_directive_phase_recovers_cancelled_runtime_phase(self) -> None:
+        """Timeout cancellation reports the last real runtime phase, not cancelled."""
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_timeout_phase_1")
+        await store.append(lineage_created("lin_timeout_phase", seed.goal))
+        await store.append(
+            lineage_generation_started(
+                "lin_timeout_phase",
+                2,
+                GenerationPhase.WONDERING.value,
+                seed.metadata.seed_id,
+            )
+        )
+        await store.append(
+            lineage_generation_phase_changed(
+                "lin_timeout_phase",
+                2,
+                GenerationPhase.REFLECTING.value,
+            )
+        )
+        await store.append(
+            lineage_generation_failed(
+                "lin_timeout_phase",
+                2,
+                GenerationPhase.CANCELLED.value,
+                "Generation cancelled by timeout",
+            )
+        )
+        loop = make_loop(store)
+
+        phase = await loop._phase_for_failed_step_directive(
+            lineage_id="lin_timeout_phase",
+            generation_number=2,
+        )
+
+        assert phase == GenerationPhase.REFLECTING.value
+
+    async def test_evolve_step_failed_directive_uses_generation_failure_phase(self) -> None:
+        """StepAction.FAILED directive should preserve the failed runtime phase."""
+        store = await create_event_store()
+        seed_v1 = make_seed(seed_id="seed_step_seedfail_1")
+        await seed_events_for_gen1(store, "lin_step_seedgen_fail", seed_v1, make_eval_summary())
+
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock(return_value=Result.ok(make_wonder_output()))
+
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock(
+            return_value=Result.ok(
+                ReflectOutput(
+                    refined_goal=seed_v1.goal,
+                    refined_constraints=seed_v1.constraints,
+                    refined_acs=seed_v1.acceptance_criteria,
+                    ontology_mutations=(),
+                    reasoning="test",
+                )
+            )
+        )
+
+        seed_generator = MagicMock()
+        seed_generator.generate_from_reflect = MagicMock(
+            return_value=Result.err("synthetic seed generation failure")
+        )
+
+        loop = EvolutionaryLoop(
+            event_store=store,
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=seed_generator,
+        )
+
+        result = await loop.evolve_step("lin_step_seedgen_fail")
+        assert result.is_ok
+        assert result.value.action is StepAction.FAILED
+
+        events = await store.replay_lineage("lin_step_seedgen_fail")
+        directive = [e for e in events if e.type == "control.directive.emitted"][-1]
+        assert directive.data["phase"] == GenerationPhase.SEEDING.value
+        assert directive.data["directive"] == "retry"
 
 
 class TestLineageStatusHandler:

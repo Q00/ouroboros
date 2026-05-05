@@ -23,6 +23,7 @@ from ouroboros.codex.cli_policy import (
     build_codex_child_env,
     resolve_codex_cli_path,
 )
+from ouroboros.codex.runtime_profile import resolve_codex_profile
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
@@ -37,6 +38,8 @@ from ouroboros.orchestrator.adapter import (
     SkillDispatchHandler,
     TaskResult,
 )
+from ouroboros.providers.base import CompletionConfig
+from ouroboros.providers.profiles import resolve_completion_profile
 from ouroboros.router import (
     InvalidInputReason,
     InvalidSkill,
@@ -56,6 +59,16 @@ _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
+_RUNTIME_PROFILE_ROLE_PREFIX = "agent_runtime"
+_RUNTIME_PROFILE_METADATA_KEYS = (
+    "llm_profile",
+    "ouroboros_profile",
+    "agent_runtime_profile",
+)
+_RUNTIME_CODEX_PROFILE_METADATA_KEYS = (
+    "codex_profile",
+    "codex_cli_profile",
+)
 
 
 class CodexCliRuntime:
@@ -89,6 +102,7 @@ class CodexCliRuntime:
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        runtime_profile: str | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._permission_mode = self._resolve_permission_mode(permission_mode)
@@ -97,6 +111,12 @@ class CodexCliRuntime:
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._runtime_profile = runtime_profile
+        self._codex_profile = resolve_codex_profile(
+            runtime_profile,
+            logger=log,
+            log_namespace=self._log_namespace,
+        )
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         log.info(
@@ -105,6 +125,8 @@ class CodexCliRuntime:
             permission_mode=permission_mode,
             model=model,
             cwd=self._cwd,
+            runtime_profile=runtime_profile,
+            codex_profile=self._codex_profile,
             skills_dir=(
                 str(self._skills_dir) if self._skills_dir is not None else self._skills_package_uri
             ),
@@ -177,6 +199,64 @@ class CodexCliRuntime:
         if not candidate or candidate == "default":
             return None
         return candidate
+
+    def _runtime_profile_from_metadata(self, runtime_handle: RuntimeHandle | None) -> str | None:
+        """Return an explicit provider-neutral profile from runtime metadata."""
+        metadata = runtime_handle.metadata if runtime_handle is not None else {}
+        for key in _RUNTIME_PROFILE_METADATA_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _codex_profile_from_metadata(self, runtime_handle: RuntimeHandle | None) -> str | None:
+        """Return an explicit Codex-native profile from runtime metadata."""
+        metadata = runtime_handle.metadata if runtime_handle is not None else {}
+        for key in _RUNTIME_CODEX_PROFILE_METADATA_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _runtime_profile_role(self, runtime_handle: RuntimeHandle | None) -> str:
+        """Build the logical role key used for agent-runtime profile lookup."""
+        metadata = runtime_handle.metadata if runtime_handle is not None else {}
+        role = metadata.get("llm_role") or metadata.get("agent_runtime_role")
+        if isinstance(role, str) and role.strip():
+            return role.strip()
+
+        session_role = metadata.get("session_role")
+        if isinstance(session_role, str) and session_role.strip():
+            normalized_role = session_role.strip().lower().replace("-", "_")
+            return f"{_RUNTIME_PROFILE_ROLE_PREFIX}_{normalized_role}"
+
+        if runtime_handle is not None and runtime_handle.kind:
+            normalized_kind = runtime_handle.kind.strip().lower().replace("-", "_")
+            if normalized_kind == _RUNTIME_PROFILE_ROLE_PREFIX:
+                return _RUNTIME_PROFILE_ROLE_PREFIX
+            if normalized_kind.startswith(f"{_RUNTIME_PROFILE_ROLE_PREFIX}_"):
+                return normalized_kind
+            if normalized_kind:
+                return f"{_RUNTIME_PROFILE_ROLE_PREFIX}_{normalized_kind}"
+
+        return _RUNTIME_PROFILE_ROLE_PREFIX
+
+    def _resolve_runtime_codex_config(
+        self,
+        runtime_handle: RuntimeHandle | None,
+    ) -> tuple[str | None, str | None]:
+        """Resolve model/profile settings for an agent-runtime task."""
+        native_profile = self._codex_profile_from_metadata(runtime_handle)
+        if native_profile:
+            return None, native_profile
+
+        profile_name = self._runtime_profile_from_metadata(runtime_handle)
+        role = None if profile_name else self._runtime_profile_role(runtime_handle)
+        resolved = resolve_completion_profile(
+            CompletionConfig(model="default", profile=profile_name, role=role),
+            backend="codex",
+        )
+        return resolved.config.model, resolved.backend_profile
 
     def _build_runtime_handle(
         self,
@@ -550,9 +630,17 @@ class CodexCliRuntime:
         *,
         resume_session_id: str | None = None,
         prompt: str | None = None,
+        runtime_handle: RuntimeHandle | None = None,
     ) -> list[str]:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
         command = [self._cli_path, "exec"]
+
+        # Codex accepts one active --profile. The backend runtime profile is
+        # the worker-isolation boundary, so it owns that singular flag when
+        # configured; role/task profile resolution may still contribute a
+        # model fallback below, but not a second --profile.
+        if self._codex_profile:
+            command.extend(["--profile", self._codex_profile])
 
         command.extend(
             [
@@ -568,6 +656,14 @@ class CodexCliRuntime:
         normalized_model = self._normalize_model(self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])
+        else:
+            runtime_model, runtime_profile = self._resolve_runtime_codex_config(runtime_handle)
+            if runtime_profile and not self._codex_profile:
+                command.extend(["--profile", runtime_profile])
+            else:
+                normalized_runtime_model = self._normalize_model(runtime_model)
+                if normalized_runtime_model:
+                    command.extend(["--model", normalized_runtime_model])
 
         command.extend(self._build_permission_args())
         if resume_session_id:
@@ -1335,6 +1431,7 @@ class CodexCliRuntime:
                 output_last_message_path=str(output_path),
                 resume_session_id=attempted_resume_session_id,
                 prompt=composed_prompt,
+                runtime_handle=current_handle,
             )
         except Exception as e:
             yield AgentMessage(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -18,6 +19,11 @@ sys.modules["ralph"] = _ralph
 _spec.loader.exec_module(_ralph)
 
 parse_evolve_text = _ralph.parse_evolve_text
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.DEVNULL)
 
 
 # ---------------------------------------------------------------------------
@@ -182,3 +188,123 @@ class TestParseEvolveText:
 """
         result = parse_evolve_text(text)
         assert result["similarity"] == pytest.approx(0.0, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Project directory forwarding
+# ---------------------------------------------------------------------------
+
+
+class _TextContent:
+    type = "text"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _ToolResult:
+    isError = False
+
+    def __init__(self, text: str) -> None:
+        self.content = [_TextContent(text)]
+
+
+class _FakeSession:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> _ToolResult:
+        self.calls.append((name, arguments))
+        if name == "ouroboros_lateral_think":
+            return _ToolResult("lateral thinking applied")
+        return _ToolResult(self._responses.pop(0))
+
+
+def test_resolve_project_dir_rejects_missing_path(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+
+    with pytest.raises(ValueError, match="does not exist"):
+        _ralph._resolve_project_dir(str(missing))
+
+
+def test_resolve_project_dir_rejects_non_git_directory(tmp_path: Path) -> None:
+    project_dir = tmp_path / "not-a-repo"
+    project_dir.mkdir()
+
+    with pytest.raises(ValueError, match="git worktree"):
+        _ralph._resolve_project_dir(str(project_dir))
+
+
+def test_resolve_project_dir_normalizes_nested_path_to_repo_root(tmp_path: Path) -> None:
+    project_dir = tmp_path / "target repo"
+    nested_dir = project_dir / "nested" / "pkg"
+    _init_git_repo(project_dir)
+    nested_dir.mkdir(parents=True)
+
+    assert _ralph._resolve_project_dir(str(nested_dir)) == str(project_dir.resolve())
+
+
+@pytest.mark.asyncio
+async def test_call_evolve_forwards_project_dir(tmp_path: Path) -> None:
+    project_dir = tmp_path / "target repo"
+    _init_git_repo(project_dir)
+    session = _FakeSession([CONTINUE_TEXT])
+    args = _ralph.build_parser().parse_args(
+        ["--lineage-id", "lin_task_mgr", "--project-dir", str(project_dir)]
+    )
+
+    result = await _ralph._call_evolve(session, args)
+
+    assert result["action"] == "continue"
+    assert session.calls == [
+        (
+            "ouroboros_evolve_step",
+            {"lineage_id": "lin_task_mgr", "project_dir": str(project_dir.resolve())},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stagnation_retry_preserves_project_dir_and_execution_flags(tmp_path: Path) -> None:
+    project_dir = tmp_path / "target"
+    _init_git_repo(project_dir)
+    session = _FakeSession([STAGNATED_TEXT, CONTINUE_TEXT])
+    args = _ralph.build_parser().parse_args(
+        [
+            "--lineage-id",
+            "lin_stuck",
+            "--project-dir",
+            str(project_dir),
+            "--no-execute",
+            "--no-parallel",
+            "--no-qa",
+            "--max-retries",
+            "1",
+        ]
+    )
+
+    result = await _ralph._call_evolve(session, args)
+
+    assert result["action"] == "continue"
+    assert session.calls[0] == (
+        "ouroboros_evolve_step",
+        {
+            "lineage_id": "lin_stuck",
+            "project_dir": str(project_dir.resolve()),
+            "execute": False,
+            "parallel": False,
+            "skip_qa": True,
+        },
+    )
+    assert session.calls[1][0] == "ouroboros_lateral_think"
+    assert session.calls[2] == (
+        "ouroboros_evolve_step",
+        {
+            "lineage_id": "lin_stuck",
+            "project_dir": str(project_dir.resolve()),
+            "execute": False,
+            "parallel": False,
+            "skip_qa": True,
+        },
+    )

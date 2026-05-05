@@ -40,6 +40,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 |---------|-------------|
 | `setup` | Detect runtimes and configure Ouroboros for your environment |
 | `init` | Start interactive interview to refine requirements |
+| `auto` | Run bounded goal → A-grade Seed → execution handoff pipeline |
 | `run` | Execute Ouroboros workflows |
 | `cancel` | Cancel stuck or orphaned executions |
 | `config` | Manage Ouroboros configuration (show, switch backend, set values) |
@@ -48,6 +49,30 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
 | `monitor` | Shorthand for `tui monitor` |
 | `mcp` | MCP server commands for Claude Desktop and other MCP clients |
+
+---
+
+
+## `ouroboros auto`
+
+Run the full-quality auto pipeline from a single goal. This is the CLI equivalent of `ooo auto` in agent sessions.
+
+```bash
+ouroboros auto "Build a local-first habit tracker CLI"
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--resume TEXT` | Resume an existing auto session id |
+| `--runtime claude|codex|opencode` | Runtime backend for execution handoff |
+| `--max-interview-rounds INTEGER` | Maximum automatic interview rounds; prevents unbounded interview loops |
+| `--max-repair-rounds INTEGER` | Maximum Seed repair rounds; prevents unbounded repair loops |
+| `--skip-run` | Stop after creating an A-grade Seed |
+| `--show-ledger` | Print assumptions and non-goals captured during auto convergence |
+
+Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
 
 ---
 

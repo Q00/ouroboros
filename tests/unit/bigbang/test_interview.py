@@ -337,6 +337,8 @@ class TestInterviewEngineAskNextQuestion:
 
         assert system_message.role == MessageRole.SYSTEM
         assert "Build a task manager" in system_message.content
+        assert messages[1].role == MessageRole.USER
+        assert messages[1].content == "Build a task manager"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("context_length", [2500, 3500])
@@ -981,6 +983,62 @@ class TestInterviewEngineSystemPrompt:
         # Now just shows "Round N" without max limit
         assert "Round 1" in prompt
 
+    def test_system_prompt_treats_summary_recovery_as_first_real_round(self) -> None:
+        """Summary sentinel rounds should not remove first-question prompt guards."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_summary_recovery_prompt",
+            initial_context="A" * 4_000,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Short project summary",
+                )
+            ],
+        )
+
+        prompt = engine._build_system_prompt(
+            state,
+            initial_context=prompt_safe_initial_context(state),
+        )
+
+        assert "Round 1" in prompt
+        assert "Round 2" not in prompt
+        assert "CRITICAL: Start your FIRST response with a DIRECT QUESTION" in prompt
+
+    def test_system_prompt_counts_real_rounds_after_summary_recovery(self) -> None:
+        """Real rounds after a summary sentinel should advance prompt round behavior."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_summary_recovery_round_two",
+            initial_context="A" * 4_000,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Short project summary",
+                ),
+                InterviewRound(
+                    round_number=2,
+                    question="What platform should this target?",
+                    user_response="CLI",
+                ),
+            ],
+        )
+
+        prompt = engine._build_system_prompt(
+            state,
+            initial_context=prompt_safe_initial_context(state),
+        )
+
+        assert "Round 2" in prompt
+        assert "CRITICAL: Start your FIRST response with a DIRECT QUESTION" not in prompt
+
     def test_system_prompt_includes_context(self) -> None:
         """_build_system_prompt includes initial context."""
         mock_adapter = MagicMock()
@@ -1121,6 +1179,47 @@ class TestInterviewEngineConversationHistory:
         history = engine._build_conversation_history(state)
 
         assert history == []
+
+    def test_initial_context_becomes_first_user_message_for_empty_history(self) -> None:
+        """First question generation includes a user turn for provider compatibility."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Build an iOS calculator",
+        )
+
+        history = engine._build_conversation_history(state, initial_context=state.initial_context)
+
+        assert len(history) == 1
+        assert history[0].role == MessageRole.USER
+        assert history[0].content == "Build an iOS calculator"
+
+    def test_summary_recovery_context_becomes_first_user_message(self) -> None:
+        """Summary sentinel rounds should not make the first provider call system-only."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_summary_recovery_first_turn",
+            initial_context="A" * 4_000,
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Short project summary",
+            )
+        )
+
+        history = engine._build_conversation_history(
+            state,
+            initial_context=prompt_safe_initial_context(state),
+        )
+
+        assert len(history) == 1
+        assert history[0].role == MessageRole.USER
+        assert history[0].content == "Short project summary"
 
     def test_history_with_rounds(self) -> None:
         """_build_conversation_history creates message pairs."""

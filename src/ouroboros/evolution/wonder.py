@@ -66,6 +66,7 @@ class WonderEngine:
     _model_is_explicit: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Track explicit model pins while allowing backend-aware implicit defaults."""
         self._model_is_explicit = self.model is not None
         try:
             self._captured_backend = self.adapter_backend or get_llm_backend()
@@ -173,6 +174,8 @@ class WonderEngine:
         adapter = self._resolve_adapter()
         config = CompletionConfig(
             model=self._completion_model(),
+            role="wonder",
+            model_is_explicit=self._model_is_explicit,
             temperature=0.7,
             max_tokens=2048,
         )

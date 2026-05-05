@@ -149,9 +149,16 @@ class CodebaseExplorer:
     """
 
     llm_adapter: LLMAdapter
-    model: str = field(default_factory=get_clarification_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     max_files_per_scan: int = 200
     max_type_defs: int = 100
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_clarification_model()
 
     async def explore(
         self,
@@ -452,8 +459,11 @@ Output a structured summary with sections: Tech Stack, Key Types, Patterns, Conv
             Message(role=MessageRole.USER, content=user_prompt),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="brownfield_explore",
+            model_is_explicit=self.model_is_explicit,
             temperature=0.2,
             max_tokens=1024,
         )

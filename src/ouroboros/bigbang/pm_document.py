@@ -11,7 +11,7 @@ Two generation modes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -249,7 +249,14 @@ class PMDocumentGenerator:
     """
 
     llm_adapter: LLMAdapter
-    model: str = _FALLBACK_MODEL
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = _FALLBACK_MODEL
 
     async def generate(
         self,
@@ -286,8 +293,11 @@ class PMDocumentGenerator:
             Message(role=MessageRole.USER, content=user_prompt),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="pm_document",
+            model_is_explicit=self.model_is_explicit,
             temperature=0.3,
             max_tokens=8192,
         )

@@ -41,6 +41,10 @@ from ouroboros.mcp.tools.definitions import (
     interview_handler,
     start_execute_seed_handler,
 )
+from ouroboros.mcp.tools.execution_handlers import (
+    _classify_synchronous_execution_status,
+    _pause_metadata_from_progress,
+)
 from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.types import ToolInputType
@@ -48,7 +52,7 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
-from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.resilience.lateral import ThinkingPersona
 
@@ -161,6 +165,59 @@ class TestExecuteSeedHandler:
         handler = execute_seed_handler(runtime_backend="opencode", llm_backend="opencode")
         assert handler.agent_runtime_backend == "opencode"
         assert handler.llm_backend == "opencode"
+
+    def test_synchronous_paused_status_is_not_mcp_error(self) -> None:
+        """Paused executions are resumable and should not be failed tool results."""
+        status, success, is_error, header = _classify_synchronous_execution_status(
+            SessionStatus.PAUSED
+        )
+
+        assert status == "paused"
+        assert success is None
+        assert is_error is False
+        assert header == "Seed Execution PAUSED"
+
+    def test_pause_metadata_from_progress_exposes_resume_contract(self) -> None:
+        """Synchronous MCP paused results should carry resume timing metadata."""
+        metadata = _pause_metadata_from_progress(
+            {
+                "runtime_status": "paused",
+                "pause_kind": "usage_limit",
+                "pause_seconds": 5400,
+                "resume_after": "2026-01-01T01:30:00+00:00",
+                "resume_hint": "Resume after the quota window.",
+                "pause_reason": "Usage limit reached",
+                "unrelated": "ignored",
+            }
+        )
+
+        assert metadata == {
+            "pause_kind": "usage_limit",
+            "pause_seconds": 5400,
+            "resume_after": "2026-01-01T01:30:00+00:00",
+            "resume_hint": "Resume after the quota window.",
+            "pause_reason": "Usage limit reached",
+        }
+
+    def test_synchronous_failed_status_is_mcp_error(self) -> None:
+        """Failed executions still surface as failed tool results."""
+        status, success, is_error, header = _classify_synchronous_execution_status(
+            SessionStatus.FAILED
+        )
+
+        assert status == "failed"
+        assert success is False
+        assert is_error is True
+        assert header == "Seed Execution FINISHED"
+
+    def test_synchronous_unknown_status_is_mcp_error(self) -> None:
+        """Unknown synchronous outcomes should not hide reconstruction failures."""
+        status, success, is_error, header = _classify_synchronous_execution_status(None)
+
+        assert status == "unknown"
+        assert success is False
+        assert is_error is True
+        assert header == "Seed Execution FINISHED"
 
 
 class TestSessionStatusHandler:
@@ -453,6 +510,7 @@ class TestOuroborosTools:
 
     EXPECTED_OUROBOROS_TOOL_NAMES = {
         "ouroboros_ac_tree_hud",
+        "ouroboros_auto",
         "ouroboros_brownfield",
         "ouroboros_cancel_execution",
         "ouroboros_cancel_job",
@@ -523,7 +581,9 @@ class TestOuroborosTools:
     def test_get_ouroboros_tools_can_inject_runtime_backend(self) -> None:
         """Tool factory can build execute_seed with a specific runtime backend."""
         tools = get_ouroboros_tools(runtime_backend="codex")
-        assert {h.definition.name for h in tools} == self.EXPECTED_OUROBOROS_TOOL_NAMES
+        assert {h.definition.name for h in tools} == self.EXPECTED_OUROBOROS_TOOL_NAMES | {
+            "ouroboros_auto"
+        }
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
 

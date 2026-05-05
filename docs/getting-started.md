@@ -11,7 +11,7 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 ### Recommended: Claude Code (`ooo`)
 
-No Python install required. Run these three commands to go from idea to execution:
+No Python install required. Run the install commands in your terminal, then run setup and auto inside Claude Code to go from idea to execution:
 
 **1. Install the plugin** (in your terminal):
 ```bash
@@ -22,11 +22,17 @@ claude plugin install ouroboros@ouroboros
 **2. Set up and build** (inside a Claude Code session -- start one with `claude`):
 ```
 ooo setup
+ooo auto "Build a task management CLI"
+```
+
+That's it. `ooo auto` runs bounded Socratic interview rounds, generates an A-grade Seed, repairs B/C Seeds when possible, and starts execution only after the A-grade gate passes. It returns an `auto_session_id` so interrupted or blocked runs can be resumed.
+
+Prefer the manual path when you want to answer every question yourself:
+
+```
 ooo interview "Build a task management CLI"
 ooo run
 ```
-
-That's it. `ooo interview` runs a Socratic interview that auto-generates a seed spec, and `ooo run` executes it.
 
 > `ooo` commands are Claude Code skills. They only work inside an active Claude Code session.
 > `ooo setup` registers the MCP server globally (one-time) and optionally configures your project.
@@ -53,6 +59,32 @@ ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
 
 > **Tip:** `ouroboros run` requires a path to a seed YAML file as a positional argument (e.g., `ouroboros run ~/.ouroboros/seeds/seed_<id>.yaml`).
+
+---
+
+
+### Auto mode: one-command A-grade pipeline
+
+Use auto mode when you want the agentic pipeline to handle interview, Seed generation, quality gating, and execution handoff from one goal:
+
+```bash
+ooo auto "Build a local-first habit tracker CLI"
+```
+
+Useful variants:
+
+```bash
+ooo auto "Build a local-first habit tracker CLI" --skip-run
+ooo auto --resume auto_abc123
+```
+
+When using the shell CLI directly, add `--show-ledger` to print the assumptions and non-goals captured during convergence:
+
+```bash
+ouroboros auto "Build a local-first habit tracker CLI" --show-ledger
+```
+
+Auto mode is hang-resistant by design: interview and repair loops are bounded, slow tool calls transition the auto session to `blocked` or `failed`, and execution handoff returns job/session IDs instead of waiting forever for completion. If auto mode stops, resume with the command printed by the surface you used: `ooo auto --resume <auto_session_id>` inside Claude Code, or `ouroboros auto --resume <auto_session_id>` from the standalone shell CLI.
 
 ---
 

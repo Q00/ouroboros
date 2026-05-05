@@ -68,11 +68,18 @@ class AssertionExtractor:
     """
 
     llm_adapter: LLMAdapter
-    model: str = field(default_factory=get_assertion_extraction_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     max_cache_size: int = 64
     _cache: OrderedDict[str, tuple[SpecAssertion, ...]] = field(
         default_factory=OrderedDict, repr=False
     )
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_assertion_extraction_model()
 
     async def extract(
         self,
@@ -104,8 +111,11 @@ class AssertionExtractor:
             Message(role=MessageRole.USER, content=prompt),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="assertion_extraction",
+            model_is_explicit=self.model_is_explicit,
             temperature=0.0,
             max_tokens=4096,
         )

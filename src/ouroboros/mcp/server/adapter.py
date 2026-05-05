@@ -931,6 +931,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.definitions import (
         ACDashboardHandler,
         ACTreeHUDHandler,
+        AutoHandler,
         CancelExecutionHandler,
         CancelJobHandler,
         EvaluateHandler,
@@ -1497,6 +1498,13 @@ def create_ouroboros_server(
         agent_runtime_backend=resolved_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    auto_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
+    auto_mcp_prefix = (
+        mcp_bridge.tool_prefix
+        if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
+        else ""
+    )
+
     tool_handlers = [
         execute_seed,
         StartExecuteSeedHandler(
@@ -1505,6 +1513,34 @@ def create_ouroboros_server(
             job_manager=job_manager,
             agent_runtime_backend=resolved_runtime_backend,
             opencode_mode=opencode_mode,
+        ),
+        AutoHandler(
+            interview_handler=InterviewHandler(
+                event_store=event_store,
+                llm_adapter=llm_adapter,
+                llm_backend=llm_backend,
+                agent_runtime_backend=resolved_runtime_backend,
+                opencode_mode=opencode_mode,
+            ),
+            generate_seed_handler=GenerateSeedHandler(
+                event_store=event_store,
+                llm_adapter=llm_adapter,
+                llm_backend=llm_backend,
+                agent_runtime_backend=resolved_runtime_backend,
+                opencode_mode=opencode_mode,
+            ),
+            start_execute_seed_handler=StartExecuteSeedHandler(
+                execute_handler=execute_seed,
+                event_store=event_store,
+                job_manager=job_manager,
+                agent_runtime_backend=resolved_runtime_backend,
+                opencode_mode=opencode_mode,
+            ),
+            llm_backend=llm_backend,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
+            mcp_manager=auto_mcp_manager,
+            mcp_tool_prefix=auto_mcp_prefix,
         ),
         SessionStatusHandler(
             event_store=event_store,

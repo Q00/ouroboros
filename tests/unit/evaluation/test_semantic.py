@@ -406,6 +406,8 @@ class TestSemanticEvaluator:
         schema = config.response_format["json_schema"]
         assert "score" in schema["required"]
         assert "ac_compliance" in schema["required"]
+        assert config.role == "semantic_evaluation"
+        assert config.model_is_explicit is False
 
     @pytest.mark.asyncio
     async def test_evaluate_llm_error(

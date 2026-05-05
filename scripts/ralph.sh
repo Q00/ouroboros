@@ -26,6 +26,7 @@ NO_PARALLEL=false
 NO_QA=false
 SERVER_COMMAND=""
 SERVER_ARGS=""
+PROJECT_DIR=""
 
 # ── Usage ───────────────────────────────────────────────────────────────────
 usage() {
@@ -42,6 +43,7 @@ Options:
   --no-qa                Skip post-execution QA evaluation
   --server-command CMD   MCP server executable (default: ouroboros)
   --server-args ARGS     MCP server arguments (default: mcp)
+  --project-dir PATH     Target repo/worktree for evolve_step and git snapshots
   -h, --help             Show this help
 
 Exit codes:
@@ -65,6 +67,7 @@ while [[ $# -gt 0 ]]; do
         --no-parallel)  NO_PARALLEL=true; shift ;;
         --no-qa)        NO_QA=true; shift ;;
         --server-command) SERVER_COMMAND="$2"; shift 2 ;;
+        --project-dir)  PROJECT_DIR="$2"; shift 2 ;;
         --server-args)  shift; SERVER_ARGS="$*"; break ;;
         -h|--help)      usage ;;
         *)              echo "Unknown option: $1" >&2; exit 2 ;;
@@ -76,9 +79,30 @@ if [[ -z "$LINEAGE_ID" ]]; then
     exit 2
 fi
 
+if [[ -n "$PROJECT_DIR" ]]; then
+    if [[ ! -d "$PROJECT_DIR" ]]; then
+        echo "Error: --project-dir does not exist or is not a directory: $PROJECT_DIR" >&2
+        exit 2
+    fi
+    PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+    if ! PROJECT_REPO_ROOT="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
+        echo "Error: --project-dir must be inside a git worktree: $PROJECT_DIR" >&2
+        exit 2
+    fi
+    PROJECT_DIR="$(cd "$PROJECT_REPO_ROOT" && pwd -P)"
+fi
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 log() {
     echo "[ralph] $(date '+%H:%M:%S') $*" >&2
+}
+
+git_in_project() {
+    if [[ -n "$PROJECT_DIR" ]]; then
+        git -C "$PROJECT_DIR" "$@"
+    else
+        git "$@"
+    fi
 }
 
 # Commit changes and create a git tag for the generation.
@@ -91,21 +115,24 @@ tag_generation() {
         return 0
     fi
 
-    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git_in_project rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         return 0
     fi
 
-    # Auto-commit: commit any changes from this generation
-    if ! git diff --quiet HEAD 2>/dev/null || \
-       ! git diff --cached --quiet 2>/dev/null || \
-       [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
-        git add -A >/dev/null 2>&1 || true
-        git commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1 || true
-        log "Committed changes for gen ${gen}"
+    # Auto-commit: commit any changes from this generation. Keep the dirty
+    # predicate explicit so clean trees are not reported as committed and
+    # staged-only changes still trigger a snapshot.
+    if ! git_in_project diff --quiet HEAD 2>/dev/null || \
+       ! git_in_project diff --cached --quiet 2>/dev/null || \
+       [ -n "$(git_in_project ls-files --others --exclude-standard 2>/dev/null)" ]; then
+        git_in_project add -A >/dev/null 2>&1 || true
+        if git_in_project commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1; then
+            log "Committed changes for gen ${gen}"
+        fi
     fi
 
     # Overwrite tag if it already exists (re-run scenario)
-    git tag -f "$tag" >/dev/null 2>&1 || true
+    git_in_project tag -f "$tag" >/dev/null 2>&1 || true
     log "Tagged ${tag}"
 }
 
@@ -123,19 +150,19 @@ rollback_to_previous() {
         return 0
     fi
 
-    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git_in_project rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         return 0
     fi
 
     local prev_tag="ooo/${LINEAGE_ID}/gen_${prev_gen}"
-    if git rev-parse "$prev_tag" >/dev/null 2>&1; then
+    if git_in_project rev-parse "$prev_tag" >/dev/null 2>&1; then
         log "Rolling back to ${prev_tag} after failure"
-        git checkout "$prev_tag" -- . >/dev/null 2>&1 || {
+        git_in_project checkout "$prev_tag" -- . >/dev/null 2>&1 || {
             log "WARNING: rollback to ${prev_tag} failed"
             return 0
         }
-        git reset HEAD >/dev/null 2>&1 || true
-        git clean -fd >/dev/null 2>&1 || true
+        git_in_project reset HEAD >/dev/null 2>&1 || true
+        git_in_project clean -fd >/dev/null 2>&1 || true
         log "Rollback complete"
     else
         log "No tag ${prev_tag} found, skipping rollback"
@@ -144,7 +171,7 @@ rollback_to_previous() {
 
 # ── Build common python args ────────────────────────────────────────────────
 build_py_args() {
-    local -a py_args=("--lineage-id" "$LINEAGE_ID" "--max-retries" "$MAX_RETRIES")
+    py_args=("--lineage-id" "$LINEAGE_ID" "--max-retries" "$MAX_RETRIES")
 
     if [[ "$NO_EXECUTE" == "true" ]]; then
         py_args+=("--no-execute")
@@ -158,23 +185,25 @@ build_py_args() {
     if [[ -n "$SERVER_COMMAND" ]]; then
         py_args+=("--server-command" "$SERVER_COMMAND")
     fi
+    if [[ -n "$PROJECT_DIR" ]]; then
+        py_args+=("--project-dir" "$PROJECT_DIR")
+    fi
     # NOTE: --server-args is NOT included here.
     # It uses REMAINDER and must be appended LAST in the main loop.
 
-    echo "${py_args[@]}"
 }
 
 # ── Main loop ───────────────────────────────────────────────────────────────
 cycle=0
 stagnation_count=0
 
-log "Starting Ralph loop for lineage=${LINEAGE_ID} max_cycles=${MAX_CYCLES}"
+log "Starting Ralph loop for lineage=${LINEAGE_ID} max_cycles=${MAX_CYCLES} project_dir=${PROJECT_DIR:-$PWD}"
 
 while (( cycle < MAX_CYCLES )); do
     cycle=$((cycle + 1))
 
     # Build per-cycle args
-    py_args=($(build_py_args))
+    build_py_args
 
     # Cycle 1: include seed file; Cycle 2+: omit it
     if (( cycle == 1 )) && [[ -n "$SEED_FILE" ]]; then

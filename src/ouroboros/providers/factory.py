@@ -13,6 +13,7 @@ from ouroboros.config import (
     get_gemini_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
+    get_runtime_profile,
 )
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
@@ -178,6 +179,7 @@ def create_llm_adapter(
             on_message=on_message,
             timeout=timeout,
             max_retries=max_retries,
+            runtime_profile=get_runtime_profile(),
         )
     if resolved_backend == "gemini":
         return GeminiCLIAdapter(

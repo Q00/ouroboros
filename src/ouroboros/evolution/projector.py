@@ -176,8 +176,11 @@ class LineageProjector:
                     lineage = lineage.with_status(LineageStatus.EXHAUSTED)
 
             elif event.type == "lineage.stagnated":
-                if lineage is not None:
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                # Stagnation is a non-terminal recovery signal. The control
+                # directive stream maps it to UNSTUCK, so replay must leave the
+                # lineage ACTIVE and resumable rather than treating it as
+                # terminal success.
+                pass
 
             elif event.type == "lineage.rewound":
                 data = event.data

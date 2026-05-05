@@ -368,6 +368,26 @@ class TestCheckAtomicity:
         assert result.value.method == "llm"
         assert result.value.is_atomic is True
         mock_llm_adapter.complete.assert_called_once()
+        config = mock_llm_adapter.complete.call_args.args[1]
+        assert config.role == "atomicity"
+        assert config.model_is_explicit is False
+
+    @pytest.mark.asyncio
+    async def test_explicit_model_is_marked(self, mock_llm_adapter):
+        """check_atomicity() should mark request-level model pins."""
+        from ouroboros.execution.atomicity import check_atomicity
+
+        result = await check_atomicity(
+            ac_content="Add a login button",
+            llm_adapter=mock_llm_adapter,
+            use_llm=True,
+            model="custom-model",
+        )
+
+        assert result.is_ok
+        config = mock_llm_adapter.complete.call_args.args[1]
+        assert config.model == "custom-model"
+        assert config.model_is_explicit is True
 
     @pytest.mark.asyncio
     async def test_heuristic_when_llm_disabled(self, mock_llm_adapter):

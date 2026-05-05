@@ -54,6 +54,11 @@ class CompletionConfig:
         response_format: Optional response format constraint.
             Use {"type": "json_object"} to force JSON output.
             Use {"type": "json_schema", "json_schema": {...}} for strict schema.
+        role: Optional logical Ouroboros task role used to resolve llm_profiles.
+        profile: Optional explicit Ouroboros llm_profiles key.
+        max_turns: Optional per-request agent turn budget for CLI-backed providers.
+        model_is_explicit: True when ``model`` is a request-level pin that must
+            not be replaced by role-based profile resolution.
     """
 
     model: str
@@ -62,6 +67,10 @@ class CompletionConfig:
     stop: list[str] | None = None
     top_p: float = 1.0
     response_format: dict[str, object] | None = None
+    role: str | None = None
+    profile: str | None = None
+    max_turns: int | None = None
+    model_is_explicit: bool = False
 
 
 @dataclass(frozen=True, slots=True)

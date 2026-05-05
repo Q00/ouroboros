@@ -278,7 +278,8 @@ class InterviewEngine:
 
     llm_adapter: LLMAdapter
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
-    model: str = field(default_factory=get_clarification_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     temperature: float = 0.7
     max_tokens: int = 2048
     _MAX_TOTAL_PROMPT_CHARS = 4800
@@ -290,6 +291,9 @@ class InterviewEngine:
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = get_clarification_model()
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def _state_file_path(self, interview_id: str) -> Path:
@@ -406,8 +410,11 @@ class InterviewEngine:
             *conversation_history,
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="clarification",
+            model_is_explicit=self.model_is_explicit,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
@@ -629,7 +636,8 @@ class InterviewEngine:
         from ouroboros.agents.loader import load_agent_prompt
 
         max_prompt_chars = max_chars or self._MAX_SYSTEM_PROMPT_CHARS
-        round_info = f"Round {state.current_round_number}"
+        effective_round_number = self._next_conversation_round_number(state)
+        round_info = f"Round {effective_round_number}"
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
@@ -639,7 +647,7 @@ class InterviewEngine:
         prompt_initial_context = self._initial_context_for_system_prompt(context_for_prompt)
 
         # For first round, add explicit instruction to start directly with a question
-        if state.current_round_number == 1:
+        if effective_round_number == 1:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"CRITICAL: Start your FIRST response with a DIRECT QUESTION about the project. "
@@ -801,14 +809,15 @@ class InterviewEngine:
 
         perspectives: list[InterviewPerspective] = [InterviewPerspective.BREADTH_KEEPER]
 
-        if state.current_round_number <= 2:
+        effective_round_number = self._next_conversation_round_number(state)
+        if effective_round_number <= 2:
             perspectives.extend(
                 [
                     InterviewPerspective.RESEARCHER,
                     InterviewPerspective.SIMPLIFIER,
                 ]
             )
-        elif state.current_round_number <= 5:
+        elif effective_round_number <= 5:
             perspectives.extend(
                 [
                     InterviewPerspective.RESEARCHER,
@@ -873,6 +882,17 @@ class InterviewEngine:
 
         return "\n".join(sections)
 
+    def _next_conversation_round_number(self, state: InterviewState) -> int:
+        """Return the next real interview round, ignoring summary sentinels."""
+        return (
+            sum(
+                1
+                for round_data in state.rounds
+                if round_data.question != self._INITIAL_CONTEXT_SUMMARY_QUESTION
+            )
+            + 1
+        )
+
     # Agent SDK CLI can return empty responses when the combined prompt
     # (system_prompt + conversation history) exceeds an internal threshold.
     # Cap each user response to keep the total prompt within safe limits.
@@ -901,9 +921,22 @@ class InterviewEngine:
             initial_context if initial_context is not None else state.initial_context
         )
 
+        has_conversation_rounds = self._next_conversation_round_number(state) > 1
         overflow = self._initial_context_overflow_message(context_for_prompt)
         if overflow:
             messages.append(Message(role=MessageRole.USER, content=overflow))
+        elif not has_conversation_rounds and context_for_prompt:
+            # Some chat providers reject a first request that contains only a
+            # system message. Mirror the user's initial context as the first
+            # user turn so provider adapters always receive a non-system
+            # conversation message on round one. Summary-recovery sentinel
+            # rounds do not count as conversation because they are skipped
+            # below. Long contexts keep using the overflow path above to
+            # preserve prompt-budget caps.
+            user_content = context_for_prompt
+            if len(user_content) > self._MAX_USER_RESPONSE_CHARS:
+                user_content = user_content[: self._MAX_USER_RESPONSE_CHARS] + "..."
+            messages.append(Message(role=MessageRole.USER, content=user_content))
 
         for round_data in state.rounds:
             if round_data.question == self._INITIAL_CONTEXT_SUMMARY_QUESTION:

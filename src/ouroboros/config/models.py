@@ -22,9 +22,11 @@ Classes:
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
 
 
 class ModelConfig(BaseModel, frozen=True):
@@ -124,6 +126,33 @@ class LLMConfig(BaseModel, frozen=True):
     dependency_analysis_model: str = "claude-opus-4-6"
     ontology_analysis_model: str = "claude-opus-4-6"
     context_compression_model: str = "gpt-4"
+
+
+class LLMProviderProfileConfig(BaseModel, frozen=True):
+    """Backend-specific overrides for an Ouroboros LLM task profile.
+
+    ``profile`` is intentionally generic here: for Codex it maps to a
+    ``codex exec --profile`` name, while other backends can ignore it and use
+    portable fields such as ``model`` or ``temperature``.
+    """
+
+    profile: str | None = None
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_turns: int | None = Field(default=None, ge=1)
+
+
+class LLMTaskProfileConfig(BaseModel, frozen=True):
+    """Provider-neutral LLM task profile with optional backend overrides."""
+
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_turns: int | None = Field(default=None, ge=1)
+    providers: dict[str, LLMProviderProfileConfig] = Field(default_factory=dict)
 
 
 class ClarificationConfig(BaseModel, frozen=True):
@@ -303,11 +332,110 @@ class LoggingConfig(BaseModel, frozen=True):
     include_reasoning: bool = True
 
 
+VALID_RUNTIME_BACKENDS = frozenset(
+    {
+        "claude",
+        "claude_code",
+        "codex",
+        "codex_cli",
+        "opencode",
+        "opencode_cli",
+        "hermes",
+        "hermes_cli",
+        "gemini",
+        "gemini_cli",
+    }
+)
+
+
+class RuntimeProfileConfig(BaseModel, frozen=True):
+    """Runtime profile configuration (issue #519 / M4 / S3).
+
+    The Agent OS architecture diagram agreed in #476 lets each pipeline
+    stage (``interview`` / ``execute`` / ``evaluate`` / ``reflect``) be
+    served by a different harness. This block exposes that decision as
+    a configuration surface; the resolution helper in
+    ``ouroboros.orchestrator.stage`` reads it.
+
+    This object also reserves ``backend_profile`` for backend-native
+    profile selection (for example PR #505's Codex ``worker`` profile),
+    so the public ``orchestrator.runtime_profile`` key has one stable
+    object shape instead of conflicting string-vs-table meanings.
+
+    Attributes:
+        backend_profile: Optional backend-native profile name. Stage
+            routing does not interpret it; backend adapters may map it
+            to their own profile mechanism.
+        default: Optional runtime backend that serves any stage missing
+            from ``stages``. ``None`` means "fall through to the
+            orchestrator's top-level ``runtime_backend``".
+        stages: Explicit per-stage mapping. Keys must be members of the
+            closed stage vocabulary; unknown keys raise ``ValueError``
+            during Pydantic validation at startup.
+    """
+
+    backend_profile: str | None = None
+    default: str | None = None
+    stages: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("backend_profile")
+    @classmethod
+    def _validate_backend_profile(cls, value: str | None) -> str | None:
+        """Normalize optional backend-native profile names."""
+        if value is None:
+            return None
+        candidate = value.strip()
+        if not candidate:
+            raise ValueError("runtime_profile.backend_profile must not be empty")
+        return candidate
+
+    @field_validator("default")
+    @classmethod
+    def _validate_default_backend(cls, value: str | None) -> str | None:
+        """Reject invalid runtime_profile.default backend names at startup."""
+        if value is None:
+            return None
+        return _validate_runtime_backend(value, field_name="runtime_profile.default")
+
+    @field_validator("stages")
+    @classmethod
+    def _validate_stage_keys(cls, value: dict[str, str]) -> dict[str, str]:
+        """Reject unknown stage names and invalid backend names at startup."""
+        validated: dict[str, str] = {}
+        for key, backend in value.items():
+            if key not in VALID_STAGE_KEYS:
+                valid_list = ", ".join(sorted(VALID_STAGE_KEYS))
+                raise ValueError(
+                    f"Unknown runtime_profile.stages key: {key!r}. Valid keys are: {valid_list}.",
+                )
+            validated[key] = _validate_runtime_backend(
+                backend,
+                field_name=f"runtime_profile.stages[{key!r}]",
+            )
+        return validated
+
+
+def _validate_runtime_backend(value: str, *, field_name: str) -> str:
+    """Validate runtime_profile backend names against orchestrator backends."""
+    candidate = value.strip().lower()
+    if candidate not in VALID_RUNTIME_BACKENDS:
+        valid_list = ", ".join(sorted(VALID_RUNTIME_BACKENDS))
+        raise ValueError(f"{field_name} must be one of: {valid_list}")
+    return candidate
+
+
 class OrchestratorConfig(BaseModel, frozen=True):
     """Orchestrator runtime configuration.
 
     Attributes:
         runtime_backend: Agent runtime backend to use for orchestrator execution.
+        runtime_profile: Optional Agent OS runtime profile object.
+            ``runtime_profile.backend_profile`` selects backend-native profiles
+            such as Codex ``--profile ouroboros-worker``. Default ``None``
+            preserves the backend's normal user-config behavior. The ``default``
+            and ``stages`` fields reserve the same object contract used by the
+            stage-routing stack so this public key does not split into
+            incompatible string-vs-table meanings.
         permission_mode: Default permission mode for local agent runtimes.
         opencode_permission_mode: Default permission mode for OpenCode agent runtimes.
         cli_path: Path to Claude CLI binary. Supports:
@@ -332,6 +460,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - None: Resolve from PATH at runtime (or OUROBOROS_GEMINI_CLI_PATH)
         default_max_turns: Default max turns for agent execution
         max_parallel_workers: Default maximum concurrent AC workers
+        usage_limit_pause_hours: Default pause window for provider usage/quota limits
         use_worktrees: Whether mutating workflows run in dedicated git worktrees
         worktree_root: Root directory for managed task worktrees
         worktree_cleanup: Cleanup policy for managed task worktrees
@@ -339,6 +468,16 @@ class OrchestratorConfig(BaseModel, frozen=True):
     """
 
     runtime_backend: Literal["claude", "codex", "opencode", "hermes", "gemini", "kiro"] = "claude"
+    runtime_profile: RuntimeProfileConfig | None = None
+
+    @field_validator("runtime_profile", mode="before")
+    @classmethod
+    def _coerce_runtime_profile(cls, value: Any) -> Any:
+        """Accept the legacy PR #505 string shorthand as backend_profile."""
+        if isinstance(value, str):
+            return {"backend_profile": value}
+        return value
+
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"
@@ -355,6 +494,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     kiro_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
+    usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
     use_worktrees: bool = True
     worktree_root: str = "~/.ouroboros/worktrees"
     worktree_cleanup: Literal["keep"] = "keep"
@@ -396,6 +536,8 @@ class OuroborosConfig(BaseModel, frozen=True):
         resilience: Phase 3 configuration
         evaluation: Phase 4 configuration
         consensus: Phase 5 configuration
+        llm_profiles: Named provider-neutral profiles for LLM-only tasks
+        llm_role_profiles: Mapping from logical task roles to profile names
         persistence: Storage configuration
         drift: Drift monitoring configuration
         runtime_controls: Long-running workflow timeout/progress controls
@@ -409,6 +551,8 @@ class OuroborosConfig(BaseModel, frozen=True):
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     consensus: ConsensusConfig = Field(default_factory=ConsensusConfig)
+    llm_profiles: dict[str, LLMTaskProfileConfig] = Field(default_factory=dict)
+    llm_role_profiles: dict[str, str] = Field(default_factory=dict)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     drift: DriftConfig = Field(default_factory=DriftConfig)
     runtime_controls: RuntimeControlsConfig = Field(default_factory=RuntimeControlsConfig)

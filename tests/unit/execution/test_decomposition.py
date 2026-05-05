@@ -309,6 +309,28 @@ class TestDecomposeAc:
         assert len(result.value.child_ac_ids) == 3
         assert all(id.startswith("ac_") for id in result.value.child_ac_ids)
         assert result.value.reasoning == "Split by functionality"
+        config = mock_llm_adapter.complete.call_args.args[1]
+        assert config.role == "decomposition"
+        assert config.model_is_explicit is False
+
+    @pytest.mark.asyncio
+    async def test_explicit_model_is_marked(self, mock_llm_adapter):
+        """decompose_ac() should mark request-level model pins."""
+        from ouroboros.execution.decomposition import decompose_ac
+
+        result = await decompose_ac(
+            ac_content="Implement user authentication",
+            ac_id="ac_parent",
+            execution_id="exec_123",
+            depth=0,
+            llm_adapter=mock_llm_adapter,
+            model="custom-model",
+        )
+
+        assert result.is_ok
+        config = mock_llm_adapter.complete.call_args.args[1]
+        assert config.model == "custom-model"
+        assert config.model_is_explicit is True
 
     @pytest.mark.asyncio
     async def test_decomposition_emits_event(self, mock_llm_adapter):

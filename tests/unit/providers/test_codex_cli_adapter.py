@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
@@ -231,6 +232,62 @@ class TestCodexCliLLMAdapter:
         assert "--sandbox" in command
         assert "read-only" in command
 
+    def test_build_command_prefers_profile_over_model(self) -> None:
+        """Codex task profiles use --profile and avoid a conflicting --model."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model="gpt-5.4",
+            profile="ouroboros-deep",
+        )
+
+        assert "--profile" in command
+        assert "ouroboros-deep" in command
+        assert "--model" not in command
+
+    @pytest.mark.asyncio
+    async def test_complete_resolves_codex_profile_from_task_role(self) -> None:
+        """Role profile resolution reaches the Codex CLI command line."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+        task_config = OuroborosConfig(
+            llm_profiles={
+                "fast": {
+                    "providers": {
+                        "codex": {
+                            "profile": "ouroboros-fast",
+                            "model": "gpt-5.3-codex-spark",
+                        },
+                    },
+                },
+            },
+            llm_role_profiles={"qa": "fast"},
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Profiled answer", encoding="utf-8")
+            assert "--profile" in command
+            assert "ouroboros-fast" in command
+            assert "--model" not in command
+            return _FakeProcess(returncode=0)
+
+        with (
+            patch(
+                "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch("ouroboros.providers.profiles.load_config", return_value=task_config),
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return a QA verdict.")],
+                CompletionConfig(model="default", role="qa"),
+            )
+
+        assert result.is_ok
+        assert result.value.content == "Profiled answer"
+
     def test_build_command_uses_full_auto_for_accept_edits(self) -> None:
         """acceptEdits maps to Codex full-auto mode."""
         adapter = CodexCliLLMAdapter(cli_path="codex", permission_mode="acceptEdits")
@@ -256,6 +313,64 @@ class TestCodexCliLLMAdapter:
 
         assert "--dangerously-bypass-approvals-and-sandbox" in command
 
+    def test_build_command_omits_profile_flag_when_runtime_profile_unset(self) -> None:
+        """Default runtime_profile=None preserves existing command shape (regression)."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "--profile" not in command
+
+    def test_build_command_adds_worker_profile_when_configured(self) -> None:
+        """runtime_profile='worker' maps to Codex `--profile ouroboros-worker`."""
+        adapter = CodexCliLLMAdapter(cli_path="codex", runtime_profile="worker")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "--profile" in command
+        profile_index = command.index("--profile")
+        assert command[profile_index + 1] == "ouroboros-worker"
+        assert profile_index < command.index("--json")
+
+    def test_build_command_skips_unknown_runtime_profile_with_warning(self) -> None:
+        """Unmapped runtime_profile values fall back to no profile flag and log a warning."""
+        with patch("ouroboros.providers.codex_cli_adapter.log.warning") as mock_warning:
+            adapter = CodexCliLLMAdapter(cli_path="codex", runtime_profile="future-tier")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "--profile" not in command
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args[0] == "codex_cli_adapter.runtime_profile_unmapped"
+        assert mock_warning.call_args.kwargs["runtime_profile"] == "future-tier"
+
+    def test_runtime_profile_prevents_duplicate_task_profile_flags(self) -> None:
+        """Worker isolation owns Codex's singular --profile flag over task profiles."""
+        adapter = CodexCliLLMAdapter(cli_path="codex", runtime_profile="worker")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="ouroboros-fast",
+        )
+
+        assert command.count("--profile") == 1
+        assert command[command.index("--profile") + 1] == "ouroboros-worker"
+        assert "ouroboros-fast" not in command
+
     @pytest.mark.asyncio
     async def test_complete_success_reads_output_file(self) -> None:
         """Successful completions return the CLI output and session id."""
@@ -265,7 +380,7 @@ class TestCodexCliLLMAdapter:
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Final answer", encoding="utf-8")
             assert "--model" not in command
-            assert kwargs["cwd"] == "/tmp/project"
+            assert Path(kwargs["cwd"]) == Path("/tmp/project")
             # Prompt is now fed via stdin, not as a positional argument
             assert kwargs.get("stdin") is not None
             return _FakeProcess(

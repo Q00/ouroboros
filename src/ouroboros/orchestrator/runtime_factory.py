@@ -12,6 +12,7 @@ from ouroboros.config import (
     get_hermes_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
+    get_runtime_profile,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
@@ -88,6 +89,7 @@ def create_agent_runtime(
     if resolved_backend == "codex":
         return CodexCliRuntime(
             cli_path=cli_path or get_codex_cli_path(),
+            runtime_profile=get_runtime_profile(),
             **runtime_kwargs,
         )
 

@@ -6,8 +6,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.init import _get_adapter, _resolve_init_llm_backend, _start_workflow
+from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
+from ouroboros.bigbang.interview import InterviewState
+from ouroboros.cli.commands.init import (
+    SeedGenerationResult,
+    _generate_seed_from_interview,
+    _get_adapter,
+    _resolve_init_llm_backend,
+    _start_workflow,
+)
 from ouroboros.cli.main import app
+from ouroboros.core.errors import ProviderError
+from ouroboros.core.types import Result
 
 runner = CliRunner()
 
@@ -137,3 +147,61 @@ class TestInitWorkflowRuntimeHandoff:
         assert mock_create_adapter.call_args.kwargs["backend"] == "opencode"
         assert mock_create_adapter.call_args.kwargs["use_case"] == "interview"
         assert mock_create_adapter.call_args.kwargs["max_turns"] == 5
+
+    @pytest.mark.asyncio
+    async def test_seed_generation_prints_provider_diagnostics(self) -> None:
+        """Seed failures should show ProviderError details, not just the terse message."""
+        state = InterviewState(
+            interview_id="interview_595",
+            initial_context="Build a CLI",
+        )
+        llm_adapter = MagicMock()
+        ambiguity_score = AmbiguityScore(
+            overall_score=0.1,
+            breakdown=ScoreBreakdown(
+                goal_clarity=ComponentScore(
+                    name="Goal",
+                    clarity_score=0.9,
+                    weight=0.4,
+                    justification="clear",
+                ),
+                constraint_clarity=ComponentScore(
+                    name="Constraints",
+                    clarity_score=0.9,
+                    weight=0.3,
+                    justification="clear",
+                ),
+                success_criteria_clarity=ComponentScore(
+                    name="Success",
+                    clarity_score=0.9,
+                    weight=0.3,
+                    justification="clear",
+                ),
+            ),
+        )
+        provider_error = ProviderError(
+            message="Claude Agent SDK request failed: Command failed with exit code 1",
+            details={
+                "error_type": "ProcessError",
+                "configured_cli_path": "/Applications/cmux.app/Contents/Resources/bin/claude",
+                "stderr": "",
+            },
+        )
+
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(ambiguity_score))
+        mock_generator = MagicMock()
+        mock_generator.generate = AsyncMock(return_value=Result.err(provider_error))
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
+            patch("ouroboros.cli.commands.init.print_error") as mock_print_error,
+        ):
+            seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+
+        assert seed_path is None
+        assert result == SeedGenerationResult.CANCELLED
+        error_text = mock_print_error.call_args.args[0]
+        assert "configured_cli_path" in error_text
+        assert "/Applications/cmux.app/Contents/Resources/bin/claude" in error_text

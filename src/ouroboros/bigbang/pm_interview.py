@@ -144,7 +144,8 @@ class PMInterviewEngine:
     inner: InterviewEngine
     classifier: QuestionClassifier
     llm_adapter: LLMAdapter
-    model: str = _FALLBACK_MODEL
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     deferred_items: list[str] = field(default_factory=list)
     decide_later_items: list[str] = field(default_factory=list)
     """Original question text for questions classified as DECIDE_LATER.
@@ -176,7 +177,7 @@ class PMInterviewEngine:
     def create(
         cls,
         llm_adapter: LLMAdapter,
-        model: str = _FALLBACK_MODEL,
+        model: str | None = None,
         state_dir: Path | None = None,
     ) -> PMInterviewEngine:
         """Factory method to create a PMInterviewEngine with proper wiring.
@@ -211,6 +212,12 @@ class PMInterviewEngine:
             llm_adapter=llm_adapter,
             model=model,
         )
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = _FALLBACK_MODEL
 
     # ──────────────────────────────────────────────────────────────
     # Brownfield repo management
@@ -1023,8 +1030,11 @@ class PMInterviewEngine:
             ),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="pm_interview",
+            model_is_explicit=self.model_is_explicit,
             temperature=0.2,
             max_tokens=4096,
         )

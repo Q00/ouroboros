@@ -292,6 +292,31 @@ class TestKiroCodeAdapterComplete:
         assert "--trust-tools=read,grep,shell" in cmd
         assert "--trust-all-tools" not in cmd
 
+    def test_allowed_tools_filters_mcp_names_from_kiro_trust_tools_flag(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(
+            cli_path="kiro-cli",
+            allowed_tools=["Read", "mcp__ouroboros__interview", "Bash"],
+        )
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert "--trust-tools=read,shell" in cmd
+        assert "mcp" not in next(arg for arg in cmd if arg.startswith("--trust-tools="))
+        assert "--trust-all-tools" not in cmd
+
+    def test_allowed_tools_only_mcp_names_sets_empty_trust_tools_flag(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(
+            cli_path="kiro-cli",
+            allowed_tools=["mcp__ouroboros__interview"],
+        )
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert "--trust-tools=" in cmd
+        assert "--trust-all-tools" not in cmd
+
     def test_allowed_tools_none_omits_trust_tools_flag(self) -> None:
         from ouroboros.providers.base import CompletionConfig
 
@@ -705,6 +730,27 @@ class TestKiroPermissionModeContract:
         adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
         cmd = adapter._build_cmd("hello", tools=["Read", "Grep", "Bash"])
         assert "--trust-tools=read,grep,shell" in cmd
+        assert "--trust-all-tools" not in cmd
+
+    def test_per_call_tools_filter_mcp_names_from_kiro_trust_categories(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
+        cmd = adapter._build_cmd(
+            "hello",
+            tools=["Read", "mcp__ouroboros__interview", "Bash"],
+        )
+        trust_arg = next(arg for arg in cmd if arg.startswith("--trust-tools="))
+        assert trust_arg == "--trust-tools=read,shell"
+        assert "mcp" not in trust_arg
+        assert "--trust-all-tools" not in cmd
+
+    def test_per_call_tools_only_mcp_names_set_empty_kiro_trust_categories(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
+        cmd = adapter._build_cmd("hello", tools=["mcp__ouroboros__interview"])
+        assert "--trust-tools=" in cmd
         assert "--trust-all-tools" not in cmd
 
     def test_runtime_child_env_strips_ouroboros_runtime_vars(self) -> None:

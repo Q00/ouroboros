@@ -74,10 +74,17 @@ class SemanticConfig:
         satisfaction_threshold: Minimum score to pass (default 0.8)
     """
 
-    model: str = field(default_factory=get_semantic_model)
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     temperature: float = 0.2
     max_tokens: int = 2048
     satisfaction_threshold: float = 0.8
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        object.__setattr__(self, "model_is_explicit", self.model is not None)
+        if self.model is None:
+            object.__setattr__(self, "model", get_semantic_model())
 
 
 def _get_evaluation_system_prompt() -> str:
@@ -282,7 +289,7 @@ class SemanticEvaluator:
             config: Evaluation configuration
         """
         self._llm = llm_adapter
-        self._config = config or SemanticConfig(model=get_semantic_model())
+        self._config = config or SemanticConfig()
 
     async def evaluate(
         self,
@@ -314,8 +321,11 @@ class SemanticEvaluator:
         ]
 
         # Call LLM with structured JSON output to ensure valid JSON
+        assert self._config.model is not None
         completion_config = CompletionConfig(
             model=self._config.model,
+            role="semantic_evaluation",
+            model_is_explicit=self._config.model_is_explicit,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
             response_format={

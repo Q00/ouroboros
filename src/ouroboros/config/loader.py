@@ -9,6 +9,7 @@ Functions:
     create_default_config: Create default configuration files
     ensure_config_dir: Ensure ~/.ouroboros/ directory exists
     get_agent_runtime_backend: Get orchestrator runtime backend from env var or config
+    get_runtime_profile: Get orchestrator backend profile (e.g. "worker") from env var or config
     get_agent_permission_mode: Get orchestrator permission mode from env var or config
     get_llm_backend: Get LLM-only backend from env var or config
     get_llm_permission_mode: Get LLM-only permission mode from env var or config
@@ -35,6 +36,7 @@ Functions:
 """
 
 import ast
+import math
 import os
 from pathlib import Path
 import shutil
@@ -70,6 +72,9 @@ _DEFAULT_CONSENSUS_MODELS = (
 _DEFAULT_CONSENSUS_ADVOCATE_MODEL = "openrouter/anthropic/claude-opus-4-6"
 _DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
 _DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
+_DEFAULT_USAGE_LIMIT_PAUSE_HOURS = 5.0
+_SECONDS_PER_HOUR = 3600
+_USAGE_LIMIT_PAUSE_CONFIG_KEY = "orchestrator.usage_limit_pause_hours"
 _RUNTIME_CONTROL_ENV_KEYS = {
     "OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS": "mcp_tool_timeout_seconds",
     "OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS": "generation_idle_timeout_seconds",
@@ -606,7 +611,7 @@ def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
 
     try:
         parsed = int(value)
-    except (TypeError, ValueError) as exc:
+    except (OverflowError, TypeError, ValueError) as exc:
         raise ConfigError(
             f"{config_key} must be a positive integer",
             config_key=config_key,
@@ -620,6 +625,13 @@ def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
             details={"value": value},
         )
 
+    if not math.isfinite(parsed):
+        raise ConfigError(
+            f"{config_key} must be finite",
+            config_key=config_key,
+            details={"value": value},
+        )
+
     if parsed <= 0:
         raise ConfigError(
             f"{config_key} must be greater than 0",
@@ -628,6 +640,110 @@ def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
         )
 
     return parsed
+
+
+def _parse_positive_float(value: Any, *, config_key: str) -> float:
+    """Parse a positive float setting without silently accepting booleans."""
+    if isinstance(value, bool):
+        raise ConfigError(
+            f"{config_key} must be a positive number",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{config_key} must be a positive number",
+            config_key=config_key,
+            details={"value": value},
+        ) from exc
+
+    if not math.isfinite(parsed):
+        raise ConfigError(
+            f"{config_key} must be finite",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    if parsed <= 0:
+        raise ConfigError(
+            f"{config_key} must be greater than 0",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    return parsed
+
+
+def get_usage_limit_pause_seconds() -> int:
+    """Get the default pause window for provider usage/quota limits.
+
+    Priority:
+        1. OUROBOROS_USAGE_LIMIT_PAUSE_HOURS environment variable
+        2. config.yaml orchestrator.usage_limit_pause_hours
+        3. built-in default (5 hours)
+    """
+    env_value = os.environ.get("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "").strip()
+    if env_value:
+        hours = _parse_positive_float(
+            env_value,
+            config_key="OUROBOROS_USAGE_LIMIT_PAUSE_HOURS",
+        )
+        return max(1, int(hours * _SECONDS_PER_HOUR))
+
+    config_path = get_config_dir() / "config.yaml"
+    if not config_path.exists():
+        # No config file means no pause-window override; use the built-in default.
+        return int(_DEFAULT_USAGE_LIMIT_PAUSE_HOURS * _SECONDS_PER_HOUR)
+
+    try:
+        with config_path.open() as f:
+            config_dict = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ConfigError(
+            f"Failed to parse configuration file: {e}",
+            config_file=str(config_path),
+            details={"yaml_error": str(e)},
+        ) from e
+    except OSError as e:
+        raise ConfigError(
+            f"Failed to read configuration file: {e}",
+            config_file=str(config_path),
+            details={"os_error": str(e), "error_type": type(e).__name__},
+        ) from e
+
+    if config_dict is None:
+        # Empty config means no pause-window override; use the built-in default.
+        return int(_DEFAULT_USAGE_LIMIT_PAUSE_HOURS * _SECONDS_PER_HOUR)
+    if not isinstance(config_dict, dict):
+        raise ConfigError(
+            "Configuration file must contain a mapping",
+            config_file=str(config_path),
+            details={"value_type": type(config_dict).__name__},
+        )
+
+    orchestrator_config = config_dict.get("orchestrator")
+    if orchestrator_config is None:
+        # Missing orchestrator section means no pause-window override.
+        return int(_DEFAULT_USAGE_LIMIT_PAUSE_HOURS * _SECONDS_PER_HOUR)
+    if not isinstance(orchestrator_config, dict):
+        raise ConfigError(
+            "orchestrator must be a mapping",
+            config_key="orchestrator",
+            config_file=str(config_path),
+            details={"value": orchestrator_config},
+        )
+    if "usage_limit_pause_hours" not in orchestrator_config:
+        # Missing pause-window key means no override; invalid values still raise below.
+        return int(_DEFAULT_USAGE_LIMIT_PAUSE_HOURS * _SECONDS_PER_HOUR)
+
+    hours = _parse_positive_float(
+        orchestrator_config["usage_limit_pause_hours"],
+        config_key=_USAGE_LIMIT_PAUSE_CONFIG_KEY,
+    )
+    return max(1, int(hours * _SECONDS_PER_HOUR))
 
 
 def get_max_parallel_workers() -> int:
@@ -695,6 +811,32 @@ def get_max_parallel_workers() -> int:
         orchestrator_config["max_parallel_workers"],
         config_key="orchestrator.max_parallel_workers",
     )
+
+
+def get_runtime_profile() -> str | None:
+    """Get the orchestrator backend profile from env var or config file.
+
+    Priority:
+        1. OUROBOROS_RUNTIME_PROFILE environment variable
+        2. config.yaml orchestrator.runtime_profile.backend_profile
+        3. None (no profile — backends keep their default user-config behavior)
+
+    Returns:
+        The backend profile name (e.g. ``"worker"``) or None.
+    """
+    env_value = os.environ.get("OUROBOROS_RUNTIME_PROFILE", "").strip()
+    if env_value:
+        return env_value
+
+    try:
+        config = load_config()
+        profile = config.orchestrator.runtime_profile
+        if profile is not None and profile.backend_profile:
+            return profile.backend_profile
+    except ConfigError:
+        pass
+
+    return None
 
 
 def get_codex_cli_path() -> str | None:

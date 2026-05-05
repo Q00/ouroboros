@@ -84,6 +84,7 @@ _KIRO_TOOL_NAME_MAP: dict[str, str] = {
     "shell": "shell",
     "write": "write",
 }
+_KIRO_TRUST_CATEGORIES = frozenset(_KIRO_TOOL_NAME_MAP.values())
 
 # Environment keys stripped from child processes to prevent recursive MCP
 # startup and nested session detection conflicts.
@@ -230,9 +231,8 @@ class KiroAgentAdapter:
         mapped_tools: list[str] = []
         seen: set[str] = set()
         for tool in tools:
-            normalized = tool.strip().lower().replace("_", "-")
-            mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
-            if mapped not in seen:
+            mapped = _kiro_native_trust_category(tool)
+            if mapped is not None and mapped not in seen:
                 mapped_tools.append(mapped)
                 seen.add(mapped)
         return ",".join(mapped_tools)
@@ -508,3 +508,19 @@ class KiroAgentAdapter:
 
 
 __all__ = ["KiroAgentAdapter"]
+
+
+def _kiro_native_trust_category(tool: str) -> str | None:
+    """Return a Kiro-native trust category for known local tools only.
+
+    Ouroboros policy allow-lists can include MCP tool names (for example
+    ``mcp__server__tool``). Kiro's ``--trust-tools`` flag accepts only native
+    trust categories such as ``read`` or ``shell``, so unknown/MCP names must
+    not be forwarded to the CLI flag. They remain in the prompt-level allow-list
+    but are filtered out of native trust-category argv.
+    """
+    normalized = tool.strip().lower().replace("_", "-")
+    mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
+    if mapped in _KIRO_TRUST_CATEGORIES:
+        return mapped
+    return None

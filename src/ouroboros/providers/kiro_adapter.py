@@ -58,6 +58,7 @@ _KIRO_TOOL_NAME_MAP: dict[str, str] = {
     "shell": "shell",
     "write": "write",
 }
+_KIRO_TRUST_CATEGORIES = frozenset(_KIRO_TOOL_NAME_MAP.values())
 
 
 def _strip_ansi(text: str) -> str:
@@ -290,8 +291,8 @@ class KiroCodeAdapter:
         mapped_tools: list[str] = []
         seen: set[str] = set()
         for tool in self._allowed_tools:
-            mapped = _kiro_tool_category(tool)
-            if mapped not in seen:
+            mapped = _kiro_native_trust_category(tool)
+            if mapped is not None and mapped not in seen:
                 mapped_tools.append(mapped)
                 seen.add(mapped)
         return ",".join(mapped_tools)
@@ -357,9 +358,14 @@ class KiroCodeAdapter:
         if self._allowed_tools is None or not _TOOL_USE_MARKER_RE.search(content):
             return
 
-        allowed = frozenset(_kiro_tool_category(tool) for tool in self._allowed_tools)
+        allowed_raw = frozenset(_normalize_tool_name(tool) for tool in self._allowed_tools)
+        allowed_categories = frozenset(
+            category
+            for tool in self._allowed_tools
+            if (category := _kiro_native_trust_category(tool)) is not None
+        )
         tool_names = _TOOL_NAME_RE.findall(content)
-        if not tool_names and not allowed:
+        if not tool_names and not allowed_raw and not allowed_categories:
             log.warning(
                 "kiro_adapter.tool_envelope_violation",
                 tool=None,
@@ -369,7 +375,9 @@ class KiroCodeAdapter:
             return
 
         for tool_name in tool_names:
-            if _kiro_tool_category(tool_name) not in allowed:
+            normalized = _normalize_tool_name(tool_name)
+            category = _kiro_native_trust_category(tool_name)
+            if normalized not in allowed_raw and category not in allowed_categories:
                 log.warning(
                     "kiro_adapter.tool_envelope_violation",
                     tool=tool_name,
@@ -381,9 +389,22 @@ class KiroCodeAdapter:
 _: type[LLMAdapter] = KiroCodeAdapter  # type: ignore[assignment]
 
 
-def _kiro_tool_category(tool: str) -> str:
-    normalized = tool.strip().lower().replace("_", "-")
-    return _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
+def _normalize_tool_name(tool: str) -> str:
+    return tool.strip().lower().replace("_", "-")
+
+
+def _kiro_native_trust_category(tool: str) -> str | None:
+    """Return a Kiro-native trust category for known local tools only.
+
+    Factory ``allowed_tools`` can include generic or MCP tool identifiers.
+    Kiro's ``--trust-tools`` accepts native categories only, so unknown/MCP
+    names are kept for prompt/audit comparison but omitted from argv.
+    """
+    normalized = _normalize_tool_name(tool)
+    mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
+    if mapped in _KIRO_TRUST_CATEGORIES:
+        return mapped
+    return None
 
 
 __all__ = ["KiroCodeAdapter"]

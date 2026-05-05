@@ -304,7 +304,7 @@ def _read_readme_content(repo_path: Path, max_chars: int = 3000) -> str | None:
 async def generate_desc(
     repo_path: Path,
     llm_adapter: LLMAdapter,
-    model: str = _FRUGAL_MODEL,
+    model: str | None = None,
 ) -> str:
     """Generate a one-line description for a repo using a Frugal-tier LLM.
 
@@ -323,6 +323,9 @@ async def generate_desc(
     if not content:
         return ""
 
+    model_is_explicit = model is not None
+    resolved_model = model or _FRUGAL_MODEL
+
     messages = [
         Message(role=MessageRole.SYSTEM, content=_DESC_SYSTEM_PROMPT),
         Message(
@@ -331,7 +334,9 @@ async def generate_desc(
         ),
     ]
     config = CompletionConfig(
-        model=model,
+        model=resolved_model,
+        role="brownfield",
+        model_is_explicit=model_is_explicit,
         temperature=0.0,
         max_tokens=60,
     )
@@ -447,7 +452,7 @@ async def register_repo(
     desc: str | None = None,
     *,
     llm_adapter: LLMAdapter | None = None,
-    model: str = _FRUGAL_MODEL,
+    model: str | None = None,
 ) -> BrownfieldRepo:
     """Register a single repository in the brownfield DB.
 
@@ -508,7 +513,7 @@ async def set_default_repo(
     path: str,
     *,
     llm_adapter: LLMAdapter | None = None,
-    model: str = _FRUGAL_MODEL,
+    model: str | None = None,
 ) -> BrownfieldRepo | None:
     """Set a registered repository as a default brownfield context.
 

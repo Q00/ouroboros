@@ -13,7 +13,7 @@ Uses a Sonnet-grade model for accurate judgment and reframing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 import json
 import re
@@ -203,9 +203,16 @@ class QuestionClassifier:
     """
 
     llm_adapter: LLMAdapter
-    model: str = _CLASSIFIER_MODEL
+    model: str | None = None
+    model_is_explicit: bool = field(default=False, init=False)
     temperature: float = _CLASSIFIER_TEMPERATURE
     codebase_context: str = ""
+
+    def __post_init__(self) -> None:
+        """Resolve implicit default model while preserving explicit caller pins."""
+        self.model_is_explicit = self.model is not None
+        if self.model is None:
+            self.model = _CLASSIFIER_MODEL
 
     async def classify(
         self,
@@ -236,8 +243,11 @@ class QuestionClassifier:
             Message(role=MessageRole.USER, content="\n".join(user_content_parts)),
         ]
 
+        assert self.model is not None
         config = CompletionConfig(
             model=self.model,
+            role="question_classification",
+            model_is_explicit=self.model_is_explicit,
             temperature=self.temperature,
             max_tokens=512,
         )
