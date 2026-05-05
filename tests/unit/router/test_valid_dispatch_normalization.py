@@ -263,6 +263,25 @@ def test_valid_dispatch_routes_plain_ralph_request_to_input_guidance(
     assert result.mcp_args == {"lineage_id": ""}
 
 
+def test_valid_dispatch_routes_empty_lineage_option_to_input_guidance(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_ralph_dispatchable_skill(skills_dir)
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt="ooo ralph --lineage-id",
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_tool == "ouroboros_ralph"
+    assert result.mcp_args == {"lineage_id": ""}
+
+
 def test_valid_dispatch_preserves_lineage_id_option_for_skills_that_do_not_use_it(
     tmp_path: Path,
 ) -> None:

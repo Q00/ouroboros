@@ -37,9 +37,11 @@ The client skill should not reimplement the loop. Deterministic frontmatter
 dispatch is limited to the router's named `--lineage-id` option so raw trailing
 text is never treated as lineage identity. Raw natural-language
 `ooo ralph "<request>"` input must flow through the validated Seed path before
-any `ouroboros_ralph` call. Once a lineage id and optional Seed YAML are
-prepared, start the MCP-owned Ralph surface once, then follow either the
-returned job tools path or the OpenCode Task widget path.
+any mutating Ralph loop starts. Until a lineage id and optional Seed YAML are
+prepared, `ouroboros_ralph` returns structured input guidance instead of
+starting a job. Once the inputs are prepared, start the MCP-owned Ralph surface
+once, then follow either the returned job tools path or the OpenCode Task widget
+path.
 
 ## Instructions
 

@@ -529,6 +529,9 @@ def _extract_dispatch_template_values(
             raw_name = option
             option_value = tokens[index + 1]
             index += 1
+        elif option_name in extra_value_option_names:
+            raw_name = option
+            option_value = ""
         elif option_name in value_option_names:
             raise ValueError(f"--{option} requires a value")
         else:
@@ -671,7 +674,9 @@ def resolve_parsed_skill_dispatch(
     try:
         template_names = _collect_dispatch_template_names(mcp_args)
         extra_value_option_names = frozenset(
-            name for name in template_names if name not in {"1", "CWD", "args", "goal"}
+            name
+            for name in template_names
+            if name not in {"1", "CWD", "args", "goal"} and name not in _VALUE_OPTION_NAMES
         )
         template_values = _extract_dispatch_template_values(
             parsed.remainder,
