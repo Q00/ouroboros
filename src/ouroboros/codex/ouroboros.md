@@ -13,6 +13,7 @@ Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP too
 | `ooo interview "<answer>"` (follow-up) | `ouroboros_interview` with `answer` and `session_id` |
 | `ooo seed [session_id]` | `ouroboros_generate_seed` |
 | `ooo run <seed.yaml>` | `ouroboros_execute_seed` with `seed_path` |
+| `ooo auto ...` | `ouroboros_auto` with the resolved `goal` / `resume` / option arguments |
 | `ooo status [session_id]` | `ouroboros_session_status` |
 | `ooo evaluate <session_id>` | `ouroboros_evaluate` |
 | `ooo evolve ...` | `ouroboros_evolve_step` |
@@ -30,6 +31,16 @@ For natural-language requests, map to the corresponding MCP tool:
 - "run the seed", "execute the workflow" → call `ouroboros_execute_seed`
 - "check status", "am I drifting?" → call `ouroboros_session_status`
 - "evaluate", "verify the result" → call `ouroboros_evaluate`
+
+## Auto Dispatch Safety
+
+`ooo auto` has a strict product contract: bounded interview, Seed generation,
+A-grade review/repair, and execution handoff. Do not emulate it with manual
+shell, repository, or GitHub work.
+
+If a user input starts with `ooo auto`, call `ouroboros_auto`. If that MCP tool
+is unavailable, stop and report that `ouroboros_auto` is unavailable instead of
+continuing as a normal Codex task.
 
 ## Setup & Update
 
