@@ -39,7 +39,7 @@ def project_path_candidates_from_seed(seed: Any) -> tuple[str, ...]:
     for reference in context_references:
         path = getattr(reference, "path", None)
         role = getattr(reference, "role", None)
-        if isinstance(path, str) and path and role == "primary":
+        if isinstance(path, str) and path and role == "primary" and path not in candidates:
             candidates.append(path)
 
     for reference in context_references:

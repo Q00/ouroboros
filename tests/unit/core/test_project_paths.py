@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from ouroboros.core.project_paths import (
     project_path_candidates_from_seed,
     resolve_path_against_base,
