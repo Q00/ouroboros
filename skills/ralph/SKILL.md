@@ -30,6 +30,22 @@ and monitor it with the normal job tools.
 
 When the user invokes this skill:
 
+### Load MCP Tools (Required first)
+
+The Ouroboros MCP tools are often registered as deferred tools that must be
+explicitly loaded before use. Do this before preparing input or calling Ralph:
+
+1. Use the `ToolSearch` tool to find and load the Ralph/job MCP tools:
+   ```
+   ToolSearch query: "+ouroboros ralph job"
+   ```
+2. Confirm that `ouroboros_ralph` and the job tools (`ouroboros_job_wait`,
+   `ouroboros_job_status`, `ouroboros_job_result`, and
+   `ouroboros_cancel_job`) are callable. If the tools are unavailable, stop and
+   tell the user that Ralph requires the Ouroboros MCP runtime.
+
+### Ralph Flow
+
 1. **Prepare lineage input**:
    - If the user provides an existing `lineage_id` and explicitly wants to
      continue it, reuse that `lineage_id` and omit `seed_content` unless they
