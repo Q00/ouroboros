@@ -313,6 +313,64 @@ class TestCodexCliLLMAdapter:
 
         assert "--dangerously-bypass-approvals-and-sandbox" in command
 
+    def test_build_command_omits_profile_flag_when_runtime_profile_unset(self) -> None:
+        """Default runtime_profile=None preserves existing command shape (regression)."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "--profile" not in command
+
+    def test_build_command_adds_worker_profile_when_configured(self) -> None:
+        """runtime_profile='worker' maps to Codex `--profile ouroboros-worker`."""
+        adapter = CodexCliLLMAdapter(cli_path="codex", runtime_profile="worker")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "--profile" in command
+        profile_index = command.index("--profile")
+        assert command[profile_index + 1] == "ouroboros-worker"
+        assert profile_index < command.index("--json")
+
+    def test_build_command_skips_unknown_runtime_profile_with_warning(self) -> None:
+        """Unmapped runtime_profile values fall back to no profile flag and log a warning."""
+        with patch("ouroboros.providers.codex_cli_adapter.log.warning") as mock_warning:
+            adapter = CodexCliLLMAdapter(cli_path="codex", runtime_profile="future-tier")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "--profile" not in command
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args[0] == "codex_cli_adapter.runtime_profile_unmapped"
+        assert mock_warning.call_args.kwargs["runtime_profile"] == "future-tier"
+
+    def test_runtime_profile_prevents_duplicate_task_profile_flags(self) -> None:
+        """Worker isolation owns Codex's singular --profile flag over task profiles."""
+        adapter = CodexCliLLMAdapter(cli_path="codex", runtime_profile="worker")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="ouroboros-fast",
+        )
+
+        assert command.count("--profile") == 1
+        assert command[command.index("--profile") + 1] == "ouroboros-worker"
+        assert "ouroboros-fast" not in command
+
     @pytest.mark.asyncio
     async def test_complete_success_reads_output_file(self) -> None:
         """Successful completions return the CLI output and session id."""

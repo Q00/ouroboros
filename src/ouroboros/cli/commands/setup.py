@@ -346,6 +346,88 @@ def _is_setup_managed_codex_mcp_entry(entry: dict[str, object]) -> bool:
     return len(args) >= 3 and args[-3:] == ["ouroboros", "mcp", "serve"]
 
 
+_CODEX_WORKER_PROFILE_SECTION = """# Ouroboros Agent OS runtime profile for Codex worker subprocesses.
+# Activated when ~/.ouroboros/config.yaml sets `orchestrator.runtime_profile.backend_profile: worker`
+# (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex
+# overrides below — for example a different model, sandbox, or notify hook —
+# without affecting interactive `codex` sessions that share this config file.
+
+[profiles.ouroboros-worker]
+"""
+
+_CODEX_WORKER_PROFILE_COMMENT_LINES = (
+    "# Ouroboros Agent OS runtime profile for Codex worker subprocesses.",
+    "# Activated when ~/.ouroboros/config.yaml sets `orchestrator.runtime_profile.backend_profile: worker`",
+    "# (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex",
+    "# overrides below — for example a different model, sandbox, or notify hook —",
+    "# without affecting interactive `codex` sessions that share this config file.",
+)
+
+
+def _is_codex_ouroboros_worker_profile_header(line: str) -> bool:
+    """Return True when the line starts the managed Codex worker profile table."""
+    return line == "[profiles.ouroboros-worker]" or line.startswith("[profiles.ouroboros-worker.")
+
+
+def _trim_managed_codex_worker_profile_comments(lines: list[str]) -> None:
+    """Excise every managed worker-profile comment block from ``lines``."""
+    expected = list(_CODEX_WORKER_PROFILE_COMMENT_LINES)
+    block_len = len(expected)
+    if block_len == 0:
+        return
+
+    index = 0
+    while index <= len(lines) - block_len:
+        if lines[index : index + block_len] == expected:
+            end = index + block_len
+            if end < len(lines) and not lines[end].strip():
+                end += 1
+            del lines[index:end]
+        else:
+            index += 1
+
+
+def _upsert_codex_worker_profile_section(raw: str) -> tuple[str, bool]:
+    """Refresh the managed comment block for ``[profiles.ouroboros-worker]``.
+
+    Setup owns only the managed comment/header. Existing user-authored keys
+    and subtables under ``[profiles.ouroboros-worker]`` are preserved verbatim.
+    """
+    section_lines = _CODEX_WORKER_PROFILE_SECTION.strip("\n").splitlines()
+    input_lines = raw.splitlines()
+    output_lines: list[str] = []
+    index = 0
+    existed_before = False
+    refreshed = False
+
+    while index < len(input_lines):
+        line = input_lines[index]
+        stripped = line.strip()
+        if stripped == "[profiles.ouroboros-worker]" and not refreshed:
+            existed_before = True
+            refreshed = True
+            _trim_managed_codex_worker_profile_comments(output_lines)
+            if output_lines and output_lines[-1].strip():
+                output_lines.append("")
+            output_lines.extend(section_lines)
+            index += 1
+            continue
+        if _is_codex_ouroboros_worker_profile_header(stripped):
+            existed_before = True
+            output_lines.append(line)
+            index += 1
+            continue
+        output_lines.append(line)
+        index += 1
+
+    if not refreshed:
+        if output_lines and output_lines[-1].strip():
+            output_lines.append("")
+        output_lines.extend(section_lines)
+
+    return "\n".join(output_lines).rstrip() + "\n", existed_before
+
+
 def _is_codex_ouroboros_table_header(line: str) -> bool:
     """Return True when the line starts the managed Codex MCP table."""
     return line == "[mcp_servers.ouroboros]" or line.startswith("[mcp_servers.ouroboros.")
@@ -518,6 +600,44 @@ def _register_codex_default_profiles() -> None:
     print_success(f"Registered Codex task profiles in {codex_config}: {', '.join(added_profiles)}")
 
 
+def _register_codex_worker_profile() -> None:
+    """Register the managed Codex worker profile in ~/.codex/config.toml."""
+    import tomllib
+
+    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config.parent.mkdir(parents=True, exist_ok=True)
+
+    if codex_config.exists():
+        raw = codex_config.read_text(encoding="utf-8")
+        try:
+            _existing_codex_profile_names(raw)
+        except (tomllib.TOMLDecodeError, ValueError) as exc:
+            print_error(f"Could not parse {codex_config} — skipping worker-profile registration.")
+            print_info(str(exc))
+            return
+    else:
+        raw = ""
+
+    updated_raw, existed_before = _upsert_codex_worker_profile_section(raw)
+    try:
+        tomllib.loads(updated_raw)
+    except tomllib.TOMLDecodeError as exc:
+        print_error(
+            f"Could not update {codex_config} — worker-profile registration would create invalid TOML."
+        )
+        print_info(str(exc))
+        return
+    if updated_raw == raw:
+        print_info("Codex worker profile already up to date.")
+        return
+
+    codex_config.write_text(updated_raw, encoding="utf-8")
+    if existed_before:
+        print_success(f"Updated Codex worker profile in {codex_config}")
+    else:
+        print_success(f"Registered Codex worker profile in {codex_config}")
+
+
 def _ensure_mapping_section(config_dict: dict, key: str) -> dict:
     """Ensure a top-level YAML section is a mapping before mutating it."""
     section = config_dict.get(key)
@@ -617,7 +737,7 @@ def _print_codex_config_guidance(config_path: Path) -> None:
     """Explain where Codex users should configure Ouroboros vs. Codex settings."""
     print_info(f"Configure Ouroboros runtime and per-role model overrides in {config_path}.")
     print_info(
-        "Use ~/.codex/config.toml only for the Codex MCP/env hookup and Codex profile anchors."
+        "Use ~/.codex/config.toml for the Codex MCP/env hookup, Codex profile anchors, and [profiles.ouroboros-worker] worker overrides."
     )
 
 
@@ -692,6 +812,7 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
     # Register MCP server in Codex config (~/.codex/config.toml)
     _register_codex_mcp_server(mode=mcp_mode)
     _register_codex_default_profiles()
+    _register_codex_worker_profile()
     _print_codex_config_guidance(config_path)
 
 

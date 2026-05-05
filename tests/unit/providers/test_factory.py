@@ -127,6 +127,42 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._cwd == "/tmp/project"
 
+    def test_creates_codex_adapter_propagates_runtime_profile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``get_runtime_profile()`` must reach CodexCliLLMAdapter via the factory.
+
+        Same regression-lock as the orchestrator runtime: if the
+        provider factory ever drops ``runtime_profile=...`` from the
+        adapter call, worker-subprocess isolation breaks for every LLM
+        path that runs through Codex (interview, evaluation, …).
+        """
+        monkeypatch.setattr(
+            "ouroboros.providers.factory.get_runtime_profile",
+            lambda: "worker",
+        )
+
+        adapter = create_llm_adapter(backend="codex", cwd="/tmp/project")
+
+        assert isinstance(adapter, CodexCliLLMAdapter)
+        assert adapter._runtime_profile == "worker"
+        assert adapter._codex_profile == "ouroboros-worker"
+
+    def test_creates_codex_adapter_default_profile_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset profile must remain unset on the adapter."""
+        monkeypatch.setattr(
+            "ouroboros.providers.factory.get_runtime_profile",
+            lambda: None,
+        )
+
+        adapter = create_llm_adapter(backend="codex", cwd="/tmp/project")
+
+        assert isinstance(adapter, CodexCliLLMAdapter)
+        assert adapter._runtime_profile is None
+        assert adapter._codex_profile is None
+
     def test_creates_codex_adapter_uses_configured_cli_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

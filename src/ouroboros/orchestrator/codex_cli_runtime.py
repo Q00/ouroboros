@@ -23,6 +23,7 @@ from ouroboros.codex.cli_policy import (
     build_codex_child_env,
     resolve_codex_cli_path,
 )
+from ouroboros.codex.runtime_profile import resolve_codex_profile
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
@@ -101,6 +102,7 @@ class CodexCliRuntime:
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        runtime_profile: str | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._permission_mode = self._resolve_permission_mode(permission_mode)
@@ -109,6 +111,12 @@ class CodexCliRuntime:
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._runtime_profile = runtime_profile
+        self._codex_profile = resolve_codex_profile(
+            runtime_profile,
+            logger=log,
+            log_namespace=self._log_namespace,
+        )
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         log.info(
@@ -117,6 +125,8 @@ class CodexCliRuntime:
             permission_mode=permission_mode,
             model=model,
             cwd=self._cwd,
+            runtime_profile=runtime_profile,
+            codex_profile=self._codex_profile,
             skills_dir=(
                 str(self._skills_dir) if self._skills_dir is not None else self._skills_package_uri
             ),
@@ -625,6 +635,13 @@ class CodexCliRuntime:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
         command = [self._cli_path, "exec"]
 
+        # Codex accepts one active --profile. The backend runtime profile is
+        # the worker-isolation boundary, so it owns that singular flag when
+        # configured; role/task profile resolution may still contribute a
+        # model fallback below, but not a second --profile.
+        if self._codex_profile:
+            command.extend(["--profile", self._codex_profile])
+
         command.extend(
             [
                 "--json",
@@ -641,7 +658,7 @@ class CodexCliRuntime:
             command.extend(["--model", normalized_model])
         else:
             runtime_model, runtime_profile = self._resolve_runtime_codex_config(runtime_handle)
-            if runtime_profile:
+            if runtime_profile and not self._codex_profile:
                 command.extend(["--profile", runtime_profile])
             else:
                 normalized_runtime_model = self._normalize_model(runtime_model)

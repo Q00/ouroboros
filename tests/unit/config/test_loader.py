@@ -34,6 +34,7 @@ from ouroboros.config.loader import (
     get_qa_model,
     get_reflect_model,
     get_runtime_controls_config,
+    get_runtime_profile,
     get_semantic_model,
     get_usage_limit_pause_seconds,
     get_wonder_model,
@@ -51,6 +52,7 @@ from ouroboros.config.models import (
     OuroborosConfig,
     ResilienceConfig,
     RuntimeControlsConfig,
+    RuntimeProfileConfig,
 )
 from ouroboros.core.errors import ConfigError
 
@@ -1326,3 +1328,52 @@ class TestIntegration:
 
         frontier = config.economics.tiers["frontier"]
         assert frontier.cost_factor == 30
+
+
+class TestRuntimeProfileConfigAccess:
+    def test_get_runtime_profile_defaults_to_none(self) -> None:
+        """No env, no config — runtime_profile resolves to None."""
+        config = OuroborosConfig()
+        with patch("ouroboros.config.loader.load_config", return_value=config):
+            assert get_runtime_profile() is None
+
+    def test_get_runtime_profile_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for runtime_profile."""
+        monkeypatch.setenv("OUROBOROS_RUNTIME_PROFILE", "worker")
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(backend_profile="future-worker")
+            )
+        )
+        with patch("ouroboros.config.loader.load_config", return_value=config):
+            assert get_runtime_profile() == "worker"
+
+    def test_get_runtime_profile_falls_back_to_config(self) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(backend_profile="worker")
+            )
+        )
+        with patch("ouroboros.config.loader.load_config", return_value=config):
+            assert get_runtime_profile() == "worker"
+
+    def test_get_runtime_profile_accepts_legacy_string_shorthand(self) -> None:
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(runtime_profile="worker"))
+        with patch("ouroboros.config.loader.load_config", return_value=config):
+            assert get_runtime_profile() == "worker"
+
+    def test_get_runtime_profile_accepts_unknown_backend_profile(self) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_profile=RuntimeProfileConfig(backend_profile="future-worker")
+            )
+        )
+        with patch("ouroboros.config.loader.load_config", return_value=config):
+            assert get_runtime_profile() == "future-worker"
+
+    def test_get_runtime_profile_ignores_stage_only_profile(self) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_profile=RuntimeProfileConfig(default="codex"))
+        )
+        with patch("ouroboros.config.loader.load_config", return_value=config):
+            assert get_runtime_profile() is None

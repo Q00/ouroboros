@@ -322,6 +322,33 @@ class TestCodexCliRuntime:
         assert command[command.index("--profile") + 1] == "ouroboros-deep"
         assert "--model" not in command
 
+    def test_runtime_profile_prevents_duplicate_role_profile_flags(self) -> None:
+        """Worker isolation owns Codex's singular --profile flag when both resolve."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project", runtime_profile="worker")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert command.count("--profile") == 1
+        assert command[command.index("--profile") + 1] == "ouroboros-worker"
+        assert "ouroboros-standard" not in command
+
     def test_build_command_uses_runtime_profile_provider_model_fallback(self) -> None:
         """Codex runtime profiles without Codex-native profile anchors should use models."""
         runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
@@ -443,6 +470,48 @@ class TestCodexCliRuntime:
         assert "--model" in command
         assert command[command.index("--model") + 1] == "gpt-5.5"
         assert "--profile" not in command
+
+    def test_build_command_omits_profile_flag_when_runtime_profile_unset(self) -> None:
+        """Default runtime_profile=None preserves existing command shape (regression)."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+        command = runtime._build_command(output_last_message_path="/tmp/out.txt")
+
+        assert "--profile" not in command
+
+    def test_build_command_adds_worker_profile_when_configured(self) -> None:
+        """runtime_profile='worker' maps to Codex `--profile ouroboros-worker`."""
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            runtime_profile="worker",
+        )
+
+        command = runtime._build_command(output_last_message_path="/tmp/out.txt")
+
+        assert "--profile" in command
+        profile_index = command.index("--profile")
+        assert command[profile_index + 1] == "ouroboros-worker"
+        # Profile must come before the rest of the args so Codex resolves
+        # the profile-managed defaults before per-flag overrides.
+        assert profile_index < command.index("--json")
+
+    def test_build_command_skips_unknown_runtime_profile_with_warning(self) -> None:
+        """Unmapped runtime_profile values fall back to no profile flag and log a warning."""
+        with patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning:
+            runtime = CodexCliRuntime(
+                cli_path="codex",
+                cwd="/tmp/project",
+                runtime_profile="future-tier",
+            )
+
+        command = runtime._build_command(output_last_message_path="/tmp/out.txt")
+
+        assert "--profile" not in command
+        mock_warning.assert_called_once()
+        warning_args = mock_warning.call_args
+        assert warning_args.args[0] == "codex_cli_runtime.runtime_profile_unmapped"
+        assert warning_args.kwargs["runtime_profile"] == "future-tier"
 
     def test_resolve_cli_path_falls_back_from_wrapper(self, tmp_path: Path) -> None:
         """Runtime should bypass wrappers the same way provider adapters do."""
