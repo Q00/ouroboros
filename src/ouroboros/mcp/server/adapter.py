@@ -345,7 +345,13 @@ def _evaluation_summary_from_spec_verification(
     mechanical: Any,
     verification_summary: Any,
 ) -> Any | None:
-    """Promote verifier-checked AC reports into formal AC verdict results."""
+    """Promote complete verifier coverage into formal AC verdict results.
+
+    Spec verification may only return reports for ACs that produced extractable
+    assertions. Missing reports and reports with no concrete verification
+    results are not formal approval: they become failed/not-evaluated AC
+    results so a partial verifier pass cannot approve the whole run.
+    """
     from ouroboros.core.lineage import ACResult, EvaluationSummary
 
     reports = tuple(getattr(verification_summary, "reports", ()) or ())
@@ -355,6 +361,7 @@ def _evaluation_summary_from_spec_verification(
     expected_ac_content: dict[int, str] = {
         ac.ac_index: ac.ac_content for ac in mechanical.ac_results
     }
+    expected_agent_results = _agent_results_from_execution_summary(mechanical)
     for task in mechanical.task_results:
         source_ac_index = task.source_ac_index
         if source_ac_index is None:
@@ -362,31 +369,48 @@ def _evaluation_summary_from_spec_verification(
         expected_ac_content.setdefault(source_ac_index, task.task_content)
 
     reports_by_index = {report.ac_index: report for report in reports}
-    expected_indices = set(expected_ac_content)
-    reported_indices = set(reports_by_index)
-    result_indices = sorted(expected_indices | reported_indices)
+    expected_indices = set(expected_ac_content) | set(expected_agent_results)
+    result_indices = sorted(expected_indices | set(reports_by_index))
 
     ac_results: list[ACResult] = []
+    missing_indices: list[int] = []
+    unverifiable_indices: list[int] = []
     for ac_index in result_indices:
         report = reports_by_index.get(ac_index)
         if report is None:
+            missing_indices.append(ac_index)
             ac_results.append(
                 ACResult(
                     ac_index=ac_index,
-                    ac_content=expected_ac_content.get(ac_index, ""),
+                    ac_content=expected_ac_content.get(
+                        ac_index, f"Acceptance criterion {ac_index + 1}"
+                    ),
                     passed=False,
                     score=0.0,
-                    evidence="No spec verification report produced for this acceptance criterion.",
+                    evidence="No spec verification report was produced for this AC.",
                     verification_method="spec_verifier",
+                    ac_verdict_state="not_evaluated",
+                    final_verdict="fail",
+                    rendered_verdict="NOT_EVALUATED",
                 )
             )
             continue
 
         details = [result.detail for result in report.results if result.detail]
         evidence = "; ".join(details)
-        if not evidence:
-            evidence = "No independently verifiable assertions; preserved legacy task report."
-        passed = bool(report.verified_pass)
+        if not report.results:
+            unverifiable_indices.append(ac_index)
+            evidence = "No independently verifiable assertions; formal AC verdict not evaluated."
+            passed = False
+            verdict_state = "not_evaluated"
+            rendered_verdict = "NOT_EVALUATED"
+        else:
+            passed = bool(report.verified_pass)
+            verdict_state = "evaluated"
+            rendered_verdict = "PASS" if passed else "FAIL"
+            if not evidence:
+                evidence = "Spec verifier produced no evidence details."
+
         ac_results.append(
             ACResult(
                 ac_index=report.ac_index,
@@ -395,26 +419,40 @@ def _evaluation_summary_from_spec_verification(
                 score=1.0 if passed else 0.0,
                 evidence=evidence,
                 verification_method="spec_verifier",
+                ac_verdict_state=verdict_state,
+                final_verdict="pass" if passed else "fail",
+                rendered_verdict=rendered_verdict,
             )
         )
 
     total = len(ac_results)
     passed_count = sum(1 for result in ac_results if result.passed)
     score = passed_count / total if total > 0 else 0.0
-    complete_coverage = bool(expected_indices) and expected_indices.issubset(reported_indices)
+    complete_coverage = bool(expected_indices) and expected_indices.issubset(reports_by_index)
     approved = complete_coverage and passed_count == total and total > 0
 
     failure_reason = None
     if not approved:
         failed_indices = [result.ac_index + 1 for result in ac_results if not result.passed]
         discrepancy_count = getattr(verification_summary, "discrepancy_count", 0)
-        suffix = (
-            f" [{discrepancy_count} spec verification override(s)]" if discrepancy_count else ""
-        )
-        failure_reason = (
+        reason_parts = [
             f"{len(failed_indices)}/{total} ACs failed "
-            f"(AC {', '.join(str(i) for i in failed_indices)}){suffix}"
-        )
+            f"(AC {', '.join(str(i) for i in failed_indices)})"
+        ]
+        if discrepancy_count:
+            reason_parts.append(f"{discrepancy_count} spec verification override(s)")
+        if missing_indices:
+            reason_parts.append(
+                "missing verifier report for AC " + ", ".join(str(i + 1) for i in missing_indices)
+            )
+        if unverifiable_indices:
+            reason_parts.append(
+                "no independently verifiable assertions for AC "
+                + ", ".join(str(i + 1) for i in unverifiable_indices)
+            )
+        failure_reason = " [".join([reason_parts[0], "; ".join(reason_parts[1:])])
+        if len(reason_parts) > 1:
+            failure_reason += "]"
 
     return EvaluationSummary(
         final_approved=approved,

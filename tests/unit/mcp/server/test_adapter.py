@@ -434,6 +434,108 @@ Parallel Execution Verification Report
         assert summary.drift_score is None
         assert summary.run_verdict == "FAIL"
 
+    def test_spec_verification_rejects_partial_ac_coverage(self) -> None:
+        """A subset of verifier reports must not approve unverified ACs."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+                TaskResult(
+                    task_index=1,
+                    task_content="Add docs",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=1,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found file: config.py",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert len(summary.ac_results) == 2
+        assert summary.ac_results[0].passed is True
+        assert summary.ac_results[1].passed is False
+        assert summary.ac_results[1].ac_verdict_state == "not_evaluated"
+        assert summary.ac_results[1].rendered_verdict == "NOT_EVALUATED"
+        assert summary.approval_status == "rejected"
+        assert "missing verifier report for AC 2" in (summary.failure_reason or "")
+        assert summary.run_verdict == "FAIL"
+
+    def test_spec_verification_rejects_unverifiable_completed_task(self) -> None:
+        """A completed task is not an AC approval when no assertions ran."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Improve UX",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Improve UX",
+                    results=(),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_verdict_state == "not_evaluated"
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert summary.approval_status == "rejected"
+        assert "no independently verifiable assertions for AC 1" in (summary.failure_reason or "")
+        assert summary.run_verdict == "FAIL"
+
     def test_extract_feedback_metadata_from_artifact_parses_structured_warning(self) -> None:
         """Execution artifacts should expose structured evaluation feedback metadata."""
         artifact = """
