@@ -63,13 +63,14 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      `seed_content` and generate a fresh `lineage_id` for this run. Keep
      `lineage_id` separate from Seed, interview, and session IDs so separate
      Ralph runs over the same Seed do not collide.
-   - If the user provides only a plain request (`ooo ralph "<request>"`), first
-     convert it into a valid Seed YAML using the same Seed contract as
-     `ooo seed`: goal, constraints, acceptance criteria, ontology schema,
-     evaluation principles, exit conditions, and metadata. Do not pass raw
-     natural-language text as `seed_content`. If the request is too ambiguous to
-     produce acceptance criteria, stop and route to `ooo interview` followed by
-     `ooo seed` instead of inventing requirements.
+   - If the user provides only a plain request (`ooo ralph "<request>"`), do
+     not freehand Seed YAML and do not pass raw natural-language text as
+     `seed_content`. Route through the authoritative Seed path first:
+     `ooo interview` to capture requirements, then `ooo seed` /
+     `ouroboros_generate_seed` to produce validated Seed YAML with the normal
+     ambiguity gate. Use that generated Seed YAML as `seed_content`. If an
+     interview/seed session already exists in context, reuse that validated Seed
+     output instead of regenerating it.
 
 2. **Start Ralph** by calling `ouroboros_ralph` with:
    - `lineage_id`: existing lineage id for an explicit continuation, otherwise a
