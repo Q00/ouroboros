@@ -58,11 +58,24 @@ def _resolve_verification_working_dir(
 ) -> Path:
     """Resolve the best project directory for post-run verification."""
     if project_dir:
+        # ``project_dir`` is the explicit MCP tool argument supplied by the
+        # caller — trusted source — so containment enforcement is left off.
+        # Untrusted seed-encoded paths are handled by
+        # ``resolve_seed_project_path`` below, which always enforces it.
         resolved = resolve_path_against_base(project_dir, stable_base=stable_base)
         if resolved is not None:
             return resolved
 
-    return resolve_seed_project_path(seed, stable_base=stable_base) or stable_base
+    resolution = resolve_seed_project_path(seed, stable_base=stable_base)
+    if resolution.path is not None:
+        return resolution.path
+    if resolution.rejected:
+        log.warning(
+            "evolution_handlers.seed_project_path_rejected",
+            stable_base=str(stable_base),
+            reason="every seed-encoded project path escaped the stable base",
+        )
+    return stable_base
 
 
 def _resolve_evolve_verification_working_dir(
@@ -72,6 +85,11 @@ def _resolve_evolve_verification_working_dir(
     initial_seed: Seed | None,
 ) -> Path:
     """Resolve the best project directory for evolve-step verification."""
+    # ``explicit_project_dir`` and ``configured_project_dir`` are trusted
+    # caller/config inputs (MCP arg or local config file), so the absolute
+    # paths they may carry are accepted without containment enforcement.
+    # Containment is enforced for seed-encoded candidates via
+    # ``resolve_seed_project_path`` (called from ``_resolve_verification_working_dir``).
     cwd_base = Path.cwd().resolve()
     if explicit_project_dir:
         resolved = resolve_path_against_base(explicit_project_dir, stable_base=cwd_base)
