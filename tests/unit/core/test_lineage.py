@@ -5,6 +5,7 @@ from ouroboros.core.lineage import (
     EvaluationSummary,
     FeedbackMetadata,
     GenerationRecord,
+    TaskResult,
 )
 from ouroboros.core.seed import OntologySchema
 
@@ -49,6 +50,46 @@ class TestEvaluationSummary:
 
         assert payload["execution_completion_status"] == "completed"
         assert payload["approval_status"] == "rejected"
+
+    def test_summary_serializes_task_results_separately_from_ac_results(self) -> None:
+        """Worker task completion should not masquerade as formal AC verdicts."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Implement feature",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    evidence="Worker finished the implementation task",
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            ac_results=(),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+
+        payload = summary.model_dump(mode="json")
+
+        assert payload["task_results"][0]["status"] == "completed"
+        assert payload["task_results"][0]["source_ac_index"] == 0
+        assert payload["ac_results"] == []
+        assert summary.run_verdict_passed is False
+
+    def test_run_verdict_fails_when_approval_not_evaluated(self) -> None:
+        """Completion without formal approval must not become a passing run verdict."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+
+        assert summary.run_verdict_passed is False
+        assert summary.run_verdict == "FAIL"
 
     def test_feedback_metadata_serializes_as_structured_output(self) -> None:
         """Structured feedback metadata should survive round-trip serialization."""

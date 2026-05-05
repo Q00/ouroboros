@@ -108,6 +108,23 @@ class ACResult(BaseModel, frozen=True):
         return None
 
 
+class TaskResult(BaseModel, frozen=True):
+    """Worker execution outcome for a task derived from an acceptance criterion.
+
+    This is intentionally separate from :class:`ACResult`: task completion
+    describes whether execution work finished, while AC results describe formal
+    evaluator/verifier verdicts about the produced artifact.
+    """
+
+    task_index: int
+    task_content: str
+    status: str
+    completed: bool
+    source_ac_index: int | None = None
+    evidence: str = ""
+    execution_method: str = "unknown"
+
+
 class FeedbackMetadata(BaseModel, frozen=True):
     """Structured evaluation feedback that downstream loops can react to."""
 
@@ -149,7 +166,17 @@ class EvaluationSummary(BaseModel, frozen=True):
         description="Suspicion that the artifact is optimized for evaluator, rubric, or test approval rather than solving the real task (0.0-1.0). Distinct from drift_score.",
     )
     failure_reason: str | None = None
-    ac_results: tuple[ACResult, ...] = ()
+    ac_results: tuple[ACResult, ...] = Field(
+        default_factory=tuple,
+        description="Formal evaluator/verifier verdicts for acceptance criteria.",
+    )
+    task_results: tuple[TaskResult, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Worker execution outcomes for tasks/subtasks. Distinct from ac_results: "
+            "task completion is not acceptance approval."
+        ),
+    )
     feedback_metadata: tuple[FeedbackMetadata, ...] = Field(
         default_factory=tuple,
         description=(
@@ -199,7 +226,7 @@ class EvaluationSummary(BaseModel, frozen=True):
             return False
         if self.ac_results:
             return all(ac.passed for ac in self.ac_results)
-        if self.approval_status == "rejected":
+        if self.approval_status != "approved":
             return False
         return self.final_approved
 
