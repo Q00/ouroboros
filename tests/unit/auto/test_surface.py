@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.adapters import HandlerInterviewBackend
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.main import app
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
@@ -39,6 +41,43 @@ def test_cli_auto_help_is_registered() -> None:
     assert result.exit_code == 0
     assert "--max-interview-rounds" in result.output
     assert "--skip-run" in result.output
+
+
+def test_cli_auto_status_prints_persisted_session(monkeypatch, tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "asking interview round 1/12")
+    state.interview_session_id = "interview_123"
+    state.current_round = 1
+    state.pending_question = "Which runtime should be used?"
+    state.seed_path = "/tmp/seed.yaml"
+    state.last_grade = "B"
+    store.save(state)
+
+    monkeypatch.setattr("ouroboros.cli.commands.auto.AutoStore", lambda: store)
+
+    result = CliRunner().invoke(app, ["auto", "--resume", state.auto_session_id, "--status"])
+
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert result.exit_code == 0
+    assert "Auto session status" in output
+    assert state.auto_session_id in output
+    assert "Phase:" in output
+    assert "interview" in output
+    assert "asking interview round 1/12" in output
+    assert "Interview session:" in output
+    assert "interview_123" in output
+    assert "Current interview round:" in output
+    assert "Which runtime should be used?" in output
+    assert "Seed grade:" in output
+    assert "Resume:" in output
+
+
+def test_cli_auto_status_requires_resume() -> None:
+    result = CliRunner().invoke(app, ["auto", "--status"])
+
+    assert result.exit_code == 1
+    assert "--status requires --resume auto_<id>" in result.output
 
 
 def test_auto_skill_frontmatter_dispatches_to_mcp_tool() -> None:
