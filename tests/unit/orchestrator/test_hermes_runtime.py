@@ -126,6 +126,86 @@ class TestHermesCliRuntime:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")
         assert runtime._llm_backend == "opencode"
 
+    @staticmethod
+    def _clear_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Drop ambient timeout env vars so kwarg/default tests stay deterministic."""
+        for name in (
+            "OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS",
+            "OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_default_timeouts_match_class_attributes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_timeout_env(monkeypatch)
+        runtime = HermesCliRuntime(cli_path="hermes")
+        assert (
+            runtime._startup_output_timeout_seconds
+            == HermesCliRuntime._startup_output_timeout_seconds
+        )
+        assert runtime._stdout_idle_timeout_seconds == HermesCliRuntime._stdout_idle_timeout_seconds
+
+    def test_explicit_timeout_kwargs_override_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_timeout_env(monkeypatch)
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            startup_output_timeout_seconds=10.0,
+            stdout_idle_timeout_seconds=20.0,
+        )
+        assert runtime._startup_output_timeout_seconds == 10.0
+        assert runtime._stdout_idle_timeout_seconds == 20.0
+
+    def test_zero_timeout_disables_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``0`` opts out of the runtime-local guard so the watchdog owns liveness."""
+        self._clear_timeout_env(monkeypatch)
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            startup_output_timeout_seconds=0,
+            stdout_idle_timeout_seconds=0,
+        )
+        assert runtime._startup_output_timeout_seconds is None
+        assert runtime._stdout_idle_timeout_seconds is None
+
+    def test_negative_timeout_disables_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_timeout_env(monkeypatch)
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            startup_output_timeout_seconds=-1.0,
+            stdout_idle_timeout_seconds=-5.0,
+        )
+        assert runtime._startup_output_timeout_seconds is None
+        assert runtime._stdout_idle_timeout_seconds is None
+
+    def test_env_vars_set_timeouts_when_kwargs_omitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS", "120")
+        monkeypatch.setenv("OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS", "900")
+        runtime = HermesCliRuntime(cli_path="hermes")
+        assert runtime._startup_output_timeout_seconds == 120.0
+        assert runtime._stdout_idle_timeout_seconds == 900.0
+
+    def test_env_var_zero_disables_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS", "0")
+        runtime = HermesCliRuntime(cli_path="hermes")
+        assert runtime._stdout_idle_timeout_seconds is None
+
+    def test_kwargs_take_priority_over_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS", "120")
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            startup_output_timeout_seconds=42.0,
+        )
+        assert runtime._startup_output_timeout_seconds == 42.0
+
+    def test_invalid_env_var_falls_back_to_class_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS", "not-a-number")
+        runtime = HermesCliRuntime(cli_path="hermes")
+        assert runtime._stdout_idle_timeout_seconds == HermesCliRuntime._stdout_idle_timeout_seconds
+
     def test_runtime_does_not_expose_local_dispatch_parser_helpers(self) -> None:
         """Dispatch parsing and metadata resolution live in the shared router."""
         obsolete_helpers = {

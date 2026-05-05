@@ -43,6 +43,45 @@ log = get_logger(__name__)
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
+_STARTUP_TIMEOUT_ENV = "OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS"
+_IDLE_TIMEOUT_ENV = "OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS"
+
+
+def _resolve_timeout_override(
+    explicit: float | None,
+    env_name: str,
+    fallback: float,
+) -> float | None:
+    """Resolve a stream-timeout override.
+
+    Priority: explicit kwarg → environment variable → class-attribute fallback.
+    Non-positive values (``0`` or negative) disable the guard so the
+    generation watchdog — not the runtime's own stream loop — owns liveness.
+    """
+    candidate: float | None
+    if explicit is not None:
+        candidate = explicit
+    else:
+        raw = os.environ.get(env_name)
+        if raw is None or not raw.strip():
+            candidate = fallback
+        else:
+            try:
+                candidate = float(raw)
+            except ValueError:
+                log.warning(
+                    "hermes_cli_runtime.timeout_env_invalid",
+                    env=env_name,
+                    raw=raw,
+                    fallback=fallback,
+                )
+                candidate = fallback
+
+    if candidate is None or candidate <= 0:
+        return None
+    return candidate
+
+
 # Hermes session ID format: YYYYMMDD_HHMMSS_xxxxxx
 _HERMES_SESSION_ID_PATTERN = re.compile(r"^session_id:\s+(?P<session_id>\d{8}_\d{6}_[a-f0-9]+)\s*$")
 _REASONING_HEADER_PREFIX = "┌─ Reasoning"
@@ -119,6 +158,8 @@ class HermesCliRuntime(AgentRuntime):
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        startup_output_timeout_seconds: float | None = None,
+        stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._permission_mode = permission_mode or "default"
@@ -129,12 +170,31 @@ class HermesCliRuntime(AgentRuntime):
         self._llm_backend = llm_backend or self._default_llm_backend
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
+        # Resolve stream-loop timeouts (kwarg → env var → class default;
+        # ``0``/negative disables the guard so the generation watchdog —
+        # not the runtime's own stream loop — owns long-running liveness.
+        # Hermes runs in quiet mode (``-Q``) and emits no progress events,
+        # so the default class-level idle window can fire on legitimate
+        # long-running model calls before the watchdog has a chance.)
+        self._startup_output_timeout_seconds = _resolve_timeout_override(
+            startup_output_timeout_seconds,
+            _STARTUP_TIMEOUT_ENV,
+            type(self)._startup_output_timeout_seconds,
+        )
+        self._stdout_idle_timeout_seconds = _resolve_timeout_override(
+            stdout_idle_timeout_seconds,
+            _IDLE_TIMEOUT_ENV,
+            type(self)._stdout_idle_timeout_seconds,
+        )
+
         log.info(
             f"{self._log_namespace}.initialized",
             cli_path=self._cli_path,
             permission_mode=self._permission_mode,
             model=model,
             cwd=self._cwd,
+            startup_output_timeout_seconds=self._startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=self._stdout_idle_timeout_seconds,
         )
 
     @property
