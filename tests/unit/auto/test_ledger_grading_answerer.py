@@ -105,6 +105,10 @@ def test_auto_answerer_routes_stack_selection_to_runtime_context() -> None:
         "What project structure should we use?",
         "Which repo should we use?",
         "What framework is this repo using?",
+        "Which framework?",
+        "What runtime?",
+        "What package manager?",
+        "Which project structure?",
     )
 
     for question in questions:

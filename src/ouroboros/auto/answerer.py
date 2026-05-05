@@ -483,7 +483,8 @@ def _is_runtime_context_question(lowered: str) -> bool:
     )
 
     return bool(
-        re.search(rf"\b(which|what)\b.+\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
+        re.search(rf"^\s*(which|what)\s+{runtime_term}\s*\??\s*$", lowered)
+        or re.search(rf"\b(which|what)\b.+\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
         or re.search(rf"\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
         or re.search(rf"\b{selection_verbs}\b.+\b{runtime_term}\b", lowered)
     )
