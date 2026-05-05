@@ -182,6 +182,10 @@ class KiroAgentAdapter:
         return self._llm_backend
 
     @property
+    def cli_path(self) -> str:
+        return self._cli_path
+
+    @property
     def capabilities(self) -> RuntimeCapabilities:
         return _KIRO_CAPABILITIES
 

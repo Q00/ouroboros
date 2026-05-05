@@ -715,6 +715,13 @@ class TestKiroPermissionModeContract:
 
         assert adapter.llm_backend == "litellm"
 
+    def test_public_cli_path_property_exposes_resolved_cli_override(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="/custom/bin/kiro-cli")
+
+        assert adapter.cli_path == "/custom/bin/kiro-cli"
+
     def test_default_mode_uses_trust_tools_empty(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 
