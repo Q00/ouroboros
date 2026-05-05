@@ -17,7 +17,7 @@ under the broader Agent OS runtime contract.
 | ControlContract closure | #574 | Ready now | Turns the contract from implemented code into a reviewable, closed acceptance record. | Over-scoping #574 into delivery or policy work. |
 | Projector conformance | #574 | Ready now | Ensures replay/projectors consume the contract fields rather than ad-hoc payload fragments. | Changing audit projections in a way that drops raw history. |
 | Effective idempotency | #574 / #575 | Ready after conformance | Makes replay/backfill/mesh consumers able to dedupe effective decisions while preserving raw events. | Collapsing distinct decisions that share weak keys. |
-| ControlJournal delivery | #575 | Needs design first | Defines the source-of-truth handoff from durable journal to local `ControlBus` and future transports. | Introducing an outbox before delivery guarantees and failure modes are explicit. |
+| EventStore-backed control delivery | #575 | Needs design first | Defines the source-of-truth handoff from persisted event stream to local `ControlBus` and future transports. | Introducing an outbox before delivery guarantees and failure modes are explicit. |
 | Producer migration | #472 / #574 | Incremental | Moves evaluator, resilience, watchdog, and lifecycle decisions onto the shared `Directive` vocabulary. | Mapping local states to terminal directives too aggressively. |
 | AgentProcess lifecycle | #518 / #528 | Incremental | Makes long-running workflows pause/resume/cancel/replay through one observable process contract. | Treating lifecycle transport as equivalent to durable replay. |
 | Capability and policy | #576 | Separate epic lane | Explains why a directive was allowed by making tool visibility/execution policy explicit and journaled. | Mixing authorization policy with directive intent. |
@@ -44,12 +44,12 @@ under the broader Agent OS runtime contract.
    - Keep the raw audit timeline unchanged.
    - Risk: medium; dedupe must not hide distinct decisions without stable keys.
 
-4. **ControlJournal delivery design (#575).**
-   - Decide between journal-backed outbox and best-effort bus delivery.
-   - Prefer journal-backed outbox if delivery must survive process crashes.
+4. **EventStore-backed control delivery design (#575).**
+   - Decide between an EventStore-backed outbox and best-effort bus delivery.
+   - Prefer an EventStore-backed outbox if delivery must survive process crashes.
    - Risk: high; this sets durability expectations for every later transport.
 
-5. **Journal-backed directive emitter and dispatcher.**
+5. **EventStore-backed directive emitter and dispatcher.**
    - Centralize append/outbox/publish behavior so producers do not hand-roll
      `append -> publish` sequences.
    - Risk: high; failure handling must be deterministic and idempotent.
