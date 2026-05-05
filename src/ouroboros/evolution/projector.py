@@ -217,6 +217,21 @@ class LineageProjector:
                     # corrupt the projection; the raw row is still queryable
                     # via event_store directly for postmortem.
                     continue
+                schema_version = data.get("schema_version")
+                if schema_version is not None and (
+                    not isinstance(schema_version, int) or schema_version < 1
+                ):
+                    continue
+                target_type = data.get("target_type")
+                if target_type is not None and (
+                    not isinstance(target_type, str) or not target_type.strip()
+                ):
+                    continue
+                target_id = data.get("target_id")
+                if target_id is not None and (
+                    not isinstance(target_id, str) or not target_id.strip()
+                ):
+                    continue
                 generation_number = data.get("generation_number")
                 if generation_number is not None and not isinstance(generation_number, int):
                     continue
@@ -226,15 +241,30 @@ class LineageProjector:
                 is_terminal = data.get("is_terminal", False)
                 if not isinstance(is_terminal, bool):
                     continue
+                parent_directive_id = data.get("parent_directive_id")
+                if parent_directive_id is not None and (
+                    not isinstance(parent_directive_id, str) or not parent_directive_id.strip()
+                ):
+                    continue
+                idempotency_key = data.get("idempotency_key")
+                if idempotency_key is not None and (
+                    not isinstance(idempotency_key, str) or not idempotency_key.strip()
+                ):
+                    continue
                 directive_emissions.append(
                     ControlDirectiveEmission(
                         directive=directive_value,
                         reason=str(data.get("reason", "")),
                         emitted_by=str(data.get("emitted_by", "")),
                         timestamp=event.timestamp,
+                        schema_version=schema_version,
+                        target_type=target_type,
+                        target_id=target_id,
                         generation_number=generation_number,
                         phase=phase,
                         is_terminal=is_terminal,
+                        parent_directive_id=parent_directive_id,
+                        idempotency_key=idempotency_key,
                     )
                 )
 
