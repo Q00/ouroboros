@@ -1,6 +1,9 @@
 ---
 name: ralph
 description: "MCP-owned Ralph loop around background evolve_step jobs"
+mcp_tool: ouroboros_ralph
+mcp_args:
+  lineage_id: "$lineage_id"
 ---
 
 # /ouroboros:ralph
@@ -30,10 +33,9 @@ terminal evolution action occurs, cancellation is requested, or
 a child Task session that owns the loop instead of creating a local JobManager
 job.
 
-The client skill should not reimplement the loop or expose deterministic
-frontmatter dispatch. The router cannot distinguish a continuation lineage id
-from a raw natural-language request at the frontmatter layer, so every
-invocation must first run the preparation rules below. Raw natural-language
+The client skill should not reimplement the loop. Deterministic frontmatter
+dispatch is limited to the router's named `--lineage-id` option so raw trailing
+text is never treated as lineage identity. Raw natural-language
 `ooo ralph "<request>"` input must flow through the validated Seed path before
 any `ouroboros_ralph` call. Once a lineage id and optional Seed YAML are
 prepared, start the MCP-owned Ralph surface once, then follow either the
