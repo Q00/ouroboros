@@ -77,29 +77,39 @@ def _check_auto_dispatch_surface(codex_dir: Path) -> list[str]:
     if not rules_path.is_file():
         failures.append(f"missing Codex rules file: {rules_path}")
     else:
-        rules = rules_path.read_text(encoding="utf-8")
-        if "`ooo auto" not in rules or "ouroboros_auto" not in rules:
+        rules = _read_codex_text(rules_path, "Codex rules", failures)
+        if rules is not None and ("`ooo auto" not in rules or "ouroboros_auto" not in rules):
             failures.append("Codex rules do not map `ooo auto` to `ouroboros_auto`")
-        if "manual" not in rules.lower() or "unavailable" not in rules.lower():
+        if rules is not None and (
+            "manual" not in rules.lower() or "unavailable" not in rules.lower()
+        ):
             failures.append("Codex rules do not describe fail-closed behavior for `ooo auto`")
 
     skill_path = codex_dir / "skills" / "ouroboros-auto" / "SKILL.md"
     if not skill_path.is_file():
         failures.append(f"missing auto skill file: {skill_path}")
     else:
-        skill = skill_path.read_text(encoding="utf-8")
-        if "mcp_tool: ouroboros_auto" not in skill:
+        skill = _read_codex_text(skill_path, "auto skill", failures)
+        if skill is not None and "mcp_tool: ouroboros_auto" not in skill:
             failures.append("auto skill does not declare `mcp_tool: ouroboros_auto`")
-        if "manual" not in skill.lower() or "unavailable" not in skill.lower():
-            failures.append("auto skill does not forbid manual fallback when dispatch is unavailable")
+        if skill is not None and (
+            "manual" not in skill.lower() or "unavailable" not in skill.lower()
+        ):
+            failures.append(
+                "auto skill does not forbid manual fallback when dispatch is unavailable"
+            )
 
     config_path = codex_dir / "config.toml"
     if not config_path.is_file():
         failures.append(f"missing Codex config file: {config_path}")
         return failures
 
+    config_text = _read_codex_text(config_path, "Codex config", failures)
+    if config_text is None:
+        return failures
+
     try:
-        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        config = tomllib.loads(config_text)
     except tomllib.TOMLDecodeError as exc:
         failures.append(f"Codex config is not valid TOML: {exc}")
         return failures
@@ -114,13 +124,13 @@ def _check_auto_dispatch_surface(codex_dir: Path) -> list[str]:
         failures.append("Codex config does not contain [mcp_servers.ouroboros]")
         return failures
 
-    command = str(ouroboros_entry.get("command", ""))
-    args = ouroboros_entry.get("args")
-    args_text = " ".join(str(arg) for arg in args) if isinstance(args, list) else ""
-    if not command:
-        failures.append("[mcp_servers.ouroboros] is missing `command`")
-    if "ouroboros" not in f"{command} {args_text}" or "mcp" not in args_text:
-        failures.append("[mcp_servers.ouroboros] does not appear to start `ouroboros mcp serve`")
+    url = ouroboros_entry.get("url")
+    if isinstance(url, str) and url.strip():
+        return failures
+
+    command = ouroboros_entry.get("command")
+    if not isinstance(command, str) or not command.strip():
+        failures.append("[mcp_servers.ouroboros] is missing `command` or `url`")
 
     if failures:
         print_warning(
@@ -129,3 +139,14 @@ def _check_auto_dispatch_surface(codex_dir: Path) -> list[str]:
         )
 
     return failures
+
+
+def _read_codex_text(path: Path, label: str, failures: list[str]) -> str | None:
+    """Read a Codex artifact for doctor checks without crashing on broken files."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        failures.append(f"{label} is not valid UTF-8: {path}: {exc}")
+    except OSError as exc:
+        failures.append(f"could not read {label}: {path}: {exc}")
+    return None

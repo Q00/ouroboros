@@ -8,7 +8,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.codex import _check_auto_dispatch_surface, app
-from ouroboros.codex import CodexArtifactInstallResult
+from ouroboros.codex import CodexArtifactInstallResult, install_codex_artifacts
 
 runner = CliRunner()
 
@@ -80,6 +80,45 @@ class TestCodexDoctor:
 
         assert _check_auto_dispatch_surface(codex_dir) == []
 
+    def test_check_auto_dispatch_surface_accepts_url_mcp_server_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n',
+            encoding="utf-8",
+        )
+
+        assert _check_auto_dispatch_surface(codex_dir) == []
+
+    def test_check_auto_dispatch_surface_accepts_custom_command_mcp_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "/opt/bin/ob-mcp-wrapper"\nargs = ["--stdio"]\n',
+            encoding="utf-8",
+        )
+
+        assert _check_auto_dispatch_surface(codex_dir) == []
+
+    def test_packaged_codex_artifacts_satisfy_doctor_contract(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        install_codex_artifacts(codex_dir=codex_dir, prune=False)
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n',
+            encoding="utf-8",
+        )
+
+        assert _check_auto_dispatch_surface(codex_dir) == []
+
     def test_check_auto_dispatch_surface_reports_missing_auto_contract(
         self,
         tmp_path: Path,
@@ -115,6 +154,20 @@ class TestCodexDoctor:
         assert cli_result.exit_code == 1
         assert "Codex ooo auto dispatch: BROKEN" in cli_result.output
         assert "missing Codex rules file" in cli_result.output
+
+    def test_doctor_command_reports_unreadable_artifact_without_traceback(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "skills" / "ouroboros-auto" / "SKILL.md").write_bytes(b"\xff")
+
+        cli_result = runner.invoke(app, ["doctor", "--codex-dir", str(codex_dir)])
+
+        assert cli_result.exit_code == 1
+        assert "auto skill is not valid UTF-8" in cli_result.output
+        assert not isinstance(cli_result.exception, UnicodeDecodeError)
 
     def test_doctor_command_reports_ok_for_healthy_install(self, tmp_path: Path) -> None:
         codex_dir = tmp_path / ".codex"

@@ -15,6 +15,8 @@ mcp_args:
 
 Run the full-quality auto pipeline from a single task description.
 
+This skill requires MCP dispatch to `ouroboros_auto`. If that tool is unavailable, stop and report a dispatch failure; do not manually emulate the auto pipeline or continue with ordinary agent work.
+
 ## Usage
 
 ```text
