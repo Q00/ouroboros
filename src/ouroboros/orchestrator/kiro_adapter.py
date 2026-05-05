@@ -1,8 +1,8 @@
 """Kiro CLI agent runtime adapter via subprocess.
 
-Calls ``kiro-cli chat --no-interactive --trust-all-tools`` for autonomous
-code execution tasks.  Implements the AgentRuntime protocol so it can be
-used as a drop-in replacement for ClaudeAgentAdapter / CodexCliRuntime.
+Calls ``kiro-cli chat --no-interactive`` with policy-derived trust flags for
+autonomous code execution tasks. Implements the AgentRuntime protocol so it
+can be used as a drop-in replacement for ClaudeAgentAdapter / CodexCliRuntime.
 """
 
 from __future__ import annotations
@@ -73,12 +73,24 @@ _MODEL_NAME_MAP: dict[str, str] = {
     "claude-opus-4-5": "claude-opus-4.5",
     "claude-haiku-4-5": "claude-haiku-4.5",
 }
+_KIRO_TOOL_NAME_MAP: dict[str, str] = {
+    "bash": "shell",
+    "edit": "write",
+    "glob": "read",
+    "grep": "grep",
+    "ls": "read",
+    "multiedit": "write",
+    "read": "read",
+    "shell": "shell",
+    "write": "write",
+}
 
 # Environment keys stripped from child processes to prevent recursive MCP
 # startup and nested session detection conflicts.
 _STRIPPED_ENV_KEYS = (
     "OUROBOROS_AGENT_RUNTIME",
     "OUROBOROS_LLM_BACKEND",
+    "OUROBOROS_RUNTIME",
     "CLAUDECODE",
 )
 
@@ -200,17 +212,30 @@ class KiroAgentAdapter:
         env["OUROBOROS_SUBAGENT"] = "1"
         return env
 
-    def _build_permission_args(self) -> list[str]:
-        """Map permission_mode onto kiro-cli trust flags.
+    def _build_permission_args(self, tools: list[str] | None = None) -> list[str]:
+        """Map per-call tools and permission_mode onto kiro-cli trust flags.
 
-        Mapping:
-        - ``default``           → ``--trust-tools=''`` (no tool trust)
-        - ``acceptEdits``       → ``--trust-all-tools`` (full auto)
-        - ``bypassPermissions`` → ``--trust-all-tools``
+        A non-``None`` ``tools`` list is the policy layer's executable tool
+        allow-list and must take precedence over coarse permission modes.
+        Only when no per-call allow-list is supplied do ``acceptEdits`` and
+        ``bypassPermissions`` expand to full trust.
         """
+        if tools is not None:
+            return [f"--trust-tools={self._kiro_trust_tools_arg(tools)}"]
         if self._permission_mode == "default":
             return ["--trust-tools="]
         return ["--trust-all-tools"]
+
+    def _kiro_trust_tools_arg(self, tools: list[str]) -> str:
+        mapped_tools: list[str] = []
+        seen: set[str] = set()
+        for tool in tools:
+            normalized = tool.strip().lower().replace("_", "-")
+            mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
+            if mapped not in seen:
+                mapped_tools.append(mapped)
+                seen.add(mapped)
+        return ",".join(mapped_tools)
 
     def _build_cmd(
         self,
@@ -220,7 +245,7 @@ class KiroAgentAdapter:
         resume_session_id: str | None = None,
     ) -> list[str]:
         cmd = [self._cli_path, "chat", "--no-interactive"]
-        cmd.extend(self._build_permission_args())
+        cmd.extend(self._build_permission_args(tools))
         if self._model:
             mapped = _MODEL_NAME_MAP.get(self._model, self._model)
             cmd.extend(["--model", mapped])

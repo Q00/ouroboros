@@ -39,6 +39,14 @@ log = structlog.get_logger(__name__)
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _TOOL_USE_MARKER_RE = re.compile(r'"type"\s*:\s*"tool_use"|tool_use')
 _TOOL_NAME_RE = re.compile(r'"(?:name|tool)"\s*:\s*"([^"]+)"')
+_STRIPPED_ENV_KEYS = (
+    "OUROBOROS_AGENT_RUNTIME",
+    "OUROBOROS_LLM_BACKEND",
+    "OUROBOROS_RUNTIME",
+    "CLAUDECODE",
+)
+_MAX_OUROBOROS_DEPTH = 5
+
 _KIRO_TOOL_NAME_MAP: dict[str, str] = {
     "bash": "shell",
     "edit": "write",
@@ -98,6 +106,7 @@ class KiroCodeAdapter:
         cli_path: str | Path | None = None,
         cwd: str | Path | None = None,
         allowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
         max_turns: int = 1,
         on_message: Callable[[str, str], None] | None = None,
         timeout: float | None = None,
@@ -106,6 +115,7 @@ class KiroCodeAdapter:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else None
         self._allowed_tools = list(allowed_tools) if allowed_tools is not None else None
+        self._permission_mode = permission_mode
         self._max_turns = max_turns
         self._on_message = on_message
         self._timeout = timeout if timeout and timeout > 0 else _DEFAULT_TIMEOUT
@@ -141,7 +151,7 @@ class KiroCodeAdapter:
         """Make a completion request via Kiro CLI subprocess."""
         prompt = self._build_prompt(messages, config)
         cmd = self._build_cmd(prompt, config)
-        env = {**os.environ, "OUROBOROS_SUBAGENT": "1"}
+        env = self._build_child_env()
         cwd = self._cwd or os.getcwd()
         requires_json = bool(
             config.response_format
@@ -233,6 +243,22 @@ class KiroCodeAdapter:
 
         return Result.err(last_error or ProviderError("Max retries exceeded"))
 
+    def _build_child_env(self) -> dict[str, str]:
+        """Build an isolated environment for child Kiro LLM processes."""
+        env = os.environ.copy()
+        for key in _STRIPPED_ENV_KEYS:
+            env.pop(key, None)
+        try:
+            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        except (ValueError, TypeError):
+            depth = 1
+        if depth > _MAX_OUROBOROS_DEPTH:
+            msg = f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded"
+            raise RuntimeError(msg)
+        env["_OUROBOROS_DEPTH"] = str(depth)
+        env["OUROBOROS_SUBAGENT"] = "1"
+        return env
+
     def _build_cmd(self, prompt: str, config: CompletionConfig) -> list[str]:
         cmd = [self._cli_path, "chat", "--no-interactive"]
         if self._allowed_tools is not None:
@@ -241,6 +267,10 @@ class KiroCodeAdapter:
             # no-tools envelope visible at the CLI boundary instead of relying
             # only on prompt wording.
             cmd.append(f"--trust-tools={self._kiro_trust_tools_arg()}")
+        elif self._permission_mode == "default":
+            cmd.append("--trust-tools=")
+        elif self._permission_mode in {"acceptEdits", "bypassPermissions"}:
+            cmd.append("--trust-all-tools")
         if config.model and config.model != "default":
             cmd.extend(["--model", _map_model_name(config.model)])
         cmd.append(prompt)

@@ -47,6 +47,9 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # ``tool_use`` stream event.  Hard enforcement would need a Gemini CLI
 # flag that does not exist.
 #
+# Kiro is not listed: ``KiroCodeAdapter`` maps the envelope to Kiro's
+# native ``--trust-tools`` categories before adding prompt guidance.
+#
 # OpenCode: ``OpenCodeLLMAdapter`` injects a ``## Tool Constraints``
 # section into the composed prompt and emits
 # ``opencode_adapter.tool_envelope_violation`` for any ``tool_use``
@@ -59,7 +62,7 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # completion-only API that never executes tools from the adapter, so an
 # envelope has nothing to restrict on that path (enforcement is
 # vacuously satisfied).
-_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini", "kiro", "opencode"})
+_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini", "opencode"})
 
 
 def resolve_llm_backend(backend: str | None = None) -> str:
@@ -140,7 +143,7 @@ def create_llm_adapter(
             hint=(
                 "This backend has no hard allowed_tools surface.  Envelope "
                 "is injected as a prompt directive and violations are "
-                "detected post-hoc.  Use claude_code / codex / opencode "
+                "detected post-hoc.  Use claude_code / codex "
                 "if hard enforcement is required."
             ),
         )
@@ -205,6 +208,7 @@ def create_llm_adapter(
             cli_path=cli_path or get_kiro_cli_path(),
             cwd=cwd,
             allowed_tools=allowed_tools,
+            permission_mode=resolved_permission_mode,
             max_turns=max_turns,
             on_message=on_message,
             timeout=timeout,

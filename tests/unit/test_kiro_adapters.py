@@ -135,6 +135,7 @@ class TestCreateLLMAdapterKiro:
         )
         assert isinstance(adapter, KiroCodeAdapter)
         assert adapter._allowed_tools == []
+        assert adapter._permission_mode == "default"
         assert adapter._max_turns == 2
         assert adapter._on_message is _on_message
 
@@ -299,6 +300,49 @@ class TestKiroCodeAdapterComplete:
 
         assert not any(arg.startswith("--trust-tools") for arg in cmd)
         assert "--trust-all-tools" not in cmd
+
+    def test_default_permission_mode_sets_empty_trust_tools_flag(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", permission_mode="default")
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert "--trust-tools=" in cmd
+        assert "--trust-all-tools" not in cmd
+
+    def test_accept_edits_permission_mode_sets_trust_all_tools_flag(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(cli_path="kiro-cli", permission_mode="acceptEdits")
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert "--trust-all-tools" in cmd
+
+    def test_build_child_env_strips_ouroboros_vars(self) -> None:
+        adapter = KiroCodeAdapter(cli_path="kiro-cli")
+        with patch.dict(
+            "os.environ",
+            {
+                "OUROBOROS_AGENT_RUNTIME": "kiro",
+                "OUROBOROS_LLM_BACKEND": "kiro",
+                "OUROBOROS_RUNTIME": "kiro",
+                "CLAUDECODE": "1",
+            },
+        ):
+            env = adapter._build_child_env()
+
+        assert "OUROBOROS_AGENT_RUNTIME" not in env
+        assert "OUROBOROS_LLM_BACKEND" not in env
+        assert "OUROBOROS_RUNTIME" not in env
+        assert "CLAUDECODE" not in env
+        assert env["_OUROBOROS_DEPTH"] == "1"
+        assert env["OUROBOROS_SUBAGENT"] == "1"
+
+    def test_build_child_env_depth_guard(self) -> None:
+        adapter = KiroCodeAdapter(cli_path="kiro-cli")
+        with patch.dict("os.environ", {"_OUROBOROS_DEPTH": "5"}):
+            with pytest.raises(RuntimeError, match="Maximum Ouroboros nesting depth"):
+                adapter._build_child_env()
 
     def test_audit_flags_tool_use_outside_envelope(self) -> None:
         captured: list[dict] = []
@@ -598,6 +642,43 @@ class TestKiroPermissionModeContract:
         adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
         cmd = adapter._build_cmd("hello")
         assert "--trust-all-tools" in cmd
+
+    def test_empty_per_call_tools_override_accept_edits_with_no_trust(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="acceptEdits")
+        cmd = adapter._build_cmd("hello", tools=[])
+        assert "--trust-tools=" in cmd
+        assert "--trust-all-tools" not in cmd
+
+    def test_per_call_tools_map_to_kiro_trust_categories(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
+        cmd = adapter._build_cmd("hello", tools=["Read", "Grep", "Bash"])
+        assert "--trust-tools=read,grep,shell" in cmd
+        assert "--trust-all-tools" not in cmd
+
+    def test_runtime_child_env_strips_ouroboros_runtime_vars(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli")
+        with patch.dict(
+            "os.environ",
+            {
+                "OUROBOROS_AGENT_RUNTIME": "kiro",
+                "OUROBOROS_LLM_BACKEND": "kiro",
+                "OUROBOROS_RUNTIME": "kiro",
+                "CLAUDECODE": "1",
+            },
+        ):
+            env = adapter._build_child_env()
+
+        assert "OUROBOROS_AGENT_RUNTIME" not in env
+        assert "OUROBOROS_LLM_BACKEND" not in env
+        assert "OUROBOROS_RUNTIME" not in env
+        assert "CLAUDECODE" not in env
+        assert env["_OUROBOROS_DEPTH"] == "1"
 
 
 class TestKiroFactoryDispatcherContract:
