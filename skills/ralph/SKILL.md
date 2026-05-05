@@ -70,17 +70,17 @@ When the user invokes this skill:
 
        # Poll for progress (non-blocking, shows intermediate state)
        # Use timeout_seconds=120 (2-min long-poll) to reduce context consumption
-       # Only report when AC completed count changes (level-based polling)
+       # Only report when Task completed count changes (level-based polling)
        prev_completed = 0
        while not terminal:
            wait_result = await job_wait(job_id, cursor, timeout_seconds=120)
            cursor = wait_result.meta["cursor"]
            status = wait_result.meta["status"]
-           # Parse AC Progress from response, report only on level completion
-           current_completed = <parse AC completed from response>
+           # Parse Task progress from response, report only on level completion
+           current_completed = <parse Task completed from response>
            if current_completed > prev_completed:
                # Report progress concisely (one line per poll)
-               print: [Level complete] AC: {current_completed}/{total} | Phase: {phase}
+               print: [Level complete] Task: {current_completed}/{total} | Phase: {phase}
                prev_completed = current_completed
            terminal = status in ("completed", "failed", "cancelled")
 
@@ -157,9 +157,9 @@ User: ooo ralph fix all failing tests
 [Ralph Iteration 1/10]
 Started background execution (job_abc123)
 Polling progress...
-  Phase: Executing | AC Progress: 1/3
-  Phase: Executing | AC Progress: 2/3
-  Phase: Executing | AC Progress: 3/3
+  Phase: Executing | Task Progress: 1/3
+  Phase: Executing | Task Progress: 2/3
+  Phase: Executing | Task Progress: 3/3
 Execution complete. Fetching result...
 
 QA Verdict: REVISE (score: 0.65)
