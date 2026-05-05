@@ -5,7 +5,7 @@ doc_metadata:
 
 # Evaluation Pipeline Guide
 
-Ouroboros Phase 4 runs every execution result through a **three-stage progressive evaluation pipeline** before marking an acceptance criterion (AC) as approved. Cheaper checks gate the expensive ones: Stage 1 is free, Stage 2 uses one LLM call, and Stage 3 (multi-model consensus) runs only when specifically triggered.
+Ouroboros Phase 4 runs every execution result through a **three-stage progressive evaluation pipeline** before assigning formal acceptance-criterion (AC) verdicts. Cheaper checks gate the expensive ones: Stage 1 is free, Stage 2 uses one LLM call, and Stage 3 (multi-model consensus) runs only when specifically triggered.
 
 > **Terminology boundary:** worker task completion is not a formal AC verdict, and task failure is not semantic drift. See [Execution vs. Evaluation Contract](./execution-vs-evaluation.md) for the shared `TaskResult` / `ACResult` distinction.
 

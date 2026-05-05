@@ -71,7 +71,7 @@ Task 2: failed
 
 It should not directly populate formal `ACResult` verdicts.
 
-Formal AC verdicts should come from explicit evaluation or verification. If a verifier only covers a subset of expected ACs, the missing ACs are not approved. They remain rejected or `not_evaluated` until a formal verdict exists.
+Formal AC verdicts should come from explicit evaluation or verification. If a verifier only covers a subset of expected ACs, the missing ACs are not approved. They remain `not_evaluated` until a formal verdict exists; if an evaluator or verifier explicitly checks an AC and finds it unsatisfied, record `fail`.
 
 ## Reporting guidance
 
