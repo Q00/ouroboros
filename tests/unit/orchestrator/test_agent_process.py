@@ -406,6 +406,7 @@ def test_agent_process_snapshot_accepts_minimal_lifecycle_rows() -> None:
     """Replay requires lifecycle status; descriptive metadata is optional."""
     same_time = datetime(2026, 1, 1, tzinfo=UTC)
     minimal_running = BaseEvent(
+        id="00000000-0000-0000-0000-000000000001",
         type="control.directive.emitted",
         timestamp=same_time,
         aggregate_type="agent_process",
@@ -416,6 +417,7 @@ def test_agent_process_snapshot_accepts_minimal_lifecycle_rows() -> None:
         },
     )
     minimal_cancelled = BaseEvent(
+        id="ffffffff-ffff-ffff-ffff-ffffffffffff",
         type="control.directive.emitted",
         timestamp=same_time,
         aggregate_type="agent_process",
