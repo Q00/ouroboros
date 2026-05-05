@@ -75,6 +75,23 @@ replay but no projection-level dedupe guarantee beyond the event id.
 Backfill, mesh delivery, and contract-targeted emitters should prefer deterministic
 idempotency keys before consumers rely on at-most-once effective application.
 
+## Local enum mapping
+
+Local workflow enums may remain in their owning subsystem, but any control-plane
+emission must map them into the global `Directive` vocabulary without semantic
+loss. The current evolution emission site uses
+`ouroboros.evolution.directive_mapping.step_action_to_directive()` as the single
+authority for `StepAction` outcomes:
+
+| Local action | Directive | Notes |
+|---|---|---|
+| `StepAction.CONTINUE` | no directive emission | No-op continuation; `lineage.generation.completed` already records progress. |
+| `StepAction.CONVERGED` | `CONVERGE` | Terminal success. |
+| `StepAction.STAGNATED` | `UNSTUCK` | Non-terminal recovery path; never terminal success. |
+| `StepAction.EXHAUSTED` | `CANCEL` | Terminal stop without claiming convergence. |
+| `StepAction.INTERRUPTED` | `CANCEL` | Current runtime stops the interrupted step and relies on resume state for continuation. |
+| `StepAction.FAILED` | `RETRY` or `CANCEL` | Depends on remaining retry budget; default live behavior emits `RETRY` until the resilience layer owns the budget. |
+
 ## Projector expectations
 
 Projectors consume the ControlContract fields from `control.directive.emitted`
