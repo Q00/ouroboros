@@ -2612,6 +2612,33 @@ class TestKiroSetup:
 
         assert first == second
 
+    def test_register_kiro_mcp_server_replaces_malformed_existing_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Malformed mcpServers.ouroboros entries should be repaired, not crash setup."""
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"ouroboros": "disabled"}}),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._register_kiro_mcp_server()
+
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        entry = data["mcpServers"]["ouroboros"]
+        assert isinstance(entry, dict)
+        assert entry["command"] == "uvx"
+        assert entry["env"]["OUROBOROS_RUNTIME"] == "kiro"
+
     def test_register_kiro_mcp_server_merges_env_when_entry_exists(
         self,
         tmp_path: Path,
@@ -2687,6 +2714,24 @@ class TestKiroSetup:
         # Unrelated keys preserved.
         assert config["llm"]["qa_model"] == "x"
         mock_register.assert_called_once_with()
+
+    def test_setup_kiro_aborts_on_non_mapping_ouroboros_config(self, tmp_path: Path) -> None:
+        """Kiro setup must not clobber malformed existing config.yaml contents."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "- not-a-mapping\n- keep-me\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_kiro_mcp_server") as mock_register,
+        ):
+            setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+
+        assert config_path.read_text(encoding="utf-8") == original
+        mock_register.assert_not_called()
 
     def test_setup_cli_with_runtime_kiro_flag(self, tmp_path: Path) -> None:
         """`ouroboros setup --runtime kiro --non-interactive` runs the kiro

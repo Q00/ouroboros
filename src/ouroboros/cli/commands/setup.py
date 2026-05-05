@@ -1016,6 +1016,10 @@ def _register_kiro_mcp_server() -> None:
     }
 
     existing = servers.get("ouroboros")
+    if existing is not None and not isinstance(existing, dict):
+        print_warning(f"{mcp_config_path} mcpServers.ouroboros is not a mapping — replacing it.")
+        existing = None
+
     needs_write = False
 
     if existing is None:
@@ -1092,8 +1096,8 @@ def _setup_kiro(kiro_path: str) -> None:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
     if not isinstance(config_dict, dict):
-        print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
-        config_dict = {}
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
+        return
 
     orch = config_dict.get("orchestrator")
     if not isinstance(orch, dict):
@@ -1138,8 +1142,8 @@ def _setup_gemini(gemini_path: str) -> None:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
     if not isinstance(config_dict, dict):
-        print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
-        config_dict = {}
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
+        return
 
     orch = config_dict.get("orchestrator")
     if not isinstance(orch, dict):
