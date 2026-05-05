@@ -471,8 +471,13 @@ The orchestrator never inspects backend-specific internals — each adapter maps
 
 - **`ClaudeAgentAdapter`** (`backend="claude"`) — Wraps Claude Agent SDK / Claude Code CLI with streaming, retry, and session resumption. Module: `src/ouroboros/orchestrator/adapter.py`
 - **`CodexCliRuntime`** (`backend="codex"`) — Drives the OpenAI Codex CLI as a session-oriented runtime with NDJSON event parsing. Module: `src/ouroboros/orchestrator/codex_cli_runtime.py`
+- **`OpenCodeRuntime`** (`backend="opencode"`) — Drives the OpenCode CLI with multi-provider support. Module: `src/ouroboros/orchestrator/opencode_runtime.py`
+- **`HermesRuntime`** (`backend="hermes"`) — Drives the Hermes Agent for local or hosted models. Module: `src/ouroboros/orchestrator/hermes_runtime.py`
+- **`GeminiCliRuntime`** (`backend="gemini"`) — Drives the Google Gemini CLI in stream-json mode. Module: `src/ouroboros/orchestrator/gemini_cli_runtime.py`
+- **`KiroAdapter`** (`backend="kiro"`) — Drives the Kiro CLI in headless mode. Module: `src/ouroboros/orchestrator/kiro_adapter.py`
+- **`CopilotCliLLMAdapter`** (`backend="copilot"`) — Drives the GitHub Copilot CLI via `copilot -p`, with live model discovery (queries `https://api.githubcopilot.com/models` at setup) and automatic hyphen-to-dotted model name mapping for cross-runtime config compatibility. Module: `src/ouroboros/providers/copilot_cli_adapter.py`
 
-> Claude Code and Codex CLI have different tool sets, permission models, and streaming semantics. Ouroboros normalizes these differences at the adapter boundary, but feature parity is not guaranteed across runtimes.
+> Each runtime has different tool sets, permission models, and streaming semantics. Ouroboros normalizes these differences at the adapter boundary, but feature parity is not guaranteed across runtimes.
 
 ### Runtime factory
 
@@ -482,7 +487,7 @@ The orchestrator never inspects backend-specific internals — each adapter maps
 2. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
 3. Explicit `backend=` parameter
 
-Accepted aliases: `claude` / `claude_code`, `codex` / `codex_cli`.
+Accepted aliases: `claude` / `claude_code`, `codex` / `codex_cli`, `opencode` / `opencode_cli`, `hermes` / `hermes_cli`, `gemini` / `gemini_cli`, `kiro` / `kiro_cli`, `copilot` / `copilot_cli`.
 
 For API details, see the source in `src/ouroboros/orchestrator/adapter.py`. For contributing a new runtime adapter, see [Contributing](contributing/).
 
@@ -527,4 +532,4 @@ For environment variables, `config.yaml` schema, and all configuration options, 
 ---
 
 > For install instructions and first-run onboarding, see **[Getting Started](getting-started.md)**.
-> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md) and [Codex CLI](runtime-guides/codex.md) runtime guides.
+> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), and [GitHub Copilot CLI](runtime-guides/copilot.md) runtime guides.

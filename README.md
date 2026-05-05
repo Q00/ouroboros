@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, and Kiro CLI. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation. For GitHub Copilot CLI, set `OUROBOROS_LLM_BACKEND=copilot` (requires `GH_TOKEN` or `GITHUB_TOKEN` to be set; see [GitHub Copilot CLI docs](https://docs.github.com/copilot/concepts/agents/about-copilot-cli)).
+> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, and Kiro CLI. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, Kiro, or GitHub Copilot CLI, run `ouroboros setup --runtime <opencode|kiro|copilot>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
 <details>
 <summary><strong>Kiro CLI quick start</strong></summary>
@@ -88,6 +88,22 @@ OUROBOROS_RUNTIME=kiro
 ```
 
 Then use `ooo` commands inside a Kiro CLI session.
+
+</details>
+
+<details>
+<summary><strong>GitHub Copilot CLI quick start</strong></summary>
+
+```bash
+gh auth login                                # one-time GitHub auth (used for live model discovery)
+pipx install 'ouroboros-ai[mcp]'             # or: uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime copilot            # discovers models live, picks a default,
+                                             # registers MCP server in ~/.copilot/mcp-config.json
+```
+
+Restart your Copilot CLI session, then use `ooo` commands inside it. Hyphenated Anthropic model IDs (`claude-opus-4-6`) used elsewhere in your config are auto-mapped to the dotted Copilot form (`claude-opus-4.6`) at runtime, so existing configs keep working when you switch backends.
+
+See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for full details.
 
 </details>
 
@@ -113,7 +129,7 @@ ouroboros setup                         # configure runtime
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias while extras migrate.
 
-See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md)
+See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md)
 
 </details>
 

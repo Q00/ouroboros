@@ -192,6 +192,12 @@ class TestCommandBuilding:
         idx = command.index("--model")
         assert command[idx + 1] == "claude-sonnet-4.5"
 
+    def test_command_maps_anthropic_hyphen_id_to_dotted_form(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot")
+        command = adapter._build_command(model="claude-opus-4-6")
+        idx = command.index("--model")
+        assert command[idx + 1] == "claude-opus-4.6"
+
     def test_command_uses_agent_over_model_when_runtime_profile_set(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", runtime_profile="worker")
         command = adapter._build_command(model="gpt-5", agent="ouroboros-fast")

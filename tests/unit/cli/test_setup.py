@@ -2788,3 +2788,373 @@ class TestKiroSetup:
 
         assert result.exit_code != 0
         assert "Kiro CLI not found" in result.output
+
+
+class TestCopilotSetup:
+    """`_setup_copilot`, `_register_copilot_mcp_server`, and the CLI dispatcher.
+
+    Mirrors `TestKiroSetup` for parity. Focuses on what is *unique* to the
+    Copilot path: live model discovery (with fallback warning), the dotted
+    MCP entry written to `~/.copilot/mcp-config.json`, and the new
+    `--runtime copilot` CLI branch.
+    """
+
+    @staticmethod
+    def _stub_models() -> list:
+        from ouroboros.copilot.model_discovery import CopilotModel
+
+        return [
+            CopilotModel(id="claude-opus-4.6", family="claude-opus-4.6"),
+            CopilotModel(id="claude-sonnet-4.5", family="claude-sonnet-4.5"),
+        ]
+
+    def test_setup_copilot_writes_runtime_and_default_model(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-interactive setup writes runtime/llm/clarification config plus
+        the chosen default model picked from live discovery."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "claude"},
+                    "llm": {"backend": "claude_code", "qa_model": "x"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=self._stub_models(),
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.used_fallback",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_copilot_mcp_server"
+            ) as mock_register,
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["orchestrator"]["runtime_backend"] == "copilot"
+        assert config["orchestrator"]["copilot_cli_path"] == "/opt/bin/copilot"
+        assert config["llm"]["backend"] == "copilot"
+        # Default model is the recommended dotted Copilot ID.
+        assert config["llm"]["default_model"] == "claude-opus-4.6"
+        assert config["clarification"]["default_model"] == "claude-opus-4.6"
+        # Unrelated keys preserved.
+        assert config["llm"]["qa_model"] == "x"
+        mock_register.assert_called_once_with()
+
+    def test_setup_copilot_aborts_on_non_mapping_ouroboros_config(
+        self, tmp_path: Path
+    ) -> None:
+        """Malformed config.yaml must not be clobbered or partially rewritten."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "- not-a-mapping\n- keep-me\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=self._stub_models(),
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.used_fallback",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_copilot_mcp_server"
+            ) as mock_register,
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        assert config_path.read_text(encoding="utf-8") == original
+        mock_register.assert_not_called()
+
+    def test_setup_copilot_warns_when_discovery_used_fallback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Setup must visibly warn when it could not reach the live API."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump({}, sort_keys=False), encoding="utf-8"
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=self._stub_models(),
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.used_fallback",
+                return_value=True,
+            ),
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server"),
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        out = capsys.readouterr().out
+        assert "fallback" in out.lower() or "gh auth" in out.lower()
+
+    def test_setup_copilot_aborts_when_no_models_discovered(
+        self, tmp_path: Path
+    ) -> None:
+        """If discovery returns an empty list, setup must abort cleanly
+        instead of writing a default-less config."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"orchestrator": {"runtime_backend": "claude"}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=[],
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.used_fallback",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_copilot_mcp_server"
+            ) as mock_register,
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        # Aborted before mutating runtime_backend or registering MCP.
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["orchestrator"]["runtime_backend"] == "claude"
+        mock_register.assert_not_called()
+
+    def test_register_copilot_mcp_creates_new_entry(self, tmp_path: Path) -> None:
+        """An empty mcp-config.json gets the ouroboros entry with the
+        copilot env block."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={
+                    "command": "uvx",
+                    "args": [
+                        "--from",
+                        "ouroboros-ai[mcp]",
+                        "ouroboros",
+                        "mcp",
+                        "serve",
+                    ],
+                },
+            ),
+        ):
+            setup_cmd._register_copilot_mcp_server()
+
+        mcp_path = tmp_path / ".copilot" / "mcp-config.json"
+        assert mcp_path.exists()
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        entry = data["mcpServers"]["ouroboros"]
+        assert entry["command"] == "uvx"
+        assert entry["env"]["OUROBOROS_AGENT_RUNTIME"] == "copilot"
+        assert entry["env"]["OUROBOROS_LLM_BACKEND"] == "copilot"
+
+    def test_register_copilot_mcp_is_idempotent(self, tmp_path: Path) -> None:
+        """Re-running with an identical detected entry must not rewrite the file."""
+        mcp_path = tmp_path / ".copilot" / "mcp-config.json"
+        mcp_path.parent.mkdir(parents=True)
+        existing_entry = {
+            "command": "uvx",
+            "args": [
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ],
+            "env": {
+                "OUROBOROS_AGENT_RUNTIME": "copilot",
+                "OUROBOROS_LLM_BACKEND": "copilot",
+            },
+        }
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"ouroboros": existing_entry}}, indent=2),
+            encoding="utf-8",
+        )
+        before_mtime = mcp_path.stat().st_mtime_ns
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={
+                    "command": "uvx",
+                    "args": [
+                        "--from",
+                        "ouroboros-ai[mcp]",
+                        "ouroboros",
+                        "mcp",
+                        "serve",
+                    ],
+                },
+            ),
+        ):
+            setup_cmd._register_copilot_mcp_server()
+
+        # File must remain byte-identical (no spurious rewrite).
+        after = json.loads(mcp_path.read_text(encoding="utf-8"))
+        assert after["mcpServers"]["ouroboros"] == existing_entry
+        assert mcp_path.stat().st_mtime_ns == before_mtime
+
+    def test_register_copilot_mcp_skips_invalid_json(self, tmp_path: Path) -> None:
+        """Malformed mcp-config.json is left untouched; no crash."""
+        mcp_path = tmp_path / ".copilot" / "mcp-config.json"
+        mcp_path.parent.mkdir(parents=True)
+        original = "{this is not json"
+        mcp_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": []},
+            ),
+        ):
+            setup_cmd._register_copilot_mcp_server()
+
+        assert mcp_path.read_text(encoding="utf-8") == original
+
+    def test_register_copilot_mcp_warns_when_no_install_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """When no working ouroboros install exists, do not write a broken entry."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value=None,
+            ),
+        ):
+            setup_cmd._register_copilot_mcp_server()
+
+        mcp_path = tmp_path / ".copilot" / "mcp-config.json"
+        # Either nothing was created, or if the path was touched, no
+        # ouroboros entry was inserted.
+        if mcp_path.exists():
+            data = json.loads(mcp_path.read_text(encoding="utf-8"))
+            assert "ouroboros" not in data.get("mcpServers", {})
+
+    def test_detect_runtimes_picks_up_copilot_from_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`_detect_runtimes()` should report copilot when the binary is on PATH."""
+        fake = tmp_path / "copilot"
+        fake.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.delenv("OUROBOROS_COPILOT_CLI_PATH", raising=False)
+
+        def fake_which(name: str) -> str | None:
+            return str(fake) if name == "copilot" else None
+
+        with patch("shutil.which", side_effect=fake_which):
+            runtimes = setup_cmd._detect_runtimes()
+
+        assert runtimes["copilot"] == str(fake)
+
+    def test_detect_runtimes_honours_explicit_copilot_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """OUROBOROS_COPILOT_CLI_PATH wins over the bare PATH lookup."""
+        explicit = tmp_path / "from-env-copilot"
+        explicit.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_COPILOT_CLI_PATH", str(explicit))
+
+        on_path = tmp_path / "from-path-copilot"
+        on_path.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        def fake_which(name: str) -> str | None:
+            # `_detect_runtimes` validates env paths via shutil.which too.
+            if name == str(explicit):
+                return str(explicit)
+            if name == "copilot":
+                return str(on_path)
+            return None
+
+        with patch("shutil.which", side_effect=fake_which):
+            runtimes = setup_cmd._detect_runtimes()
+
+        assert runtimes["copilot"] == str(explicit)
+
+    def test_setup_cli_with_runtime_copilot_flag(self, tmp_path: Path) -> None:
+        """`ouroboros setup --runtime copilot --non-interactive` runs the
+        copilot setup path without requiring user interaction."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={
+                    "claude": None,
+                    "codex": None,
+                    "opencode": None,
+                    "hermes": None,
+                    "gemini": None,
+                    "kiro": None,
+                    "copilot": "/opt/bin/copilot",
+                },
+            ),
+            patch("ouroboros.cli.commands.setup._setup_copilot") as mock_setup,
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "copilot", "--non-interactive"],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_setup.assert_called_once_with("/opt/bin/copilot", non_interactive=True)
+
+    def test_setup_cli_copilot_missing_binary_errors_cleanly(
+        self, tmp_path: Path
+    ) -> None:
+        """Explicit --runtime copilot with no copilot binary should exit non-zero."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={
+                    "claude": None,
+                    "codex": None,
+                    "opencode": None,
+                    "hermes": None,
+                    "gemini": None,
+                    "kiro": None,
+                    "copilot": None,
+                },
+            ),
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "copilot", "--non-interactive"],
+            )
+
+        assert result.exit_code != 0
+        assert "Copilot CLI not found" in result.output

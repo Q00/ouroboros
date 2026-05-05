@@ -38,6 +38,7 @@ from ouroboros.copilot.cli_policy import (
     build_copilot_child_env,
     resolve_copilot_cli_path,
 )
+from ouroboros.copilot.model_discovery import map_to_copilot_model
 from ouroboros.copilot.runtime_profile import resolve_copilot_agent
 from ouroboros.copilot_permissions import (
     build_copilot_exec_permission_args,
@@ -298,7 +299,14 @@ class CopilotCliLLMAdapter:
         elif agent:
             command.extend(["--agent", agent])
         elif model:
-            command.extend(["--model", model])
+            mapped_model = map_to_copilot_model(model)
+            if mapped_model != model:
+                log.debug(
+                    f"{self._log_namespace}.model_mapped",
+                    requested=model,
+                    resolved=mapped_model,
+                )
+            command.extend(["--model", mapped_model])
 
         return command
 
