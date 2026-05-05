@@ -50,6 +50,7 @@ replayable execution contract on your choice of runtime backend.
 - [Contributing Guide](../CONTRIBUTING.md) - How to set up, code, test, and submit PRs
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
 - [Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md) - Locked vocabulary for `AgentRuntimeContext`, `ControlPlane`, `ControlContract`, `Directive`, `ControlBus`, and `IOJournal`
+- [ControlContract](./contributing/control-contract.md) - Control-plane schema, terminality, replay, and idempotency invariants
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
