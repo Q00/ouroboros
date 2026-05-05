@@ -114,6 +114,13 @@ _TERMINAL_STATUSES: Final[frozenset[AgentProcessStatus]] = frozenset(
         AgentProcessStatus.FAILED,
     }
 )
+_LIFECYCLE_REPLAY_ORDER: Final[dict[AgentProcessStatus, int]] = {
+    AgentProcessStatus.RUNNING: 0,
+    AgentProcessStatus.PAUSED: 1,
+    AgentProcessStatus.CANCELLED: 2,
+    AgentProcessStatus.FAILED: 2,
+    AgentProcessStatus.COMPLETED: 2,
+}
 
 
 # Mapping from a status transition to the directive that lands on the
@@ -154,7 +161,9 @@ def project_agent_process_snapshot(
     snapshot: AgentProcessSnapshot | None = None
     target_process_id = process_id
 
-    for event in events:
+    valid_events: list[tuple[int, Any, str, AgentProcessStatus, str | None, str | None]] = []
+
+    for sequence, event in enumerate(events):
         if getattr(event, "type", None) != ControlContract.EVENT_TYPE:
             continue
         if getattr(event, "aggregate_type", None) != _TARGET_TYPE:
@@ -186,12 +195,25 @@ def project_agent_process_snapshot(
         intent = raw_intent if isinstance(raw_intent, str) and raw_intent else None
         raw_reason = data.get("reason")
         reason = raw_reason if isinstance(raw_reason, str) and raw_reason else None
+        valid_events.append((sequence, event, event_process_id, status, intent, reason))
+
+    valid_events.sort(
+        key=lambda item: (
+            getattr(item[1], "timestamp", None),
+            _LIFECYCLE_REPLAY_ORDER[item[3]],
+            item[0],
+        )
+    )
+
+    for _, _event, event_process_id, status, intent, reason in valid_events:
         snapshot = AgentProcessSnapshot(
             process_id=event_process_id,
             status=status,
-            intent=intent,
+            intent=intent if intent is not None else (snapshot.intent if snapshot else None),
             directive_count=(snapshot.directive_count if snapshot is not None else 0) + 1,
-            last_reason=reason,
+            last_reason=reason
+            if reason is not None
+            else (snapshot.last_reason if snapshot else None),
         )
 
     return snapshot

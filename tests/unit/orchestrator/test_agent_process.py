@@ -8,6 +8,7 @@ deferred-implementation surface (replay raises NotImplementedError).
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
@@ -403,14 +404,20 @@ async def test_agent_process_snapshot_ignores_other_processes_and_malformed_rows
 
 def test_agent_process_snapshot_accepts_minimal_lifecycle_rows() -> None:
     """Replay requires lifecycle status; descriptive metadata is optional."""
+    same_time = datetime(2026, 1, 1, tzinfo=UTC)
     minimal_running = BaseEvent(
         type="control.directive.emitted",
+        timestamp=same_time,
         aggregate_type="agent_process",
         aggregate_id="proc-wanted",
-        data={"extra": {"lifecycle_status": "running"}},
+        data={
+            "reason": "ralph: spawned",
+            "extra": {"lifecycle_status": "running", "intent": "ralph"},
+        },
     )
     minimal_cancelled = BaseEvent(
         type="control.directive.emitted",
+        timestamp=same_time,
         aggregate_type="agent_process",
         aggregate_id="proc-wanted",
         data={"extra": {"lifecycle_status": "cancelled"}},
@@ -423,11 +430,45 @@ def test_agent_process_snapshot_accepts_minimal_lifecycle_rows() -> None:
 
     assert snapshot is not None
     assert snapshot.process_id == "proc-wanted"
-    assert snapshot.intent is None
+    assert snapshot.intent == "ralph"
     assert snapshot.status is AgentProcessStatus.CANCELLED
     assert snapshot.directive_count == 2
-    assert snapshot.last_reason is None
+    assert snapshot.last_reason == "ralph: spawned"
     assert snapshot.is_terminal is True
+
+
+def test_agent_process_snapshot_keeps_terminal_state_for_timestamp_ties() -> None:
+    """Replay ordering by timestamp/id must not let spawn rows overwrite terminal rows."""
+    same_time = datetime(2026, 1, 1, tzinfo=UTC)
+    completed = BaseEvent(
+        id="00000000-0000-0000-0000-000000000001",
+        type="control.directive.emitted",
+        timestamp=same_time,
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={
+            "reason": "ralph: work returned",
+            "extra": {"lifecycle_status": "completed", "intent": "ralph"},
+        },
+    )
+    running = BaseEvent(
+        id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        type="control.directive.emitted",
+        timestamp=same_time,
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={
+            "reason": "ralph: spawned",
+            "extra": {"lifecycle_status": "running", "intent": "ralph"},
+        },
+    )
+
+    snapshot = project_agent_process_snapshot([completed, running], process_id="proc-wanted")
+
+    assert snapshot is not None
+    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.intent == "ralph"
+    assert snapshot.last_reason == "ralph: work returned"
 
 
 @pytest.mark.asyncio
