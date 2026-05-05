@@ -78,11 +78,17 @@ When the user invokes this skill:
      generation output, not the full Ralph job wrapper. Prefer concrete changed
      files or execution output from the final generation/worktree when available;
      otherwise use only the text after the `## Final generation output` section
-     in the job result. Surface the concrete evaluation handoff:
-     `Next: ooo evaluate <lineage_id> <actual final artifact>`.
-     When calling the MCP tool directly, pass `session_id=<lineage_id>`,
-     `artifact=<actual final artifact>`, and the original `seed_content` when
-     available.
+     in the job result. Keep the evolution `lineage_id` separate from the
+     execution `session_id`: for formal evaluation, use the execution session id
+     emitted by the final generation/run output (for example `Session ID:
+     orch_...`), not the Ralph lineage id. If no execution session id is
+     surfaced, do not present an executable `ooo evaluate` command; summarize
+     that formal evaluation needs the final execution `session_id` plus the
+     extracted artifact. When the execution session id is available, surface the
+     concrete handoff: `Next: ooo evaluate <execution_session_id> <actual final
+     artifact>`. When calling the MCP tool directly, pass
+     `session_id=<execution_session_id>`, `artifact=<actual final artifact>`,
+     and the original `seed_content` when available.
    - Max generations / failure: summarize the stop reason and suggest
      `ooo unstuck`, `ooo interview`, or a narrower Ralph retry
    - Cancelled: confirm cancellation and preserve the job id for later inspection
