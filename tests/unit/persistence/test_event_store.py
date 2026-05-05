@@ -1,5 +1,7 @@
 """Unit tests for ouroboros.persistence.event_store module."""
 
+import asyncio
+
 import pytest
 
 from ouroboros.core.errors import PersistenceError
@@ -46,6 +48,27 @@ class TestEventStoreInitialization:
         store = EventStore(f"sqlite+aiosqlite:///{db_path}")
         await store.initialize()
         await store.initialize()  # Should not raise
+        await store.close()
+
+    async def test_in_memory_store_shares_schema_across_concurrent_connections(self) -> None:
+        """`:memory:` stores must not lose schema across async connection checkout."""
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+
+        async def append_one(index: int) -> None:
+            await store.append(
+                BaseEvent(
+                    type="test.event.created",
+                    aggregate_type="test",
+                    aggregate_id="memory",
+                    data={"index": index},
+                )
+            )
+
+        await asyncio.gather(*(append_one(index) for index in range(5)))
+        events = await store.replay("test", "memory")
+
+        assert len(events) == 5
         await store.close()
 
 

@@ -673,6 +673,14 @@ class TestRuntimeProfileConfig:
             RuntimeProfileConfig(backend_profile="   ")
         assert "runtime_profile.backend_profile" in str(exc_info.value)
 
+    def test_runtime_profile_default_accepts_kiro_backends(self) -> None:
+        assert RuntimeProfileConfig(default="kiro").default == "kiro"
+        assert RuntimeProfileConfig(default="kiro_cli").default == "kiro_cli"
+
+    def test_runtime_profile_stages_accept_kiro_backends(self) -> None:
+        profile = RuntimeProfileConfig(stages={"execute": "kiro", "reflect": "kiro_cli"})
+        assert profile.stages == {"execute": "kiro", "reflect": "kiro_cli"}
+
     def test_orchestrator_runtime_profile_string_shorthand(self) -> None:
         config = OrchestratorConfig(runtime_profile="worker")
         assert config.runtime_profile is not None

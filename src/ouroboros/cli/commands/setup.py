@@ -164,8 +164,9 @@ def _get_current_backend() -> str | None:
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH.
 
-    For Gemini, we additionally honor the explicit-path overrides
-    (``OUROBOROS_GEMINI_CLI_PATH`` and persisted ``orchestrator.gemini_cli_path``)
+    For Gemini and Kiro, we additionally honor the explicit-path overrides
+    (``OUROBOROS_GEMINI_CLI_PATH`` / ``OUROBOROS_KIRO_CLI_PATH`` and the
+    persisted ``orchestrator.gemini_cli_path`` / ``orchestrator.kiro_cli_path``)
     so that users with non-PATH installs are still detected.
     """
     runtimes: dict[str, str | None] = {}
@@ -181,6 +182,20 @@ def _detect_runtimes() -> dict[str, str | None]:
     except Exception:
         gemini_path = None
     runtimes["gemini"] = gemini_path or shutil.which("gemini")
+
+    # Kiro: same explicit-path-first policy. Binary is ``kiro-cli``.
+    # Validate the helper result defensively so a stale env/config override
+    # cannot make setup persist a dead executable path.
+    try:
+        from ouroboros.config import get_kiro_cli_path
+
+        kiro_path = get_kiro_cli_path()
+    except Exception:
+        kiro_path = None
+    runtimes["kiro"] = (
+        kiro_path if kiro_path and shutil.which(kiro_path) else None
+    ) or shutil.which("kiro-cli")
+
     return runtimes
 
 
@@ -912,6 +927,200 @@ def _setup_hermes(hermes_path: str) -> None:
     _register_hermes_mcp_server()
 
 
+def _detect_mcp_entry_for_kiro() -> dict[str, object] | None:
+    """Build an MCP command entry optimized for Kiro CLI.
+
+    Unlike ``_detect_mcp_entry`` (which prefers ``uvx`` for install-method
+    robustness), Kiro needs **fast cold-start** because its MCP init timeout
+    is shorter than ``uvx``'s first-time environment build can take. When the
+    ``ouroboros`` binary is already available (i.e. the user has done
+    ``pip install ouroboros-ai``), spawning it directly skips ``uvx``'s
+    dependency resolution and keeps startup under Kiro's init deadline.
+
+    Priority: ouroboros binary > uvx > python3 -m ouroboros.
+    """
+    if (ouroboros_bin := shutil.which("ouroboros")) is not None:
+        return {"command": ouroboros_bin, "args": ["mcp", "serve"]}
+    if shutil.which("uvx"):
+        return {
+            "command": "uvx",
+            "args": _build_uvx_mcp_args("ouroboros-ai[mcp,claude]"),
+        }
+    # python3 -m fallback: only valid if ouroboros is importable
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["python3", "-c", "import ouroboros"],
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+
+
+def _register_kiro_mcp_server() -> None:
+    """Register the Ouroboros MCP hookup in ``~/.kiro/settings/mcp.json``.
+
+    Mirrors ``_ensure_claude_mcp_entry`` (same detection and idempotency
+    policy), with two Kiro-specific additions baked into the entry:
+
+    * ``OUROBOROS_RUNTIME=kiro`` — so the MCP server routes agent work to
+      the Kiro adapter by default when Kiro spawns it.
+    * ``OUROBOROS_LLM_BACKEND=kiro`` — so interview / seed generation use
+      the Kiro LLM adapter instead of falling back to Claude SDK.
+
+    These env vars are required for the end-user "drop-in backend"
+    experience: without them a user who runs ``kiro-cli chat`` sees the
+    Ouroboros MCP server pick Claude as default and fail when Claude is
+    not configured.
+
+    Uses :func:`_detect_mcp_entry_for_kiro` which prefers the direct
+    ``ouroboros`` binary over ``uvx`` to stay within Kiro's MCP init
+    timeout.
+    """
+    mcp_config_path = Path.home() / ".kiro" / "settings" / "mcp.json"
+    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mcp_data: dict = {}
+    if mcp_config_path.exists():
+        try:
+            mcp_data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            print_error(f"Could not parse {mcp_config_path} — skipping Kiro MCP registration.")
+            return
+        if not isinstance(mcp_data, dict):
+            print_warning(f"{mcp_config_path} top-level is not a mapping — resetting.")
+            mcp_data = {}
+
+    servers = mcp_data.get("mcpServers")
+    if not isinstance(servers, dict):
+        if servers is not None:
+            print_warning(f"{mcp_config_path} 'mcpServers' section is not a mapping — resetting.")
+        servers = {}
+        mcp_data["mcpServers"] = servers
+
+    detected = _detect_mcp_entry_for_kiro()
+    if detected is None:
+        print_warning("Cannot register Kiro MCP server: no working ouroboros installation found.")
+        return
+
+    # _KNOWN_COMMANDS also accepts an absolute-path match so that an entry
+    # previously written with the venv-resident ``ouroboros`` binary (detector
+    # priority 1 output) can still be upgraded on later setup runs.
+    target_env = {
+        "OUROBOROS_RUNTIME": "kiro",
+        "OUROBOROS_LLM_BACKEND": "kiro",
+    }
+
+    existing = servers.get("ouroboros")
+    if existing is not None and not isinstance(existing, dict):
+        print_warning(f"{mcp_config_path} mcpServers.ouroboros is not a mapping — replacing it.")
+        existing = None
+
+    needs_write = False
+
+    if existing is None:
+        servers["ouroboros"] = {
+            "command": detected["command"],
+            "args": detected["args"],
+            "disabled": False,
+            "env": target_env,
+        }
+        needs_write = True
+        print_success(f"Registered Ouroboros MCP server in {mcp_config_path}")
+    else:
+        # Update command/args for known standard commands only; leave custom
+        # entries (docker, nix, etc.) alone so we don't break user setups.
+        # Absolute paths whose basename is ``ouroboros`` are also considered
+        # setup-managed — the binary-first detector (_detect_mcp_entry_for_kiro)
+        # writes absolute paths from venvs, and we want re-runs of setup to
+        # be able to upgrade those entries.
+        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python", "uv"}
+        existing_cmd = existing.get("command")
+        is_setup_managed = existing_cmd in _KNOWN_COMMANDS or (
+            isinstance(existing_cmd, str)
+            and os.path.basename(existing_cmd) in {"ouroboros", "python3", "python"}
+        )
+        if is_setup_managed:
+            if (
+                existing.get("command") != detected["command"]
+                or existing.get("args") != detected["args"]
+            ):
+                existing["command"] = detected["command"]
+                existing["args"] = detected["args"]
+                needs_write = True
+                print_info("Updated Kiro MCP entry to match current install method.")
+
+        current_env = existing.get("env")
+        merged_env: dict[str, str] = dict(current_env) if isinstance(current_env, dict) else {}
+        for key, value in target_env.items():
+            if merged_env.get(key) != value:
+                merged_env[key] = value
+                needs_write = True
+        if merged_env != current_env:
+            existing["env"] = merged_env
+
+        if existing.get("disabled") is True:
+            existing["disabled"] = False
+            needs_write = True
+
+        if not needs_write:
+            print_info("Kiro MCP entry already registered.")
+
+    if needs_write:
+        with mcp_config_path.open("w", encoding="utf-8") as f:
+            json.dump(mcp_data, f, indent=2)
+
+
+def _setup_kiro(kiro_path: str) -> None:
+    """Configure Ouroboros for the Kiro CLI runtime.
+
+    Writes ``~/.ouroboros/config.yaml`` with ``orchestrator.runtime_backend =
+    kiro`` / ``llm.backend = kiro`` and registers the MCP server in
+    ``~/.kiro/settings/mcp.json`` so the user's very next
+    ``kiro-cli chat`` session can invoke ``ooo <skill>`` prefixes without
+    hand-editing any config file.
+    """
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
+        return
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "kiro"
+    orch["kiro_cli_path"] = kiro_path
+
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        config_dict["llm"] = llm
+    llm["backend"] = "kiro"
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured Kiro runtime (CLI: {kiro_path})")
+    print_info(f"Config saved to: {config_path}")
+
+    _register_kiro_mcp_server()
+
+
 def _setup_gemini(gemini_path: str) -> None:
     """Configure Ouroboros for the Gemini CLI runtime.
 
@@ -933,8 +1142,8 @@ def _setup_gemini(gemini_path: str) -> None:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
     if not isinstance(config_dict, dict):
-        print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
-        config_dict = {}
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
+        return
 
     orch = config_dict.get("orchestrator")
     if not isinstance(orch, dict):
@@ -1703,7 +1912,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, kiro).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -1730,14 +1939,15 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex, OpenCode) and configures
-    Ouroboros to use the selected backend.
+    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro)
+    and configures Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
     [dim]    ouroboros setup                      # auto-detect[/dim]
     [dim]    ouroboros setup --runtime codex      # use Codex[/dim]
     [dim]    ouroboros setup --runtime claude     # use Claude Code[/dim]
     [dim]    ouroboros setup --runtime opencode   # use OpenCode[/dim]
+    [dim]    ouroboros setup --runtime kiro       # use Kiro CLI[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
     [dim]    ouroboros setup default            # toggle default repos[/dim]
@@ -1804,7 +2014,8 @@ def setup(
                 "  • Codex CLI:   npm install -g @openai/codex\n"
                 "  • OpenCode:    npm install -g opencode-ai\n"
                 "  • Hermes CLI:  https://hermes.ai/cli\n"
-                "  • Gemini CLI:  npm install -g @google/gemini-cli"
+                "  • Gemini CLI:  npm install -g @google/gemini-cli\n"
+                "  • Kiro CLI:    https://kiro.dev/docs/cli/"
             )
             raise typer.Exit(1)
 
@@ -1869,6 +2080,16 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_gemini(gemini_path)
+    elif selected in ("kiro", "kiro_cli"):
+        kiro_path = available.get("kiro")
+        if not kiro_path:
+            print_error(
+                "Kiro CLI not found.\n"
+                "Install it from https://kiro.dev/docs/cli/, set "
+                "OUROBOROS_KIRO_CLI_PATH, or configure orchestrator.kiro_cli_path."
+            )
+            raise typer.Exit(1)
+        _setup_kiro(kiro_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

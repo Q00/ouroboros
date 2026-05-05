@@ -2471,3 +2471,320 @@ class TestSetupJsoncDetection:
 
         assert jsonc_path.exists()
         assert not (config_dir / "opencode.json").exists()
+
+
+class TestKiroSetup:
+    """Tests for Kiro-specific setup behavior."""
+
+    def test_detect_runtimes_includes_kiro(self, tmp_path: Path) -> None:
+        """_detect_runtimes should surface kiro when kiro-cli is on PATH.
+
+        Explicit-path config helpers are stubbed to None so PATH lookup wins.
+        """
+        which_calls: dict[str, str | None] = {
+            "claude": None,
+            "codex": None,
+            "opencode": None,
+            "hermes": None,
+            "gemini": None,
+            "kiro-cli": "/opt/bin/kiro-cli",
+        }
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda name: which_calls.get(name),
+            ),
+            patch("ouroboros.config.get_gemini_cli_path", return_value=None),
+            patch("ouroboros.config.get_kiro_cli_path", return_value=None),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["kiro"] == "/opt/bin/kiro-cli"
+
+    def test_detect_runtimes_honors_config_kiro_path(self, tmp_path: Path) -> None:
+        """Explicit orchestrator.kiro_cli_path takes precedence over PATH."""
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda name: "/custom/kiro" if name == "/custom/kiro" else None,
+            ),
+            patch(
+                "ouroboros.config.get_kiro_cli_path",
+                return_value="/custom/kiro",
+            ),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["kiro"] == "/custom/kiro"
+
+    def test_detect_runtimes_rejects_stale_config_kiro_path(self, tmp_path: Path) -> None:
+        """Stale explicit Kiro paths must not make setup report Kiro available."""
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                return_value=None,
+            ),
+            patch(
+                "ouroboros.config.get_kiro_cli_path",
+                return_value="/missing/kiro-cli",
+            ),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["kiro"] is None
+
+    def test_register_kiro_mcp_server_creates_fresh_entry(self, tmp_path: Path) -> None:
+        """Fresh setup writes a valid entry with the Kiro env vars baked in."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._register_kiro_mcp_server()
+
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        assert mcp_path.exists()
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        entry = data["mcpServers"]["ouroboros"]
+
+        assert entry["command"] == "uvx"
+        assert entry["args"] == [
+            "--from",
+            "ouroboros-ai[mcp,claude]",
+            "ouroboros",
+            "mcp",
+            "serve",
+        ]
+        assert entry["disabled"] is False
+        assert entry["env"]["OUROBOROS_RUNTIME"] == "kiro"
+        assert entry["env"]["OUROBOROS_LLM_BACKEND"] == "kiro"
+
+    def test_register_kiro_mcp_server_preserves_other_servers(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Existing non-ouroboros entries must survive re-registration."""
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "awslabs.aws-documentation-mcp-server": {
+                            "command": "uvx",
+                            "args": ["aws-docs-mcp@latest"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._register_kiro_mcp_server()
+
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        assert "awslabs.aws-documentation-mcp-server" in data["mcpServers"]
+        assert "ouroboros" in data["mcpServers"]
+
+    def test_register_kiro_mcp_server_is_idempotent(self, tmp_path: Path) -> None:
+        """Running the registration twice must not drift the entry."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._register_kiro_mcp_server()
+            first = (tmp_path / ".kiro" / "settings" / "mcp.json").read_text(encoding="utf-8")
+            setup_cmd._register_kiro_mcp_server()
+            second = (tmp_path / ".kiro" / "settings" / "mcp.json").read_text(encoding="utf-8")
+
+        assert first == second
+
+    def test_register_kiro_mcp_server_replaces_malformed_existing_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Malformed mcpServers.ouroboros entries should be repaired, not crash setup."""
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"ouroboros": "disabled"}}),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._register_kiro_mcp_server()
+
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        entry = data["mcpServers"]["ouroboros"]
+        assert isinstance(entry, dict)
+        assert entry["command"] == "uvx"
+        assert entry["env"]["OUROBOROS_RUNTIME"] == "kiro"
+
+    def test_register_kiro_mcp_server_merges_env_when_entry_exists(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An existing ouroboros entry without env gets env injected; custom
+        keys survive."""
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "uvx",
+                            "args": [
+                                "--from",
+                                "ouroboros-ai[mcp,claude]",
+                                "ouroboros",
+                                "mcp",
+                                "serve",
+                            ],
+                            "env": {"CUSTOM_VAR": "keep_me"},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._register_kiro_mcp_server()
+
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        env = data["mcpServers"]["ouroboros"]["env"]
+        assert env["OUROBOROS_RUNTIME"] == "kiro"
+        assert env["OUROBOROS_LLM_BACKEND"] == "kiro"
+        assert env["CUSTOM_VAR"] == "keep_me"
+
+    def test_setup_kiro_updates_config_and_registers_mcp(self, tmp_path: Path) -> None:
+        """_setup_kiro writes runtime_backend/llm.backend and delegates MCP
+        registration."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "claude"},
+                    "llm": {"backend": "claude_code", "qa_model": "x"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_kiro_mcp_server") as mock_register,
+        ):
+            setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["orchestrator"]["runtime_backend"] == "kiro"
+        assert config["orchestrator"]["kiro_cli_path"] == "/opt/bin/kiro-cli"
+        assert config["llm"]["backend"] == "kiro"
+        # Unrelated keys preserved.
+        assert config["llm"]["qa_model"] == "x"
+        mock_register.assert_called_once_with()
+
+    def test_setup_kiro_aborts_on_non_mapping_ouroboros_config(self, tmp_path: Path) -> None:
+        """Kiro setup must not clobber malformed existing config.yaml contents."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "- not-a-mapping\n- keep-me\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_kiro_mcp_server") as mock_register,
+        ):
+            setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+
+        assert config_path.read_text(encoding="utf-8") == original
+        mock_register.assert_not_called()
+
+    def test_setup_cli_with_runtime_kiro_flag(self, tmp_path: Path) -> None:
+        """`ouroboros setup --runtime kiro --non-interactive` runs the kiro
+        setup path without requiring user interaction."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={
+                    "claude": None,
+                    "codex": None,
+                    "opencode": None,
+                    "hermes": None,
+                    "gemini": None,
+                    "kiro": "/opt/bin/kiro-cli",
+                },
+            ),
+            patch("ouroboros.cli.commands.setup._setup_kiro") as mock_setup,
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "kiro", "--non-interactive"],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_setup.assert_called_once_with("/opt/bin/kiro-cli")
+
+    def test_setup_cli_kiro_missing_binary_errors_cleanly(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit --runtime kiro with no kiro-cli should exit non-zero
+        instead of crashing or silently succeeding."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={
+                    "claude": None,
+                    "codex": None,
+                    "opencode": None,
+                    "hermes": None,
+                    "gemini": None,
+                    "kiro": None,
+                },
+            ),
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "kiro", "--non-interactive"],
+            )
+
+        assert result.exit_code != 0
+        assert "Kiro CLI not found" in result.output

@@ -117,7 +117,7 @@ class LLMConfig(BaseModel, frozen=True):
         context_compression_model: Default model for workflow context compression
     """
 
-    backend: Literal["claude", "claude_code", "litellm", "codex", "gemini", "opencode"] = (
+    backend: Literal["claude", "claude_code", "litellm", "codex", "gemini", "opencode", "kiro"] = (
         "claude_code"
     )
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
@@ -344,6 +344,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "hermes_cli",
         "gemini",
         "gemini_cli",
+        "kiro",
+        "kiro_cli",
     }
 )
 
@@ -467,7 +469,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
     """
 
-    runtime_backend: Literal["claude", "codex", "opencode", "hermes", "gemini"] = "claude"
+    runtime_backend: Literal["claude", "codex", "opencode", "hermes", "gemini", "kiro"] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
     @field_validator("runtime_profile", mode="before")
@@ -491,6 +493,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     opencode_cli_path: str | None = None
     hermes_cli_path: str | None = None
     gemini_cli_path: str | None = None
+    kiro_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -505,6 +508,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "opencode_cli_path",
         "hermes_cli_path",
         "gemini_cli_path",
+        "kiro_cli_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:

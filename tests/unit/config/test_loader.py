@@ -26,6 +26,7 @@ from ouroboros.config.loader import (
     get_dependency_analysis_model,
     get_double_diamond_model,
     get_gemini_cli_path,
+    get_kiro_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
     get_max_parallel_workers,
@@ -517,6 +518,58 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_gemini_cli_path() is None
+
+    def test_get_kiro_cli_path_returns_executable_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Env var path is returned when it points to an executable file."""
+        fake = tmp_path / "kiro-cli"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.setenv("OUROBOROS_KIRO_CLI_PATH", str(fake))
+        assert get_kiro_cli_path() == str(fake)
+
+    def test_get_kiro_cli_path_rejects_stale_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Stale env var that doesn't point to an executable is treated as missing."""
+        stale = tmp_path / "missing-kiro-cli"
+        monkeypatch.setenv("OUROBOROS_KIRO_CLI_PATH", str(stale))
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+        ):
+            assert get_kiro_cli_path() is None
+
+    def test_get_kiro_cli_path_falls_back_to_config(self, tmp_path: Path) -> None:
+        """Config path is honored when env is absent and the file is executable."""
+        fake = tmp_path / "kiro-cli"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(kiro_cli_path=str(fake))
+                ),
+            ),
+        ):
+            assert get_kiro_cli_path() == str(fake)
+
+    def test_get_kiro_cli_path_rejects_stale_config(self, tmp_path: Path) -> None:
+        """Stale config value that no longer points to an executable returns None."""
+        stale = tmp_path / "ghost-kiro-cli"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(kiro_cli_path=str(stale))
+                ),
+            ),
+        ):
+            assert get_kiro_cli_path() is None
 
     def test_get_opencode_mode_returns_config_value(self) -> None:
         """get_opencode_mode reads orchestrator.opencode_mode from config."""
@@ -1019,6 +1072,36 @@ class TestLLMHelperLookups:
             ),
         ):
             assert get_llm_backend() == "litellm"
+
+    def test_get_llm_backend_accepts_llm_capable_runtime_shortcut(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Runtime shortcuts only drive LLM flows for backends with LLM adapters."""
+        monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+        monkeypatch.setenv("OUROBOROS_RUNTIME", "kiro")
+        assert get_llm_backend() == "kiro"
+
+    def test_get_llm_backend_accepts_kiro_cli_runtime_shortcut(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kiro's runtime alias should preserve the single-env-var setup contract."""
+        monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+        monkeypatch.setenv("OUROBOROS_RUNTIME", "kiro_cli")
+        assert get_llm_backend() == "kiro"
+
+    def test_get_llm_backend_ignores_runtime_without_llm_adapter(self) -> None:
+        """Hermes runtime should keep using the configured LLM backend."""
+        with (
+            patch.dict(os.environ, {"OUROBOROS_RUNTIME": "hermes"}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    llm=LLMConfig(backend="claude_code"),
+                    orchestrator=OrchestratorConfig(runtime_backend="hermes"),
+                ),
+            ),
+        ):
+            assert get_llm_backend() == "claude_code"
 
     def test_get_llm_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for llm permission mode."""

@@ -29,6 +29,7 @@ log = structlog.get_logger(__name__)
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
 _GEMINI_BACKENDS = {"gemini", "gemini_cli"}
+_KIRO_BACKENDS = {"kiro", "kiro_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _LITELLM_BACKENDS = {"litellm", "openai", "openrouter"}
 _LLM_USE_CASES = frozenset({"default", "interview"})
@@ -46,6 +47,9 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # ``gemini_cli_adapter.tool_envelope_violation`` for any out-of-envelope
 # ``tool_use`` stream event.  Hard enforcement would need a Gemini CLI
 # flag that does not exist.
+#
+# Kiro is not listed: ``KiroCodeAdapter`` maps the envelope to Kiro's
+# native ``--trust-tools`` categories before adding prompt guidance.
 #
 # OpenCode: ``OpenCodeLLMAdapter`` injects a ``## Tool Constraints``
 # section into the composed prompt and emits
@@ -71,6 +75,8 @@ def resolve_llm_backend(backend: str | None = None) -> str:
         return "codex"
     if candidate in _GEMINI_BACKENDS:
         return "gemini"
+    if candidate in _KIRO_BACKENDS:
+        return "kiro"
     if candidate in _OPENCODE_BACKENDS:
         return "opencode"
     if candidate in _LITELLM_BACKENDS:
@@ -99,7 +105,6 @@ def resolve_llm_permission_mode(
         # Interview uses LLM to generate questions — no file writes, but
         # CLI sandbox modes block LLM output entirely. Must bypass.
         return "bypassPermissions"
-
     return get_llm_permission_mode(backend=resolved)
 
 
@@ -136,7 +141,7 @@ def create_llm_adapter(
             hint=(
                 "This backend has no hard allowed_tools surface.  Envelope "
                 "is injected as a prompt directive and violations are "
-                "detected post-hoc.  Use claude_code / codex / opencode "
+                "detected post-hoc.  Use claude_code / codex "
                 "if hard enforcement is required."
             ),
         )
@@ -189,6 +194,20 @@ def create_llm_adapter(
             cwd=cwd,
             permission_mode=resolved_permission_mode,
             allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    if resolved_backend == "kiro":
+        from ouroboros.config import get_kiro_cli_path
+        from ouroboros.providers.kiro_adapter import KiroCodeAdapter
+
+        return KiroCodeAdapter(
+            cli_path=cli_path or get_kiro_cli_path(),
+            cwd=cwd,
+            allowed_tools=allowed_tools,
+            permission_mode=resolved_permission_mode,
             max_turns=max_turns,
             on_message=on_message,
             timeout=timeout,

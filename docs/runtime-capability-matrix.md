@@ -13,7 +13,7 @@ The runtime backend is selected via the `orchestrator.runtime_backend` config ke
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes
+  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes | kiro
                             # The runtime abstraction layer also accepts custom
                             # adapters registered in runtime_factory.py
 ```
@@ -26,7 +26,7 @@ ouroboros run workflow --runtime codex seed.yaml
 
 You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` environment variable.
 
-> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, and Hermes are the natively shipped backends; additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture — How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter).
+> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, Hermes, and Kiro CLI are the natively shipped backends; additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture — How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter).
 
 ## Capability Matrix
 
@@ -34,39 +34,40 @@ You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` 
 
 These capabilities are part of the Ouroboros core engine and work the same way regardless of runtime backend.
 
-| Capability                         | Claude Code | Codex CLI | OpenCode | Hermes | Notes                                                       |
-| ---------------------------------- | :---------: | :-------: | :------: | :----: | ----------------------------------------------------------- |
-| Seed file parsing                  |     Yes     |    Yes    |   Yes    |  Yes   | Same YAML schema, same validation                           |
-| Acceptance criteria tree           |     Yes     |    Yes    |   Yes    |  Yes   | Structured AC decomposition                                 |
-| Evaluation principles              |     Yes     |    Yes    |   Yes    |  Yes   | Weighted scoring against principles                         |
-| Exit conditions                    |     Yes     |    Yes    |   Yes    |  Yes   | Deterministic termination logic                             |
-| Event sourcing (SQLite)            |     Yes     |    Yes    |   Yes    |  Yes   | Full event log, replay support                              |
-| Checkpoint / resume                |     Yes     |    Yes    |   Yes    |  Yes   | `--resume <session_id>`                                     |
-| TUI dashboard                      |     Yes     |    Yes    |   Yes    |  Yes   | Textual-based progress view                                 |
-| Interview (Socratic seed creation) |     Yes     |    Yes    |   Yes    |  Yes   | `ouroboros init start ...` with the appropriate LLM backend |
-| Dry-run validation                 |     Yes     |    Yes    |   Yes    |  Yes   | `--dry-run` validates without executing                     |
+| Capability                         | Claude Code | Codex CLI | OpenCode | Hermes | Kiro CLI | Notes                                                       |
+| ---------------------------------- | :---------: | :-------: | :------: | :----: | :------: | ----------------------------------------------------------- |
+| Seed file parsing                  |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | Same YAML schema, same validation                           |
+| Acceptance criteria tree           |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | Structured AC decomposition                                 |
+| Evaluation principles              |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | Weighted scoring against principles                         |
+| Exit conditions                    |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | Deterministic termination logic                             |
+| Event sourcing (SQLite)            |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | Full event log, replay support                              |
+| Checkpoint / resume                |     Yes     |    Yes    |   Yes    |  Yes   | Partial  | `--resume <session_id>` everywhere; Kiro forwards to `--resume-id` **when the caller supplies the id** — headless does not surface session ids, so automatic checkpoint/resume is future work |
+| TUI dashboard                      |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | Textual-based progress view                                 |
+| Interview (Socratic seed creation) |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | `ouroboros init start ...` with the appropriate LLM backend |
+| Dry-run validation                 |     Yes     |    Yes    |   Yes    |  Yes   |   Yes    | `--dry-run` validates without executing                     |
 
 ### Runtime Layer (differs by backend)
 
 These capabilities depend on the runtime backend's native features and execution model.
 
-| Capability                |             Claude Code             |       Codex CLI       |                         OpenCode                          |                                   Hermes                                   | Notes                                                            |
-| ------------------------- | :---------------------------------: | :-------------------: | :-------------------------------------------------------: | :------------------------------------------------------------------------: | ---------------------------------------------------------------- |
-| **Authentication**        |        Max Plan subscription        |    OpenAI API key     |        Provider API keys (configured in OpenCode)         |        NousResearch (or compatible provider) API key or local model        | No API key needed for Claude Code                                |
-| **Underlying model**      |         Claude (Anthropic)          |   GPT-5.4+ (OpenAI)   | Provider-dependent (OpenCode supports multiple providers) | Provider-dependent (Hermes supports multiple providers) or Any local model | Model choice follows the runtime                                 |
-| **Tool surface**          | Read, Write, Edit, Bash, Glob, Grep | Codex-native tool set |            Read, Write, Edit, Bash, Glob, Grep            |                      Custom skills via MCP + run cmd                       | Different tool implementations; same task outcomes               |
-| **Sandbox / permissions** |    Claude Code permission system    |  Codex sandbox model  |                OpenCode permission system                 |                          Hermes permission system                          | Each runtime manages its own safety boundaries                   |
-| **Cost model**            |        Included in Max Plan         | Per-token API charges |              Depends on configured provider               |                            Depends on API/Local                            | See [OpenAI pricing](https://openai.com/pricing) for Codex costs |
+| Capability                |             Claude Code             |       Codex CLI       |                         OpenCode                          |                                   Hermes                                   |           Kiro CLI           | Notes                                                            |
+| ------------------------- | :---------------------------------: | :-------------------: | :-------------------------------------------------------: | :------------------------------------------------------------------------: | :--------------------------: | ---------------------------------------------------------------- |
+| **Authentication**        |        Max Plan subscription        |    OpenAI API key     |        Provider API keys (configured in OpenCode)         |        NousResearch (or compatible provider) API key or local model        |      Kiro AWS sign-in        | No API key needed for Claude Code or Kiro                        |
+| **Underlying model**      |         Claude (Anthropic)          |   GPT-5.4+ (OpenAI)   | Provider-dependent (OpenCode supports multiple providers) | Provider-dependent (Hermes supports multiple providers) or Any local model | Claude (via AWS) + others    | Kiro publishes a model picker (claude-opus-*, sonnet-*, etc.)    |
+| **Tool surface**          | Read, Write, Edit, Bash, Glob, Grep | Codex-native tool set |            Read, Write, Edit, Bash, Glob, Grep            |                      Custom skills via MCP + run cmd                       |   Kiro-native tool set       | Different tool implementations; same task outcomes               |
+| **Sandbox / permissions** |    Claude Code permission system    |  Codex sandbox model  |                OpenCode permission system                 |                          Hermes permission system                          | `--trust-tools` / `--trust-all-tools` | Each runtime manages its own safety boundaries          |
+| **Cost model**            |        Included in Max Plan         | Per-token API charges |              Depends on configured provider               |                            Depends on API/Local                            |    Included in Kiro plan     | See [OpenAI pricing](https://openai.com/pricing) for Codex costs |
+| **Declared capabilities** | skill_dispatch, targeted_resume, structured_output | all three | all three | all three | skill_dispatch only; `targeted_resume=False` (headless does not surface session ids), `structured_output=False` (plain-text stdio) | See `RuntimeCapabilities` on the adapter |
 
 ### Integration Surface (UX differences)
 
-| Aspect                      | Claude Code                                   | Codex CLI                                                                                                                                                                                                                                                    | OpenCode                                           | Hermes                                           |
-| --------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- | ------------------------------------------------ |
-| **Primary UX**              | In-session skills and MCP server              | Session-oriented Ouroboros runtime over Codex CLI transport                                                                                                                                                                                                  | MCP server integration                             | In-session skills and MCP server                 |
-| **Skill shortcuts (`ooo`)** | Yes -- skills loaded into Claude Code session | Yes -- after `ouroboros setup --runtime codex` installs managed skills into `~/.codex/skills/`, rules into `~/.codex/rules/`, and the MCP/env hookup into `~/.codex/config.toml`. Keep role-specific Ouroboros model overrides in `~/.ouroboros/config.yaml` | Yes -- after `ouroboros setup --runtime opencode`  | Yes -- after `ouroboros setup --runtime hermes`  |
-| **MCP integration**         | Native MCP server support                     | Deterministic skill/MCP dispatch through the Ouroboros Codex adapter                                                                                                                                                                                         | Native MCP server support                          | Native MCP server support                        |
-| **Session context**         | Shares Claude Code session context            | Preserved via runtime handles, native session IDs, and resume support                                                                                                                                                                                        | Session IDs + resume via `--session`               | Preserved via session IDs and internal parser    |
-| **Install extras**          | `ouroboros-ai[claude]`                        | `ouroboros-ai` (base package) + `codex` on PATH                                                                                                                                                                                                              | `ouroboros-ai` (base package) + `opencode` on PATH | `ouroboros-ai` (base package) + `hermes` on PATH |
+| Aspect                      | Claude Code                                   | Codex CLI                                                                                                                                                                                                                                                    | OpenCode                                           | Hermes                                           | Kiro CLI                                                                                      |
+| --------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| **Primary UX**              | In-session skills and MCP server              | Session-oriented Ouroboros runtime over Codex CLI transport                                                                                                                                                                                                  | MCP server integration                             | In-session skills and MCP server                 | In-session skills and MCP server (Kiro headless mode)                                         |
+| **Skill shortcuts (`ooo`)** | Yes -- skills loaded into Claude Code session | Yes -- after `ouroboros setup --runtime codex` installs managed skills into `~/.codex/skills/`, rules into `~/.codex/rules/`, and the MCP/env hookup into `~/.codex/config.toml`. Keep role-specific Ouroboros model overrides in `~/.ouroboros/config.yaml` | Yes -- after `ouroboros setup --runtime opencode`  | Yes -- after `ouroboros setup --runtime hermes`  | Yes -- after `ouroboros setup --runtime kiro` the Ouroboros MCP server is registered in `~/.kiro/settings/mcp.json` with `OUROBOROS_RUNTIME=kiro` / `OUROBOROS_LLM_BACKEND=kiro` baked in |
+| **MCP integration**         | Native MCP server support                     | Deterministic skill/MCP dispatch through the Ouroboros Codex adapter                                                                                                                                                                                         | Native MCP server support                          | Native MCP server support                        | Native MCP server support; `SkillInterceptor` routes `ooo <skill>` prefixes before spawning Kiro subprocess |
+| **Session context**         | Shares Claude Code session context            | Preserved via runtime handles, native session IDs, and resume support                                                                                                                                                                                        | Session IDs + resume via `--session`               | Preserved via session IDs and internal parser    | Headless runs do not surface session IDs; callers may pass an externally sourced `--resume-id`, but automatic targeted resume is not declared yet |
+| **Install extras**          | `ouroboros-ai[claude]`                        | `ouroboros-ai` (base package) + `codex` on PATH                                                                                                                                                                                                              | `ouroboros-ai` (base package) + `opencode` on PATH | `ouroboros-ai` (base package) + `hermes` on PATH | `ouroboros-ai[claude]` + `kiro-cli` on PATH                                                   |
 
 ## What Stays the Same
 
@@ -99,6 +100,7 @@ The table below covers the three currently shipped backends. Because Ouroboros u
 | Want a Codex-backed Ouroboros session instead of a Claude Code session | Codex CLI (`runtime_backend: codex`)                                          |
 | Want to use OpenCode with multiple model providers                     | OpenCode (`runtime_backend: opencode`)                                        |
 | Want to use the Hermes Agent (open source local & API agent)           | Hermes (`runtime_backend: hermes`)                                            |
+| Want to use Kiro CLI (AWS-provided coding agent, browser-free headless) | Kiro (`runtime_backend: kiro`)                                                |
 | Want to use Anthropic's Claude models                                  | Claude Code                                                                   |
 | Want to use OpenAI's GPT models                                        | Codex CLI                                                                     |
 | Want to use multiple providers via a single runtime                    | OpenCode                                                                      |
@@ -112,5 +114,6 @@ The table below covers the three currently shipped backends. Because Ouroboros u
 - [Codex CLI runtime guide](runtime-guides/codex.md)
 - [Hermes Agent runtime guide](runtime-guides/hermes.md)
 - [OpenCode runtime guide](runtime-guides/opencode.md)
+- [Kiro CLI runtime guide](runtime-guides/kiro.md)
 - [Platform support matrix](platform-support.md) (OS and Python version compatibility)
 - [Architecture overview](architecture.md) — including [How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter)

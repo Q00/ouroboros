@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import and_, event, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
@@ -234,10 +235,21 @@ class EventStore:
                 # into a real read-only connection.
                 connect_args["uri"] = True
 
+            engine_kwargs: dict[str, Any] = {
+                "echo": False,
+                "connect_args": connect_args,
+            }
+            if self._database_url.endswith("/:memory:"):
+                # SQLite in-memory databases are scoped to the DB-API
+                # connection.  Without a StaticPool, concurrent async tasks can
+                # observe a fresh connection that has not run create_all(),
+                # producing intermittent "no such table: events" failures in
+                # watchdog cancellation paths.
+                engine_kwargs["poolclass"] = StaticPool
+
             self._engine = create_async_engine(
                 self._database_url,
-                echo=False,
-                connect_args=connect_args,
+                **engine_kwargs,
             )
 
             # Enable WAL mode and set busy timeout on every new connection.
