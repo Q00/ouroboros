@@ -221,7 +221,7 @@ After running `ouroboros setup --runtime opencode`, the Ouroboros MCP server is 
 | `ooo setup` | Yes | `ouroboros setup --runtime opencode` |
 | `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
 
-> **Ralph note (#528):** `ooo ralph` now starts one MCP-owned `ouroboros_ralph` background job and monitors it with the standard job tools. The skill no longer reimplements the multi-generation loop with client-side `evolve_step` polling.
+> **Ralph note (#528):** `ooo ralph` now starts one MCP-owned `ouroboros_ralph` background job and monitors it with the standard job tools. The skill no longer reimplements the multi-generation loop with client-side `evolve_step` polling. To stop a running Ralph job, use the MCP job cancellation tool `ouroboros_cancel_job(job_id)`; `ouroboros cancel execution <execution_id>` is only for execution sessions and does not cancel Ralph job IDs.
 
 > **Note on `ooo seed` vs `ooo interview`:** These are two distinct skills with separate roles. `ooo interview` runs a Socratic Q&A session and returns a `session_id`. `ooo seed` accepts that `session_id` and generates a structured Seed YAML (with ambiguity scoring). From the terminal, both steps are performed in a single `ouroboros init start` invocation.
 

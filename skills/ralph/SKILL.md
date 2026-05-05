@@ -39,7 +39,11 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
    ```
    ToolSearch query: "+ouroboros ralph job"
    ```
-2. Confirm that `ouroboros_ralph` and the job tools (`ouroboros_job_wait`,
+2. The loaded tools may be exposed under plugin-prefixed names such as
+   `mcp__plugin_ouroboros_ouroboros__ouroboros_ralph`. Use the actual tool
+   names returned by `ToolSearch`; the bare names below are the canonical MCP
+   tool names for documentation.
+3. Confirm that `ouroboros_ralph` and the job tools (`ouroboros_job_wait`,
    `ouroboros_job_status`, `ouroboros_job_result`, and
    `ouroboros_cancel_job`) are callable. If the tools are unavailable, stop and
    tell the user that Ralph requires the Ouroboros MCP runtime.
