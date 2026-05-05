@@ -1,11 +1,11 @@
 ---
 name: ralph
-description: "Persistent self-referential loop until verification passes"
+description: "Client-driven Ralph loop around background evolve_step jobs"
 ---
 
 # /ouroboros:ralph
 
-Persistent self-referential loop until verification passes. "The boulder never stops."
+Client-driven Ralph loop around background `evolve_step` jobs. "The boulder never stops."
 
 ## Usage
 
@@ -16,7 +16,20 @@ ooo ralph "<your request>"
 
 **Trigger keywords:** "ralph", "don't stop", "must complete", "until it works", "keep going"
 
+> **Current implementation note (#528):** `ooo ralph` is currently a
+> skill-driven loop. The MCP server exposes `ouroboros_start_evolve_step`
+> and the job polling tools, but it does **not** yet expose a first-class
+> `ouroboros_ralph` tool that owns the whole multi-generation loop. That
+> means this skill must keep calling one generation at a time until a
+> dedicated MCP-owned Ralph loop lands.
+
 ## How It Works
+
+Ralph mode is currently coordinated by this skill. It starts one background
+`evolve_step` job per iteration, polls that job, reads the QA result, and then
+decides whether to start another iteration. The loop state lives in the client
+conversation plus EventStore/job history; it is not yet a single durable MCP
+job.
 
 Ralph mode includes parallel execution + automatic verification:
 
@@ -43,7 +56,8 @@ When the user invokes this skill:
 2. **Initialize loop**:
    - Generate a session_id (UUID)
    - Track iteration, verification_history in conversation context
-   - No file I/O needed — evolve_step stores all execution data in EventStore
+   - No file I/O needed — evolve_step stores execution data in EventStore
+   - Do not claim a dedicated `ouroboros_ralph` MCP job exists yet; use `ouroboros_start_evolve_step` plus job polling
 
 4. **Enter the loop** (non-blocking background execution):
 
@@ -130,7 +144,7 @@ When the user invokes this skill:
 
 ## The Boulder Never Stops
 
-This is the key phrase. Ralph does not give up:
+This is the key phrase. Ralph does not give up while the client continues to drive the loop:
 - Each failure is data for the next attempt
 - Verification drives the loop
 - Only complete success or max iterations stops it

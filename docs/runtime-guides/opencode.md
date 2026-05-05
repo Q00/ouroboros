@@ -210,7 +210,7 @@ After running `ouroboros setup --runtime opencode`, the Ouroboros MCP server is 
 | `ooo status` | Yes | `ouroboros status execution <execution_id>` |
 | `ooo evaluate` | Yes | *(MCP only)* |
 | `ooo evolve` | Yes | *(MCP only)* |
-| `ooo ralph` | Yes | *(MCP only)* |
+| `ooo ralph` | Yes | Skill-driven loop over `ouroboros_start_evolve_step`; no first-class `ouroboros_ralph` tool yet |
 | `ooo cancel` | Yes | `ouroboros cancel execution <execution_id>` |
 | `ooo unstuck` | Yes | *(MCP only)* |
 | `ooo tutorial` | Yes | *(MCP only)* |
@@ -220,6 +220,8 @@ After running `ouroboros setup --runtime opencode`, the Ouroboros MCP server is 
 | `ooo qa` | Yes | *(MCP only)* |
 | `ooo setup` | Yes | `ouroboros setup --runtime opencode` |
 | `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
+
+> **Ralph note (#528):** `ooo ralph` currently relies on the installed skill to repeatedly call `ouroboros_start_evolve_step` and poll jobs. A dedicated MCP-owned `ouroboros_ralph` loop is planned but not implemented in this release.
 
 > **Note on `ooo seed` vs `ooo interview`:** These are two distinct skills with separate roles. `ooo interview` runs a Socratic Q&A session and returns a `session_id`. `ooo seed` accepts that `session_id` and generates a structured Seed YAML (with ambiguity scoring). From the terminal, both steps are performed in a single `ouroboros init start` invocation.
 
