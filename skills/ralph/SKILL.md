@@ -15,8 +15,10 @@ MCP-owned Ralph loop around background `evolve_step` jobs. "The boulder never st
 
 ```
 ooo ralph <lineage_id>
-ooo ralph "<your request>"        # requires validated Seed preparation before tool start
 /ouroboros:ralph <lineage_id>
+
+# For a plain natural-language request, run `ooo interview` + `ooo seed` first,
+# then call the MCP tool with a fresh lineage_id and the validated Seed YAML.
 ```
 
 **Trigger keywords:** "ralph", "don't stop", "must complete", "until it works", "keep going"
@@ -68,14 +70,16 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      `seed_content` and generate a fresh `lineage_id` for this run. Keep
      `lineage_id` separate from Seed, interview, and session IDs so separate
      Ralph runs over the same Seed do not collide.
-   - If the user provides only a plain request (`ooo ralph "<request>"`), do
-     not freehand Seed YAML and do not pass raw natural-language text as
-     `seed_content`. Route through the authoritative Seed path first:
-     `ooo interview` to capture requirements, then `ooo seed` /
+   - If the user provides only a plain natural-language request, do not treat
+     it as a direct `ooo ralph "<request>"` command, do not freehand Seed YAML,
+     and do not pass raw text as `seed_content`. Route through the authoritative
+     Seed path first: `ooo interview` to capture requirements, then `ooo seed` /
      `ouroboros_generate_seed` to produce validated Seed YAML with the normal
-     ambiguity gate. Use that generated Seed YAML as `seed_content`. If an
-     interview/seed session already exists in context, reuse that validated Seed
-     output instead of regenerating it.
+     ambiguity gate. After Seed generation, call the MCP tool with a fresh
+     `lineage_id` and that validated Seed YAML as `seed_content`; do not use the
+     exact frontmatter shorthand for the raw request text. If an interview/seed
+     session already exists in context, reuse that validated Seed output instead
+     of regenerating it.
 
 2. **Start Ralph** by calling `ouroboros_ralph` with:
    - `lineage_id`: existing lineage id for an explicit continuation, otherwise a
