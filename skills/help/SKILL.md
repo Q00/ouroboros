@@ -54,7 +54,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | Command | Purpose | Mode |
 |---------|---------|------|
 | `ooo evolve` | Start/monitor evolutionary development loop | MCP |
-| `ooo ralph` | Self-referential loop until verified ("don't stop") | Plugin + MCP |
+| `ooo ralph` | Client-driven loop until verified (uses background evolve_step jobs) | Plugin + MCP |
 
 **Plugin** = Works immediately after `ooo setup`.
 **MCP** = Requires `ooo setup` (Python >= 3.12 auto-detected). Run setup once to unlock all features.
@@ -117,7 +117,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 
 | Skill | Purpose | Best For |
 |-------|---------|----------|
-| `/ouroboros:ralph` | Self-referential loop until verified | "Don't stop", must complete |
+| `/ouroboros:ralph` | Client-driven loop over background evolve_step jobs | "Don't stop", must complete |
 | `/ouroboros:evolve` | Evolutionary ontology refinement | Spec iteration until convergence |
 
 ## Available Agents

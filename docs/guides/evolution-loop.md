@@ -76,7 +76,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED
 
 ## Ralph: The Persistent Loop
 
-`ooo ralph` (Claude Code skill) runs the evolutionary loop persistently -- across session boundaries -- until convergence. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
+`ooo ralph` is currently a **client-driven skill loop** around background `evolve_step` jobs. The MCP server exposes `ouroboros_start_evolve_step` plus job polling tools; it does not yet expose a first-class `ouroboros_ralph` job that owns the whole loop. Each generation is recorded in the EventStore, so lineage history can be inspected and a client can continue from recorded state, but the multi-generation loop itself is not yet durable across client/session restarts.
 
 ```
 Ralph Cycle 1: evolve_step(lineage, seed) → Gen 1 → action=CONTINUE
@@ -91,8 +91,8 @@ Ralph Cycle 3: evolve_step(lineage)       → Gen 3 → action=CONVERGED
 | | `ooo evolve` | `ooo ralph` |
 |---|---|---|
 | **Scope** | Single evolution step | Loop until convergence |
-| **Session** | Within current session | Survives session restarts |
-| **Control** | Manual -- you decide when to stop | Automatic -- convergence decides |
+| **Session** | Within current session | Client must reconstruct/continue from EventStore; MCP-owned durable loop is not implemented yet |
+| **Control** | Manual -- you decide when to stop | Skill-driven automation -- the client starts each next generation until convergence/limit |
 | **Use case** | Incremental refinement | Full autonomous evolution |
 
 ---
