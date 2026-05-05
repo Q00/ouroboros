@@ -132,7 +132,7 @@ def test_auto_answerer_partial_runtime_facts_do_not_confirm_runtime_context() ->
 
     answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
 
-    assert answer.source == AutoAnswerSource.REPO_FACT
+    assert answer.source == AutoAnswerSource.EXISTING_CONVENTION
     assert answer.confidence == 0.8
     assert "Typer CLI" in answer.text
     runtime_entries = [

@@ -287,11 +287,7 @@ class AutoAnswerer:
                 ),
                 evidence=partial_evidence,
             )
-            answer_source = (
-                AutoAnswerSource.REPO_FACT
-                if partial_facts
-                else AutoAnswerSource.EXISTING_CONVENTION
-            )
+            answer_source = AutoAnswerSource.EXISTING_CONVENTION
             confidence = 0.8 if partial_facts else 0.78
         updates = [
             (
