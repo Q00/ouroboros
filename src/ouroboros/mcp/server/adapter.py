@@ -450,9 +450,9 @@ def _evaluation_summary_from_spec_verification(
                 "no independently verifiable assertions for AC "
                 + ", ".join(str(i + 1) for i in unverifiable_indices)
             )
-        failure_reason = " [".join([reason_parts[0], "; ".join(reason_parts[1:])])
+        failure_reason = reason_parts[0]
         if len(reason_parts) > 1:
-            failure_reason += "]"
+            failure_reason += f" [{'; '.join(reason_parts[1:])}]"
 
     return EvaluationSummary(
         final_approved=approved,

@@ -381,6 +381,53 @@ Parallel Execution Verification Report
         assert summary.drift_score is None
         assert summary.run_verdict == "PASS"
 
+    def test_spec_verification_plain_failure_reason_has_no_dangling_bracket(self) -> None:
+        """Ordinary verifier failures should render a clean failure reason."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=False,
+                            detail="Structure 'config' not found",
+                        ),
+                    ),
+                    agent_reported_pass=False,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.failure_reason == "1/1 ACs failed (AC 1)"
+
     def test_spec_verification_discrepancy_becomes_formal_ac_failure(self) -> None:
         """False-positive legacy PASS claims remain catchable by spec verification."""
         mechanical = EvaluationSummary(
