@@ -472,6 +472,13 @@ def _extract_dispatch_template_values(
         return token[2:].split("=", 1)[0].strip().replace("-", "_")
 
     def control_suffix_starts_at(start: int) -> bool:
+        first_suffix_option = option_name_for(tokens[start])
+        if (
+            positional_count > 1
+            and not parse_trailing_options
+            and first_suffix_option in extra_value_option_names
+        ):
+            return False
         suffix_index = start
         while suffix_index < len(tokens):
             suffix_token = tokens[suffix_index]
@@ -676,7 +683,9 @@ def resolve_parsed_skill_dispatch(
         extra_value_option_names = frozenset(
             name
             for name in template_names
-            if name not in {"1", "CWD", "args", "goal"} and name not in _VALUE_OPTION_NAMES
+            if name not in {"1", "CWD", "args", "goal"}
+            and name not in _VALUE_OPTION_NAMES
+            and name not in _BOOLEAN_OPTION_NAMES
         )
         template_values = _extract_dispatch_template_values(
             parsed.remainder,
