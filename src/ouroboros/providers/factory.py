@@ -105,9 +105,6 @@ def resolve_llm_permission_mode(
         # Interview uses LLM to generate questions — no file writes, but
         # CLI sandbox modes block LLM output entirely. Must bypass.
         return "bypassPermissions"
-    if resolved == "kiro":
-        return "default"
-
     return get_llm_permission_mode(backend=resolved)
 
 

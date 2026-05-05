@@ -92,7 +92,21 @@ class TestResolveLLMPermissionModeKiro:
     def test_kiro_returns_default(self) -> None:
         assert resolve_llm_permission_mode(backend="kiro") == "default"
 
-    def test_kiro_interview_returns_default(self) -> None:
+    def test_kiro_respects_llm_permission_mode_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OUROBOROS_LLM_PERMISSION_MODE", "acceptEdits")
+
+        assert resolve_llm_permission_mode(backend="kiro") == "acceptEdits"
+
+    def test_kiro_interview_respects_llm_permission_mode_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_LLM_PERMISSION_MODE", "bypassPermissions")
+
+        assert (
+            resolve_llm_permission_mode(backend="kiro", use_case="interview") == "bypassPermissions"
+        )
+
+    def test_kiro_interview_returns_config_default_without_override(self) -> None:
         assert resolve_llm_permission_mode(backend="kiro", use_case="interview") == "default"
 
 
