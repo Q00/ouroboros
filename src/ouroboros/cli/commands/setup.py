@@ -1147,9 +1147,7 @@ def _register_copilot_mcp_server() -> None:
         try:
             data = json.loads(mcp_path.read_text(encoding="utf-8")) or {}
         except json.JSONDecodeError:
-            print_warning(
-                "~/.copilot/mcp-config.json is not valid JSON — leaving it untouched."
-            )
+            print_warning("~/.copilot/mcp-config.json is not valid JSON — leaving it untouched.")
             return
 
     if not isinstance(data, dict):
@@ -1216,9 +1214,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
     if not isinstance(config_dict, dict):
-        print_error(
-            "~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup."
-        )
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
         return
 
     # Live-discover available Copilot models. Falls back silently to a
@@ -1250,9 +1246,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
         console.print()
 
         try:
-            default_idx = str(
-                next(i for i, m in enumerate(models, 1) if m.id == preferred_default)
-            )
+            default_idx = str(next(i for i, m in enumerate(models, 1) if m.id == preferred_default))
         except StopIteration:
             default_idx = "1"
 

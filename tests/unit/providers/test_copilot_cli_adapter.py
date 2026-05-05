@@ -247,15 +247,9 @@ class TestEventParsing:
 
     def test_extract_session_id_supports_multiple_keys(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot")
-        assert (
-            adapter._extract_session_id_from_event({"session_id": "abc"}) == "abc"
-        )
-        assert (
-            adapter._extract_session_id_from_event({"sessionId": "def"}) == "def"
-        )
-        assert (
-            adapter._extract_session_id_from_event({"thread_id": "ghi"}) == "ghi"
-        )
+        assert adapter._extract_session_id_from_event({"session_id": "abc"}) == "abc"
+        assert adapter._extract_session_id_from_event({"sessionId": "def"}) == "def"
+        assert adapter._extract_session_id_from_event({"thread_id": "ghi"}) == "ghi"
         assert adapter._extract_session_id_from_event({"foo": "bar"}) is None
 
     def test_extract_stdout_errors_collects_error_events(self) -> None:

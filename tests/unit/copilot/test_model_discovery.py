@@ -56,9 +56,12 @@ class TestListCopilotModels:
         md.reset_cache()
 
     def test_uses_api_response_when_token_resolves(self) -> None:
-        with patch.object(md, "_resolve_token", return_value="ghs_fake"), patch(
-            "urllib.request.urlopen",
-            return_value=_FakeUrlResponse(_FAKE_API_PAYLOAD),
+        with (
+            patch.object(md, "_resolve_token", return_value="ghs_fake"),
+            patch(
+                "urllib.request.urlopen",
+                return_value=_FakeUrlResponse(_FAKE_API_PAYLOAD),
+            ),
         ):
             models = md.list_copilot_models(refresh=True)
 
@@ -80,9 +83,12 @@ class TestListCopilotModels:
     def test_falls_back_on_http_error(self) -> None:
         import urllib.error
 
-        with patch.object(md, "_resolve_token", return_value="ghs_fake"), patch(
-            "urllib.request.urlopen",
-            side_effect=urllib.error.URLError("boom"),
+        with (
+            patch.object(md, "_resolve_token", return_value="ghs_fake"),
+            patch(
+                "urllib.request.urlopen",
+                side_effect=urllib.error.URLError("boom"),
+            ),
         ):
             models = md.list_copilot_models(refresh=True)
 
@@ -96,9 +102,12 @@ class TestListCopilotModels:
             call_count["n"] += 1
             return _FakeUrlResponse(_FAKE_API_PAYLOAD)
 
-        with patch.object(md, "_resolve_token", return_value="ghs_fake"), patch(
-            "urllib.request.urlopen",
-            side_effect=fake_urlopen,
+        with (
+            patch.object(md, "_resolve_token", return_value="ghs_fake"),
+            patch(
+                "urllib.request.urlopen",
+                side_effect=fake_urlopen,
+            ),
         ):
             md.list_copilot_models(refresh=True)
             md.list_copilot_models()
@@ -129,8 +138,7 @@ class TestMapToCopilotModel:
             assert md.map_to_copilot_model("claude-opus-4-6") == "claude-opus-4.6"
             assert md.map_to_copilot_model("claude-sonnet-4-6") == "claude-sonnet-4.6"
             assert (
-                md.map_to_copilot_model("openrouter/anthropic/claude-opus-4-6")
-                == "claude-opus-4.6"
+                md.map_to_copilot_model("openrouter/anthropic/claude-opus-4-6") == "claude-opus-4.6"
             )
 
     def test_unknown_hyphen_id_returns_unchanged(self) -> None:
@@ -195,9 +203,10 @@ class TestResolveToken:
             stdout="ghs_from_cli\n",
             stderr="",
         )
-        with patch("shutil.which", return_value="/usr/bin/gh"), patch(
-            "subprocess.run", return_value=completed
-        ) as run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
             assert md._resolve_token() == "ghs_from_cli"
             run.assert_called_once()
 
@@ -212,8 +221,9 @@ class TestResolveToken:
             stdout="",
             stderr="not logged in",
         )
-        with patch("shutil.which", return_value="/usr/bin/gh"), patch(
-            "subprocess.run", return_value=completed
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", return_value=completed),
         ):
             assert md._resolve_token() is None
 
@@ -224,13 +234,15 @@ class TestResolveToken:
             stdout="   \n",
             stderr="",
         )
-        with patch("shutil.which", return_value="/usr/bin/gh"), patch(
-            "subprocess.run", return_value=completed
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", return_value=completed),
         ):
             assert md._resolve_token() is None
 
     def test_returns_none_when_gh_subprocess_raises(self) -> None:
-        with patch("shutil.which", return_value="/usr/bin/gh"), patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=5)
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=5)),
         ):
             assert md._resolve_token() is None

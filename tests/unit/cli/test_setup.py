@@ -2808,9 +2808,7 @@ class TestCopilotSetup:
             CopilotModel(id="claude-sonnet-4.5", family="claude-sonnet-4.5"),
         ]
 
-    def test_setup_copilot_writes_runtime_and_default_model(
-        self, tmp_path: Path
-    ) -> None:
+    def test_setup_copilot_writes_runtime_and_default_model(self, tmp_path: Path) -> None:
         """Non-interactive setup writes runtime/llm/clarification config plus
         the chosen default model picked from live discovery."""
         config_dir = tmp_path / ".ouroboros"
@@ -2838,9 +2836,7 @@ class TestCopilotSetup:
                 "ouroboros.copilot.model_discovery.used_fallback",
                 return_value=False,
             ),
-            patch(
-                "ouroboros.cli.commands.setup._register_copilot_mcp_server"
-            ) as mock_register,
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
         ):
             setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
 
@@ -2855,9 +2851,7 @@ class TestCopilotSetup:
         assert config["llm"]["qa_model"] == "x"
         mock_register.assert_called_once_with()
 
-    def test_setup_copilot_aborts_on_non_mapping_ouroboros_config(
-        self, tmp_path: Path
-    ) -> None:
+    def test_setup_copilot_aborts_on_non_mapping_ouroboros_config(self, tmp_path: Path) -> None:
         """Malformed config.yaml must not be clobbered or partially rewritten."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -2876,9 +2870,7 @@ class TestCopilotSetup:
                 "ouroboros.copilot.model_discovery.used_fallback",
                 return_value=False,
             ),
-            patch(
-                "ouroboros.cli.commands.setup._register_copilot_mcp_server"
-            ) as mock_register,
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
         ):
             setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
 
@@ -2913,9 +2905,7 @@ class TestCopilotSetup:
         out = capsys.readouterr().out
         assert "fallback" in out.lower() or "gh auth" in out.lower()
 
-    def test_setup_copilot_aborts_when_no_models_discovered(
-        self, tmp_path: Path
-    ) -> None:
+    def test_setup_copilot_aborts_when_no_models_discovered(self, tmp_path: Path) -> None:
         """If discovery returns an empty list, setup must abort cleanly
         instead of writing a default-less config."""
         config_dir = tmp_path / ".ouroboros"
@@ -2937,9 +2927,7 @@ class TestCopilotSetup:
                 "ouroboros.copilot.model_discovery.used_fallback",
                 return_value=False,
             ),
-            patch(
-                "ouroboros.cli.commands.setup._register_copilot_mcp_server"
-            ) as mock_register,
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
         ):
             setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
 
@@ -3042,9 +3030,7 @@ class TestCopilotSetup:
 
         assert mcp_path.read_text(encoding="utf-8") == original
 
-    def test_register_copilot_mcp_warns_when_no_install_detected(
-        self, tmp_path: Path
-    ) -> None:
+    def test_register_copilot_mcp_warns_when_no_install_detected(self, tmp_path: Path) -> None:
         """When no working ouroboros install exists, do not write a broken entry."""
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -3131,9 +3117,7 @@ class TestCopilotSetup:
         assert result.exit_code == 0, result.output
         mock_setup.assert_called_once_with("/opt/bin/copilot", non_interactive=True)
 
-    def test_setup_cli_copilot_missing_binary_errors_cleanly(
-        self, tmp_path: Path
-    ) -> None:
+    def test_setup_cli_copilot_missing_binary_errors_cleanly(self, tmp_path: Path) -> None:
         """Explicit --runtime copilot with no copilot binary should exit non-zero."""
         runner = CliRunner()
         with (

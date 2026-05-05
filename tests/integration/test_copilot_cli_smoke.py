@@ -28,7 +28,12 @@ async def test_real_copilot_cli_returns_text() -> None:
     )
 
     result = await adapter.complete(
-        [Message(role=MessageRole.USER, content='Reply with exactly the word "ready" and nothing else.')],
+        [
+            Message(
+                role=MessageRole.USER,
+                content='Reply with exactly the word "ready" and nothing else.',
+            )
+        ],
         CompletionConfig(model="default", max_tokens=32),
     )
 

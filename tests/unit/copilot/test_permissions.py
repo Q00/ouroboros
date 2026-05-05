@@ -25,9 +25,7 @@ class TestResolveCopilotPermissionMode:
             resolve_copilot_permission_mode("nonsense")
 
     def test_respects_explicit_default_mode(self) -> None:
-        assert (
-            resolve_copilot_permission_mode(None, default_mode="acceptEdits") == "acceptEdits"
-        )
+        assert resolve_copilot_permission_mode(None, default_mode="acceptEdits") == "acceptEdits"
 
 
 class TestBuildCopilotExecArgsForSandbox:

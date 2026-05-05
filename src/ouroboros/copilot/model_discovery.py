@@ -54,13 +54,36 @@ class CopilotModel:
 
 
 _FALLBACK_MODELS: tuple[CopilotModel, ...] = (
-    CopilotModel(id="claude-opus-4.7", family="claude-opus-4.7", vendor="Anthropic", name="Claude Opus 4.7"),
-    CopilotModel(id="claude-opus-4.6", family="claude-opus-4.6", vendor="Anthropic", name="Claude Opus 4.6"),
-    CopilotModel(id="claude-opus-4.5", family="claude-opus-4.5", vendor="Anthropic", name="Claude Opus 4.5"),
-    CopilotModel(id="claude-sonnet-4.6", family="claude-sonnet-4.6", vendor="Anthropic", name="Claude Sonnet 4.6"),
-    CopilotModel(id="claude-sonnet-4.5", family="claude-sonnet-4.5", vendor="Anthropic", name="Claude Sonnet 4.5"),
-    CopilotModel(id="claude-sonnet-4", family="claude-sonnet-4", vendor="Anthropic", name="Claude Sonnet 4"),
-    CopilotModel(id="claude-haiku-4.5", family="claude-haiku-4.5", vendor="Anthropic", name="Claude Haiku 4.5"),
+    CopilotModel(
+        id="claude-opus-4.7", family="claude-opus-4.7", vendor="Anthropic", name="Claude Opus 4.7"
+    ),
+    CopilotModel(
+        id="claude-opus-4.6", family="claude-opus-4.6", vendor="Anthropic", name="Claude Opus 4.6"
+    ),
+    CopilotModel(
+        id="claude-opus-4.5", family="claude-opus-4.5", vendor="Anthropic", name="Claude Opus 4.5"
+    ),
+    CopilotModel(
+        id="claude-sonnet-4.6",
+        family="claude-sonnet-4.6",
+        vendor="Anthropic",
+        name="Claude Sonnet 4.6",
+    ),
+    CopilotModel(
+        id="claude-sonnet-4.5",
+        family="claude-sonnet-4.5",
+        vendor="Anthropic",
+        name="Claude Sonnet 4.5",
+    ),
+    CopilotModel(
+        id="claude-sonnet-4", family="claude-sonnet-4", vendor="Anthropic", name="Claude Sonnet 4"
+    ),
+    CopilotModel(
+        id="claude-haiku-4.5",
+        family="claude-haiku-4.5",
+        vendor="Anthropic",
+        name="Claude Haiku 4.5",
+    ),
     CopilotModel(id="gpt-5.4", family="gpt-5.4", vendor="OpenAI", name="GPT-5.4"),
     CopilotModel(id="gpt-5.3-codex", family="gpt-5.3-codex", vendor="OpenAI", name="GPT-5.3 Codex"),
     CopilotModel(id="gpt-5.2", family="gpt-5.2", vendor="OpenAI", name="GPT-5.2"),
@@ -164,7 +187,9 @@ def _parse_models_payload(payload: dict[str, Any]) -> list[CopilotModel]:
         if model_id in seen:
             continue
         seen.add(model_id)
-        capabilities = entry.get("capabilities") if isinstance(entry.get("capabilities"), dict) else {}
+        capabilities = (
+            entry.get("capabilities") if isinstance(entry.get("capabilities"), dict) else {}
+        )
         family = ""
         if isinstance(capabilities, dict):
             family_value = capabilities.get("family")
@@ -262,7 +287,9 @@ def map_to_copilot_model(
     if model_clean in available_ids:
         return model_clean
 
-    if mapped_static and (not available_ids or mapped_static in available_ids or mapped_static in families):
+    if mapped_static and (
+        not available_ids or mapped_static in available_ids or mapped_static in families
+    ):
         return mapped_static
 
     # Last attempt: hyphen-to-dot conversion when the dotted variant exists.
