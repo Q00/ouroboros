@@ -422,6 +422,18 @@ class ControlDirectiveEmission(BaseModel, frozen=True):
     parent_directive_id: str | None = None
     idempotency_key: str | None = None
 
+    @property
+    def effective_idempotency_key(self) -> tuple[str, str, str, str] | None:
+        """Return the ControlContract effective-decision key when complete."""
+        if self.target_type is None or self.target_id is None or self.idempotency_key is None:
+            return None
+        return (
+            self.target_type,
+            self.target_id,
+            self.directive,
+            self.idempotency_key,
+        )
+
 
 class OntologyLineage(BaseModel, frozen=True):
     """Tracks O₁ → O₂ → O₃ evolution across generations.
@@ -476,6 +488,31 @@ class OntologyLineage(BaseModel, frozen=True):
         return self.model_copy(
             update={"directive_emissions": self.directive_emissions + (emission,)}
         )
+
+    @property
+    def effective_directive_emissions(self) -> tuple[ControlDirectiveEmission, ...]:
+        """Return the idempotency-aware directive view for consumers.
+
+        ``directive_emissions`` is the raw audit timeline and intentionally keeps
+        every projected control event. This view is narrower: when a
+        ControlContract row carries the stable effective-decision key
+        ``(target_type, target_id, directive, idempotency_key)``, repeated rows
+        with the same key collapse to the first observed emission. Rows without a
+        complete key remain visible because the projection cannot prove they are
+        duplicates.
+        """
+        seen: set[tuple[str, str, str, str]] = set()
+        effective: list[ControlDirectiveEmission] = []
+        for emission in self.directive_emissions:
+            key = emission.effective_idempotency_key
+            if key is None:
+                effective.append(emission)
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            effective.append(emission)
+        return tuple(effective)
 
     def rewind_to(self, generation_number: int) -> OntologyLineage:
         """Return lineage truncated to the given generation.

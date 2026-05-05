@@ -391,3 +391,91 @@ class TestDirectiveProjection:
 
         assert lineage is not None
         assert [e.directive for e in lineage.directive_emissions] == ["continue"]
+
+    def test_effective_directive_view_dedupes_stable_idempotency_keys(self) -> None:
+        """The effective view collapses repeated delivery without hiding raw audit."""
+        projector = LineageProjector()
+        duplicate_key = "lin:gen2:reflect:retry1"
+        events = [
+            _event("lineage.created", {"goal": "idempotency view"}),
+            _event(
+                "control.directive.emitted",
+                {
+                    "schema_version": 1,
+                    "target_type": "lineage",
+                    "target_id": LINEAGE_ID,
+                    "directive": "retry",
+                    "reason": "First retry delivery.",
+                    "emitted_by": "evolver",
+                    "idempotency_key": duplicate_key,
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "schema_version": 1,
+                    "target_type": "lineage",
+                    "target_id": LINEAGE_ID,
+                    "directive": "retry",
+                    "reason": "Duplicate retry delivery.",
+                    "emitted_by": "evolver",
+                    "idempotency_key": duplicate_key,
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "schema_version": 1,
+                    "target_type": "lineage",
+                    "target_id": LINEAGE_ID,
+                    "directive": "unstuck",
+                    "reason": "Distinct decision.",
+                    "emitted_by": "resilience",
+                    "idempotency_key": "lin:gen2:unstuck1",
+                },
+            ),
+        ]
+
+        lineage = projector.project(events)
+
+        assert lineage is not None
+        assert [e.reason for e in lineage.directive_emissions] == [
+            "First retry delivery.",
+            "Duplicate retry delivery.",
+            "Distinct decision.",
+        ]
+        assert [e.reason for e in lineage.effective_directive_emissions] == [
+            "First retry delivery.",
+            "Distinct decision.",
+        ]
+
+    def test_effective_directive_view_keeps_rows_without_complete_keys(self) -> None:
+        """Legacy rows are not deduped when stable identity is incomplete."""
+        projector = LineageProjector()
+        events = [
+            _event("lineage.created", {"goal": "legacy idempotency"}),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Legacy retry 1.",
+                    "emitted_by": "evolver",
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Legacy retry 2.",
+                    "emitted_by": "evolver",
+                },
+            ),
+        ]
+
+        lineage = projector.project(events)
+
+        assert lineage is not None
+        assert [e.reason for e in lineage.effective_directive_emissions] == [
+            "Legacy retry 1.",
+            "Legacy retry 2.",
+        ]
