@@ -14,7 +14,7 @@ Covers (issue #514, closes #473):
 
 from datetime import UTC, datetime
 
-from ouroboros.core.lineage import LineageStatus
+from ouroboros.core.lineage import ControlDirectiveEmission, LineageStatus, OntologyLineage
 from ouroboros.events.base import BaseEvent
 from ouroboros.evolution.projector import LineageProjector
 
@@ -478,4 +478,37 @@ class TestDirectiveProjection:
         assert [e.reason for e in lineage.effective_directive_emissions] == [
             "Legacy retry 1.",
             "Legacy retry 2.",
+        ]
+
+    def test_effective_key_requires_non_empty_identity_fields(self) -> None:
+        """Blank identity fields are incomplete even if they are strings."""
+        lineage = OntologyLineage(
+            lineage_id=LINEAGE_ID,
+            goal="blank identity",
+            directive_emissions=(
+                ControlDirectiveEmission(
+                    directive="retry",
+                    reason="Blank target type.",
+                    emitted_by="evolver",
+                    timestamp=datetime.now(UTC),
+                    target_type=" ",
+                    target_id=LINEAGE_ID,
+                    idempotency_key="same",
+                ),
+                ControlDirectiveEmission(
+                    directive="retry",
+                    reason="Blank idempotency key.",
+                    emitted_by="evolver",
+                    timestamp=datetime.now(UTC),
+                    target_type="lineage",
+                    target_id=LINEAGE_ID,
+                    idempotency_key="",
+                ),
+            ),
+        )
+
+        assert [e.effective_idempotency_key for e in lineage.directive_emissions] == [None, None]
+        assert [e.reason for e in lineage.effective_directive_emissions] == [
+            "Blank target type.",
+            "Blank idempotency key.",
         ]

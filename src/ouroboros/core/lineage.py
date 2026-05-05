@@ -425,7 +425,14 @@ class ControlDirectiveEmission(BaseModel, frozen=True):
     @property
     def effective_idempotency_key(self) -> tuple[str, str, str, str] | None:
         """Return the ControlContract effective-decision key when complete."""
-        if self.target_type is None or self.target_id is None or self.idempotency_key is None:
+        if (
+            self.target_type is None
+            or self.target_id is None
+            or self.idempotency_key is None
+            or not self.target_type.strip()
+            or not self.target_id.strip()
+            or not self.idempotency_key.strip()
+        ):
             return None
         return (
             self.target_type,
