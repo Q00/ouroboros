@@ -95,14 +95,17 @@ class GeminiCLIRuntime(CodexCliRuntime):
 
         Args:
             cli_path: Optional path to the gemini binary.
-            permission_mode: Ouroboros permission level — one of
-                ``acceptEdits`` (→ ``auto_edit``) or ``bypassPermissions``
-                (→ ``yolo``). ``default`` is rejected because Gemini's
-                interactive approval mode would deadlock the subprocess
-                under ``--non-interactive``. Falls back to ``acceptEdits``
-                when omitted — non-blocking and matching the
-                orchestrator-wide default; operators must opt in to
-                ``bypassPermissions`` explicitly.
+            permission_mode: Ouroboros permission level. Recognized
+                non-blocking modes (``acceptEdits`` → ``auto_edit``,
+                ``bypassPermissions`` → ``yolo``) pass through.
+                ``"default"`` is the orchestrator-wide setting that
+                represents an interactive prompt; the headless Gemini
+                runtime cannot honour it, so it is normalized to
+                ``acceptEdits`` with an audit log instead of failing
+                — that keeps a globally valid config working while
+                avoiding the deadlock under ``--non-interactive``.
+                Falls back to ``acceptEdits`` when omitted; operators
+                must opt in to ``bypassPermissions`` explicitly.
             model: Optional model identifier.
             cwd: Optional working directory for the subprocess.
             skills_dir: Optional directory for skill definitions.
@@ -126,16 +129,20 @@ class GeminiCLIRuntime(CodexCliRuntime):
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
         """Validate and normalize the Gemini CLI permission mode.
 
-        ``None`` resolves to :data:`_GEMINI_DEFAULT_PERMISSION_MODE`
+        ``None`` and the orchestrator-wide ``"default"`` setting both
+        resolve to :data:`_GEMINI_DEFAULT_PERMISSION_MODE`
         (``acceptEdits`` → ``auto_edit``, non-blocking under
-        ``--non-interactive``). Only the non-blocking Ouroboros modes
-        (``acceptEdits``, ``bypassPermissions``) are accepted.
+        ``--non-interactive``). ``config.orchestrator.permission_mode``
+        accepts ``"default"`` as a valid global setting, so the
+        backend-specific contract narrows it at the boundary rather
+        than turning a previously valid config into a hard error: a
+        prompt-driven ``--approval-mode default`` would wedge a headless
+        subprocess.
 
-        ``"default"`` is rejected with a tailored error: this runtime
-        always launches Gemini with ``--non-interactive`` and would
-        wedge indefinitely on the first approval prompt. Anything else
-        raises ``ValueError`` too — fail-open on a permission boundary
-        would let a typo (or unchecked
+        Other recognized Ouroboros modes (``acceptEdits``,
+        ``bypassPermissions``) pass through. Anything else raises
+        ``ValueError`` instead of silently falling back — fail-open on
+        a permission boundary would let a typo (or unchecked
         ``OUROBOROS_AGENT_PERMISSION_MODE`` value) escalate the runtime.
         Matches the Codex permission parser contract.
         """
@@ -145,13 +152,17 @@ class GeminiCLIRuntime(CodexCliRuntime):
         if candidate in _GEMINI_PERMISSION_MODES:
             return candidate
         if candidate == "default":
-            msg = (
-                "Gemini CLI runs headless (--non-interactive); 'default' "
-                "would block on the first approval prompt. Use 'acceptEdits' "
-                "for the conservative non-blocking path or 'bypassPermissions' "
-                "for full bypass."
+            log.warning(
+                "gemini_cli_runtime.permission_mode_coerced",
+                requested="default",
+                resolved=_GEMINI_DEFAULT_PERMISSION_MODE,
+                reason=(
+                    "Gemini runtime is headless (--non-interactive); the "
+                    "interactive 'default' approval mode would block, so it "
+                    "is normalized to the safe non-blocking equivalent."
+                ),
             )
-            raise ValueError(msg)
+            return _GEMINI_DEFAULT_PERMISSION_MODE
         msg = (
             f"Unsupported Gemini permission mode: {permission_mode!r} "
             f"(expected one of {sorted(_GEMINI_PERMISSION_MODES)})"

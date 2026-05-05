@@ -134,11 +134,28 @@ def test_build_command_maps_accept_edits_to_auto_edit() -> None:
     assert _approval_flag(cmd) == "auto_edit"
 
 
-def test_default_permission_mode_rejected_with_helpful_error() -> None:
-    """The interactive ``default`` mode would deadlock the headless subprocess
-    on the first approval prompt; the runtime rejects it with guidance."""
-    with pytest.raises(ValueError, match="Gemini CLI runs headless"):
-        GeminiCLIRuntime(cli_path="/usr/bin/gemini", permission_mode="default")
+def test_default_permission_mode_normalized_to_accept_edits() -> None:
+    """``config.orchestrator.permission_mode`` validly accepts ``default``.
+
+    The headless Gemini runtime cannot honour the interactive ``default`` mode,
+    so it is normalized to ``acceptEdits``/``auto_edit`` (non-blocking) with an
+    audit log entry rather than turning a previously valid global config into
+    a hard runtime-creation failure.
+    """
+    from structlog.testing import capture_logs
+
+    with capture_logs() as cap_logs:
+        runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini", permission_mode="default")
+
+    assert runtime.permission_mode == "acceptEdits"
+    cmd = runtime._build_command("/tmp/unused", prompt="x")
+    assert _approval_flag(cmd) == "auto_edit"
+    coerced = [
+        e for e in cap_logs if e.get("event") == "gemini_cli_runtime.permission_mode_coerced"
+    ]
+    assert len(coerced) == 1
+    assert coerced[0]["requested"] == "default"
+    assert coerced[0]["resolved"] == "acceptEdits"
 
 
 def test_build_command_uses_auto_edit_when_permission_mode_omitted() -> None:
