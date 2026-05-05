@@ -1939,8 +1939,8 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex, OpenCode) and configures
-    Ouroboros to use the selected backend.
+    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro)
+    and configures Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
     [dim]    ouroboros setup                      # auto-detect[/dim]

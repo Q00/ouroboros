@@ -689,7 +689,7 @@ ouroboros mcp serve [OPTIONS]
 | `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` is only a client config alias for outbound MCP connections and is NOT a valid serve transport. |
 | `--db TEXT` | Path to the EventStore database file |
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`, `gemini`, `kiro`). Affects which tool variants are instantiated |
 
 **Examples:**
 
@@ -771,7 +771,7 @@ ouroboros mcp info [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`, `gemini`, `kiro`). Affects which tool variants are instantiated |
 
 **Available Tools:**
 
