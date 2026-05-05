@@ -520,6 +520,26 @@ def test_auto_answerer_allows_safe_production_and_project_feature_questions() ->
         assert "runtime_context" not in updated_sections
 
 
+def test_auto_answerer_preserves_product_runtime_status_semantics() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Should the app display runtime status?",
+        "What runtime status should the app display?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(
+            question,
+            SeedDraftLedger.from_goal("Build an operations dashboard"),
+        )
+
+        assert answer.blocker is None
+        assert "product behavior" in answer.text.lower()
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert {"constraints", "acceptance_criteria"} <= updated_sections
+        assert "runtime_context" not in updated_sections
+
+
 def test_ledger_marks_same_key_conflicting_values_as_open_gap() -> None:
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     ledger.add_entry(

@@ -117,17 +117,7 @@ class AutoAnswerer:
             return self._feature_acceptance_answer(question)
         if _is_actor_or_io_question(lowered):
             return self._io_actor_answer(question)
-        if _matches_any(
-            lowered,
-            (
-                r"\bruntime\b",
-                r"\bstack\b",
-                r"\brepository runtime\b",
-                r"\bframework\b",
-                r"\bproject structure\b",
-                r"\bproject runtime\b",
-            ),
-        ):
+        if _is_runtime_context_question(lowered):
             return self._runtime_answer(question, context)
         if _is_product_behavior_question(lowered):
             return self._product_behavior_answer(question)
@@ -477,6 +467,28 @@ def _acceptance_subject(question: str) -> str:
 def _slug_key(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     return slug[:64] or "requested_behavior"
+
+
+def _is_runtime_context_question(lowered: str) -> bool:
+    runtime_terms = (
+        r"runtime",
+        r"stack",
+        r"repository runtime",
+        r"framework",
+        r"package manager",
+        r"project structure",
+        r"project runtime",
+    )
+    runtime_term = r"(?:" + "|".join(runtime_terms) + r")"
+    selection_verbs = (
+        r"(?:use|used|choose|select|configure|adopt|manage|managed|structure|organize)"
+    )
+
+    return bool(
+        re.search(rf"\b(which|what)\b.+\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
+        or re.search(rf"\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
+        or re.search(rf"\b{selection_verbs}\b.+\b{runtime_term}\b", lowered)
+    )
 
 
 def _is_product_behavior_question(lowered: str) -> bool:
