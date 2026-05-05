@@ -134,13 +134,11 @@ def test_build_command_maps_accept_edits_to_auto_edit() -> None:
     assert _approval_flag(cmd) == "auto_edit"
 
 
-def test_build_command_maps_default_to_default() -> None:
-    runtime = GeminiCLIRuntime(
-        cli_path="/usr/bin/gemini",
-        permission_mode="default",
-    )
-    cmd = runtime._build_command("/tmp/unused", prompt="x")
-    assert _approval_flag(cmd) == "default"
+def test_default_permission_mode_rejected_with_helpful_error() -> None:
+    """The interactive ``default`` mode would deadlock the headless subprocess
+    on the first approval prompt; the runtime rejects it with guidance."""
+    with pytest.raises(ValueError, match="Gemini CLI runs headless"):
+        GeminiCLIRuntime(cli_path="/usr/bin/gemini", permission_mode="default")
 
 
 def test_build_command_uses_auto_edit_when_permission_mode_omitted() -> None:
