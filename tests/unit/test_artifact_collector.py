@@ -85,7 +85,20 @@ class TestArtifactCollector:
         bundle = collector.collect(output, project_dir=tmpdir)
         assert bundle.total_chars == 300
 
-    def test_ac_association_extraction(self) -> None:
+    def test_task_association_extraction(self) -> None:
+        tmpdir = self._create_project({"task.py": "code"})
+        path = os.path.join(tmpdir, "task.py")
+        output = (
+            f"### Task 2: [COMPLETED] Create tasks\nWrite: {path}\n"
+            "### Task 3: [FAILED] Delete tasks\nOther stuff\n"
+        )
+
+        collector = ArtifactCollector()
+        bundle = collector.collect(output, project_dir=tmpdir)
+        assert len(bundle.files) == 1
+        assert 1 in bundle.files[0].ac_indices  # Task 2 → source AC index 1
+
+    def test_legacy_ac_association_extraction_remains_supported(self) -> None:
         tmpdir = self._create_project({"task.py": "code"})
         path = os.path.join(tmpdir, "task.py")
         output = f"### AC 2: [PASS] Create tasks\nWrite: {path}\n### AC 3: [FAIL] Delete tasks\nOther stuff\n"
@@ -93,15 +106,15 @@ class TestArtifactCollector:
         collector = ArtifactCollector()
         bundle = collector.collect(output, project_dir=tmpdir)
         assert len(bundle.files) == 1
-        assert 1 in bundle.files[0].ac_indices  # AC 2 → 0-based index 1
+        assert 1 in bundle.files[0].ac_indices  # Legacy AC 2 → source AC index 1
 
-    def test_collects_file_from_sub_ac_report_format(self) -> None:
+    def test_collects_file_from_subtask_report_format(self) -> None:
         tmpdir = self._create_project({"task_store.py": "TASKS = []\n"})
         path = os.path.join(tmpdir, "task_store.py")
         output = (
-            "### AC 1: [PASS] Create tasks\n"
-            "Decomposed into 1 Sub-ACs\n\n"
-            "#### Sub-AC 1.1: [PASS] Create task storage\n"
+            "### Task 1: [COMPLETED] Create tasks\n"
+            "Decomposed into 1 Subtasks\n\n"
+            "#### Subtask 1.1: [COMPLETED] Create task storage\n"
             "File Changes:\n"
             f"- Write: {path}\n"
             "Result:\n"

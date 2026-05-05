@@ -193,6 +193,29 @@ Parallel Execution Verification Report
         assert summary.execution_completion_status == "failed"
         assert summary.run_verdict_passed is False
 
+    def test_current_task_report_maps_to_task_results_not_ac_verdicts(self) -> None:
+        """Current Task COMPLETED/FAILED lines are worker task completion signals."""
+        seed = SimpleNamespace(acceptance_criteria=("Implement feature", "Add tests"))
+        artifact = """
+Parallel Execution Verification Report
+
+## Task Results
+### Task 1: [COMPLETED] Implement feature
+### Task 2: [FAILED] Add tests
+""".strip()
+
+        summary = _parse_legacy_execution_task_summary(artifact, seed)
+
+        assert summary is not None
+        assert summary.ac_results == ()
+        assert [task.status for task in summary.task_results] == ["completed", "failed"]
+        assert [task.execution_method for task in summary.task_results] == [
+            "parallel_report",
+            "parallel_report",
+        ]
+        assert summary.drift_score is None
+        assert summary.approval_status == "not_evaluated"
+
     def test_legacy_execution_report_completion_does_not_approve_without_evaluation(self) -> None:
         """All worker tasks completing still requires a separate formal AC verdict."""
         seed = SimpleNamespace(acceptance_criteria=("Implement feature",))
@@ -649,8 +672,8 @@ Success: 1/1
 ## Feedback Metadata
 Feedback Metadata JSON: {"feedback_metadata": [{"code": "decomposition_depth_warning", "details": {"affected_ac_paths": ["1.1.1"], "affected_count": 1, "max_depth": 3}, "message": "Recursive decomposition reached the soft depth safety net; affected leaves were forced to atomic execution.", "severity": "warning", "source": "parallel_executor"}]}
 
-## AC Results
-### AC 1: [PASS] Ship feature
+## Task Results
+### Task 1: [COMPLETED] Ship feature
 """.strip()
 
         feedback = _extract_feedback_metadata_from_artifact(artifact)

@@ -343,12 +343,12 @@ class ArtifactCollector:
         indices: list[int] = []
         basename = os.path.basename(file_path)
 
-        # Look for AC sections that reference this file
-        ac_sections = re.split(r"### AC (\d+):", output)
-        for i in range(1, len(ac_sections) - 1, 2):
-            ac_num = int(ac_sections[i])
-            section_text = ac_sections[i + 1].split("### AC")[0]
+        # Look for current Task sections and legacy AC sections that reference this file.
+        sections = re.split(r"### (?:Task|AC) (\d+):", output)
+        for i in range(1, len(sections) - 1, 2):
+            task_num = int(sections[i])
+            section_text = re.split(r"### (?:Task|AC) \d+:", sections[i + 1])[0]
             if basename in section_text or file_path in section_text:
-                indices.append(ac_num - 1)  # Convert to 0-based
+                indices.append(task_num - 1)  # Convert to 0-based
 
         return indices
