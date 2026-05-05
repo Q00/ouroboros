@@ -18,13 +18,18 @@ ooo ralph "<your request>"
 
 ## How It Works
 
-Ralph is owned by the `ouroboros_ralph` MCP tool. The tool starts one
-background Ralph job, runs repeated `evolve_step` generations inside that job,
-and stops only when QA passes, convergence is reached, a terminal evolution
-action occurs, cancellation is requested, or `max_generations` is reached.
+Ralph is owned by the `ouroboros_ralph` MCP tool. In non-plugin runtimes, the
+tool starts one background Ralph job, runs repeated `evolve_step` generations
+inside that job, and stops only when QA passes, convergence is reached, a
+terminal evolution action occurs, cancellation is requested, or
+`max_generations` is reached. In OpenCode plugin mode, the MCP tool returns a
+`delegated_to_plugin` envelope with `job_id=None`; the bridge plugin dispatches
+a child Task session that owns the loop instead of creating a local JobManager
+job.
 
-The client skill should not reimplement the loop. It should start the MCP job
-and monitor it with the normal job tools.
+The client skill should not reimplement the loop. It should start the MCP-owned
+Ralph surface once, then follow either the returned job tools path or the
+OpenCode Task widget path.
 
 ## Instructions
 
@@ -77,23 +82,30 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
    - `project_dir`: explicit target project directory when known
    - `max_generations`: default `10` unless the user requests a tighter bound
 
-3. **Report the returned job id** concisely and retain the job cursor from
-   `response.meta.cursor`:
+3. **Handle the start response**:
+   - If `response.meta.job_id` is present, report it concisely and retain the
+     job cursor from `response.meta.cursor`:
 
-   ```
-   [Ralph] Started background loop: <job_id>
-   Lineage: <lineage_id>
-   ```
+     ```
+     [Ralph] Started background loop: <job_id>
+     Lineage: <lineage_id>
+     ```
 
-4. **Monitor progress** with job tooling:
+   - If `response.meta.status == "delegated_to_plugin"` and
+     `response.meta.job_id is None`, report that OpenCode plugin mode delegated
+     the loop to a child Task session. Do not call `ouroboros_job_wait`,
+     `ouroboros_job_result`, or `ouroboros_cancel_job` without a job id; follow
+     the host Task widget/session lifecycle instead.
+
+4. **Monitor non-plugin job progress** with job tooling when a `job_id` exists:
    - `ouroboros_job_wait(job_id, cursor, timeout_seconds=120)` for long polling;
      after every wait/status response, update `cursor = response.meta.cursor`
    - `ouroboros_job_status(job_id)` for a quick status check
    - `ouroboros_job_result(job_id)` when the job is terminal
    - `ouroboros_cancel_job(job_id)` if the user says stop/cancel
 
-5. **On termination**, fetch `ouroboros_job_result(job_id)` and summarize the
-   final job result and next step:
+5. **On non-plugin job termination**, fetch `ouroboros_job_result(job_id)` and
+   summarize the final job result and next step:
    - Success / convergence: summarize the final generation output, QA verdict,
      and any `worktree_path` / `worktree_branch` returned in job metadata. Do not
      present `ooo evaluate` as an automatic next step for Ralph results: the
@@ -107,6 +119,10 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
    - Max generations / failure: summarize the stop reason and suggest
      `ooo unstuck`, `ooo interview`, or a narrower Ralph retry
    - Cancelled: confirm cancellation and preserve the job id for later inspection
+
+6. **On OpenCode plugin delegation**, rely on the child Task result as the
+   terminal surface. Summarize the Task completion/error state and lineage id; do
+   not claim a local Ralph job can be polled or cancelled.
 
 ## Tool Mapping
 
