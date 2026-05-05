@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 import logging
 from typing import Any, Final, Protocol
@@ -181,6 +182,12 @@ def project_agent_process_snapshot(
             status = AgentProcessStatus(raw_status)
         except ValueError:
             continue
+        timestamp = getattr(event, "timestamp", None)
+        if not isinstance(timestamp, datetime):
+            continue
+        event_id = getattr(event, "id", None)
+        if not isinstance(event_id, str):
+            continue
 
         raw_intent = extra.get("intent")
         intent = raw_intent if isinstance(raw_intent, str) and raw_intent else None
@@ -190,8 +197,8 @@ def project_agent_process_snapshot(
 
     valid_events.sort(
         key=lambda item: (
-            getattr(item[1], "timestamp", None),
-            getattr(item[1], "id", ""),
+            item[1].timestamp,
+            item[1].id,
             item[0],
         )
     )

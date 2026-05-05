@@ -473,6 +473,39 @@ def test_agent_process_snapshot_matches_event_store_order_for_timestamp_ties() -
     assert snapshot.last_reason == "ralph: spawned"
 
 
+def test_agent_process_snapshot_skips_rows_without_comparable_ordering() -> None:
+    """Malformed event-like rows without timestamp/id should not crash sorting."""
+
+    class _NoTimestampEvent:
+        type = "control.directive.emitted"
+        aggregate_type = "agent_process"
+        aggregate_id = "proc-wanted"
+        data = {
+            "reason": "bad",
+            "extra": {"lifecycle_status": "completed", "intent": "bad"},
+        }
+
+    valid = BaseEvent(
+        id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        type="control.directive.emitted",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={
+            "reason": "ralph: spawned",
+            "extra": {"lifecycle_status": "running", "intent": "ralph"},
+        },
+    )
+
+    snapshot = project_agent_process_snapshot(
+        [_NoTimestampEvent(), valid], process_id="proc-wanted"
+    )
+
+    assert snapshot is not None
+    assert snapshot.status is AgentProcessStatus.RUNNING
+    assert snapshot.intent == "ralph"
+
+
 @pytest.mark.asyncio
 async def test_status_is_running_immediately_after_spawn() -> None:
     process = AgentProcess(event_store=None)
