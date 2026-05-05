@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 from ouroboros.copilot import model_discovery as md
 
-
 _FAKE_API_PAYLOAD: dict[str, Any] = {
     "data": [
         {
@@ -39,7 +38,7 @@ class _FakeUrlResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._raw = json.dumps(payload).encode("utf-8")
 
-    def __enter__(self) -> "_FakeUrlResponse":
+    def __enter__(self) -> _FakeUrlResponse:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:

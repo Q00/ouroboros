@@ -1148,7 +1148,7 @@ def _register_copilot_mcp_server() -> None:
             data = json.loads(mcp_path.read_text(encoding="utf-8")) or {}
         except json.JSONDecodeError:
             print_warning(
-                f"~/.copilot/mcp-config.json is not valid JSON — leaving it untouched."
+                "~/.copilot/mcp-config.json is not valid JSON — leaving it untouched."
             )
             return
 

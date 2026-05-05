@@ -9,12 +9,12 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import IOJournalRecorder
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.factory import (
     create_llm_adapter,
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
-from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
