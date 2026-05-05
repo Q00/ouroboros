@@ -182,3 +182,55 @@ class TestParseEvolveText:
 """
         result = parse_evolve_text(text)
         assert result["similarity"] == pytest.approx(0.0, abs=1e-4)
+
+
+class _FakeContent:
+    type = "text"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeToolResult:
+    def __init__(self, text: str, *, is_error: bool = False) -> None:
+        self.content = [_FakeContent(text)]
+        self.isError = is_error
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def call_tool(self, name: str, args: dict[str, object]) -> _FakeToolResult:
+        self.calls.append((name, dict(args)))
+        if name == "ouroboros_lateral_think":
+            return _FakeToolResult("ok")
+        if len([call for call in self.calls if call[0] == "ouroboros_evolve_step"]) == 1:
+            return _FakeToolResult(STAGNATED_TEXT)
+        return _FakeToolResult(CONTINUE_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_call_evolve_forwards_project_dir_initial_and_retry(tmp_path: Path) -> None:
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: Test\n", encoding="utf-8")
+    session = _FakeSession()
+    args = _ralph.argparse.Namespace(
+        lineage_id="lin_input",
+        project_dir="/tmp/project with spaces",
+        seed_file=str(seed_file),
+        no_execute=False,
+        no_parallel=True,
+        no_qa=True,
+        max_retries=1,
+    )
+
+    result = await _ralph._call_evolve(session, args)
+
+    assert result["action"] == "continue"
+    evolve_calls = [args for name, args in session.calls if name == "ouroboros_evolve_step"]
+    assert evolve_calls[0]["project_dir"] == "/tmp/project with spaces"
+    assert evolve_calls[0]["seed_content"] == "goal: Test\n"
+    assert evolve_calls[0]["parallel"] is False
+    assert evolve_calls[0]["skip_qa"] is True
+    assert evolve_calls[1]["project_dir"] == "/tmp/project with spaces"

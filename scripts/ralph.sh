@@ -102,14 +102,18 @@ tag_generation() {
 
     (cd "$git_dir" && git rev-parse --is-inside-work-tree >/dev/null 2>&1) || return 0
 
-    # Auto-commit: commit any changes from this generation
-    (cd "$git_dir" && git diff --quiet HEAD 2>/dev/null || \
-       git diff --cached --quiet 2>/dev/null || \
-       [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]) && {
+    # Auto-commit: commit any changes from this generation. Keep the dirty
+    # check inside the target repo and preserve the original semantics:
+    # unstaged, staged, or untracked files should trigger a snapshot commit.
+    if (cd "$git_dir" && \
+        { ! git diff --quiet HEAD 2>/dev/null || \
+          ! git diff --cached --quiet 2>/dev/null || \
+          [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; }); then
         (cd "$git_dir" && git add -A >/dev/null 2>&1 || true)
-        (cd "$git_dir" && git commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1 || true)
-        log "Committed changes for gen ${gen}"
-    }
+        if (cd "$git_dir" && git commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1); then
+            log "Committed changes for gen ${gen}"
+        fi
+    fi
 
     # Overwrite tag if it already exists (re-run scenario)
     (cd "$git_dir" && git tag -f "$tag" >/dev/null 2>&1 || true)
@@ -155,7 +159,9 @@ rollback_to_previous() {
 
 # ── Build common python args ────────────────────────────────────────────────
 build_py_args() {
-    local -a py_args=("--lineage-id" "$LINEAGE_ID" "--max-retries" "$MAX_RETRIES")
+    # Mutate the caller-visible array directly. Returning arrays through command
+    # substitution would split path-like values such as --project-dir "My App".
+    py_args=("--lineage-id" "$LINEAGE_ID" "--max-retries" "$MAX_RETRIES")
 
     if [[ -n "$PROJECT_DIR" ]]; then
         py_args+=("--project-dir" "$PROJECT_DIR")
@@ -175,8 +181,6 @@ build_py_args() {
     fi
     # NOTE: --server-args is NOT included here.
     # It uses REMAINDER and must be appended LAST in the main loop.
-
-    echo "${py_args[@]}"
 }
 
 # ── Main loop ───────────────────────────────────────────────────────────────
@@ -188,8 +192,10 @@ log "Starting Ralph loop for lineage=${LINEAGE_ID} max_cycles=${MAX_CYCLES}"
 while (( cycle < MAX_CYCLES )); do
     cycle=$((cycle + 1))
 
-    # Build per-cycle args
-    py_args=($(build_py_args))
+    # Build per-cycle args. build_py_args writes the array in-place so
+    # path-like values containing spaces remain a single argv entry.
+    py_args=()
+    build_py_args
 
     # Cycle 1: include seed file; Cycle 2+: omit it
     if (( cycle == 1 )) && [[ -n "$SEED_FILE" ]]; then
