@@ -112,14 +112,27 @@ class GeminiCLIRuntime(CodexCliRuntime):
     # -- Permission mode overrides -----------------------------------------
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
-        """Normalize the permission mode for Gemini CLI.
+        """Validate and normalize the Gemini CLI permission mode.
 
-        Gemini CLI has its own internal permission model.  Ouroboros modes
-        are stored for metadata purposes but no permission flags are emitted.
+        ``None`` resolves to :data:`_GEMINI_DEFAULT_PERMISSION_MODE`
+        (``bypassPermissions``) so headless runs do not stall on a
+        prompt; recognized Ouroboros modes (``default``, ``acceptEdits``,
+        ``bypassPermissions``) pass through. Anything else raises
+        ``ValueError`` instead of silently falling back — fail-open on a
+        permission boundary would let a typo (or unchecked
+        ``OUROBOROS_AGENT_PERMISSION_MODE`` value) escalate the runtime
+        to ``yolo``. Matches the Codex permission parser contract.
         """
-        if permission_mode and permission_mode in _GEMINI_PERMISSION_MODES:
-            return permission_mode
-        return _GEMINI_DEFAULT_PERMISSION_MODE
+        if permission_mode is None:
+            return _GEMINI_DEFAULT_PERMISSION_MODE
+        candidate = permission_mode.strip()
+        if candidate in _GEMINI_PERMISSION_MODES:
+            return candidate
+        msg = (
+            f"Unsupported Gemini permission mode: {permission_mode!r} "
+            f"(expected one of {sorted(_GEMINI_PERMISSION_MODES)})"
+        )
+        raise ValueError(msg)
 
     def _build_permission_args(self) -> list[str]:
         """Return empty list — Gemini CLI has no Codex-style permission flags."""

@@ -150,16 +150,26 @@ def test_build_command_uses_yolo_when_permission_mode_omitted() -> None:
     assert _approval_flag(cmd) == "yolo"
 
 
-def test_unknown_permission_mode_resolves_to_yolo() -> None:
-    """Unknown modes are coerced to ``bypassPermissions`` by
-    ``_resolve_permission_mode`` and emit ``yolo`` at command-build time."""
-    runtime = GeminiCLIRuntime(
-        cli_path="/usr/bin/gemini",
-        permission_mode="totally-unknown-mode",
-    )
+def test_unknown_permission_mode_raises_value_error() -> None:
+    """An unrecognized mode (e.g. typo) must fail fast — silent fallback to
+    ``bypassPermissions`` would escalate any unchecked input to full bypass."""
+    with pytest.raises(ValueError, match="Unsupported Gemini permission mode"):
+        GeminiCLIRuntime(
+            cli_path="/usr/bin/gemini",
+            permission_mode="acceptedits",  # plausible typo of "acceptEdits"
+        )
+
+
+def test_omitted_permission_mode_resolves_to_bypass() -> None:
+    """``None`` keeps the headless-safe default (``bypassPermissions`` → yolo)."""
+    runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini")
     assert runtime.permission_mode == "bypassPermissions"
-    cmd = runtime._build_command("/tmp/unused", prompt="x")
-    assert _approval_flag(cmd) == "yolo"
+
+
+def test_empty_string_permission_mode_raises() -> None:
+    """Empty/whitespace-only strings are not a valid mode either."""
+    with pytest.raises(ValueError, match="Unsupported Gemini permission mode"):
+        GeminiCLIRuntime(cli_path="/usr/bin/gemini", permission_mode="   ")
 
 
 def test_runtime_does_not_feed_prompt_via_stdin() -> None:
