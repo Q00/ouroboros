@@ -183,14 +183,17 @@ def project_agent_process_snapshot(
             continue
 
         raw_intent = extra.get("intent")
-        intent = raw_intent if isinstance(raw_intent, str) and raw_intent else None
-        reason = data.get("reason")
+        if not isinstance(raw_intent, str) or not raw_intent:
+            continue
+        raw_reason = data.get("reason")
+        if not isinstance(raw_reason, str) or not raw_reason:
+            continue
         snapshot = AgentProcessSnapshot(
             process_id=event_process_id,
             status=status,
-            intent=intent,
+            intent=raw_intent,
             directive_count=(snapshot.directive_count if snapshot is not None else 0) + 1,
-            last_reason=reason if isinstance(reason, str) else None,
+            last_reason=raw_reason,
         )
 
     return snapshot

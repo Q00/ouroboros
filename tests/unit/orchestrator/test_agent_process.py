@@ -402,6 +402,43 @@ async def test_agent_process_snapshot_ignores_other_processes_and_malformed_rows
 
 
 @pytest.mark.asyncio
+async def test_agent_process_snapshot_skips_partial_rows_after_valid_state() -> None:
+    """Partial lifecycle rows must not erase an already valid projection."""
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):
+        return None
+
+    handle = await process.spawn(intent="evolve_step", work_fn=work, process_id="proc-wanted")
+    await handle.wait_until_complete(timeout=1.0)
+
+    partial_without_intent = BaseEvent(
+        type="control.directive.emitted",
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={"reason": "bad partial", "extra": {"lifecycle_status": "cancelled"}},
+    )
+    partial_without_reason = BaseEvent(
+        type="control.directive.emitted",
+        aggregate_type="agent_process",
+        aggregate_id="proc-wanted",
+        data={"extra": {"lifecycle_status": "paused", "intent": "bad"}},
+    )
+
+    snapshot = project_agent_process_snapshot(
+        [*store.appended, partial_without_intent, partial_without_reason],
+        process_id="proc-wanted",
+    )
+
+    assert snapshot is not None
+    assert snapshot.intent == "evolve_step"
+    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.directive_count == 2
+    assert snapshot.last_reason == "evolve_step: work returned"
+
+
+@pytest.mark.asyncio
 async def test_status_is_running_immediately_after_spawn() -> None:
     process = AgentProcess(event_store=None)
     started = asyncio.Event()
