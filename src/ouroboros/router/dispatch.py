@@ -379,11 +379,32 @@ def _coerce_named_option_value(value: str | bool) -> str | int | bool:
     return value
 
 
+def _collect_dispatch_template_names(value: Any) -> set[str]:
+    """Return named placeholders referenced by a frontmatter dispatch mapping."""
+    names: set[str] = set()
+    if isinstance(value, str):
+        exact = _DISPATCH_TEMPLATE_EXACT_PATTERN.fullmatch(value)
+        if exact is not None:
+            names.add(exact.group("name"))
+            return names
+        names.update(match.group(0)[1:] for match in _DISPATCH_TEMPLATE_PATTERN.finditer(value))
+        return names
+    if isinstance(value, Mapping):
+        for item in value.values():
+            names.update(_collect_dispatch_template_names(item))
+        return names
+    if isinstance(value, list):
+        for item in value:
+            names.update(_collect_dispatch_template_names(item))
+    return names
+
+
 def _extract_dispatch_template_values(
     remainder: str | None,
     *,
     first_argument: str | None,
     cwd: str | Path,
+    extra_value_option_names: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Build template values from deterministic command arguments.
 
@@ -392,6 +413,8 @@ def _extract_dispatch_template_values(
     from long ``--kebab-case`` options, while ``$args``/``$goal`` contain the
     shell-normalized positional payload with those options removed.
     """
+    value_option_names = _VALUE_OPTION_NAMES | extra_value_option_names
+    control_option_names = _BOOLEAN_OPTION_NAMES | value_option_names
     values: dict[str, Any] = {
         "1": first_argument or "",
         "CWD": str(cwd),
@@ -400,6 +423,8 @@ def _extract_dispatch_template_values(
         "max_interview_rounds": "",
         "max_repair_rounds": "",
     }
+    for option_name in extra_value_option_names:
+        values.setdefault(option_name, "")
     tokens = _shell_split_remainder(remainder)
     if not tokens and first_argument:
         # Multiline payloads intentionally skip shell tokenization so Seed YAML
@@ -447,19 +472,26 @@ def _extract_dispatch_template_values(
         return token[2:].split("=", 1)[0].strip().replace("-", "_")
 
     def control_suffix_starts_at(start: int) -> bool:
+        first_suffix_option = option_name_for(tokens[start])
+        if (
+            positional_count > 1
+            and not parse_trailing_options
+            and first_suffix_option in extra_value_option_names
+        ):
+            return False
         suffix_index = start
         while suffix_index < len(tokens):
             suffix_token = tokens[suffix_index]
             if not suffix_token.startswith("--") or suffix_token == "--":
                 return False
             suffix_option_name = option_name_for(suffix_token)
-            if suffix_option_name not in _CONTROL_OPTION_NAMES:
+            if suffix_option_name not in control_option_names:
                 return False
             if "=" in suffix_token or suffix_option_name in _BOOLEAN_OPTION_NAMES:
                 suffix_index += 1
                 continue
             if (
-                suffix_option_name in _VALUE_OPTION_NAMES
+                suffix_option_name in value_option_names
                 and suffix_index + 1 < len(tokens)
                 and not tokens[suffix_index + 1].startswith("--")
             ):
@@ -490,7 +522,7 @@ def _extract_dispatch_template_values(
             index += 1
             continue
         option_name = option.split("=", 1)[0].strip().replace("-", "_")
-        if option_name not in _CONTROL_OPTION_NAMES:
+        if option_name not in control_option_names:
             append_positional(token)
             index += 1
             continue
@@ -504,7 +536,10 @@ def _extract_dispatch_template_values(
             raw_name = option
             option_value = tokens[index + 1]
             index += 1
-        elif option_name in _VALUE_OPTION_NAMES:
+        elif option_name in extra_value_option_names:
+            raw_name = option
+            option_value = ""
+        elif option_name in value_option_names:
             raise ValueError(f"--{option} requires a value")
         else:
             raw_name = option
@@ -644,10 +679,19 @@ def resolve_parsed_skill_dispatch(
     first_argument = extract_first_argument(parsed.remainder)
     mcp_tool, mcp_args = normalized
     try:
+        template_names = _collect_dispatch_template_names(mcp_args)
+        extra_value_option_names = frozenset(
+            name
+            for name in template_names
+            if name not in {"1", "CWD", "args", "goal"}
+            and name not in _VALUE_OPTION_NAMES
+            and name not in _BOOLEAN_OPTION_NAMES
+        )
         template_values = _extract_dispatch_template_values(
             parsed.remainder,
             first_argument=first_argument,
             cwd=cwd,
+            extra_value_option_names=extra_value_option_names,
         )
         resolved_mcp_args = resolve_dispatch_templates(
             mcp_args,
