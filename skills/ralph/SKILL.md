@@ -76,8 +76,9 @@ When the user invokes this skill:
            wait_result = await job_wait(job_id, cursor, timeout_seconds=120)
            cursor = wait_result.meta["cursor"]
            status = wait_result.meta["status"]
-           # Parse Task progress from response, report only on level completion
-           current_completed = <parse Task completed from response>
+           # Metadata keys remain legacy-compatible (`ac_completed` / `sub_ac_completed`).
+           # Interpret and relay those counters as Task/Subtask progress.
+           current_completed = wait_result.meta["ac_completed"]
            if current_completed > prev_completed:
                # Report progress concisely (one line per poll)
                print: [Level complete] Task: {current_completed}/{total} | Phase: {phase}
