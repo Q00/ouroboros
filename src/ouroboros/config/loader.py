@@ -864,6 +864,40 @@ def get_codex_cli_path() -> str | None:
     return None
 
 
+def get_copilot_cli_path() -> str | None:
+    """Get GitHub Copilot CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_COPILOT_CLI_PATH environment variable
+        2. config.yaml orchestrator.copilot_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Stale env var / config values that don't point to an executable are
+    treated as missing so setup discovery can fall back to PATH instead of
+    persisting an unusable explicit path.
+
+    Returns:
+        Path to Copilot CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_COPILOT_CLI_PATH", "").strip()
+    if env_path:
+        resolved = str(Path(env_path).expanduser())
+        if shutil.which(resolved):
+            return resolved
+
+    try:
+        config = load_config()
+        copilot_path = getattr(config.orchestrator, "copilot_cli_path", None)
+        if copilot_path:
+            resolved = str(Path(copilot_path).expanduser())
+            if shutil.which(resolved):
+                return resolved
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_kiro_cli_path() -> str | None:
     """Get Kiro CLI path from environment variable or config file.
 
@@ -1025,6 +1059,8 @@ def get_llm_backend() -> str:
         "claude": "claude",
         "claude_code": "claude_code",
         "codex": "codex",
+        "copilot": "copilot",
+        "copilot_cli": "copilot",
         "gemini": "gemini",
         "kiro": "kiro",
         "kiro_cli": "kiro",

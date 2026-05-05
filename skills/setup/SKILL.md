@@ -11,6 +11,14 @@ Guided onboarding wizard that converts users into power users.
 > This skill runs inside a Claude Code session. For other runtime backends, the CLI `ouroboros setup` command handles configuration.
 > For full install and onboarding instructions, see [Getting Started](docs/getting-started.md).
 
+> **GitHub Copilot CLI users**: Run `ouroboros setup --runtime copilot` (after `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`). Setup will:
+>
+> 1. Live-discover available models from the GitHub Copilot models API (uses `gh auth token`) and let you pick a default. A bundled fallback list is used when offline.
+> 2. Write `orchestrator.runtime_backend = copilot` and `llm.backend = copilot` plus your chosen default into `~/.ouroboros/config.yaml`.
+> 3. Register the MCP server in `~/.copilot/mcp-config.json` so the next `copilot` session can call `ooo ...` skills.
+>
+> Hyphen Anthropic IDs that the Ouroboros defaults use (for example `claude-opus-4-6`) are auto-mapped at runtime to the dotted form Copilot CLI expects (`claude-opus-4.6`), so existing config files keep working when you switch backends.
+
 ## Usage
 
 ```

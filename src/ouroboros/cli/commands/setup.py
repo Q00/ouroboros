@@ -196,6 +196,17 @@ def _detect_runtimes() -> dict[str, str | None]:
         kiro_path if kiro_path and shutil.which(kiro_path) else None
     ) or shutil.which("kiro-cli")
 
+    # Copilot: explicit-path config first, then PATH.
+    try:
+        from ouroboros.config import get_copilot_cli_path
+
+        copilot_path = get_copilot_cli_path()
+    except Exception:
+        copilot_path = None
+    runtimes["copilot"] = (
+        copilot_path if copilot_path and shutil.which(copilot_path) else None
+    ) or shutil.which("copilot")
+
     return runtimes
 
 
@@ -1121,6 +1132,161 @@ def _setup_kiro(kiro_path: str) -> None:
     _register_kiro_mcp_server()
 
 
+def _register_copilot_mcp_server() -> None:
+    """Register or refresh the Ouroboros MCP entry in ~/.copilot/mcp-config.json.
+
+    Copilot CLI loads MCP servers from ``~/.copilot/mcp-config.json``. We add
+    the Ouroboros server (built from whichever package install method we
+    detect) and set the env so the MCP child uses the Copilot backend.
+    """
+    mcp_path = Path.home() / ".copilot" / "mcp-config.json"
+    mcp_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict = {}
+    if mcp_path.exists():
+        try:
+            data = json.loads(mcp_path.read_text(encoding="utf-8")) or {}
+        except json.JSONDecodeError:
+            print_warning("~/.copilot/mcp-config.json is not valid JSON — leaving it untouched.")
+            return
+
+    if not isinstance(data, dict):
+        print_warning("~/.copilot/mcp-config.json top-level is not an object — skipping.")
+        return
+
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+        data["mcpServers"] = servers
+
+    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
+    if detected is None:
+        print_warning(
+            "Cannot register MCP server: no working ouroboros installation found.\n"
+            "Install with one of:\n"
+            "  pipx install 'ouroboros-ai[mcp]'\n"
+            "  uv tool install 'ouroboros-ai[mcp]'\n"
+            "  pip install 'ouroboros-ai[mcp]'"
+        )
+        return
+
+    env_block = {
+        "OUROBOROS_AGENT_RUNTIME": "copilot",
+        "OUROBOROS_LLM_BACKEND": "copilot",
+    }
+    new_entry: dict[str, object] = {
+        "command": detected["command"],
+        "args": detected["args"],
+        "env": env_block,
+    }
+
+    existing = servers.get("ouroboros")
+    if existing == new_entry:
+        print_info("MCP server already registered for Copilot CLI.")
+        return
+
+    servers["ouroboros"] = new_entry
+    mcp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print_success(f"Registered MCP server in {mcp_path}")
+
+
+def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
+    """Configure Ouroboros for the GitHub Copilot CLI runtime.
+
+    Writes ``~/.ouroboros/config.yaml`` with ``orchestrator.runtime_backend =
+    copilot`` / ``llm.backend = copilot`` and persists the user's chosen
+    default model after live-discovering the Copilot model catalog. Also
+    registers the MCP server in ``~/.copilot/mcp-config.json``.
+    """
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.copilot.model_discovery import (
+        list_copilot_models,
+        used_fallback,
+    )
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
+        return
+
+    # Live-discover available Copilot models. Falls back silently to a
+    # bundled snapshot when the GitHub API is unreachable or unauthenticated.
+    models = list_copilot_models(refresh=True)
+    if used_fallback():
+        print_warning(
+            "Could not reach the GitHub Copilot models API — using a bundled "
+            "fallback list. Run `gh auth login` and re-run setup to refresh."
+        )
+    if not models:
+        print_error("No Copilot models available; cannot pick a default.")
+        return
+
+    preferred_default = next(
+        (m.id for m in models if m.id.startswith("claude-opus-4.6")),
+        models[0].id,
+    )
+
+    if non_interactive:
+        chosen_model = preferred_default
+        print_info(f"Non-interactive mode, default model: {chosen_model}")
+    else:
+        console.print("\n[bold]Available Copilot models:[/bold]")
+        for idx, model in enumerate(models, 1):
+            tag = " [yellow](recommended)[/yellow]" if model.id == preferred_default else ""
+            label = f" — {model.name}" if model.name else ""
+            console.print(f"  [{idx}] {model.id}{label}{tag}")
+        console.print()
+
+        try:
+            default_idx = str(next(i for i, m in enumerate(models, 1) if m.id == preferred_default))
+        except StopIteration:
+            default_idx = "1"
+
+        choice = typer.prompt("Select default model", default=default_idx)
+        try:
+            idx = int(choice) - 1
+            chosen_model = models[idx].id
+        except (ValueError, IndexError):
+            chosen_model = choice.strip() or preferred_default
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "copilot"
+    orch["copilot_cli_path"] = copilot_path
+
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        config_dict["llm"] = llm
+    llm["backend"] = "copilot"
+    llm["default_model"] = chosen_model
+
+    clarification = config_dict.get("clarification")
+    if not isinstance(clarification, dict):
+        clarification = {}
+        config_dict["clarification"] = clarification
+    clarification["default_model"] = chosen_model
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured Copilot runtime (CLI: {copilot_path})")
+    print_info(f"Default model: {chosen_model}")
+    print_info(f"Config saved to: {config_path}")
+
+    _register_copilot_mcp_server()
+
+
 def _setup_gemini(gemini_path: str) -> None:
     """Configure Ouroboros for the Gemini CLI runtime.
 
@@ -1912,7 +2078,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, kiro).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, kiro, copilot).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -1939,7 +2105,7 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro)
+    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot)
     and configures Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
@@ -1948,6 +2114,7 @@ def setup(
     [dim]    ouroboros setup --runtime claude     # use Claude Code[/dim]
     [dim]    ouroboros setup --runtime opencode   # use OpenCode[/dim]
     [dim]    ouroboros setup --runtime kiro       # use Kiro CLI[/dim]
+    [dim]    ouroboros setup --runtime copilot    # use GitHub Copilot CLI[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
     [dim]    ouroboros setup default            # toggle default repos[/dim]
@@ -2015,7 +2182,8 @@ def setup(
                 "  • OpenCode:    npm install -g opencode-ai\n"
                 "  • Hermes CLI:  https://hermes.ai/cli\n"
                 "  • Gemini CLI:  npm install -g @google/gemini-cli\n"
-                "  • Kiro CLI:    https://kiro.dev/docs/cli/"
+                "  • Kiro CLI:    https://kiro.dev/docs/cli/\n"
+                "  • Copilot CLI: https://docs.github.com/copilot/github-copilot-in-the-cli"
             )
             raise typer.Exit(1)
 
@@ -2090,6 +2258,16 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_kiro(kiro_path)
+    elif selected in ("copilot", "copilot_cli"):
+        copilot_path = available.get("copilot")
+        if not copilot_path:
+            print_error(
+                "GitHub Copilot CLI not found.\n"
+                "Install it from https://docs.github.com/copilot/github-copilot-in-the-cli, set "
+                "OUROBOROS_COPILOT_CLI_PATH, or configure orchestrator.copilot_cli_path."
+            )
+            raise typer.Exit(1)
+        _setup_copilot(copilot_path, non_interactive=non_interactive)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

@@ -62,6 +62,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
+    COPILOT = "copilot"
     OPENCODE = "opencode"
     GEMINI = "gemini"
 
@@ -704,7 +705,7 @@ def start(
             "--llm-backend",
             help=(
                 "LLM backend for interview, ambiguity scoring, and seed generation "
-                "(claude_code, litellm, codex, or opencode)."
+                "(claude_code, litellm, codex, copilot, opencode, or gemini)."
             ),
             case_sensitive=False,
         ),

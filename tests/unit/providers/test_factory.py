@@ -9,6 +9,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import IOJournalRecorder
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.factory import (
     create_llm_adapter,
     resolve_llm_backend,
@@ -46,6 +47,11 @@ class TestResolveLLMBackend:
         """OpenCode aliases normalize to opencode."""
         assert resolve_llm_backend("opencode") == "opencode"
         assert resolve_llm_backend("opencode_cli") == "opencode"
+
+    def test_resolves_copilot_aliases(self) -> None:
+        """Copilot aliases normalize to copilot."""
+        assert resolve_llm_backend("copilot") == "copilot"
+        assert resolve_llm_backend("copilot_cli") == "copilot"
 
     def test_falls_back_to_configured_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Configured backend is used when no explicit backend is provided."""
@@ -351,3 +357,63 @@ class TestGeminiSoftToolEnforcement:
 
         assert adapter.__class__.__name__ == "GeminiCLIAdapter"
         assert adapter._allowed_tools is None  # type: ignore[attr-defined]
+
+
+class TestCopilotBackend:
+    """GitHub Copilot CLI factory dispatch.
+
+    Mirrors :class:`TestGeminiSoftToolEnforcement`. Copilot CLI honours a
+    real ``--available-tools`` allowlist, so the envelope is hard-enforced
+    rather than soft-enforced — the adapter still has to round-trip the
+    list, empty list, and ``None`` cases through construction.
+    """
+
+    def _stub_copilot_cli(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        fake_cli = tmp_path / "copilot"
+        fake_cli.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        fake_cli.chmod(0o755)
+        monkeypatch.setenv("OUROBOROS_COPILOT_CLI_PATH", str(fake_cli))
+
+    def test_copilot_backend_returns_copilot_adapter(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        self._stub_copilot_cli(monkeypatch, tmp_path)
+        adapter = create_llm_adapter(backend="copilot")
+        assert isinstance(adapter, CopilotCliLLMAdapter)
+
+    def test_copilot_backend_accepts_allowed_tools_envelope(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        self._stub_copilot_cli(monkeypatch, tmp_path)
+        adapter = create_llm_adapter(
+            backend="copilot",
+            allowed_tools=["Read", "Grep", "Glob"],
+        )
+        assert isinstance(adapter, CopilotCliLLMAdapter)
+        assert adapter._allowed_tools == ["Read", "Grep", "Glob"]  # type: ignore[attr-defined]
+
+    def test_copilot_backend_accepts_empty_allowed_tools(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """An explicit empty allowlist produces a hard "no tools" envelope."""
+        self._stub_copilot_cli(monkeypatch, tmp_path)
+        adapter = create_llm_adapter(backend="copilot", allowed_tools=[])
+        assert isinstance(adapter, CopilotCliLLMAdapter)
+        assert adapter._allowed_tools == []  # type: ignore[attr-defined]
+
+    def test_copilot_backend_accepts_unrestricted_callers(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """``allowed_tools=None`` means the caller did not constrain tools."""
+        self._stub_copilot_cli(monkeypatch, tmp_path)
+        adapter = create_llm_adapter(backend="copilot", allowed_tools=None)
+        assert isinstance(adapter, CopilotCliLLMAdapter)
+        assert adapter._allowed_tools is None  # type: ignore[attr-defined]
+
+    def test_copilot_backend_uses_copilot_cli_alias(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """The ``copilot_cli`` alias resolves to the same adapter."""
+        self._stub_copilot_cli(monkeypatch, tmp_path)
+        adapter = create_llm_adapter(backend="copilot_cli")
+        assert isinstance(adapter, CopilotCliLLMAdapter)

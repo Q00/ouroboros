@@ -9,6 +9,7 @@ from ouroboros.config import (
     get_agent_runtime_backend,
     get_cli_path,
     get_codex_cli_path,
+    get_copilot_cli_path,
     get_hermes_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
@@ -25,8 +26,9 @@ _KIRO_BACKENDS = {"kiro", "kiro_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _HERMES_BACKENDS = {"hermes", "hermes_cli"}
 _GEMINI_BACKENDS = {"gemini", "gemini_cli"}
+_COPILOT_BACKENDS = {"copilot", "copilot_cli"}
 
-_SUPPORTED_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini", "kiro")
+_SUPPORTED_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot")
 
 
 def resolve_agent_runtime_backend(backend: str | None = None) -> str:
@@ -44,6 +46,8 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
         return "hermes"
     if candidate in _GEMINI_BACKENDS:
         return "gemini"
+    if candidate in _COPILOT_BACKENDS:
+        return "copilot"
 
     msg = (
         f"Unsupported orchestrator runtime backend: {candidate}. "
@@ -130,6 +134,14 @@ def create_agent_runtime(
 
         return KiroAgentAdapter(
             cli_path=cli_path or get_kiro_cli_path(),
+            **runtime_kwargs,
+        )
+
+    if resolved_backend == "copilot":
+        from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+
+        return CopilotCliRuntime(
+            cli_path=cli_path or get_copilot_cli_path(),
             **runtime_kwargs,
         )
 
