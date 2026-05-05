@@ -233,55 +233,14 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             Result containing execution result or error.
         """
         resolved_cwd = self._resolve_dispatch_cwd(arguments.get("cwd"))
-        seed_content = arguments.get("seed_content")
-        seed_path = arguments.get("seed_path")
-        if not seed_content and seed_path:
-            seed_candidate = Path(str(seed_path)).expanduser()
-            if not seed_candidate.is_absolute():
-                seed_candidate = resolved_cwd / seed_candidate
-
-            # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
-            ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
-            valid_cwd, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                resolved_cwd,
-            )
-            valid_home, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                ouroboros_seeds,
-            )
-            if not valid_cwd and not valid_home:
-                return Result.err(
-                    MCPToolError(
-                        f"Seed path escapes allowed directories: "
-                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
-                        tool_name="ouroboros_execute_seed",
-                    )
-                )
-
-            try:
-                seed_content = await asyncio.to_thread(
-                    seed_candidate.read_text,
-                    encoding="utf-8",
-                )
-            except FileNotFoundError:
-                # Per tool contract: treat non-existent path as inline YAML
-                seed_content = str(seed_path)
-            except OSError as e:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to read seed file: {e}",
-                        tool_name="ouroboros_execute_seed",
-                    )
-                )
-
-        if not seed_content:
-            return Result.err(
-                MCPToolError(
-                    "seed_content or seed_path is required",
-                    tool_name="ouroboros_execute_seed",
-                )
-            )
+        seed_result = await self._resolve_seed_content(
+            arguments=arguments,
+            resolved_cwd=resolved_cwd,
+            tool_name="ouroboros_execute_seed",
+        )
+        if seed_result.is_err:
+            return seed_result
+        seed_content = seed_result.value
 
         session_id = arguments.get("session_id")
         is_resume = bool(session_id)
@@ -745,6 +704,70 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         return Path.cwd()
 
     @staticmethod
+    async def _resolve_seed_content(
+        *,
+        arguments: dict[str, Any],
+        resolved_cwd: Path,
+        tool_name: str,
+    ) -> Result[str, MCPServerError]:
+        """Resolve seed YAML from inline ``seed_content`` or a contained ``seed_path``.
+
+        Single source of truth for both ``ExecuteSeedHandler`` and
+        ``StartExecuteSeedHandler`` so the seed-path containment policy stays
+        in one place. The candidate path must live inside ``resolved_cwd`` or
+        ``~/.ouroboros/seeds``; non-existent paths fall back to inline YAML
+        per the tool contract; ``OSError``s become :class:`MCPToolError`.
+        """
+        seed_content = arguments.get("seed_content")
+        if seed_content:
+            return Result.ok(seed_content)
+
+        seed_path = arguments.get("seed_path")
+        if not seed_path:
+            return Result.err(
+                MCPToolError(
+                    "seed_content or seed_path is required",
+                    tool_name=tool_name,
+                )
+            )
+
+        seed_candidate = Path(str(seed_path)).expanduser()
+        if not seed_candidate.is_absolute():
+            seed_candidate = resolved_cwd / seed_candidate
+
+        # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
+        ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
+        valid_cwd, _ = InputValidator.validate_path_containment(
+            seed_candidate,
+            resolved_cwd,
+        )
+        valid_home, _ = InputValidator.validate_path_containment(
+            seed_candidate,
+            ouroboros_seeds,
+        )
+        if not valid_cwd and not valid_home:
+            return Result.err(
+                MCPToolError(
+                    f"Seed path escapes allowed directories: "
+                    f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
+                    tool_name=tool_name,
+                )
+            )
+
+        try:
+            return Result.ok(await asyncio.to_thread(seed_candidate.read_text, encoding="utf-8"))
+        except FileNotFoundError:
+            # Per tool contract: treat non-existent path as inline YAML
+            return Result.ok(str(seed_path))
+        except OSError as e:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to read seed file: {e}",
+                    tool_name=tool_name,
+                )
+            )
+
+    @staticmethod
     def _derive_quality_bar(seed: Seed) -> str:
         """Derive a quality bar string from seed acceptance criteria."""
         ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
@@ -862,57 +885,18 @@ class StartExecuteSeedHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        seed_content = arguments.get("seed_content")
-        seed_path = arguments.get("seed_path")
-        if not seed_content and seed_path:
-            resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(
-                arguments.get("cwd"),
-            )
-            seed_candidate = Path(str(seed_path)).expanduser()
-            if not seed_candidate.is_absolute():
-                seed_candidate = resolved_cwd / seed_candidate
-
-            # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
-            ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
-            valid_cwd, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                resolved_cwd,
-            )
-            valid_home, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                ouroboros_seeds,
-            )
-            if not valid_cwd and not valid_home:
-                return Result.err(
-                    MCPToolError(
-                        f"Seed path escapes allowed directories: "
-                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-
-            try:
-                seed_content = await asyncio.to_thread(seed_candidate.read_text, encoding="utf-8")
-                arguments = {**arguments, "seed_content": seed_content}
-            except FileNotFoundError:
-                # Per tool contract: treat non-existent path as inline YAML
-                seed_content = str(seed_path)
-                arguments = {**arguments, "seed_content": seed_content}
-            except OSError as e:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to read seed file: {e}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-
-        if not seed_content:
-            return Result.err(
-                MCPToolError(
-                    "seed_content or seed_path is required",
-                    tool_name="ouroboros_start_execute_seed",
-                )
-            )
+        resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(arguments.get("cwd"))
+        seed_result = await ExecuteSeedHandler._resolve_seed_content(
+            arguments=arguments,
+            resolved_cwd=resolved_cwd,
+            tool_name="ouroboros_start_execute_seed",
+        )
+        if seed_result.is_err:
+            return seed_result
+        seed_content = seed_result.value
+        # Forward the resolved YAML so the inner ExecuteSeedHandler skips its
+        # own path-resolution branch (the contract is now centralised here).
+        arguments = {**arguments, "seed_content": seed_content}
 
         # Resolve worker cap up front so plugin and background paths agree.
         try:
