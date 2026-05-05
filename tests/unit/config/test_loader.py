@@ -1081,6 +1081,14 @@ class TestLLMHelperLookups:
         monkeypatch.setenv("OUROBOROS_RUNTIME", "kiro")
         assert get_llm_backend() == "kiro"
 
+    def test_get_llm_backend_accepts_kiro_cli_runtime_shortcut(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kiro's runtime alias should preserve the single-env-var setup contract."""
+        monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+        monkeypatch.setenv("OUROBOROS_RUNTIME", "kiro_cli")
+        assert get_llm_backend() == "kiro"
+
     def test_get_llm_backend_ignores_runtime_without_llm_adapter(self) -> None:
         """Hermes runtime should keep using the configured LLM backend."""
         with (

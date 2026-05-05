@@ -662,6 +662,15 @@ class TestOuroborosRuntimeFallback:
         monkeypatch.setenv("OUROBOROS_RUNTIME", "kiro")
         assert get_llm_backend() == "kiro"
 
+    def test_get_llm_backend_uses_kiro_cli_runtime_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.config.loader import get_llm_backend
+
+        monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+        monkeypatch.setenv("OUROBOROS_RUNTIME", "kiro_cli")
+        assert get_llm_backend() == "kiro"
+
     def test_llm_backend_env_takes_priority_over_runtime(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

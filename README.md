@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 <summary><strong>Kiro CLI quick start</strong></summary>
 
 ```bash
-pip install ouroboros-ai
+pip install 'ouroboros-ai[claude]'
 ouroboros setup            # detects Kiro CLI and registers MCP server
 ```
 

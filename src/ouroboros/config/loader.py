@@ -1021,8 +1021,17 @@ def get_llm_backend() -> str:
         return env_backend
 
     env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
-    if env_runtime in {"claude", "claude_code", "codex", "gemini", "kiro", "opencode"}:
-        return env_runtime
+    llm_capable_runtime_aliases = {
+        "claude": "claude",
+        "claude_code": "claude_code",
+        "codex": "codex",
+        "gemini": "gemini",
+        "kiro": "kiro",
+        "kiro_cli": "kiro",
+        "opencode": "opencode",
+    }
+    if env_runtime in llm_capable_runtime_aliases:
+        return llm_capable_runtime_aliases[env_runtime]
 
     try:
         config = load_config()
