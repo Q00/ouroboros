@@ -172,6 +172,80 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_start_job_wraps_bare_future_runner(self, tmp_path) -> None:
+        """A bare Future is wrapped in a Task and still completes the job."""
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        future: asyncio.Future[MCPToolResult] = asyncio.get_running_loop().create_future()
+
+        try:
+            started = await manager.start_job(
+                job_type="future",
+                initial_message="queued",
+                runner=future,
+                links=JobLinks(),
+            )
+            runner_task = manager._runner_tasks.get(started.job_id)
+
+            assert isinstance(runner_task, asyncio.Task)
+            assert runner_task is not future
+
+            future.set_result(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="future"),),
+                    is_error=False,
+                    meta={"kind": "future"},
+                )
+            )
+            await asyncio.sleep(0.05)
+            snapshot = await manager.get_snapshot(started.job_id)
+
+            assert snapshot.status == JobStatus.COMPLETED
+            assert snapshot.result_text == "future"
+            assert snapshot.result_meta["kind"] == "future"
+            assert started.job_id not in manager._runner_tasks
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_cancels_externally_created_task(self, tmp_path) -> None:
+        """Cancellation reaches a pre-built Task registered as the runner."""
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        runner_cancelled = asyncio.Event()
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    runner_cancelled.set()
+                    raise
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            external_task = asyncio.create_task(_runner())
+            started = await manager.start_job(
+                job_type="external-cancel",
+                initial_message="queued",
+                runner=external_task,
+                links=JobLinks(),
+            )
+
+            await manager.cancel_job(started.job_id)
+            await asyncio.wait_for(runner_cancelled.wait(), timeout=1)
+            await asyncio.sleep(0)
+            snapshot = await manager.get_snapshot(started.job_id)
+
+            assert external_task.cancelled()
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_wait_for_change_returns_new_cursor(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
