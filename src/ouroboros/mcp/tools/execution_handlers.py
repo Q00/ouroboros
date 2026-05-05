@@ -764,10 +764,15 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         if isinstance(delegated_parent_cwd, str) and delegated_parent_cwd.strip():
             return Path(delegated_parent_cwd).expanduser().resolve()
 
-        seed_project_dir = resolve_seed_project_path(seed, stable_base=dispatch_cwd)
-        if seed_project_dir is not None:
-            return seed_project_dir
-
+        resolution = resolve_seed_project_path(seed, stable_base=dispatch_cwd)
+        if resolution.path is not None:
+            return resolution.path
+        if resolution.rejected:
+            log.warning(
+                "execution_handlers.seed_project_path_rejected",
+                dispatch_cwd=str(dispatch_cwd),
+                reason="every seed-encoded project path escaped the dispatch cwd",
+            )
         return dispatch_cwd
 
     @staticmethod
