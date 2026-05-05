@@ -1,11 +1,11 @@
 ---
 name: ralph
-description: "Client-driven Ralph loop around background evolve_step jobs"
+description: "MCP-owned Ralph loop around background evolve_step jobs"
 ---
 
 # /ouroboros:ralph
 
-Client-driven Ralph loop around background `evolve_step` jobs. "The boulder never stops."
+MCP-owned Ralph loop around background `evolve_step` jobs. "The boulder never stops."
 
 ## Usage
 
@@ -16,192 +16,66 @@ ooo ralph "<your request>"
 
 **Trigger keywords:** "ralph", "don't stop", "must complete", "until it works", "keep going"
 
-> **Current implementation note (#528):** `ooo ralph` is currently a
-> skill-driven loop. The MCP server exposes `ouroboros_start_evolve_step`
-> and the job polling tools, but it does **not** yet expose a first-class
-> `ouroboros_ralph` tool that owns the whole multi-generation loop. That
-> means this skill must keep calling one generation at a time until a
-> dedicated MCP-owned Ralph loop lands.
-
 ## How It Works
 
-Ralph mode is currently coordinated by this skill. It starts one background
-`evolve_step` job per iteration, polls that job, reads the QA result, and then
-decides whether to start another iteration. The loop state lives in the client
-conversation plus EventStore/job history; it is not yet a single durable MCP
-job.
+Ralph is owned by the `ouroboros_ralph` MCP tool. The tool starts one
+background Ralph job, runs repeated `evolve_step` generations inside that job,
+and stops only when QA passes, convergence is reached, a terminal evolution
+action occurs, cancellation is requested, or `max_generations` is reached.
 
-Ralph mode includes parallel execution + automatic verification:
-
-1. **Execute** (parallel where possible)
-   - Independent tasks run concurrently
-   - Dependency-aware scheduling
-
-2. **Verify** (verifier)
-   - Check completion
-   - Validate tests pass
-   - Measure drift
-
-3. **Loop** (if failed)
-   - Analyze failure
-   - Fix issues
-   - Repeat from step 1
+The client skill should not reimplement the loop. It should start the MCP job
+and monitor it with the normal job tools.
 
 ## Instructions
 
 When the user invokes this skill:
 
-1. **Parse the request**: Extract what needs to be done
+1. **Parse the request**: Extract what needs to be done and prepare the seed or
+   lineage input expected by `ouroboros_ralph`.
 
-2. **Initialize loop**:
-   - Generate a session_id (UUID)
-   - Track iteration, verification_history in conversation context
-   - No file I/O needed — evolve_step stores execution data in EventStore
-   - Do not claim a dedicated `ouroboros_ralph` MCP job exists yet; use `ouroboros_start_evolve_step` plus job polling
+2. **Start Ralph** by calling `ouroboros_ralph` with:
+   - `lineage_id`: existing lineage id, or a generated stable id for a new loop
+   - `seed_content`: Seed YAML for generation 1 when starting a new lineage
+   - `execute`: default `true`
+   - `parallel`: default `true`
+   - `skip_qa`: default `false`
+   - `project_dir`: explicit target project directory when known
+   - `max_generations`: default `10` unless the user requests a tighter bound
 
-4. **Enter the loop** (non-blocking background execution):
+3. **Report the returned job id** concisely:
 
    ```
-   while iteration < max_iterations:
-       # Start evolve_step in background — returns immediately
-       job = await start_evolve_step(lineage_id, seed_content, execute=true)
-       job_id = job.meta["job_id"]
-       cursor = job.meta["cursor"]
-
-       # Poll for progress (non-blocking, shows intermediate state)
-       # Use timeout_seconds=120 (2-min long-poll) to reduce context consumption
-       # Only report when AC completed count changes (level-based polling)
-       prev_completed = 0
-       while not terminal:
-           wait_result = await job_wait(job_id, cursor, timeout_seconds=120)
-           cursor = wait_result.meta["cursor"]
-           status = wait_result.meta["status"]
-           # Parse AC Progress from response, report only on level completion
-           current_completed = <parse AC completed from response>
-           if current_completed > prev_completed:
-               # Report progress concisely (one line per poll)
-               print: [Level complete] AC: {current_completed}/{total} | Phase: {phase}
-               prev_completed = current_completed
-           terminal = status in ("completed", "failed", "cancelled")
-
-       # Fetch final result
-       result = await job_result(job_id)
-
-       # Parse QA from evolve_step response text
-       # (EvolveStepHandler runs QA internally and appends verdict)
-       verification.passed = (qa_verdict == "pass")
-       verification.score = qa_score
-
-       # Record in conversation context
-       verification_history.append({
-           "iteration": iteration,
-           "passed": verification.passed,
-           "score": verification.score,
-           "verdict": qa_verdict
-       })
-
-       if verification.passed:
-           # SUCCESS
-           break
-
-       # Failed - analyze and continue
-       iteration += 1
-
-       if iteration >= max_iterations:
-           # Max iterations reached
-           break
+   [Ralph] Started background loop: <job_id>
+   Lineage: <lineage_id>
    ```
 
-   **Tool mapping:**
-   - `start_evolve_step` = `ouroboros_start_evolve_step`
-   - `job_wait` = `ouroboros_job_wait`
-   - `job_result` = `ouroboros_job_result`
+4. **Monitor progress** with job tooling:
+   - `ouroboros_job_wait(job_id, cursor, timeout_seconds=120)` for long polling
+   - `ouroboros_job_status(job_id)` for a quick status check
+   - `ouroboros_job_result(job_id)` when the job is terminal
+   - `ouroboros_cancel_job(job_id)` if the user says stop/cancel
 
-4. **On termination**, display a next-step:
-   - **Success** (QA passed): `Next: ooo evaluate for formal 3-stage verification`
-   - **Max iterations reached**: `Next: ooo interview to re-examine the problem — or ooo unstuck to try a different approach`
+5. **On termination**, summarize the final job result and next step:
+   - Success / convergence: `Next: ooo evaluate for formal 3-stage verification`
+   - Max generations / failure: summarize the stop reason and suggest
+     `ooo unstuck`, `ooo interview`, or a narrower Ralph retry
+   - Cancelled: confirm cancellation and preserve the job id for later inspection
 
-6. **Report progress** each iteration:
-   ```
-   [Ralph Iteration <i>/<max>]
-   Execution complete. Running QA...
+## Tool Mapping
 
-   QA Verdict: <PASS/REVISE/FAIL> (score: <score>)
-   Differences:
-     - <difference 1>
-     - <difference 2>
-   Suggestions:
-     - <suggestion 1>
-     - <suggestion 2>
-
-   The boulder never stops. Continuing...
-   ```
-
-6. **Handle interruption**:
-   - If user says "stop": exit gracefully
-   - If user says "continue": call `ouroboros_query_events(aggregate_id=<lineage_id>)`
-     to reconstruct iteration history from EventStore
+| Skill action | MCP tool |
+| --- | --- |
+| Start Ralph loop | `ouroboros_ralph` |
+| Wait for progress | `ouroboros_job_wait` |
+| Fetch final result | `ouroboros_job_result` |
+| Cancel loop | `ouroboros_cancel_job` |
+| Inspect current status | `ouroboros_job_status` |
 
 ## The Boulder Never Stops
 
-This is the key phrase. Ralph does not give up while the client continues to drive the loop:
-- Each failure is data for the next attempt
-- Verification drives the loop
-- Only complete success or max iterations stops it
+This is the key phrase. Ralph does not give up:
 
-## Example
-
-```
-User: ooo ralph fix all failing tests
-
-[Ralph Iteration 1/10]
-Started background execution (job_abc123)
-Polling progress...
-  Phase: Executing | AC Progress: 1/3
-  Phase: Executing | AC Progress: 2/3
-  Phase: Executing | AC Progress: 3/3
-Execution complete. Fetching result...
-
-QA Verdict: REVISE (score: 0.65)
-Differences:
-  - 3 tests still failing
-  - Type errors in src/api.py
-Suggestions:
-  - Fix type annotations in api.py before retrying
-
-The boulder never stops. Continuing...
-
-[Ralph Iteration 2/10]
-Executing in parallel...
-Fixing remaining issues...
-Running QA...
-
-QA Verdict: REVISE (score: 0.85)
-Differences:
-  - 1 test edge case failing
-Suggestions:
-  - Add boundary check in parse_input()
-
-The boulder never stops. Continuing...
-
-[Ralph Iteration 3/10]
-Executing in parallel...
-Fixing edge case...
-Running QA...
-
-QA Verdict: PASS (score: 1.0)
-
-Ralph COMPLETE
-==============
-Request: Fix all failing tests
-Iterations: 3
-
-QA History:
-- Iteration 1: REVISE (0.65)
-- Iteration 2: REVISE (0.85)
-- Iteration 3: PASS (1.0)
-
-All tests passing. Build successful.
-
-Next: `ooo evaluate` for formal 3-stage verification
-```
+- Each failure is data for the next attempt.
+- Verification drives the loop.
+- Only success, convergence, terminal failure, cancellation, or max-generation
+  limits stop it.
