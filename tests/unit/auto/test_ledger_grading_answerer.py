@@ -103,6 +103,8 @@ def test_auto_answerer_routes_stack_selection_to_runtime_context() -> None:
     questions = (
         "Which runtime stack, repo, and project patterns should be used?",
         "What project structure should we use?",
+        "Which repo should we use?",
+        "What framework is this repo using?",
     )
 
     for question in questions:

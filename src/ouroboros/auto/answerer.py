@@ -473,6 +473,8 @@ def _is_runtime_context_question(lowered: str) -> bool:
     runtime_terms = (
         r"runtime",
         r"stack",
+        r"repo",
+        r"repository",
         r"repository runtime",
         r"framework",
         r"package manager",
@@ -481,7 +483,7 @@ def _is_runtime_context_question(lowered: str) -> bool:
     )
     runtime_term = r"(?:" + "|".join(runtime_terms) + r")"
     selection_verbs = (
-        r"(?:use|used|choose|select|configure|adopt|manage|managed|structure|organize)"
+        r"(?:use|used|using|uses|choose|select|configure|adopt|manage|managed|structure|organize)"
     )
 
     return bool(
