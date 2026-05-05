@@ -428,6 +428,59 @@ Parallel Execution Verification Report
         assert summary is not None
         assert summary.failure_reason == "1/1 ACs failed (AC 1)"
 
+    def test_spec_verification_does_not_approve_failed_execution(self) -> None:
+        """Passing verifier results must not approve a run whose execution failed."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="failed",
+                    completed=False,
+                    source_ac_index=0,
+                    evidence="Worker failed before completing the task",
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found file: config.py",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is True
+        assert summary.execution_completion_status == "failed"
+        assert summary.approval_status == "rejected"
+        assert summary.final_approved is False
+        assert summary.run_verdict == "FAIL"
+        assert "execution_completion_status=failed" in (summary.failure_reason or "")
+
     def test_spec_verification_discrepancy_becomes_formal_ac_failure(self) -> None:
         """False-positive legacy PASS claims remain catchable by spec verification."""
         mechanical = EvaluationSummary(

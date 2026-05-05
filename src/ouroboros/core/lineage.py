@@ -208,11 +208,13 @@ class EvaluationSummary(BaseModel, frozen=True):
         """Eagerly reconcile approval fields with AC results at construction time."""
         if self.ac_results:
             ac_passed = all(ac.passed for ac in self.ac_results)
-            expected_status = "approved" if ac_passed else "rejected"
+            execution_completed = self.execution_completion_status == "completed"
+            final_approved = ac_passed and execution_completed
+            expected_status = "approved" if final_approved else "rejected"
             if self.approval_status != expected_status:
                 object.__setattr__(self, "approval_status", expected_status)
-            if self.final_approved != ac_passed:
-                object.__setattr__(self, "final_approved", ac_passed)
+            if self.final_approved != final_approved:
+                object.__setattr__(self, "final_approved", final_approved)
         return self
 
     @property

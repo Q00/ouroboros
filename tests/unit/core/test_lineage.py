@@ -222,11 +222,12 @@ class TestEvaluationSummary:
         assert summary.run_verdict == "FAIL"
 
     def test_run_verdict_fails_when_execution_incomplete(self) -> None:
-        """Execution failure overrides AC results — run must be FAIL."""
+        """Execution failure overrides AC results and legacy approval fields."""
         summary = EvaluationSummary(
-            final_approved=False,
+            final_approved=True,
             highest_stage_passed=2,
             execution_completion_status="failed",
+            approval_status="approved",
             ac_results=(
                 ACResult(
                     ac_index=0,
@@ -241,6 +242,8 @@ class TestEvaluationSummary:
 
         assert summary.run_verdict_passed is False
         assert summary.run_verdict == "FAIL"
+        assert summary.final_approved is False
+        assert summary.approval_status == "rejected"
 
     def test_run_verdict_fails_when_approval_rejected_no_ac_results(self) -> None:
         """Rejected approval without AC results must be FAIL."""
@@ -322,6 +325,30 @@ class TestEvaluationSummary:
         payload = summary.model_dump(mode="json")
         assert payload["approval_status"] == "approved"
         assert payload["final_approved"] is True
+
+    def test_serialized_approval_is_execution_aware_with_passing_acs(self) -> None:
+        """model_dump() must not expose approved legacy fields after execution failure."""
+        summary = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            execution_completion_status="failed",
+            approval_status="approved",
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Feature works",
+                    passed=True,
+                    score=1.0,
+                    evidence="OK",
+                    verification_method="semantic",
+                ),
+            ),
+        )
+
+        payload = summary.model_dump(mode="json")
+        assert payload["approval_status"] == "rejected"
+        assert payload["final_approved"] is False
+        assert summary.run_verdict == "FAIL"
 
 
 class TestACResult:

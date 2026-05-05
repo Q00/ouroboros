@@ -429,7 +429,8 @@ def _evaluation_summary_from_spec_verification(
     passed_count = sum(1 for result in ac_results if result.passed)
     score = passed_count / total if total > 0 else 0.0
     complete_coverage = bool(expected_indices) and expected_indices.issubset(reports_by_index)
-    approved = complete_coverage and passed_count == total and total > 0
+    execution_completed = mechanical.execution_completion_status == "completed"
+    approved = complete_coverage and passed_count == total and total > 0 and execution_completed
 
     failure_reason = None
     if not approved:
@@ -449,6 +450,10 @@ def _evaluation_summary_from_spec_verification(
             reason_parts.append(
                 "no independently verifiable assertions for AC "
                 + ", ".join(str(i + 1) for i in unverifiable_indices)
+            )
+        if not execution_completed:
+            reason_parts.append(
+                f"execution_completion_status={mechanical.execution_completion_status}"
             )
         failure_reason = reason_parts[0]
         if len(reason_parts) > 1:
