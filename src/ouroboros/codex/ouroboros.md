@@ -19,6 +19,9 @@ Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP too
 | `ooo evolve ...` | `ouroboros_evolve_step` |
 | `ooo cancel [execution_id]` | `ouroboros_cancel_execution` |
 | `ooo unstuck` / `ooo lateral` | `ouroboros_lateral_think` |
+| `ooo auto ...` | `ouroboros_auto` |
+
+If `ouroboros_auto` is unavailable, stop and report that the MCP dispatch surface is broken. Do not manually emulate `ooo auto` with ordinary shell, GitHub, or coding work.
 
 ## Natural Language Mapping
 
