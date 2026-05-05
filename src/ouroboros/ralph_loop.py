@@ -115,7 +115,7 @@ class RalphLoopRunner:
         final_result: MCPToolResult | None = None
         seed_content = config.seed_content
         stop_reason = "max_generations reached"
-        status = "failed"
+        status = "completed"
 
         for iteration_index in range(1, config.max_generations + 1):
             arguments: dict[str, Any] = {
@@ -166,7 +166,7 @@ class RalphLoopRunner:
             seed_content = None
         else:
             if final_result is not None:
-                status = "failed"
+                status = "completed"
                 stop_reason = "max_generations reached"
 
         if final_result is None:

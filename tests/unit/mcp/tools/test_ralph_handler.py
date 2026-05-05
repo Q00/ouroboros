@@ -19,6 +19,7 @@ from ouroboros.ralph_loop import RalphLoopConfig, RalphLoopRunner
 @dataclass
 class _FakeEvolveHandler:
     actions: list[str]
+    qa_verdicts: list[str | None] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     async def handle(self, arguments: dict[str, Any]):
@@ -26,6 +27,16 @@ class _FakeEvolveHandler:
         index = len(self.calls) - 1
         action = self.actions[min(index, len(self.actions) - 1)]
         generation = index + 1
+        qa_verdict = (
+            self.qa_verdicts[min(index, len(self.qa_verdicts) - 1)] if self.qa_verdicts else None
+        )
+        meta: dict[str, Any] = {
+            "lineage_id": arguments["lineage_id"],
+            "generation": generation,
+            "action": action,
+        }
+        if qa_verdict is not None:
+            meta["qa"] = {"verdict": qa_verdict}
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -35,11 +46,7 @@ class _FakeEvolveHandler:
                     ),
                 ),
                 is_error=action == "failed",
-                meta={
-                    "lineage_id": arguments["lineage_id"],
-                    "generation": generation,
-                    "action": action,
-                },
+                meta=meta,
             )
         )
 
@@ -76,9 +83,28 @@ async def test_ralph_loop_stops_at_max_generations() -> None:
         )
     )
 
-    assert result.status == "failed"
+    assert result.status == "completed"
     assert result.stop_reason == "max_generations reached"
     assert result.iteration_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ralph_loop_stops_when_qa_passes() -> None:
+    evolve = _FakeEvolveHandler(["continue", "continue"], qa_verdicts=["fail", "pass"])
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(
+        RalphLoopConfig(
+            lineage_id="lin_qa",
+            seed_content="goal: qa",
+            max_generations=5,
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.stop_reason == "qa passed"
+    assert result.iteration_count == 2
+    assert result.iterations[1].qa_verdict == "pass"
 
 
 @pytest.mark.asyncio
@@ -185,3 +211,5 @@ def test_ralph_handler_definition_is_public_tool() -> None:
         "seed_content",
         "max_generations",
     }
+    assert "ouroboros_cancel_job" in handler.definition.description
+    assert "ouroboros_job_cancel" not in handler.definition.description

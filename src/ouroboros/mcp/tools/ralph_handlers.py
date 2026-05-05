@@ -60,8 +60,10 @@ class RalphHandler:
                 "Start a first-class Ralph loop in the background. The loop repeatedly "
                 "runs evolve_step until QA passes, convergence is reached, a terminal "
                 "evolution action occurs, cancellation is requested, or max_generations "
-                "is reached. Returns a job_id immediately for ouroboros_job_status, "
-                "ouroboros_job_wait, ouroboros_job_result, and ouroboros_job_cancel."
+                "is reached. In non-plugin runtimes, returns a job_id immediately for "
+                "ouroboros_job_status, ouroboros_job_wait, ouroboros_job_result, and "
+                "ouroboros_cancel_job. In OpenCode plugin mode, returns job_id=None and "
+                "delegates the loop to the plugin child session."
             ),
             parameters=(
                 MCPToolParameter(
@@ -197,7 +199,7 @@ class RalphHandler:
             f"Lineage ID: {config.lineage_id}\n"
             f"Max generations: {config.max_generations}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, ouroboros_job_result, "
-            "or ouroboros_job_cancel to monitor it."
+            "or ouroboros_cancel_job to monitor it."
         )
         return Result.ok(
             MCPToolResult(
