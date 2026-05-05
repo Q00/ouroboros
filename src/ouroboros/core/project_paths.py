@@ -2,12 +2,33 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SeedProjectPathResolution:
+    """Outcome of resolving a seed-encoded project directory.
+
+    Distinguishes the two ``path is None`` cases that callers previously
+    conflated:
+
+    * ``rejected=False`` — the seed encoded no project path, or the seed
+      was ``None``. Falling back to the caller's stable base is safe.
+    * ``rejected=True`` — at least one path was encoded but every
+      candidate escaped ``stable_base``. The seed *intended* to point
+      somewhere; the caller must surface that explicitly (audit log,
+      tool error, etc.) rather than silently running in the base
+      directory.
+    """
+
+    path: Path | None
+    rejected: bool
 
 
 def resolve_path_against_base(
@@ -84,7 +105,7 @@ def project_path_candidates_from_seed(seed: Any) -> tuple[str, ...]:
     return tuple(candidates)
 
 
-def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> Path | None:
+def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> SeedProjectPathResolution:
     """Resolve the highest-priority project path encoded in a seed.
 
     Seed-encoded paths originate from untrusted sources — seeds may be
@@ -93,15 +114,28 @@ def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> Path | None:
     priority order (metadata first, then primary brownfield references,
     then remaining references); each escaping candidate is rejected with a
     containment-violation log entry, and the next candidate is evaluated.
-    The function returns ``None`` when no candidate is contained — every
-    returned path is therefore inside ``stable_base``.
+
+    Returns a :class:`SeedProjectPathResolution`:
+
+    * ``path is not None``  — a contained candidate was found and is
+      returned. ``rejected`` is ``False``.
+    * ``path is None``, ``rejected=False`` — the seed encoded no project
+      paths (empty seed or no metadata/brownfield references).
+    * ``path is None``, ``rejected=True`` — at least one candidate was
+      encoded but every candidate escaped ``stable_base``. Callers must
+      treat this as an explicit security event, not a benign empty seed.
     """
-    for candidate in project_path_candidates_from_seed(seed):
+    candidates = project_path_candidates_from_seed(seed)
+    if not candidates:
+        return SeedProjectPathResolution(path=None, rejected=False)
+
+    for candidate in candidates:
         resolved = resolve_path_against_base(
             candidate,
             stable_base=stable_base,
             enforce_containment=True,
         )
         if resolved is not None:
-            return resolved
-    return None
+            return SeedProjectPathResolution(path=resolved, rejected=False)
+
+    return SeedProjectPathResolution(path=None, rejected=True)

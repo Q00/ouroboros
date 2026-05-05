@@ -66,7 +66,16 @@ def _resolve_verification_working_dir(
         if resolved is not None:
             return resolved
 
-    return resolve_seed_project_path(seed, stable_base=stable_base) or stable_base
+    resolution = resolve_seed_project_path(seed, stable_base=stable_base)
+    if resolution.path is not None:
+        return resolution.path
+    if resolution.rejected:
+        log.warning(
+            "evolution_handlers.seed_project_path_rejected",
+            stable_base=str(stable_base),
+            reason="every seed-encoded project path escaped the stable base",
+        )
+    return stable_base
 
 
 def _resolve_evolve_verification_working_dir(

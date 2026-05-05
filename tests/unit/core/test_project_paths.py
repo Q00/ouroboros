@@ -186,8 +186,10 @@ class TestProjectPathCandidatesFromSeed:
 class TestResolveSeedProjectPath:
     """Tests for resolve_seed_project_path."""
 
-    def test_none_seed_returns_none(self, tmp_path: Path) -> None:
-        assert resolve_seed_project_path(None, stable_base=tmp_path) is None
+    def test_none_seed_returns_empty_resolution(self, tmp_path: Path) -> None:
+        result = resolve_seed_project_path(None, stable_base=tmp_path)
+        assert result.path is None
+        assert result.rejected is False
 
     def test_resolves_first_candidate(self, tmp_path: Path) -> None:
         seed = SimpleNamespace(
@@ -195,7 +197,8 @@ class TestResolveSeedProjectPath:
             brownfield_context=None,
         )
         result = resolve_seed_project_path(seed, stable_base=tmp_path)
-        assert result == (tmp_path / "myproject").resolve()
+        assert result.path == (tmp_path / "myproject").resolve()
+        assert result.rejected is False
 
     def test_absolute_path_inside_base_in_seed(self, tmp_path: Path) -> None:
         abs_dir = tmp_path / "absolute_project"
@@ -205,7 +208,8 @@ class TestResolveSeedProjectPath:
             brownfield_context=None,
         )
         result = resolve_seed_project_path(seed, stable_base=tmp_path)
-        assert result == abs_dir.resolve()
+        assert result.path == abs_dir.resolve()
+        assert result.rejected is False
 
     def test_absolute_path_escaping_base_rejected(self, tmp_path: Path) -> None:
         outside = tmp_path.parent / "escaped_project"
@@ -214,7 +218,8 @@ class TestResolveSeedProjectPath:
             brownfield_context=None,
         )
         result = resolve_seed_project_path(seed, stable_base=tmp_path)
-        assert result is None
+        assert result.path is None
+        assert result.rejected is True
 
     def test_traversal_brownfield_reference_rejected(self, tmp_path: Path) -> None:
         ref = SimpleNamespace(path="../../etc/passwd", role="primary")
@@ -223,7 +228,8 @@ class TestResolveSeedProjectPath:
             brownfield_context=SimpleNamespace(context_references=[ref]),
         )
         result = resolve_seed_project_path(seed, stable_base=tmp_path)
-        assert result is None
+        assert result.path is None
+        assert result.rejected is True
 
     def test_falls_through_to_safe_candidate(self, tmp_path: Path) -> None:
         safe = tmp_path / "safe"
@@ -237,9 +243,25 @@ class TestResolveSeedProjectPath:
             brownfield_context=SimpleNamespace(context_references=refs),
         )
         result = resolve_seed_project_path(seed, stable_base=tmp_path)
-        assert result == safe.resolve()
+        assert result.path == safe.resolve()
+        assert result.rejected is False
 
-    def test_empty_seed_returns_none(self, tmp_path: Path) -> None:
+    def test_empty_seed_returns_empty_resolution(self, tmp_path: Path) -> None:
         seed = SimpleNamespace(metadata=None, brownfield_context=None)
         result = resolve_seed_project_path(seed, stable_base=tmp_path)
-        assert result is None
+        assert result.path is None
+        assert result.rejected is False
+
+    def test_distinguishes_no_candidates_from_all_rejected(self, tmp_path: Path) -> None:
+        """The two ``path is None`` cases must be distinguishable by callers."""
+        empty = SimpleNamespace(metadata=None, brownfield_context=None)
+        rejected = SimpleNamespace(
+            metadata=SimpleNamespace(project_dir="/etc/passwd", working_directory=None),
+            brownfield_context=None,
+        )
+
+        empty_result = resolve_seed_project_path(empty, stable_base=tmp_path)
+        rejected_result = resolve_seed_project_path(rejected, stable_base=tmp_path)
+
+        assert empty_result.path is None and not empty_result.rejected
+        assert rejected_result.path is None and rejected_result.rejected
