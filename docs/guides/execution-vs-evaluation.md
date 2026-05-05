@@ -97,7 +97,7 @@ Combined summaries should show both dimensions instead of collapsing them:
 
 ```text
 Execution: completed
-Evaluation: not_evaluated
+AC verdict: not_evaluated
 Run verdict: FAIL
 ```
 
@@ -105,7 +105,7 @@ or:
 
 ```text
 Execution: completed
-Evaluation: approved
+AC verdict: pass
 Run verdict: PASS
 ```
 
