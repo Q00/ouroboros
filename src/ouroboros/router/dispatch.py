@@ -706,8 +706,14 @@ def resolve_parsed_skill_dispatch(
         if resolved_mcp_args.get(arg_name) in ("", None)
     ]
     if missing_required_args:
-        return NotHandled(
-            reason=f"missing required MCP argument: {', '.join(missing_required_args)}",
+        return InvalidSkill(
+            reason=(
+                f"missing required MCP argument: {', '.join(missing_required_args)}. "
+                "For natural-language Ralph requests, run the validated interview/seed "
+                "flow before invoking ouroboros_ralph with seed_content."
+            ),
+            skill_path=resolved_skill_path,
+            category=InvalidInputReason.TEMPLATE_RESOLUTION_ERROR,
         )
 
     return Resolved(
