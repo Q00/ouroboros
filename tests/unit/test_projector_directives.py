@@ -110,8 +110,8 @@ class TestDirectiveProjection:
         assert emitted == ["evolve", "retry", "converge"]
         assert lineage.directive_emissions[-1].is_terminal is True
 
-    def test_optional_correlation_fields_default_to_none(self) -> None:
-        """generation_number and phase are None when absent from the payload."""
+    def test_optional_contract_fields_default_to_none(self) -> None:
+        """Optional ControlContract fields are None when absent from the payload."""
         projector = LineageProjector()
         events = [
             _event("lineage.created", {"goal": "no correlations"}),
@@ -129,8 +129,46 @@ class TestDirectiveProjection:
 
         assert lineage is not None
         emission = lineage.directive_emissions[0]
+        assert emission.schema_version is None
+        assert emission.target_type is None
+        assert emission.target_id is None
         assert emission.generation_number is None
         assert emission.phase is None
+        assert emission.parent_directive_id is None
+        assert emission.idempotency_key is None
+
+    def test_control_contract_identity_fields_are_projected(self) -> None:
+        """The lineage view preserves stable ControlContract identity metadata."""
+        projector = LineageProjector()
+        events = [
+            _event("lineage.created", {"goal": "contract metadata"}),
+            _event(
+                "control.directive.emitted",
+                {
+                    "schema_version": 1,
+                    "target_type": "lineage",
+                    "target_id": LINEAGE_ID,
+                    "directive": "retry",
+                    "reason": "Retry budget remains.",
+                    "emitted_by": "evolver",
+                    "generation_number": 2,
+                    "phase": "reflecting",
+                    "is_terminal": False,
+                    "parent_directive_id": "evt_parent",
+                    "idempotency_key": "lin:gen2:reflect:retry1",
+                },
+            ),
+        ]
+
+        lineage = projector.project(events)
+
+        assert lineage is not None
+        emission = lineage.directive_emissions[0]
+        assert emission.schema_version == 1
+        assert emission.target_type == "lineage"
+        assert emission.target_id == LINEAGE_ID
+        assert emission.parent_directive_id == "evt_parent"
+        assert emission.idempotency_key == "lin:gen2:reflect:retry1"
 
     def test_malformed_directive_event_is_skipped(self) -> None:
         """A directive event without a usable directive payload is silently skipped."""
@@ -268,6 +306,47 @@ class TestDirectiveProjection:
                     "reason": "Healthy row.",
                     "emitted_by": "evolver",
                     "generation_number": 1,
+                },
+            ),
+        ]
+
+        lineage = projector.project(events)
+
+        assert lineage is not None
+        assert [e.directive for e in lineage.directive_emissions] == ["continue"]
+
+    def test_invalid_contract_identity_shape_is_skipped(self) -> None:
+        """Malformed ControlContract metadata should not corrupt projection."""
+        projector = LineageProjector()
+        events = [
+            _event("lineage.created", {"goal": "invalid contract metadata"}),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Bad schema version.",
+                    "emitted_by": "evolver",
+                    "schema_version": "1",
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "wait",
+                    "reason": "Bad target type.",
+                    "emitted_by": "orchestrator",
+                    "target_type": 42,
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "continue",
+                    "reason": "Healthy row.",
+                    "emitted_by": "evolver",
+                    "schema_version": 1,
+                    "target_type": "lineage",
+                    "target_id": LINEAGE_ID,
                 },
             ),
         ]
