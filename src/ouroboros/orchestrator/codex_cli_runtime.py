@@ -563,13 +563,33 @@ class CodexCliRuntime:
         try:
             dispatched_messages = await dispatcher(intercept, current_handle)
         except Exception as e:
+            failure_context = self._build_intercept_failure_context(intercept)
             log.warning(
                 f"{self._log_namespace}.skill_intercept_dispatch_failed",
-                **self._build_intercept_failure_context(intercept),
+                **failure_context,
                 error_type=type(e).__name__,
                 error=str(e),
                 exc_info=True,
             )
+            if intercept.skill_name == "auto":
+                return (
+                    AgentMessage(
+                        type="result",
+                        content=(
+                            "Cannot run ooo auto: required MCP tool "
+                            f"`{intercept.mcp_tool}` is unavailable. "
+                            "Run `ouroboros doctor` / setup to register the MCP server."
+                        ),
+                        data={
+                            "subtype": "error",
+                            "error_type": "SkillDispatchUnavailable",
+                            "skill_name": intercept.skill_name,
+                            "tool_name": intercept.mcp_tool,
+                            "command_prefix": intercept.command_prefix,
+                        },
+                        resume_handle=current_handle,
+                    ),
+                )
             return None
 
         recoverable_error = self._extract_recoverable_dispatch_error(dispatched_messages)

@@ -1655,6 +1655,55 @@ class TestCodexCliRuntime:
         assert messages[-1].content == "Codex fallback"
 
     @pytest.mark.asyncio
+    async def test_execute_task_auto_dispatch_failure_does_not_fall_back(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`ooo auto` must fail closed when the MCP dispatch tool is unavailable."""
+        self._write_skill(
+            tmp_path,
+            "auto",
+            [
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock(side_effect=LookupError("No local handler registered"))
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        with (
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            ) as mock_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+
+        dispatcher.assert_awaited_once()
+        mock_warning.assert_called_once()
+        mock_exec.assert_not_called()
+        assert len(messages) == 1
+        assert messages[0].is_error is True
+        assert messages[0].content.startswith("Cannot run ooo auto")
+        assert "`ouroboros_auto` is unavailable" in messages[0].content
+        assert messages[0].data == {
+            "subtype": "error",
+            "error_type": "SkillDispatchUnavailable",
+            "skill_name": "auto",
+            "tool_name": "ouroboros_auto",
+            "command_prefix": "ooo auto",
+        }
+
+    @pytest.mark.asyncio
     async def test_execute_task_falls_through_when_interview_intercept_dispatcher_raises(
         self,
         tmp_path: Path,
