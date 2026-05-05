@@ -137,6 +137,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      ac_total = response.meta.ac_total
      sub_ac_completed = response.meta.sub_ac_completed
      sub_ac_total = response.meta.sub_ac_total
+     # The metadata field names remain legacy-compatible; relay them to users as Task/Subtask progress.
      message_hint = first non-empty non-metadata line from response.text, or null
 
      # Build one short relay update from structured fields.
@@ -145,9 +146,9 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
        break
 
      if ac_completed > prev_ac_completed:
-       print ac_progress_relay(phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total, message_hint)
+       print task_progress_relay(phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total, message_hint)
      elif sub_ac_completed > prev_sub_ac_completed:
-       print sub_ac_progress_relay(phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total, message_hint)
+       print subtask_progress_relay(phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total, message_hint)
      elif phase != prev_phase or status != prev_status:
        print phase_or_status_relay(status, phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total)
      elif message_hint != prev_message:
@@ -165,21 +166,23 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      This keeps the main session available often enough for a live relay while
      still avoiding noisy polling.
    - Use `view: "compact"` for very long jobs or when the user only wants a
-     heartbeat. It returns one-line state such as `job_x | running | AC 3/17`.
+     heartbeat. The raw tool may still return legacy text such as
+     `job_x | running | AC 3/17`; relay that to users as Task progress.
    - Use `view: "summary"` for normal monitoring. It includes the job message
-     plus AC/Sub-AC counts.
+     plus Task/Subtask counts derived from legacy `ac_completed`/`sub_ac_completed`
+     metadata fields.
    - Use `view: "full"` only when the user asks for detailed job status.
 
    Relay style examples:
-   - `In progress: Deliver is at AC 1/3 and Sub-AC 12/16. Current work is the Sub-AC 3 regression test.`
-   - `Level update: parallel level 1/1 has finished, and AC progress advanced to 3/3.`
+   - `In progress: Deliver is at Task 1/3 and Subtask 12/16. Current work is the Subtask 3 regression test.`
+   - `Level update: parallel level 1/1 has finished, and Task progress advanced to 3/3.`
    - `Completed: execution finished. Fetching the final job result now.`
 
    Relay output contract for other harnesses/models:
    - One update should be 1-2 sentences or 1 compact line.
-   - Include `phase`, `AC completed/total`, and `Sub-AC completed/total` when present.
+   - Include `phase`, Task completed/total and Subtask completed/total when present.
    - Include the current work hint only if it changes.
-   - Never include the full AC tree in routine relay output.
+   - Never include the full task tree in routine relay output.
    - Never include raw JSON, raw meta dumps, or repeated unchanged cursor lines.
    - Terminal statuses must be explicit: completed, failed, cancelled, or interrupted.
 
@@ -208,7 +211,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      view: "compact"
 
    # Full tree only when user asks "show details", progress looks stuck,
-   # or debugging requires seeing AC/Sub-AC structure.
+   # or debugging requires seeing the task/subtask structure.
    Tool: ouroboros_ac_tree_hud
    Arguments:
      session_id: <session_id>
@@ -270,11 +273,11 @@ Session ID: orch_x1y2z3
 Execution ID: exec_m1n2o3
 
 [Relay]
-In progress: Deliver is at AC 1/3 and Sub-AC 12/16.
-Current work is finishing the workflow routing Sub-AC.
+In progress: Deliver is at Task 1/3 and Subtask 12/16.
+Current work is finishing the workflow routing Subtask.
 
 [Relay]
-Level update: parallel level 1/1 has finished, and AC progress advanced to 3/3.
+Level update: parallel level 1/1 has finished, and Task progress advanced to 3/3.
 Execution is complete. Fetching the final job result now.
 
 [Fetching final result...]
