@@ -68,7 +68,7 @@ class BaseEvent(BaseModel, frozen=True):
     Attributes:
         id: Unique event identifier (UUID).
         type: Event type following dot.notation.past_tense convention.
-              Examples: "ontology.concept.added", "execution.ac.completed"
+              Examples: "ontology.concept.added", "orchestrator.session.completed"
         timestamp: When the event occurred (UTC).
         aggregate_type: Type of aggregate this event belongs to.
         aggregate_id: Unique identifier of the aggregate.

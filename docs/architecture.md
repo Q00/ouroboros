@@ -387,7 +387,7 @@ else:
 ### Event Sourcing
 
 All state changes are persisted as immutable events in a single SQLite table (`events`) via SQLAlchemy Core:
-- **Event types** use dot-notation past tense (e.g., `orchestrator.session.started`, `execution.ac.completed`)
+- **Event types** use dot-notation past tense (e.g., `orchestrator.session.started`, `orchestrator.session.completed`)
 - **Append-only** — events can never be modified or deleted
 - **Unit of Work** pattern groups events + checkpoint into atomic commits
 - **Replay** capability — reconstruct any session by replaying its events
