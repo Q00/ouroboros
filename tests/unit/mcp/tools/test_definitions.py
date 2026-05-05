@@ -31,6 +31,7 @@ from ouroboros.mcp.tools.definitions import (
     LineageStatusHandler,
     MeasureDriftHandler,
     QueryEventsHandler,
+    RalphHandler,
     SessionStatusHandler,
     StartEvolveStepHandler,
     StartExecuteSeedHandler,
@@ -530,6 +531,7 @@ class TestOuroborosTools:
         "ouroboros_pm_interview",
         "ouroboros_qa",
         "ouroboros_query_events",
+        "ouroboros_ralph",
         "ouroboros_session_status",
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
@@ -566,6 +568,7 @@ class TestOuroborosTools:
         assert BrownfieldHandler in handler_types
         assert PMInterviewHandler in handler_types
         assert QAHandler in handler_types
+        assert RalphHandler in handler_types
 
     def test_all_tools_have_unique_names(self) -> None:
         """All tools have unique names."""

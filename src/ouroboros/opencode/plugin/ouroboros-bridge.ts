@@ -260,6 +260,7 @@ function fail(r: Output, label: string, err: unknown): void {
 }
 
 const seen = new Map<string, number>()
+const ralphChildren = new Set<string>()
 
 export function dupe(pid: string, callID: string): boolean {
   // Identity = parent session + MCP callID. One MCP call = one dispatch.
@@ -283,6 +284,23 @@ export function dupe(pid: string, callID: string): boolean {
 
 export function _resetDedupe(): void {
   seen.clear()
+  ralphChildren.clear()
+}
+
+function isRalphTool(s: Sub): boolean {
+  return s.tool === "ouroboros_ralph"
+}
+
+export function markRalphChild(childID: string): void {
+  if (childID) ralphChildren.add(childID)
+}
+
+export function isNestedRalphDispatch(pid: string, subs: Sub[]): boolean {
+  return ralphChildren.has(pid) && subs.some(isRalphTool)
+}
+
+export function isRalphOwnedSession(sessionID: string): boolean {
+  return ralphChildren.has(sessionID)
 }
 
 // HeyAPI base client exposed via client.session._client (shared across namespaces).
@@ -382,6 +400,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
   const created = await cli.session.create({ body: { parentID: pid, title: s.title } })
   const childID = created?.data?.id
   if (!childID) throw new Error("child session create returned no id")
+  if (isRalphTool(s) || isRalphOwnedSession(pid)) markRalphChild(childID)
   log(`CHILD_CREATED pid=${pid} child=${childID} title=${s.title}`)
 
   await patch(b, pid, mid, partID, {
@@ -476,6 +495,11 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const callID = typeof input.callID === "string" ? input.callID : ""
         if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID")); return }
         if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID")); return }
+        if (isNestedRalphDispatch(pid, subs)) {
+          log(`REJECT reason=nested_ralph pid=${pid} tool=${subs[0].tool}`)
+          fail(out, "ouroboros_ralph", new Error("nested ouroboros_ralph delegation is not allowed"))
+          return
+        }
 
         const cli = ctx.client as unknown as Cli
         const b = base(ctx.client)

@@ -12,6 +12,7 @@ Handler modules:
 - evaluation_handlers: MeasureDriftHandler, EvaluateHandler, LateralThinkHandler
 - evolution_handlers: EvolveStepHandler, StartEvolveStepHandler,
                       EvolveRewindHandler, LineageStatusHandler
+- ralph_handlers: RalphHandler
 - job_handlers: CancelExecutionHandler, JobStatusHandler, JobWaitHandler,
                 JobResultHandler, CancelJobHandler
 - qa: QAHandler
@@ -55,6 +56,7 @@ from ouroboros.mcp.tools.query_handlers import (
     QueryEventsHandler,
     SessionStatusHandler,
 )
+from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
@@ -298,6 +300,22 @@ def start_evolve_step_handler(
     )
 
 
+def ralph_handler(
+    *,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> RalphHandler:
+    """Create a RalphHandler instance."""
+    return RalphHandler(
+        evolve_handler=EvolveStepHandler(
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+
+
 def lineage_status_handler() -> LineageStatusHandler:
     """Create a LineageStatusHandler instance."""
     return LineageStatusHandler()
@@ -332,6 +350,7 @@ OuroborosToolHandlers = tuple[
     | LateralThinkHandler
     | EvolveStepHandler
     | StartEvolveStepHandler
+    | RalphHandler
     | LineageStatusHandler
     | EvolveRewindHandler
     | CancelExecutionHandler
@@ -437,6 +456,14 @@ def get_ouroboros_tools(
             opencode_mode=opencode_mode,
         ),
         StartEvolveStepHandler(
+            evolve_handler=EvolveStepHandler(
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            ),
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        RalphHandler(
             evolve_handler=EvolveStepHandler(
                 agent_runtime_backend=runtime_backend,
                 opencode_mode=opencode_mode,
