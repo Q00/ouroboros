@@ -635,6 +635,10 @@ class CodexCliRuntime:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
         command = [self._cli_path, "exec"]
 
+        # Codex accepts one active --profile. The backend runtime profile is
+        # the worker-isolation boundary, so it owns that singular flag when
+        # configured; role/task profile resolution may still contribute a
+        # model fallback below, but not a second --profile.
         if self._codex_profile:
             command.extend(["--profile", self._codex_profile])
 
@@ -654,7 +658,7 @@ class CodexCliRuntime:
             command.extend(["--model", normalized_model])
         else:
             runtime_model, runtime_profile = self._resolve_runtime_codex_config(runtime_handle)
-            if runtime_profile:
+            if runtime_profile and not self._codex_profile:
                 command.extend(["--profile", runtime_profile])
             else:
                 normalized_runtime_model = self._normalize_model(runtime_model)

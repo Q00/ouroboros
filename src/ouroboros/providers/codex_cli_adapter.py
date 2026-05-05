@@ -369,6 +369,9 @@ class CodexCliLLMAdapter:
         The prompt is always fed via stdin to avoid ARG_MAX limits.
         """
         command = [self._cli_path, "exec"]
+        # Codex has one --profile selector. Runtime-profile worker isolation
+        # owns that flag when configured; task-profile resolution may still
+        # contribute a --model fallback, but must not emit a competing profile.
         if self._codex_profile:
             command.extend(["--profile", self._codex_profile])
         command.extend(
@@ -390,7 +393,7 @@ class CodexCliLLMAdapter:
         if output_schema_path:
             command.extend(["--output-schema", output_schema_path])
 
-        if profile:
+        if profile and not self._codex_profile:
             command.extend(["--profile", profile])
         elif model:
             command.extend(["--model", model])
@@ -704,7 +707,9 @@ class CodexCliLLMAdapter:
         effective_config = resolved.config
         prompt = self._build_prompt(messages, max_turns=effective_config.max_turns)
         normalized_model = (
-            None if resolved.backend_profile else self._normalize_model(effective_config.model)
+            None
+            if resolved.backend_profile and not self._codex_profile
+            else self._normalize_model(effective_config.model)
         )
         output_fd, output_path_str = tempfile.mkstemp(prefix=self._tempfile_prefix, suffix=".txt")
         os.close(output_fd)

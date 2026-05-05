@@ -322,6 +322,33 @@ class TestCodexCliRuntime:
         assert command[command.index("--profile") + 1] == "ouroboros-deep"
         assert "--model" not in command
 
+    def test_runtime_profile_prevents_duplicate_role_profile_flags(self) -> None:
+        """Worker isolation owns Codex's singular --profile flag when both resolve."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project", runtime_profile="worker")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert command.count("--profile") == 1
+        assert command[command.index("--profile") + 1] == "ouroboros-worker"
+        assert "ouroboros-standard" not in command
+
     def test_build_command_uses_runtime_profile_provider_model_fallback(self) -> None:
         """Codex runtime profiles without Codex-native profile anchors should use models."""
         runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
