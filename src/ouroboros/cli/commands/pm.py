@@ -385,6 +385,8 @@ def _make_message_callback(debug: bool):
             display = first_line[:100] + "..." if len(first_line) > 100 else first_line
             if display:
                 console.print(f"  [dim]thinking:[/] {display}")
+        elif msg_type == "tool_started":
+            console.print(f"  [cyan]tool started:[/] {content}")
         elif msg_type == "tool":
             console.print(f"  [yellow]tool:[/] {content}")
 
