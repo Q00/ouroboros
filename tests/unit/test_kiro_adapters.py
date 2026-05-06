@@ -88,8 +88,32 @@ class TestResolveLLMBackendKiro:
         assert resolve_llm_backend("claude") == "claude_code"
 
 
+@pytest.fixture
+def _isolated_llm_permission_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate LLM permission resolution from the developer's local config.
+
+    `get_llm_permission_mode` reads ``~/.ouroboros/config.yaml`` when no env
+    override is set, so without isolation any developer who pinned
+    ``llm.permission_mode`` locally (e.g. ``bypassPermissions``) would see
+    these tests fail even though the contract default for kiro is
+    ``"default"``. CI passes only because the runner has no config file.
+
+    The fixture clears the env override and forces ``load_config`` to fail
+    with ``ConfigError`` so resolution falls back to the contract default.
+    """
+    from ouroboros.config import loader as config_loader
+
+    monkeypatch.delenv("OUROBOROS_LLM_PERMISSION_MODE", raising=False)
+    monkeypatch.delenv("OUROBOROS_OPENCODE_PERMISSION_MODE", raising=False)
+
+    def _raise_config_error() -> None:
+        raise config_loader.ConfigError("isolated for unit test")
+
+    monkeypatch.setattr(config_loader, "load_config", _raise_config_error)
+
+
 class TestResolveLLMPermissionModeKiro:
-    def test_kiro_returns_default(self) -> None:
+    def test_kiro_returns_default(self, _isolated_llm_permission_config: None) -> None:
         assert resolve_llm_permission_mode(backend="kiro") == "default"
 
     def test_kiro_respects_llm_permission_mode_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,7 +130,9 @@ class TestResolveLLMPermissionModeKiro:
             resolve_llm_permission_mode(backend="kiro", use_case="interview") == "bypassPermissions"
         )
 
-    def test_kiro_interview_returns_config_default_without_override(self) -> None:
+    def test_kiro_interview_returns_config_default_without_override(
+        self, _isolated_llm_permission_config: None
+    ) -> None:
         assert resolve_llm_permission_mode(backend="kiro", use_case="interview") == "default"
 
 
@@ -135,7 +161,9 @@ class TestCreateLLMAdapterKiro:
         assert isinstance(adapter, KiroCodeAdapter)
         assert adapter._max_retries == 5
 
-    def test_passes_tool_envelope_to_kiro_adapter(self) -> None:
+    def test_passes_tool_envelope_to_kiro_adapter(
+        self, _isolated_llm_permission_config: None
+    ) -> None:
         messages: list[tuple[str, str]] = []
 
         def _on_message(kind: str, content: str) -> None:
