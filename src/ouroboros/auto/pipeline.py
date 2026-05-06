@@ -409,7 +409,13 @@ def _grade_meets_required(actual: str | None, required: str) -> bool:
 
 
 def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
-    if tool_name in {"interview.start", "interview.resume", "interview.answer", "auto_answerer"}:
+    if tool_name in {
+        "interview.start",
+        "interview.resume",
+        "interview.answer",
+        "auto_answerer",
+        "interview_driver",
+    }:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION

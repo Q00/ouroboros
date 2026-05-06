@@ -49,3 +49,138 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     assert run_auto.called
     assert "Auto session:" in result.output
     assert "auto_test" in result.output
+
+
+def _persisted_state_with_bounds(tmp_path, *, max_interview_rounds: int, max_repair_rounds: int):
+    """Persist a blocked auto session with a known loop budget for resume tests."""
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.max_interview_rounds = max_interview_rounds
+    state.max_repair_rounds = max_repair_rounds
+    state.skip_run = True
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked(
+        "auto interview reached max rounds with unresolved gaps: actors",
+        tool_name="interview_driver",
+    )
+    store = AutoStore(tmp_path)
+    store.save(state)
+    return state, store, state.auto_session_id
+
+
+def test_resume_uses_persisted_bounds_when_cli_unspecified(tmp_path) -> None:
+    """No explicit CLI bound on resume must keep the persisted budget intact."""
+    import asyncio
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    _, store, session_id = _persisted_state_with_bounds(
+        tmp_path, max_interview_rounds=2, max_repair_rounds=1
+    )
+
+    captured: dict[str, int] = {}
+
+    async def fake_pipeline_run(self, state):  # noqa: ARG001
+        captured["max_interview_rounds"] = self.interview_driver.max_rounds
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+
+        result = asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=False,
+            )
+        )
+
+    assert result.status == "complete"
+    assert captured["max_interview_rounds"] == 2
+
+
+def test_resume_raises_persisted_bound_when_cli_overrides_higher(tmp_path) -> None:
+    """Explicit CLI value larger than persisted must raise the bound for resume."""
+    import asyncio
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    _, store, session_id = _persisted_state_with_bounds(
+        tmp_path, max_interview_rounds=2, max_repair_rounds=1
+    )
+
+    captured: dict[str, int] = {}
+
+    async def fake_pipeline_run(self, state):
+        captured["driver_max_rounds"] = self.interview_driver.max_rounds
+        captured["state_max_interview_rounds"] = state.max_interview_rounds
+        captured["state_max_repair_rounds"] = state.max_repair_rounds
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+
+        result = asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=session_id,
+                runtime=None,
+                max_interview_rounds=6,
+                max_repair_rounds=None,
+                skip_run=False,
+            )
+        )
+
+    assert result.status == "complete"
+    assert captured["driver_max_rounds"] == 6
+    assert captured["state_max_interview_rounds"] == 6
+    assert captured["state_max_repair_rounds"] == 1
+
+
+def test_resume_rejects_lower_bound_override(tmp_path) -> None:
+    """Tightening a bound on resume must be refused — never trap a session further."""
+    import asyncio
+
+    import pytest
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    _, store, session_id = _persisted_state_with_bounds(
+        tmp_path, max_interview_rounds=4, max_repair_rounds=2
+    )
+
+    with patch("ouroboros.cli.commands.auto.AutoStore") as store_cls:
+        store_cls.return_value = store
+
+        with pytest.raises(ValueError, match="refuse to tighten"):
+            asyncio.run(
+                _run_auto(
+                    goal=None,
+                    resume=session_id,
+                    runtime=None,
+                    max_interview_rounds=2,
+                    max_repair_rounds=None,
+                    skip_run=False,
+                )
+            )

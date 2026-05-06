@@ -1796,3 +1796,67 @@ async def test_pipeline_seed_loader_rejects_non_seed_on_review_resume(tmp_path) 
     assert result.status == "failed"
     assert "seed loader returned dict, expected Seed" in (result.blocker or "")
     assert state.last_tool_name == "seed_loader"
+
+
+def test_recoverable_phase_includes_interview_driver() -> None:
+    """Sessions blocked at interview max_rounds set tool_name='interview_driver';
+    resume must route them back to the INTERVIEW phase."""
+    from ouroboros.auto.pipeline import _recoverable_phase_for_tool
+
+    assert _recoverable_phase_for_tool("interview_driver") == AutoPhase.INTERVIEW
+
+
+@pytest.mark.asyncio
+async def test_resume_after_interview_max_rounds_can_continue_when_bound_raised(
+    tmp_path,
+) -> None:
+    """Reproduce: a session blocked at max_interview_rounds with
+    tool_name='interview_driver' must resume cleanly when the bound is raised
+    instead of immediately re-emitting the same blocker."""
+    answer_calls: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What is the acceptance signal?", "interview_resume")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answer_calls.append(text)
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.interview_session_id = "interview_resume"
+    state.current_round = 2
+    state.max_interview_rounds = 4  # bound raised from the original 2
+    state.pending_question = "What is the acceptance signal?"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked(
+        "auto interview reached max rounds with unresolved gaps: actors",
+        tool_name="interview_driver",
+    )
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=state.max_interview_rounds,
+    )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        return {"job_id": "job_resume", "execution_id": "exec_resume", "session_id": "ses_resume"}
+
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete", f"resume blocked: {result.blocker!r}"
+    assert state.phase == AutoPhase.COMPLETE
+    assert answer_calls, "interview backend must be re-engaged on resume"
