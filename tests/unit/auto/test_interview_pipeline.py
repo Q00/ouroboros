@@ -168,6 +168,28 @@ def test_seed_draft_ledger_hydrates_markdown_bulleted_goal() -> None:
     assert ledger.sections["inputs"].entries[-1].value == "no CLI arguments"
 
 
+def test_seed_draft_ledger_uses_later_repeated_goal_label_as_correction() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are no CLI arguments. "
+        "Outputs are json. "
+        "Outputs are yaml. "
+        "Runtime context is local Python 3.11. "
+        "Constraints are stdlib only. "
+        "Non-goals are network calls. "
+        "Acceptance criteria are stdout includes hello. "
+        "Verification plan is run pytest. "
+        "Failure modes are missing stdout assertion."
+    )
+
+    assert ledger.is_seed_ready()
+    outputs = ledger.sections["outputs"].entries
+    assert [(entry.value, entry.status) for entry in outputs] == [
+        ("json", LedgerStatus.WEAK),
+        ("yaml", LedgerStatus.CONFIRMED),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001

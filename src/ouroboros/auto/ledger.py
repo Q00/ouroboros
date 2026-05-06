@@ -443,24 +443,22 @@ def _hydrate_explicit_goal_sections(ledger: SeedDraftLedger, goal: str) -> None:
             rf"(?P<value>.*?)"
             rf"{_EXPLICIT_GOAL_SECTION_BOUNDARY}"
         )
-        match = re.search(pattern, goal, flags=re.IGNORECASE | re.DOTALL)
-        if match is None:
-            continue
-        value = _clean_goal_fact(match.group("value"))
-        if not value:
-            continue
-        ledger.add_entry(
-            section_name,
-            LedgerEntry(
-                key=key,
-                value=value,
-                source=source,
-                confidence=0.93,
-                status=LedgerStatus.CONFIRMED,
-                reversible=False,
-                rationale=f"Explicitly supplied in the initial auto goal for {section_name}.",
-            ),
-        )
+        for match in re.finditer(pattern, goal, flags=re.IGNORECASE | re.DOTALL):
+            value = _clean_goal_fact(match.group("value"))
+            if not value:
+                continue
+            ledger.add_entry(
+                section_name,
+                LedgerEntry(
+                    key=key,
+                    value=value,
+                    source=source,
+                    confidence=0.93,
+                    status=LedgerStatus.CONFIRMED,
+                    reversible=False,
+                    rationale=f"Explicitly supplied in the initial auto goal for {section_name}.",
+                ),
+            )
 
 
 def _clean_goal_fact(value: str) -> str:
