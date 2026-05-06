@@ -2244,8 +2244,19 @@ def setup(
             print_info(f"Auto-selected: {selected}")
         elif len(available) > 1:
             if non_interactive:
-                selected = "claude" if "claude" in available else next(iter(available))
-                print_info(f"Non-interactive mode, selected: {selected}")
+                # Prefer the previously-configured backend so unattended
+                # upgrades (e.g. install.sh re-runs) do not silently rewrite
+                # a deliberate user choice. Fall back to claude only when no
+                # prior choice exists, then to the first available CLI.
+                if current_backend and current_backend in available:
+                    selected = current_backend
+                    print_info(f"Non-interactive mode, preserving current backend: {selected}")
+                elif "claude" in available:
+                    selected = "claude"
+                    print_info(f"Non-interactive mode, selected: {selected}")
+                else:
+                    selected = next(iter(available))
+                    print_info(f"Non-interactive mode, selected: {selected}")
             else:
                 choices = list(available.keys())
                 default_idx = "1"

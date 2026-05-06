@@ -1,11 +1,41 @@
 #!/bin/bash
 # Ouroboros installer — auto-detects runtime and installs accordingly.
 # Usage: curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+#
+# Runtime selection (first match wins):
+#   1. OUROBOROS_INSTALL_RUNTIME env var (claude|codex|opencode|hermes|all)
+#   2. Existing ~/.ouroboros/config.yaml runtime — preserved on upgrade
+#      unless OUROBOROS_INSTALL_RECONFIGURE=1 (or --reconfigure flag) is set.
+#   3. Interactive prompt when stdin is a TTY.
+#   4. Auto-detect single CLI on PATH; default to claude in pipe mode.
 set -euo pipefail
 
 PACKAGE_NAME="ouroboros-ai"
 MIN_PYTHON="3.12"
 IS_LOCAL=false
+RECONFIGURE="${OUROBOROS_INSTALL_RECONFIGURE:-}"
+EXPLICIT_RUNTIME="${OUROBOROS_INSTALL_RUNTIME:-}"
+
+# Parse simple flags: --reconfigure, --runtime <name>
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reconfigure)
+      RECONFIGURE="1"
+      shift
+      ;;
+    --runtime)
+      EXPLICIT_RUNTIME="${2:-}"
+      shift 2
+      ;;
+    --runtime=*)
+      EXPLICIT_RUNTIME="${1#--runtime=}"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
 
 # Override PACKAGE_NAME if running inside the repository clone
 if [ -f "pyproject.toml" ] && grep -q "name = \"ouroboros-ai\"" pyproject.toml; then
@@ -129,7 +159,54 @@ RUNTIME_COUNT=0
 [ "$HAS_CODEX" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_HERMES" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 
-if [ "$RUNTIME_COUNT" -gt 1 ]; then
+# Map a runtime name to (EXTRAS, RUNTIME) pair.
+# Used after explicit/preserved runtime resolution to derive install extras.
+_runtime_to_extras() {
+  case "$1" in
+    claude) EXTRAS="[claude]"; RUNTIME="claude" ;;
+    codex)  EXTRAS=""; RUNTIME="codex" ;;
+    hermes) EXTRAS="[mcp]"; RUNTIME="hermes" ;;
+    all)    EXTRAS="[all]"; RUNTIME="" ;;
+    "")     EXTRAS=""; RUNTIME="" ;;
+    *)
+      echo "Error: unsupported runtime '$1' (expected: claude, codex, hermes, all)"
+      exit 1
+      ;;
+  esac
+}
+
+# Try to read the previously-configured runtime from ~/.ouroboros/config.yaml.
+# Preserves user choice across upgrades unless --reconfigure / --runtime is set.
+EXISTING_RUNTIME=""
+EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
+if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
+  EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
+import os, sys
+try:
+    import yaml  # type: ignore
+except ImportError:
+    sys.exit(0)
+try:
+    with open(os.environ['EXISTING_CONFIG']) as f:
+        data = yaml.safe_load(f) or {}
+    backend = (data.get('orchestrator') or {}).get('runtime_backend') or ''
+    if backend in ('claude', 'codex', 'hermes'):
+        print(backend)
+except Exception:
+    pass
+" 2>/dev/null || true)
+fi
+
+if [ -n "$EXPLICIT_RUNTIME" ]; then
+  echo
+  echo "  Runtime: $EXPLICIT_RUNTIME (from --runtime / OUROBOROS_INSTALL_RUNTIME)"
+  _runtime_to_extras "$EXPLICIT_RUNTIME"
+elif [ -n "$EXISTING_RUNTIME" ]; then
+  echo
+  echo "  Runtime: $EXISTING_RUNTIME (preserved from $EXISTING_CONFIG)"
+  echo "           [dim]Re-run with --reconfigure to choose again.[/dim]"
+  _runtime_to_extras "$EXISTING_RUNTIME"
+elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     echo
     echo "Multiple runtimes detected. Which runtime do you want to use?"
@@ -139,48 +216,47 @@ if [ "$RUNTIME_COUNT" -gt 1 ]; then
     echo "  [4] All     (pip install ${PACKAGE_NAME}[all])"
     read -rp "Select [1]: " choice
     case "${choice:-1}" in
-      2) EXTRAS=""; RUNTIME="codex" ;;
-      3) EXTRAS="[mcp]"; RUNTIME="hermes" ;;
-      4) EXTRAS="[all]"; RUNTIME="" ;;
-      *) EXTRAS="[claude]"; RUNTIME="claude" ;;
+      2) _runtime_to_extras "codex" ;;
+      3) _runtime_to_extras "hermes" ;;
+      4) _runtime_to_extras "all" ;;
+      *) _runtime_to_extras "claude" ;;
     esac
   else
     # Pipe mode: default to claude when multiple runtimes exist
-    EXTRAS="[claude]"
-    RUNTIME="claude"
+    _runtime_to_extras "claude"
   fi
-elif [ "$HAS_CLAUDE" = true ]; then
-  EXTRAS="[claude]"
-  RUNTIME="claude"
-elif [ "$HAS_CODEX" = true ]; then
-  EXTRAS=""
-  RUNTIME="codex"
-elif [ "$HAS_HERMES" = true ]; then
-  EXTRAS="[mcp]"
-  RUNTIME="hermes"
+elif [ "$HAS_CLAUDE" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "claude"
+elif [ "$HAS_CODEX" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "codex"
+elif [ "$HAS_HERMES" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "hermes"
 else
+  # No runtime CLI on PATH yet — first install. Always prompt when interactive
+  # so the user picks deliberately rather than silently defaulting to claude.
   if [ -t 0 ]; then
-    # Interactive mode: ask the user
     echo
     echo "No runtime CLI detected. Which runtime will you use?"
     echo "  [1] Claude  (pip install ${PACKAGE_NAME}[claude])  ← recommended"
     echo "  [2] Codex   (pip install ${PACKAGE_NAME})"
     echo "  [3] Hermes  (pip install ${PACKAGE_NAME}[mcp])"
     echo "  [4] All     (pip install ${PACKAGE_NAME}[all])"
+    echo "  [0] None    (install base package only — pick a backend later)"
     read -rp "Select [1]: " choice
+    case "${choice:-1}" in
+      0) _runtime_to_extras "" ;;
+      2) _runtime_to_extras "codex" ;;
+      3) _runtime_to_extras "hermes" ;;
+      4) _runtime_to_extras "all" ;;
+      *) EXTRAS="[mcp,claude]"; RUNTIME="claude" ;;
+    esac
   else
-    # Pipe mode (curl | bash): install base package, skip runtime-specific setup
+    # Pipe mode (curl | bash): install base package, skip runtime-specific setup.
     echo
     echo "  No runtime detected (non-interactive: installing base package)"
-    choice="0"
+    echo "  Pick a backend afterwards with: ouroboros config backend <claude|codex|hermes|gemini>"
+    _runtime_to_extras ""
   fi
-  case "${choice:-1}" in
-    0) EXTRAS=""; RUNTIME="" ;;
-    2) EXTRAS="[mcp]"; RUNTIME="codex" ;;
-    3) EXTRAS="[mcp]"; RUNTIME="hermes" ;;
-    4) EXTRAS="[all]"; RUNTIME="" ;;
-    *) EXTRAS="[mcp,claude]"; RUNTIME="claude" ;;
-  esac
 fi
 
 INSTALL_SPEC="${PACKAGE_NAME}${EXTRAS}"
@@ -337,3 +413,9 @@ echo '    > ooo interview "your idea here"'
 echo
 echo "  Or from the terminal:"
 echo '    ouroboros init start "your idea here"'
+echo
+if [ -n "$RUNTIME" ]; then
+  echo "  Current backend: $RUNTIME"
+fi
+echo "  Switch backend later: ouroboros config backend <claude|codex|hermes|gemini>"
+echo "  (For kiro / copilot / opencode: ouroboros setup --runtime <name>)"

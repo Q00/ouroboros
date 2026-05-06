@@ -3323,3 +3323,61 @@ class TestCopilotSetup:
 
         assert result.exit_code != 0
         assert "Copilot CLI not found" in result.output
+
+
+class TestNonInteractiveAutoSelect:
+    """`ouroboros setup --non-interactive` runtime auto-selection."""
+
+    def _run(self, *, current_backend: str | None, available: dict[str, str]) -> str:
+        """Invoke `setup --non-interactive` (no --runtime) and capture which
+        backend the auto-select branch chose, by stubbing every `_setup_*`
+        helper. Returns the backend name actually dispatched."""
+        chosen: dict[str, str] = {}
+
+        def _claude(path: str) -> None:
+            chosen["selected"] = "claude"
+
+        def _codex(path: str, **kwargs) -> None:
+            chosen["selected"] = "codex"
+
+        def _hermes(path: str) -> None:
+            chosen["selected"] = "hermes"
+
+        runner = CliRunner()
+        with (
+            patch.object(setup_cmd, "_get_current_backend", return_value=current_backend),
+            patch.object(setup_cmd, "_detect_runtimes", return_value=available),
+            patch.object(setup_cmd, "_setup_claude", side_effect=_claude),
+            patch.object(setup_cmd, "_setup_codex", side_effect=_codex),
+            patch.object(setup_cmd, "_setup_hermes", side_effect=_hermes),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--non-interactive"])
+        assert result.exit_code == 0, result.output
+        return chosen.get("selected", "")
+
+    def test_prefers_current_backend_over_claude_default(self) -> None:
+        """Existing config = codex; multi-runtime; non-interactive
+        must keep codex, not silently flip to claude."""
+        selected = self._run(
+            current_backend="codex",
+            available={"claude": "/usr/bin/claude", "codex": "/usr/bin/codex"},
+        )
+        assert selected == "codex"
+
+    def test_falls_back_to_claude_when_no_current_backend(self) -> None:
+        """First-install scenario (no persisted backend) keeps the
+        existing claude default for unattended pipe-mode flows."""
+        selected = self._run(
+            current_backend=None,
+            available={"claude": "/usr/bin/claude", "codex": "/usr/bin/codex"},
+        )
+        assert selected == "claude"
+
+    def test_falls_back_to_first_available_when_claude_missing(self) -> None:
+        """No persisted backend, no claude on PATH — pick the first
+        available CLI deterministically (codex here)."""
+        selected = self._run(
+            current_backend=None,
+            available={"codex": "/usr/bin/codex", "hermes": "/usr/bin/hermes"},
+        )
+        assert selected == "codex"
