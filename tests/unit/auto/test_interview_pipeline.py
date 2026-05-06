@@ -12,6 +12,7 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
+from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
@@ -308,6 +309,29 @@ async def test_interview_driver_supplies_bounded_repo_facts_to_answerer(tmp_path
     assert repo_entry.evidence == ["pyproject.toml", "src/", "tests/"]
     assert "Python project requiring >=3.12" in repo_entry.value
     assert "Typer CLI" in repo_entry.value
+
+
+def test_repo_context_keeps_partial_project_hints_out_of_confirmed_runtime(tmp_path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "\n".join(
+            [
+                "[project]",
+                'name = "tool-only"',
+                "",
+                "[build-system]",
+                'build-backend = "hatchling.build"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert "runtime_context" not in context.repo_facts
+    assert context.repo_facts["package_manager"] == "hatchling/pyproject"
+    assert context.repo_facts["project_structure"] == "src layout with tests directory"
 
 
 @pytest.mark.asyncio

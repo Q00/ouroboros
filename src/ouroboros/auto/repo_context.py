@@ -35,12 +35,15 @@ def repo_auto_answer_context(cwd: str | Path) -> AutoAnswerContext:
     evidence: dict[str, tuple[str, ...]] = {}
     runtime_parts: list[str] = []
     runtime_evidence = ["pyproject.toml"]
+    strong_runtime_fact = False
 
     requires_python = _clean_str(project.get("requires-python"))
     if requires_python:
         runtime_parts.append(f"Python project requiring {requires_python}")
+        strong_runtime_fact = True
     elif project:
-        runtime_parts.append("Python project declared in pyproject.toml")
+        facts["project_kind"] = "Python project declared in pyproject.toml"
+        evidence["project_kind"] = ("pyproject.toml",)
 
     package_manager = _package_manager(root, pyproject_data)
     if package_manager:
@@ -53,6 +56,7 @@ def repo_auto_answer_context(cwd: str | Path) -> AutoAnswerContext:
         facts["framework"] = framework
         evidence["framework"] = ("pyproject.toml",)
         runtime_parts.append(f"using {framework}")
+        strong_runtime_fact = True
 
     structure = _project_structure(root)
     if structure:
@@ -62,7 +66,7 @@ def repo_auto_answer_context(cwd: str | Path) -> AutoAnswerContext:
         runtime_parts.append(structure)
         runtime_evidence.extend(structure_evidence)
 
-    if runtime_parts:
+    if strong_runtime_fact and runtime_parts:
         facts["runtime_context"] = "; ".join(runtime_parts) + "."
         evidence["runtime_context"] = tuple(dict.fromkeys(runtime_evidence))
 
