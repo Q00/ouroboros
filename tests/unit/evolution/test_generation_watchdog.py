@@ -461,8 +461,14 @@ async def test_parent_cancellation_cancels_watched_generation() -> None:
             child_cancelled.set()
             raise
 
-    parent = asyncio.create_task(watchdog.watch(long_work()))
-    await asyncio.sleep(0.05)
+    child_started = asyncio.Event()
+
+    async def tracked_long_work() -> str:
+        child_started.set()
+        return await long_work()
+
+    parent = asyncio.create_task(watchdog.watch(tracked_long_work()))
+    await asyncio.wait_for(child_started.wait(), timeout=1)
     parent.cancel()
 
     with pytest.raises(asyncio.CancelledError):

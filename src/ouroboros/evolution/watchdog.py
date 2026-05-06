@@ -105,9 +105,9 @@ class GenerationProgressWatchdog:
 
     async def watch[T](self, awaitable: Awaitable[T]) -> T:
         """Run *awaitable* until it finishes or watchdog policy cancels it."""
+        await self.initialize_baseline()
         task: asyncio.Task[T] = asyncio.create_task(awaitable)
         try:
-            await self.initialize_baseline()
             while True:
                 done, _ = await asyncio.wait(
                     {task},
