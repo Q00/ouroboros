@@ -915,6 +915,81 @@ class TestCodexCliLLMAdapter:
         assert "failure_category" not in details
         assert "remediation" not in details
 
+    def test_codex_failure_details_does_not_classify_non_openai_401_as_auth(
+        self,
+    ) -> None:
+        """Bot review (PR #656): a nested tool / MCP service returning its own
+        ``401 Unauthorized`` must NOT be misclassified as Codex auth-plane
+        failure. Only auth phrases combined with a Codex/OpenAI marker should
+        trigger the ``codex_auth`` category."""
+        nested_tool_401 = (
+            "tool failed: HTTP 401 Unauthorized from https://internal.example.com/api/v3"
+        )
+
+        details = CodexCliLLMAdapter._codex_failure_details(
+            returncode=1,
+            session_id="thread_2",
+            stderr="Reading prompt from stdin...",
+            stdout_errors=[nested_tool_401],
+            message=nested_tool_401,
+        )
+
+        assert details["returncode"] == 1
+        assert "failure_category" not in details, (
+            "Generic 401 from a non-Codex/non-OpenAI service must not be "
+            "labeled codex_auth — operators would be sent to inspect "
+            "CODEX_HOME/auth.json for an unrelated failure."
+        )
+        assert "remediation" not in details
+
+    def test_codex_failure_details_classifies_openai_chat_completions_401_as_auth(
+        self,
+    ) -> None:
+        """Auth phrase + OpenAI domain (any endpoint, not just /v1/responses)
+        should still classify as Codex auth — Codex CLI may use other
+        endpoints depending on profile, but they all share the same auth
+        plane."""
+        msg = "401 Unauthorized: Invalid API key from https://api.openai.com/v1/chat/completions"
+        details = CodexCliLLMAdapter._codex_failure_details(
+            returncode=1,
+            session_id="thread_3",
+            stderr="Reading prompt from stdin...",
+            stdout_errors=[msg],
+            message=msg,
+        )
+
+        assert details["failure_category"] == "codex_auth"
+        # /v1/responses-specific flag must reflect actual presence so
+        # downstream renderers can distinguish endpoints.
+        assert details["openai_responses_endpoint_seen"] is False
+        assert "CODEX_HOME/auth.json" in details["remediation"]
+
+    def test_looks_like_codex_auth_failure_classifier_unit_cases(self) -> None:
+        """Spot-check the classifier directly so future drift in either the
+        auth-phrase list or the provider-marker list fails loudly here."""
+        cls = CodexCliLLMAdapter
+
+        # Positive cases — both signal classes present.
+        assert cls._looks_like_codex_auth_failure(
+            "401 Unauthorized from api.openai.com/v1/responses"
+        )
+        assert cls._looks_like_codex_auth_failure("codex login required: invalid bearer token")
+        assert cls._looks_like_codex_auth_failure(
+            "Missing bearer or basic authentication, see openai.com docs"
+        )
+
+        # Negative — auth phrase alone, no Codex/OpenAI marker.
+        assert not cls._looks_like_codex_auth_failure(
+            "tool failed: 401 Unauthorized from internal.example.com"
+        )
+        assert not cls._looks_like_codex_auth_failure("invalid api key for stripe")
+
+        # Negative — provider marker alone, no auth phrase.
+        assert not cls._looks_like_codex_auth_failure("rate limited: 429 from api.openai.com")
+        assert not cls._looks_like_codex_auth_failure(
+            "codex CLI exited with code 1: model not found"
+        )
+
     @pytest.mark.asyncio
     async def test_complete_emits_tool_started_callbacks_from_json_events(self) -> None:
         """Chat renderers can show nested tool/MCP progress before completion."""

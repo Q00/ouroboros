@@ -71,11 +71,41 @@ _CODEX_AUTH_FAILURE_PATTERNS = (
     "missing api key",
     "invalid bearer token",
 )
+
+# A bare auth phrase ("401 unauthorized", "unauthorized") is ambiguous —
+# nested tools or MCP services routed through the same ``error`` /
+# ``turn.failed`` channel can surface their own 401s without involving Codex
+# auth at all. To avoid sending operators to inspect ``CODEX_HOME/auth.json``
+# for an unrelated failure, classification additionally requires that the
+# error mention a Codex/OpenAI-specific marker below.
+_CODEX_PROVIDER_MARKERS = (
+    "api.openai.com",
+    "openai.com",
+    "codex",
+)
 _OPENAI_RESPONSES_ENDPOINT = "api.openai.com/v1/responses"
 
 
 class CodexCliLLMAdapter:
-    """LLM adapter backed by local Codex CLI execution."""
+    """LLM adapter backed by local Codex CLI execution.
+
+    Streaming progress callback contract (``on_message``):
+
+    The callable receives ``(message_type, content)`` tuples derived from the
+    Codex JSONL stream. ``message_type`` is one of:
+
+    - ``"thinking"`` — agent reasoning, summaries, or to-do lists. Emitted
+      only on completion (started reasoning is suppressed to reduce noise).
+    - ``"tool_started"`` — a tool/MCP/file-change/web-search call has begun
+      executing. Useful for chat or terminal renderers that want to show
+      in-flight progress before completion. New in 0.34+.
+    - ``"tool"`` — a tool call has finished and the adapter has the
+      completed item information. Always emitted for tool-like items
+      regardless of whether ``"tool_started"`` was seen.
+
+    Consumers that switch on ``message_type`` should ignore unknown kinds to
+    stay forward-compatible with future categories.
+    """
 
     _provider_name = "codex_cli"
     _display_name = "Codex CLI"
@@ -533,9 +563,18 @@ class CodexCliLLMAdapter:
 
     @staticmethod
     def _looks_like_codex_auth_failure(message: str) -> bool:
-        """Identify Codex/OpenAI auth failures that are otherwise opaque 401s."""
+        """Identify Codex/OpenAI auth failures that are otherwise opaque 401s.
+
+        Requires BOTH an auth-related phrase AND a Codex/OpenAI-specific
+        provider marker. Without the marker, generic 401s from nested tool
+        or MCP calls would be misclassified as Codex auth-plane failures
+        and routed to the wrong remediation (``CODEX_HOME/auth.json``).
+        """
         normalized = message.lower()
-        return any(pattern in normalized for pattern in _CODEX_AUTH_FAILURE_PATTERNS)
+        has_auth_phrase = any(pattern in normalized for pattern in _CODEX_AUTH_FAILURE_PATTERNS)
+        if not has_auth_phrase:
+            return False
+        return any(marker in normalized for marker in _CODEX_PROVIDER_MARKERS)
 
     @staticmethod
     def _uses_openai_responses_endpoint(message: str) -> bool:
