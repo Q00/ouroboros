@@ -108,7 +108,9 @@ def _framework(project: dict[str, Any]) -> str:
         return ""
     normalized = {_dependency_name(item) for item in dependencies if isinstance(item, str)}
     frameworks = [
-        framework for dependency, framework in _FRAMEWORK_DEPENDENCIES.items() if dependency in normalized
+        framework
+        for dependency, framework in _FRAMEWORK_DEPENDENCIES.items()
+        if dependency in normalized
     ]
     return ", ".join(frameworks)
 
