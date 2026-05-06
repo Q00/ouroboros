@@ -39,6 +39,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
         return OpenCodeLLMAdapter
+    if name == "HermesCliLLMAdapter":
+        from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
+
+        return HermesCliLLMAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -56,6 +60,7 @@ __all__ = [
     "CodexCliLLMAdapter",
     "CopilotCliLLMAdapter",
     "OpenCodeLLMAdapter",
+    "HermesCliLLMAdapter",
     "LiteLLMAdapter",
     # Factory helpers
     "create_llm_adapter",

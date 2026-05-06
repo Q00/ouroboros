@@ -2,6 +2,7 @@
 
 from ouroboros.backends.capabilities import (
     BackendCapability,
+    backend_supports_tool_envelope,
     get_backend_capability,
     interview_driver_backend_choices,
     llm_backend_choices,
@@ -15,6 +16,7 @@ from ouroboros.backends.capabilities import (
 
 __all__ = [
     "BackendCapability",
+    "backend_supports_tool_envelope",
     "get_backend_capability",
     "interview_driver_backend_choices",
     "llm_backend_choices",

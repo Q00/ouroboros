@@ -26,6 +26,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
@@ -57,7 +58,7 @@ from ouroboros.mcp.types import (
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.pm.handoff import build_pm_dev_handoff_next_step
-from ouroboros.providers import create_llm_adapter
+from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 
 log = structlog.get_logger()
 
@@ -368,7 +369,9 @@ class PMInterviewHandler:
             backend=self.llm_backend,
             max_turns=1,
             use_case="interview",
-            allowed_tools=[],
+            allowed_tools=[]
+            if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+            else None,
         )
         model = get_clarification_model(self.llm_backend)
         return PMInterviewEngine.create(

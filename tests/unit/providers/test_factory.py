@@ -15,6 +15,7 @@ from ouroboros.providers.factory import (
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
+from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
@@ -63,10 +64,10 @@ class TestResolveLLMBackend:
         with pytest.raises(ValueError, match="Unsupported LLM backend"):
             resolve_llm_backend("invalid")
 
-    def test_rejects_hermes_backend(self) -> None:
-        """Hermes is runtime-only until an LLM adapter exists."""
-        with pytest.raises(ValueError, match="Unsupported LLM backend"):
-            resolve_llm_backend("hermes")
+    def test_resolves_hermes_aliases(self) -> None:
+        """Hermes aliases normalize to hermes."""
+        assert resolve_llm_backend("hermes") == "hermes"
+        assert resolve_llm_backend("hermes_cli") == "hermes"
 
 
 class TestCreateLLMAdapter:
@@ -185,6 +186,20 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
         assert isinstance(adapter, OpenCodeLLMAdapter)
         assert adapter._cwd == "/tmp/project"
+
+    def test_creates_hermes_adapter(self) -> None:
+        """Hermes backend returns HermesCliLLMAdapter."""
+        adapter = create_llm_adapter(backend="hermes", cwd="/tmp/project")
+        assert isinstance(adapter, HermesCliLLMAdapter)
+        assert adapter._cwd is not None
+        assert adapter._cwd.name == "project"
+
+    def test_hermes_adapter_preserves_unsupported_tool_envelope(self) -> None:
+        """Factory preserves unsupported envelopes so Hermes can fail explicitly."""
+        adapter = create_llm_adapter(backend="hermes", allowed_tools=[], cwd="/tmp/project")
+
+        assert isinstance(adapter, HermesCliLLMAdapter)
+        assert adapter._allowed_tools == ()
 
     def test_creates_opencode_adapter_uses_configured_cli_path(
         self, monkeypatch: pytest.MonkeyPatch

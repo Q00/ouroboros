@@ -21,6 +21,8 @@ _BACKEND_ALIASES = {
     "copilot_cli": "copilot",
     "gemini": "gemini",
     "gemini_cli": "gemini",
+    "hermes": "hermes",
+    "hermes_cli": "hermes",
     "opencode": "opencode",
     "opencode_cli": "opencode",
     "litellm": "litellm",

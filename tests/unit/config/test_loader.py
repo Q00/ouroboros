@@ -1089,8 +1089,8 @@ class TestLLMHelperLookups:
         monkeypatch.setenv("OUROBOROS_RUNTIME", "kiro_cli")
         assert get_llm_backend() == "kiro"
 
-    def test_get_llm_backend_ignores_runtime_without_llm_adapter(self) -> None:
-        """Hermes runtime should keep using the configured LLM backend."""
+    def test_get_llm_backend_accepts_hermes_runtime_shortcut(self) -> None:
+        """Hermes runtime can also serve LLM completion defaults."""
         with (
             patch.dict(os.environ, {"OUROBOROS_RUNTIME": "hermes"}, clear=True),
             patch(
@@ -1101,7 +1101,7 @@ class TestLLMHelperLookups:
                 ),
             ),
         ):
-            assert get_llm_backend() == "claude_code"
+            assert get_llm_backend() == "hermes"
 
     def test_get_llm_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for llm permission mode."""
@@ -1243,6 +1243,22 @@ class TestLLMHelperLookups:
             assert get_reflect_model(backend="copilot") == "default"
             assert get_semantic_model(backend="copilot") == "default"
             assert get_assertion_extraction_model(backend="copilot") == "default"
+
+    def test_hermes_backend_normalizes_config_default_models_to_default_sentinel(self) -> None:
+        """Existing default configs should remain usable after switching to Hermes."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(),
+            ),
+        ):
+            assert get_clarification_model(backend="hermes") == "default"
+            assert get_qa_model(backend="hermes") == "default"
+            assert get_wonder_model(backend="hermes") == "default"
+            assert get_reflect_model(backend="hermes") == "default"
+            assert get_semantic_model(backend="hermes") == "default"
+            assert get_assertion_extraction_model(backend="hermes") == "default"
 
     def test_codex_backend_preserves_explicit_non_default_models_from_config(self) -> None:
         """Explicit config overrides should survive backend normalization."""
