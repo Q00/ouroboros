@@ -36,6 +36,8 @@ try:
     prefs = json.load(open(path, encoding='utf-8'))
 except Exception:
     prefs = {}
+if not isinstance(prefs, dict):
+    prefs = {}
 print(prefs.get('welcomeCompleted') or ('legacy-welcomeShown' if prefs.get('welcomeShown') else ''))
 PY
 )
@@ -45,6 +47,8 @@ path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
     prefs = json.load(open(path, encoding='utf-8'))
 except Exception:
+    prefs = {}
+if not isinstance(prefs, dict):
     prefs = {}
 print(prefs.get('welcomeVersion') or '')
 PY
@@ -254,10 +258,57 @@ gh auth status &>/dev/null && echo "GH_OK" || echo "GH_MISSING"
 ```
 
 - **Star on GitHub**: `gh api -X PUT /user/starred/Q00/ouroboros`
-- Both: Save `{"star_asked": true, "welcomeShown": true, "welcomeCompleted": "$(date -Iseconds)", "welcomeVersion": "0.14.0"}` to `~/.ouroboros/prefs.json`
+- Both choices: merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys. Set `star_asked: true` after either star prompt choice so the star prompt is not repeated:
+  ```bash
+python3 - <<'PY'
+import json, os
+from datetime import UTC, datetime
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path, encoding='utf-8') as f:
+        prefs = json.load(f)
+    if not isinstance(prefs, dict):
+        prefs = {}
+except Exception:
+    prefs = {}
+prefs.update({
+    'star_asked': True,
+    'welcomeShown': True,
+    'welcomeCompleted': datetime.now(UTC).isoformat(),
+    'welcomeVersion': '0.14.0',
+})
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(prefs, f, indent=2)
+    f.write('\n')
+PY
+  ```
 
 **If `GH_MISSING` or `star_asked` is true:**
-Just save `{"welcomeShown": true, "welcomeCompleted": "$(date -Iseconds)", "welcomeVersion": "0.14.0"}`
+Merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys:
+  ```bash
+python3 - <<'PY'
+import json, os
+from datetime import UTC, datetime
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path, encoding='utf-8') as f:
+        prefs = json.load(f)
+    if not isinstance(prefs, dict):
+        prefs = {}
+except Exception:
+    prefs = {}
+prefs.update({
+    'welcomeShown': True,
+    'welcomeCompleted': datetime.now(UTC).isoformat(),
+    'welcomeVersion': '0.14.0',
+})
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(prefs, f, indent=2)
+    f.write('\n')
+PY
+  ```
 
 ---
 
