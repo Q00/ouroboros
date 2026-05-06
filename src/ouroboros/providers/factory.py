@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 import structlog
 
+from ouroboros.backends import resolve_llm_backend_name, soft_tool_enforcement_backends
 from ouroboros.config import (
     get_codex_cli_path,
     get_gemini_cli_path,
@@ -27,13 +28,6 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
-_CODEX_BACKENDS = {"codex", "codex_cli"}
-_COPILOT_BACKENDS = {"copilot", "copilot_cli"}
-_GEMINI_BACKENDS = {"gemini", "gemini_cli"}
-_KIRO_BACKENDS = {"kiro", "kiro_cli"}
-_OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
-_LITELLM_BACKENDS = {"litellm", "openai", "openrouter"}
 _LLM_USE_CASES = frozenset({"default", "interview"})
 
 # Resolved backend names whose adapter enforces the ``allowed_tools``
@@ -65,29 +59,20 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # completion-only API that never executes tools from the adapter, so an
 # envelope has nothing to restrict on that path (enforcement is
 # vacuously satisfied).
-_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini", "opencode"})
+_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = soft_tool_enforcement_backends()
 
 
 def resolve_llm_backend(backend: str | None = None) -> str:
     """Resolve and validate the LLM adapter backend name."""
     candidate = (backend or get_llm_backend()).strip().lower()
-    if candidate in _CLAUDE_CODE_BACKENDS:
+    try:
+        resolved = resolve_llm_backend_name(candidate)
+    except ValueError as exc:
+        msg = f"Unsupported LLM backend: {candidate}"
+        raise ValueError(msg) from exc
+    if resolved == "claude":
         return "claude_code"
-    if candidate in _CODEX_BACKENDS:
-        return "codex"
-    if candidate in _COPILOT_BACKENDS:
-        return "copilot"
-    if candidate in _GEMINI_BACKENDS:
-        return "gemini"
-    if candidate in _KIRO_BACKENDS:
-        return "kiro"
-    if candidate in _OPENCODE_BACKENDS:
-        return "opencode"
-    if candidate in _LITELLM_BACKENDS:
-        return "litellm"
-
-    msg = f"Unsupported LLM backend: {candidate}"
-    raise ValueError(msg)
+    return resolved
 
 
 def resolve_llm_permission_mode(

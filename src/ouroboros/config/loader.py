@@ -46,6 +46,7 @@ from typing import Any
 from pydantic import ValidationError as PydanticValidationError
 import yaml
 
+from ouroboros.backends import get_backend_capability
 from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
     OuroborosConfig,
@@ -1057,19 +1058,11 @@ def get_llm_backend() -> str:
         return env_backend
 
     env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
-    llm_capable_runtime_aliases = {
-        "claude": "claude",
-        "claude_code": "claude_code",
-        "codex": "codex",
-        "copilot": "copilot",
-        "copilot_cli": "copilot",
-        "gemini": "gemini",
-        "kiro": "kiro",
-        "kiro_cli": "kiro",
-        "opencode": "opencode",
-    }
-    if env_runtime in llm_capable_runtime_aliases:
-        return llm_capable_runtime_aliases[env_runtime]
+    env_runtime_capability = get_backend_capability(env_runtime)
+    if env_runtime_capability is not None and env_runtime_capability.supports_llm:
+        if env_runtime in {"claude_code"}:
+            return "claude_code"
+        return env_runtime_capability.name
 
     try:
         config = load_config()

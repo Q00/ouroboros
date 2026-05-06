@@ -12,6 +12,10 @@ from typing import Annotated
 import typer
 import yaml
 
+from ouroboros.backends import (
+    get_backend_capability,
+    runtime_backend_choices,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.tables import create_key_value_table, print_table
@@ -22,8 +26,12 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_VALID_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini")
-_SWITCHABLE_BACKENDS = ("claude", "codex", "hermes", "gemini")
+_VALID_BACKENDS = runtime_backend_choices()
+_SWITCHABLE_BACKENDS = tuple(
+    backend
+    for backend in _VALID_BACKENDS
+    if (capability := get_backend_capability(backend)) is not None and capability.switchable_runtime
+)
 
 
 def _load_config() -> tuple[dict, Path]:
@@ -84,15 +92,10 @@ def _save_config(data: dict, path: Path) -> None:
 def _resolve_cli_path(data: dict) -> str | None:
     """Return the active CLI path based on the current runtime backend."""
     backend = data.get("orchestrator", {}).get("runtime_backend", "claude")
-    if backend == "codex":
-        return data.get("orchestrator", {}).get("codex_cli_path")
-    if backend == "opencode":
-        return data.get("orchestrator", {}).get("opencode_cli_path")
-    if backend == "hermes":
-        return data.get("orchestrator", {}).get("hermes_cli_path")
-    if backend == "gemini":
-        return data.get("orchestrator", {}).get("gemini_cli_path")
-    return data.get("orchestrator", {}).get("cli_path")
+    capability = get_backend_capability(str(backend))
+    if capability is not None and capability.cli_config_key:
+        return data.get("orchestrator", {}).get(capability.cli_config_key)
+    return None
 
 
 def _resolve_db_path(data: dict, config_path: Path) -> str:
@@ -200,12 +203,8 @@ def backend(
     # Detect CLI path. For backends that expose an env-var or persisted
     # config path (gemini), honor those before falling back to PATH so users
     # with explicit-path installs can still switch via the CLI.
-    cli_name = {
-        "claude": "claude",
-        "codex": "codex",
-        "hermes": "hermes",
-        "gemini": "gemini",
-    }[new_backend]
+    capability = get_backend_capability(new_backend)
+    cli_name = capability.cli_name if capability and capability.cli_name else new_backend
     cli_path = None
     if new_backend == "gemini":
         from ouroboros.config import get_gemini_cli_path
@@ -445,26 +444,11 @@ def validate() -> None:
         issues.append(f"orchestrator.runtime_backend '{backend_val}' is not supported")
 
     # Check CLI path exists
-    if backend_val == "claude":
-        cli = data.get("orchestrator", {}).get("cli_path")
+    capability = get_backend_capability(str(backend_val or ""))
+    if capability is not None and capability.cli_config_key:
+        cli = data.get("orchestrator", {}).get(capability.cli_config_key)
         if cli and not Path(cli).exists():
-            issues.append(f"Claude CLI path does not exist: {cli}")
-    elif backend_val == "codex":
-        cli = data.get("orchestrator", {}).get("codex_cli_path")
-        if cli and not Path(cli).exists():
-            issues.append(f"Codex CLI path does not exist: {cli}")
-    elif backend_val == "opencode":
-        cli = data.get("orchestrator", {}).get("opencode_cli_path")
-        if cli and not Path(cli).exists():
-            issues.append(f"OpenCode CLI path does not exist: {cli}")
-    elif backend_val == "hermes":
-        cli = data.get("orchestrator", {}).get("hermes_cli_path")
-        if cli and not Path(cli).exists():
-            issues.append(f"Hermes CLI path does not exist: {cli}")
-    elif backend_val == "gemini":
-        cli = data.get("orchestrator", {}).get("gemini_cli_path")
-        if cli and not Path(cli).exists():
-            issues.append(f"Gemini CLI path does not exist: {cli}")
+            issues.append(f"{capability.name} CLI path does not exist: {cli}")
 
     # Try loading config through the validated schema
     try:

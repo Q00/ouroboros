@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ouroboros.backends import resolve_runtime_backend_name, runtime_backend_choices
 from ouroboros.config import (
     get_agent_permission_mode,
     get_agent_runtime_backend,
@@ -20,40 +21,20 @@ from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.command_dispatcher import create_codex_command_dispatcher
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 
-_CLAUDE_BACKENDS = {"claude", "claude_code"}
-_CODEX_BACKENDS = {"codex", "codex_cli"}
-_KIRO_BACKENDS = {"kiro", "kiro_cli"}
-_OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
-_HERMES_BACKENDS = {"hermes", "hermes_cli"}
-_GEMINI_BACKENDS = {"gemini", "gemini_cli"}
-_COPILOT_BACKENDS = {"copilot", "copilot_cli"}
-
-_SUPPORTED_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot")
+_SUPPORTED_BACKENDS = runtime_backend_choices()
 
 
 def resolve_agent_runtime_backend(backend: str | None = None) -> str:
     """Resolve and validate the orchestrator runtime backend name."""
     candidate = (backend or get_agent_runtime_backend()).strip().lower()
-    if candidate in _CLAUDE_BACKENDS:
-        return "claude"
-    if candidate in _CODEX_BACKENDS:
-        return "codex"
-    if candidate in _KIRO_BACKENDS:
-        return "kiro"
-    if candidate in _OPENCODE_BACKENDS:
-        return "opencode"
-    if candidate in _HERMES_BACKENDS:
-        return "hermes"
-    if candidate in _GEMINI_BACKENDS:
-        return "gemini"
-    if candidate in _COPILOT_BACKENDS:
-        return "copilot"
-
-    msg = (
-        f"Unsupported orchestrator runtime backend: {candidate}. "
-        f"Supported backends: {', '.join(_SUPPORTED_BACKENDS)}"
-    )
-    raise ValueError(msg)
+    try:
+        return resolve_runtime_backend_name(candidate)
+    except ValueError as exc:
+        msg = (
+            f"Unsupported orchestrator runtime backend: {candidate}. "
+            f"Supported backends: {', '.join(_SUPPORTED_BACKENDS)}"
+        )
+        raise ValueError(msg) from exc
 
 
 def create_agent_runtime(
