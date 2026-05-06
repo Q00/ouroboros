@@ -142,6 +142,7 @@ def create_agent_runtime(
 
         return CopilotCliRuntime(
             cli_path=cli_path or get_copilot_cli_path(),
+            runtime_profile=get_runtime_profile(),
             **runtime_kwargs,
         )
 

@@ -36,6 +36,8 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     OPENCODE = "opencode"
     HERMES = "hermes"
     GEMINI = "gemini"
+    KIRO = "kiro"
+    COPILOT = "copilot"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -47,6 +49,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     COPILOT = "copilot"
     OPENCODE = "opencode"
     GEMINI = "gemini"
+    KIRO = "kiro"
 
 
 def _write_pid_file() -> bool:
@@ -365,7 +368,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, or hermes).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, or kiro).",
             case_sensitive=False,
         ),
     ] = None,
@@ -455,7 +458,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, or hermes).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, or kiro).",
             case_sensitive=False,
         ),
     ] = None,

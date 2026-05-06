@@ -1170,24 +1170,115 @@ def _register_copilot_mcp_server() -> None:
         )
         return
 
-    env_block = {
+    target_env = {
         "OUROBOROS_AGENT_RUNTIME": "copilot",
         "OUROBOROS_LLM_BACKEND": "copilot",
     }
-    new_entry: dict[str, object] = {
-        "command": detected["command"],
-        "args": detected["args"],
-        "env": env_block,
-    }
 
     existing = servers.get("ouroboros")
-    if existing == new_entry:
-        print_info("MCP server already registered for Copilot CLI.")
-        return
+    if existing is not None and not isinstance(existing, dict):
+        print_warning(
+            "~/.copilot/mcp-config.json mcpServers.ouroboros is not an object — replacing it."
+        )
+        existing = None
 
-    servers["ouroboros"] = new_entry
-    mcp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    print_success(f"Registered MCP server in {mcp_path}")
+    needs_write = False
+    if existing is None:
+        servers["ouroboros"] = {
+            "command": detected["command"],
+            "args": detected["args"],
+            "env": target_env,
+        }
+        needs_write = True
+        print_success(f"Registered MCP server in {mcp_path}")
+    else:
+        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python", "uv"}
+        existing_cmd = existing.get("command")
+        is_setup_managed = existing_cmd in _KNOWN_COMMANDS or (
+            isinstance(existing_cmd, str)
+            and os.path.basename(existing_cmd) in {"ouroboros", "python3", "python"}
+        )
+        if is_setup_managed and (
+            existing.get("command") != detected["command"]
+            or existing.get("args") != detected["args"]
+        ):
+            existing["command"] = detected["command"]
+            existing["args"] = detected["args"]
+            needs_write = True
+            print_info("Updated Copilot MCP entry to match current install method.")
+
+        current_env = existing.get("env")
+        merged_env: dict[str, str] = dict(current_env) if isinstance(current_env, dict) else {}
+        for key, value in target_env.items():
+            if merged_env.get(key) != value:
+                merged_env[key] = value
+                needs_write = True
+        if merged_env != current_env:
+            existing["env"] = merged_env
+
+        if not needs_write:
+            print_info("MCP server already registered for Copilot CLI.")
+
+    if needs_write:
+        mcp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+_COPILOT_DEFAULT_MODEL_TARGETS: tuple[tuple[str, str, str], ...] = (
+    ("llm", "qa_model", "claude-sonnet-4-20250514"),
+    ("llm", "dependency_analysis_model", "claude-opus-4-6"),
+    ("llm", "ontology_analysis_model", "claude-opus-4-6"),
+    ("llm", "context_compression_model", "gpt-4"),
+    ("clarification", "default_model", "claude-opus-4-6"),
+    ("evaluation", "semantic_model", "claude-opus-4-6"),
+    ("evaluation", "assertion_extraction_model", "claude-sonnet-4-6"),
+    ("resilience", "wonder_model", "claude-opus-4-6"),
+    ("resilience", "reflect_model", "claude-opus-4-6"),
+    ("execution", "atomicity_model", "claude-opus-4-6"),
+    ("execution", "decomposition_model", "claude-opus-4-6"),
+    ("execution", "double_diamond_model", "claude-opus-4-6"),
+    ("consensus", "advocate_model", "openrouter/anthropic/claude-opus-4-6"),
+    ("consensus", "devil_model", "openrouter/openai/gpt-4o"),
+    ("consensus", "judge_model", "openrouter/google/gemini-2.5-pro"),
+)
+
+_COPILOT_DEFAULT_MODEL_LIST_TARGETS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "consensus",
+        "models",
+        (
+            "openrouter/openai/gpt-4o",
+            "openrouter/anthropic/claude-opus-4-6",
+            "openrouter/google/gemini-2.5-pro",
+        ),
+    ),
+)
+
+
+def _apply_copilot_default_model(
+    config_dict: dict,
+    chosen_model: str,
+    model_roster: tuple[str, ...],
+) -> None:
+    """Persist the setup-selected Copilot model into supported model fields.
+
+    There is no generic ``llm.default_model`` contract in ``LLMConfig``.
+    Treat setup's selected model as the default for model fields that are
+    absent or still equal to Ouroboros' shipped defaults, while preserving
+    explicit user overrides.
+    """
+    for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_TARGETS:
+        section = _ensure_mapping_section(config_dict, section_name)
+        current = section.get(key)
+        if current is None or current == shipped_default:
+            section[key] = chosen_model
+
+    for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_LIST_TARGETS:
+        section = _ensure_mapping_section(config_dict, section_name)
+        current = section.get(key)
+        if current is None or (
+            isinstance(current, (list, tuple)) and tuple(current) == shipped_default
+        ):
+            section[key] = list(model_roster)
 
 
 def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
@@ -1257,25 +1348,22 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
         except (ValueError, IndexError):
             chosen_model = choice.strip() or preferred_default
 
-    orch = config_dict.get("orchestrator")
-    if not isinstance(orch, dict):
-        orch = {}
-        config_dict["orchestrator"] = orch
-    orch["runtime_backend"] = "copilot"
-    orch["copilot_cli_path"] = copilot_path
+    try:
+        orch = _ensure_mapping_section(config_dict, "orchestrator")
+        orch["runtime_backend"] = "copilot"
+        orch["copilot_cli_path"] = copilot_path
 
-    llm = config_dict.get("llm")
-    if not isinstance(llm, dict):
-        llm = {}
-        config_dict["llm"] = llm
-    llm["backend"] = "copilot"
-    llm["default_model"] = chosen_model
-
-    clarification = config_dict.get("clarification")
-    if not isinstance(clarification, dict):
-        clarification = {}
-        config_dict["clarification"] = clarification
-    clarification["default_model"] = chosen_model
+        llm = _ensure_mapping_section(config_dict, "llm")
+        llm["backend"] = "copilot"
+        llm.pop("default_model", None)
+        model_roster = tuple(model.id for model in models[:3])
+        if len(model_roster) < 3:
+            model_roster = (*model_roster, *((chosen_model,) * (3 - len(model_roster))))
+        _apply_copilot_default_model(config_dict, chosen_model, model_roster)
+    except ValueError as exc:
+        print_error(f"Invalid config.yaml structure: {exc}")
+        print_info("Aborting Copilot setup without rewriting config.yaml.")
+        return
 
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)

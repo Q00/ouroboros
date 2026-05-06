@@ -12,6 +12,8 @@ what the orchestrator runtime adds on top.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from ouroboros.orchestrator.copilot_cli_runtime import (
@@ -104,10 +106,93 @@ def test_build_command_ignores_resume_session_id() -> None:
     assert "sess-123" not in command
 
 
+def test_constructor_runtime_profile_emits_copilot_agent_flag() -> None:
+    runtime = CopilotCliRuntime(
+        cli_path="/usr/bin/copilot",
+        cwd="/work",
+        runtime_profile="worker",
+    )
+
+    command = runtime._build_command(
+        output_last_message_path="/tmp/ignored",
+        prompt="task",
+    )
+
+    assert command[command.index("--agent") + 1] == "ouroboros-worker"
+    assert "--model" not in command
+
+
+def test_runtime_handle_profile_metadata_emits_copilot_agent_flag() -> None:
+    runtime = _make_runtime()
+    handle = runtime._build_runtime_handle("sess-1")
+    assert handle is not None
+    handle = replace(handle, metadata={"agent_runtime_profile": "worker"})
+
+    command = runtime._build_command(
+        output_last_message_path="/tmp/ignored",
+        prompt="task",
+        runtime_handle=handle,
+    )
+
+    assert command[command.index("--agent") + 1] == "ouroboros-worker"
+    assert "--model" not in command
+
+
 def test_build_command_uses_p_flag_not_stdin() -> None:
     runtime = _make_runtime()
     assert runtime._feeds_prompt_via_stdin() is False
     assert runtime._requires_process_stdin() is False
+
+
+# ---------------------------------------------------------------------------
+# Copilot JSONL event conversion
+# ---------------------------------------------------------------------------
+
+
+def test_convert_event_returns_copilot_agent_message_content() -> None:
+    runtime = _make_runtime()
+
+    messages = runtime._convert_event(
+        {"type": "agent.message", "message": {"text": "All clear."}},
+        current_handle=None,
+    )
+
+    assert len(messages) == 1
+    assert messages[0].type == "assistant"
+    assert messages[0].content == "All clear."
+
+
+def test_convert_event_binds_copilot_session_started_handle() -> None:
+    runtime = _make_runtime()
+
+    messages = runtime._convert_event(
+        {"type": "session.started", "session_id": "sess-1"},
+        current_handle=None,
+    )
+
+    assert len(messages) == 1
+    assert messages[0].type == "system"
+    assert messages[0].resume_handle is not None
+    assert messages[0].resume_handle.native_session_id == "sess-1"
+
+
+def test_convert_event_maps_copilot_tool_and_error_events() -> None:
+    runtime = _make_runtime()
+
+    tool_messages = runtime._convert_event(
+        {"type": "tool_call", "name": "read", "input": {"path": "README.md"}},
+        current_handle=None,
+    )
+    error_messages = runtime._convert_event(
+        {"type": "turn.failed", "error": {"message": "nope"}},
+        current_handle=None,
+    )
+
+    assert tool_messages[0].tool_name == "read"
+    assert tool_messages[0].data["tool_input"] == {"path": "README.md"}
+    assert error_messages[0].is_final
+    assert error_messages[0].is_error
+    assert error_messages[0].content == "nope"
 
 
 # ---------------------------------------------------------------------------

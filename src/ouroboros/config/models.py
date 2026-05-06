@@ -353,6 +353,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "gemini_cli",
         "kiro",
         "kiro_cli",
+        "copilot",
+        "copilot_cli",
     }
 )
 

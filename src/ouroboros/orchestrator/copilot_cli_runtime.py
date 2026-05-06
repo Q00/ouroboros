@@ -23,6 +23,7 @@ Custom CLI path:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -31,12 +32,15 @@ from ouroboros.copilot.cli_policy import (
     build_copilot_child_env,
 )
 from ouroboros.copilot.model_discovery import map_to_copilot_model
+from ouroboros.copilot.runtime_profile import resolve_copilot_agent
 from ouroboros.copilot_permissions import (
     build_copilot_exec_permission_args,
     resolve_copilot_permission_mode,
 )
-from ouroboros.orchestrator.adapter import RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
+from ouroboros.providers.base import CompletionConfig
+from ouroboros.providers.profiles import resolve_completion_profile
 
 log = structlog.get_logger(__name__)
 
@@ -92,6 +96,7 @@ class CopilotCliRuntime(CodexCliRuntime):
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        runtime_profile: str | None = None,
     ) -> None:
         super().__init__(
             cli_path=cli_path,
@@ -101,6 +106,12 @@ class CopilotCliRuntime(CodexCliRuntime):
             skills_dir=skills_dir,
             skill_dispatcher=skill_dispatcher,
             llm_backend=llm_backend,
+        )
+        self._runtime_profile = runtime_profile
+        self._copilot_agent = resolve_copilot_agent(
+            runtime_profile,
+            logger=log,
+            log_namespace=self._log_namespace,
         )
 
     # -- Permission mode overrides -----------------------------------------
@@ -169,7 +180,7 @@ class CopilotCliRuntime(CodexCliRuntime):
         also unused (the assistant reply is reconstructed from the JSONL
         event stream by ``_convert_event``).
         """
-        del output_last_message_path, resume_session_id, runtime_handle
+        del output_last_message_path, resume_session_id
 
         command = [
             self._cli_path,
@@ -181,13 +192,47 @@ class CopilotCliRuntime(CodexCliRuntime):
         ]
         command.extend(self._build_permission_args())
 
-        normalized_model = self._normalize_model(self._model)
-        if normalized_model:
-            mapped = map_to_copilot_model(normalized_model)
-            command.extend(["--model", mapped])
+        if self._copilot_agent:
+            command.extend(["--agent", self._copilot_agent])
+        else:
+            normalized_model = self._normalize_model(self._model)
+            if normalized_model:
+                mapped = map_to_copilot_model(normalized_model)
+                command.extend(["--model", mapped])
+            else:
+                runtime_model, runtime_agent = self._resolve_runtime_copilot_config(runtime_handle)
+                if runtime_agent:
+                    command.extend(["--agent", runtime_agent])
+                else:
+                    normalized_runtime_model = self._normalize_model(runtime_model)
+                    if normalized_runtime_model:
+                        mapped = map_to_copilot_model(normalized_runtime_model)
+                        command.extend(["--model", mapped])
 
         command.extend(["-p", prompt or ""])
         return command
+
+    def _resolve_runtime_copilot_config(
+        self,
+        runtime_handle: RuntimeHandle | None,
+    ) -> tuple[str | None, str | None]:
+        """Resolve model/agent settings for a Copilot agent-runtime task."""
+        profile_name = self._runtime_profile_from_metadata(runtime_handle)
+        if profile_name:
+            native_agent = resolve_copilot_agent(
+                profile_name,
+                logger=log,
+                log_namespace=self._log_namespace,
+            )
+            if native_agent:
+                return None, native_agent
+
+        role = None if profile_name else self._runtime_profile_role(runtime_handle)
+        resolved = resolve_completion_profile(
+            CompletionConfig(model="default", profile=profile_name, role=role),
+            backend="copilot",
+        )
+        return resolved.config.model, resolved.backend_profile
 
     def _feeds_prompt_via_stdin(self) -> bool:
         """Return False — Copilot CLI accepts the prompt via the ``-p`` flag."""
@@ -196,6 +241,91 @@ class CopilotCliRuntime(CodexCliRuntime):
     def _requires_process_stdin(self) -> bool:
         """Return False — Copilot CLI does not need a writable stdin pipe."""
         return False
+
+    # -- Event conversion ---------------------------------------------------
+
+    def _convert_event(
+        self,
+        event: dict[str, Any],
+        current_handle: RuntimeHandle | None,
+    ) -> list[AgentMessage]:
+        """Convert Copilot JSONL events into normalized runtime messages.
+
+        Copilot CLI emits a different event schema from Codex CLI. Reusing the
+        Codex parser would drop successful ``agent.message`` events and make
+        the runtime fall back to a generic completion string. Keep the mapping
+        deliberately small and schema-tolerant so the orchestrator returns the
+        model's actual answer while still preserving lifecycle and tool hints.
+        """
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            return []
+
+        if event_type in {"session.started", "session.created", "session.ready"}:
+            session_id = self._extract_event_session_id(event)
+            if not session_id:
+                return []
+            handle = self._build_runtime_handle(session_id, current_handle)
+            return [
+                AgentMessage(
+                    type="system",
+                    content=f"Session initialized: {session_id}",
+                    data={"subtype": "init", "session_id": session_id},
+                    resume_handle=handle,
+                )
+            ]
+
+        if event_type in {"agent.message", "message"}:
+            content = self._extract_text(event)
+            if not content:
+                return []
+            return [AgentMessage(type="assistant", content=content, resume_handle=current_handle)]
+
+        if event_type in {"reasoning", "thinking"}:
+            content = self._extract_text(event)
+            if not content:
+                return []
+            return [
+                AgentMessage(
+                    type="assistant",
+                    content=content,
+                    data={"thinking": content, "subtype": event_type},
+                    resume_handle=current_handle,
+                )
+            ]
+
+        if event_type in {"tool_use", "tool.start", "tool_call"}:
+            tool_name_obj = event.get("name") or event.get("tool")
+            tool_name = (
+                tool_name_obj if isinstance(tool_name_obj, str) and tool_name_obj else "tool"
+            )
+            tool_input = event.get("input") if isinstance(event.get("input"), dict) else {}
+            return [
+                self._build_tool_message(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    content=f"Calling tool: {tool_name}",
+                    handle=current_handle,
+                    extra_data={"subtype": event_type},
+                )
+            ]
+
+        if event_type in {"error", "turn.failed", "fatal"}:
+            payload = event.get("error") if event_type == "turn.failed" else event
+            content = self._extract_text(payload) or f"{self._display_name} reported an error"
+            return [
+                AgentMessage(
+                    type="result",
+                    content=content,
+                    data={"subtype": "error", "error_type": "CopilotCliError"},
+                    resume_handle=current_handle,
+                )
+            ]
+
+        if event_type in {"turn.completed", "run.completed", "session.ended"}:
+            return []
+
+        return []
 
     # -- Session resumption ------------------------------------------------
 

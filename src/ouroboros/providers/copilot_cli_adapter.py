@@ -279,12 +279,13 @@ class CopilotCliLLMAdapter:
         # allowlist semantics — anything outside it is invisible to the model.
         # ``--allow-tool`` is added in parallel so the allowed tools also skip
         # confirmation prompts (required for non-interactive ``-p`` mode).
-        if self._allowed_tools:
+        if self._allowed_tools is not None:
             tool_list = ",".join(self._allowed_tools)
             command.extend([f"--available-tools={tool_list}"])
-            command.extend([f"--allow-tool={tool_list}"])
-
-        command.extend(self._build_permission_args())
+            if tool_list:
+                command.extend([f"--allow-tool={tool_list}"])
+        else:
+            command.extend(self._build_permission_args())
 
         # Agent profile (Copilot's ``--agent``) takes precedence over per-call
         # ``--model`` selection, mirroring the Codex ``--profile`` precedence.

@@ -119,6 +119,45 @@ class TestPromptBuilding:
         assert "Do NOT use any tools or MCP calls" in prompt
         assert "tool-assisted turns" not in prompt
 
+    def test_command_preserves_tool_allowlist_with_default_permission(self) -> None:
+        adapter = CopilotCliLLMAdapter(
+            cli_path="copilot",
+            allowed_tools=["read", "grep"],
+        )
+
+        command = adapter._build_command(model=None)
+
+        assert "--available-tools=read,grep" in command
+        assert "--allow-tool=read,grep" in command
+        assert "--available-tools=" not in command
+
+    def test_tool_allowlist_is_not_reopened_by_bypass_permission(self) -> None:
+        adapter = CopilotCliLLMAdapter(
+            cli_path="copilot",
+            allowed_tools=["read", "grep"],
+            permission_mode="bypassPermissions",
+        )
+
+        command = adapter._build_command(model=None)
+
+        assert "--available-tools=read,grep" in command
+        assert "--allow-tool=read,grep" in command
+        assert "--allow-all" not in command
+
+    def test_explicit_empty_tools_hard_denies_tools_even_with_write_permission(self) -> None:
+        adapter = CopilotCliLLMAdapter(
+            cli_path="copilot",
+            allowed_tools=[],
+            permission_mode="acceptEdits",
+        )
+
+        command = adapter._build_command(model=None)
+
+        assert "--available-tools=" in command
+        assert "--allow-all-tools" not in command
+        assert "--allow-all" not in command
+        assert not any(arg.startswith("--allow-tool=") for arg in command)
+
     def test_no_tool_section_when_unspecified(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot")
         prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Hi")])
@@ -174,8 +213,9 @@ class TestCommandBuilding:
         command = adapter._build_command(model=None)
         assert "--available-tools=read,grep" in command
         assert "--allow-tool=read,grep" in command
-        # acceptEdits maps to plain --allow-all-tools (no deny wildcard).
-        assert "--allow-all-tools" in command
+        # The explicit allowlist is the hard envelope; do not reopen the full
+        # tool surface with permission-mode broadening flags.
+        assert "--allow-all-tools" not in command
         assert "--deny-tool=*" not in command
 
     def test_command_uses_allow_all_for_bypass_mode(self) -> None:

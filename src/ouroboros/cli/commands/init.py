@@ -54,6 +54,8 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     OPENCODE = "opencode"
     HERMES = "hermes"
     GEMINI = "gemini"
+    KIRO = "kiro"
+    COPILOT = "copilot"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -65,6 +67,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     COPILOT = "copilot"
     OPENCODE = "opencode"
     GEMINI = "gemini"
+    KIRO = "kiro"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):
@@ -694,7 +697,7 @@ def start(
             "--runtime",
             help=(
                 "Agent runtime backend for the workflow execution step after seed generation "
-                "(claude, codex, opencode, or hermes)."
+                "(claude, codex, opencode, hermes, gemini, copilot, or kiro)."
             ),
             case_sensitive=False,
         ),

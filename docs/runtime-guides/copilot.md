@@ -78,10 +78,13 @@ at the start of the wizard. The flow:
    error), fall back silently to a bundled snapshot of well-known IDs so
    setup still completes.
 
-Setup prints the chosen default model and persists it to
-`llm.default_model` and `clarification.default_model` in
-`~/.ouroboros/config.yaml`. Re-run `ouroboros setup --runtime copilot` any
-time to pick a new default after GitHub ships new models.
+Setup prints the chosen default model and persists it through supported
+model fields in `~/.ouroboros/config.yaml` — for example
+`clarification.default_model`, `llm.qa_model`, evaluation/resilience model
+fields, and consensus model defaults when those fields are absent or still
+on Ouroboros' shipped defaults. There is no `llm.default_model` key in the
+config contract. Re-run `ouroboros setup --runtime copilot` any time to pick
+a new default after GitHub ships new models.
 
 ### Hyphen versus dotted model IDs
 

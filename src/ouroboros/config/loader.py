@@ -58,9 +58,11 @@ from ouroboros.core.errors import ConfigError  # noqa: E402
 
 _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
 _KIRO_LLM_BACKENDS = frozenset({"kiro", "kiro_cli"})
+_COPILOT_LLM_BACKENDS = frozenset({"copilot", "copilot_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
+_COPILOT_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -1120,6 +1122,8 @@ def _default_model_for_backend(
         return _CODEX_DEFAULT_MODEL
     if resolved in _KIRO_LLM_BACKENDS:
         return _KIRO_DEFAULT_MODEL
+    if resolved in _COPILOT_LLM_BACKENDS:
+        return _COPILOT_DEFAULT_MODEL
     return default_model
 
 
@@ -1148,6 +1152,8 @@ def _normalize_configured_model_for_backend(
         return _CODEX_DEFAULT_MODEL
     if resolved in _KIRO_LLM_BACKENDS and candidate == default_model:
         return _KIRO_DEFAULT_MODEL
+    if resolved in _COPILOT_LLM_BACKENDS and candidate == default_model:
+        return _COPILOT_DEFAULT_MODEL
 
     return candidate
 
@@ -1164,7 +1170,7 @@ def _normalize_configured_models_for_backend(
         return _default_models_for_backend(default_models, backend=backend)
 
     if (
-        _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS
+        _resolve_llm_backend_for_models(backend) in (_CODEX_LLM_BACKENDS | _COPILOT_LLM_BACKENDS)
         and normalized == default_models
     ):
         return _default_models_for_backend(default_models, backend=backend)

@@ -2844,12 +2844,117 @@ class TestCopilotSetup:
         assert config["orchestrator"]["runtime_backend"] == "copilot"
         assert config["orchestrator"]["copilot_cli_path"] == "/opt/bin/copilot"
         assert config["llm"]["backend"] == "copilot"
-        # Default model is the recommended dotted Copilot ID.
-        assert config["llm"]["default_model"] == "claude-opus-4.6"
+        # Default model is the recommended dotted Copilot ID, persisted only
+        # through supported config fields.
+        assert "default_model" not in config["llm"]
         assert config["clarification"]["default_model"] == "claude-opus-4.6"
-        # Unrelated keys preserved.
+        # Explicit user overrides are preserved.
         assert config["llm"]["qa_model"] == "x"
         mock_register.assert_called_once_with()
+
+    def test_setup_copilot_replaces_shipped_default_model_fields(self, tmp_path: Path) -> None:
+        """Fresh/default configs should honor the model selected during setup."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "claude"},
+                    "llm": {"backend": "claude_code"},
+                    "clarification": {"default_model": "claude-opus-4-6"},
+                    "evaluation": {"semantic_model": "claude-opus-4-6"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=self._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server"),
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["llm"]["qa_model"] == "claude-opus-4.6"
+        assert config["llm"]["dependency_analysis_model"] == "claude-opus-4.6"
+        assert config["clarification"]["default_model"] == "claude-opus-4.6"
+        assert config["evaluation"]["semantic_model"] == "claude-opus-4.6"
+        assert config["consensus"]["models"] == [
+            "claude-opus-4.6",
+            "claude-sonnet-4.5",
+            "claude-opus-4.6",
+        ]
+        assert config["consensus"]["advocate_model"] == "claude-opus-4.6"
+        assert config["consensus"]["devil_model"] == "claude-opus-4.6"
+        assert config["consensus"]["judge_model"] == "claude-opus-4.6"
+        assert "default_model" not in config["llm"]
+
+    def test_setup_copilot_aborts_on_non_mapping_sections(self, tmp_path: Path) -> None:
+        """Malformed sections must not be clobbered or crash setup."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = yaml.safe_dump(
+            {
+                "orchestrator": ["keep", "me"],
+                "llm": {"backend": "claude_code"},
+            },
+            sort_keys=False,
+        )
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=self._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        assert config_path.read_text(encoding="utf-8") == original
+        mock_register.assert_not_called()
+
+    def test_setup_copilot_aborts_on_non_mapping_model_sections(self, tmp_path: Path) -> None:
+        """Model-default sections are validated before rewrite."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = yaml.safe_dump(
+            {
+                "orchestrator": {"runtime_backend": "claude"},
+                "llm": {"backend": "claude_code"},
+                "consensus": ["keep", "me"],
+            },
+            sort_keys=False,
+        )
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=self._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        assert config_path.read_text(encoding="utf-8") == original
+        mock_register.assert_not_called()
 
     def test_setup_copilot_aborts_on_non_mapping_ouroboros_config(self, tmp_path: Path) -> None:
         """Malformed config.yaml must not be clobbered or partially rewritten."""
@@ -3011,6 +3116,82 @@ class TestCopilotSetup:
         after = json.loads(mcp_path.read_text(encoding="utf-8"))
         assert after["mcpServers"]["ouroboros"] == existing_entry
         assert mcp_path.stat().st_mtime_ns == before_mtime
+
+    def test_register_copilot_mcp_preserves_custom_entry_and_merges_env(
+        self, tmp_path: Path
+    ) -> None:
+        """Custom Copilot MCP wrappers should not be replaced by setup."""
+        mcp_path = tmp_path / ".copilot" / "mcp-config.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "/opt/custom/wrapper",
+                            "args": ["--custom"],
+                            "env": {"CUSTOM": "1"},
+                        }
+                    }
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+        ):
+            setup_cmd._register_copilot_mcp_server()
+
+        entry = json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"]
+        assert entry["command"] == "/opt/custom/wrapper"
+        assert entry["args"] == ["--custom"]
+        assert entry["env"] == {
+            "CUSTOM": "1",
+            "OUROBOROS_AGENT_RUNTIME": "copilot",
+            "OUROBOROS_LLM_BACKEND": "copilot",
+        }
+
+    def test_register_copilot_mcp_updates_setup_managed_entry(self, tmp_path: Path) -> None:
+        """Setup-managed entries can be upgraded while preserving extra env."""
+        mcp_path = tmp_path / ".copilot" / "mcp-config.json"
+        mcp_path.parent.mkdir(parents=True)
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "uvx",
+                            "args": ["old"],
+                            "env": {"CUSTOM": "1"},
+                        }
+                    }
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["new"]},
+            ),
+        ):
+            setup_cmd._register_copilot_mcp_server()
+
+        entry = json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"]
+        assert entry["command"] == "uvx"
+        assert entry["args"] == ["new"]
+        assert entry["env"]["CUSTOM"] == "1"
+        assert entry["env"]["OUROBOROS_AGENT_RUNTIME"] == "copilot"
+        assert entry["env"]["OUROBOROS_LLM_BACKEND"] == "copilot"
 
     def test_register_copilot_mcp_skips_invalid_json(self, tmp_path: Path) -> None:
         """Malformed mcp-config.json is left untouched; no crash."""
