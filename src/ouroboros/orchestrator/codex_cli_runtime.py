@@ -543,10 +543,12 @@ class CodexCliRuntime:
     def _is_auto_recoverable_dispatch_unavailable(recoverable_error: AgentMessage) -> bool:
         """Return whether a recoverable auto dispatch error means the tool is unavailable."""
         error_type = recoverable_error.data.get("error_type")
+        error_text = recoverable_error.content.lower()
         if error_type == "MCPResourceNotFoundError":
             return True
+        if error_type == "LookupError":
+            return "no local handler registered" in error_text
 
-        error_text = recoverable_error.content.lower()
         if error_type == "MCPClientError":
             return any(
                 marker in error_text
