@@ -105,7 +105,79 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --prerelease=allow --with mcp>=1.26.0,<2.0.0 --with claude-agent-sdk>=0.1.0 --with anthropic>=0.52.0"
+        "uv tool install --upgrade --python >=3.12 . --prerelease=allow --with mcp>=1.26.0,<2.0.0 --with claude-agent-sdk>=0.1.0,<1.0.0 --with anthropic>=0.52.0,<1.0.0"
         in calls
     )
     assert "ouroboros setup --runtime claude --non-interactive" in calls
+
+
+# ---------------------------------------------------------------------------
+# pyproject ↔ install.sh `[all]` extras parity
+# ---------------------------------------------------------------------------
+#
+# Maps every [project.optional-dependencies] extra to the package names that
+# the installer's `[all]` --with list MUST cover under uv. Update both this
+# table and install.sh whenever pyproject extras change. The mapping is
+# explicit (rather than parsed from pyproject) so a wrong rename or removal
+# fails loudly here instead of silently desyncing.
+_EXTRA_TO_PACKAGES: dict[str, tuple[str, ...]] = {
+    "claude": ("claude-agent-sdk", "anthropic"),
+    "copilot": (),  # pyproject declares copilot extras as []; nothing to install
+    "litellm": ("litellm",),
+    "dashboard": ("streamlit", "plotly", "pandas"),
+    "mcp": ("mcp",),
+    "tui": ("textual",),
+}
+
+
+def _read_pyproject_extras() -> dict[str, list[str]]:
+    """Parse [project.optional-dependencies] from pyproject.toml."""
+    try:
+        import tomllib  # type: ignore[import-not-found]
+    except ModuleNotFoundError:  # pragma: no cover — Python <3.11 fallback
+        import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+
+    pyproject = REPO_ROOT / "pyproject.toml"
+    with pyproject.open("rb") as f:
+        data = tomllib.load(f)
+    return data["project"]["optional-dependencies"]
+
+
+def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
+    """`[all]` under uv must install every extra that pyproject declares.
+
+    Catches the contract drift flagged by ouroboros-agent on PR #654:
+    install.sh's hand-maintained --with list silently dropped tui and
+    dashboard packages, so users picking 'All' got an incomplete tree.
+    """
+    extras = _read_pyproject_extras()
+    # `all` is a single self-referential entry, e.g.
+    # ``["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]``. Pull the
+    # bracketed names back out so we can compare against our mapping.
+    import re
+
+    declared_in_all: set[str] = set()
+    for entry in extras.get("all", []):
+        match = re.search(r"\[([^\]]+)\]", entry)
+        if match:
+            declared_in_all.update(name.strip() for name in match.group(1).split(","))
+
+    expected_extras = set(_EXTRA_TO_PACKAGES.keys())
+
+    # Sanity: pyproject's `all` aggregates every extra we know about.
+    assert declared_in_all == expected_extras, (
+        "pyproject [all] no longer matches the test mapping — update "
+        "_EXTRA_TO_PACKAGES and install.sh together."
+    )
+
+    result = _run_installer(tmp_path, env={"OUROBOROS_INSTALL_RUNTIME": "all"})
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+
+    expected_packages = {pkg for pkgs in _EXTRA_TO_PACKAGES.values() for pkg in pkgs}
+    missing = sorted(pkg for pkg in expected_packages if f"--with {pkg}" not in calls)
+    assert not missing, (
+        f"install.sh `[all]` is missing --with entries for: {missing}.\n"
+        "Update the case statement in scripts/install.sh to mirror the "
+        "pyproject extras."
+    )
