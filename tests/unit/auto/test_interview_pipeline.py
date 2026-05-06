@@ -106,6 +106,29 @@ def test_seed_draft_ledger_hydrates_explicit_goal_facts() -> None:
     assert "temporary scratch directory" in ledger.sections["runtime_context"].entries[-1].value
 
 
+def test_seed_draft_ledger_preserves_punctuation_inside_explicit_goal_facts() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are config path ./fixtures/hello.txt; use Python 3.11. "
+        "Outputs are write ./out/hello.txt and print hello; goodbye. "
+        "Runtime context is Python 3.11 on linux; cwd is /tmp/demo.v1. "
+        "Constraints are stdlib only. "
+        "Non-goals are network calls. "
+        "Acceptance criteria are hello.txt exists and stdout is hello. "
+        "Verification plan is run python3.11 ./hello.py. "
+        "Failure modes are missing ./out/hello.txt."
+    )
+
+    assert ledger.is_seed_ready()
+    inputs = ledger.sections["inputs"].entries[-1].value
+    outputs = ledger.sections["outputs"].entries[-1].value
+    runtime_context = ledger.sections["runtime_context"].entries[-1].value
+    assert "./fixtures/hello.txt; use Python 3.11" in inputs
+    assert "write ./out/hello.txt and print hello; goodbye" in outputs
+    assert "Python 3.11 on linux; cwd is /tmp/demo.v1" in runtime_context
+    assert "Constraints are" not in runtime_context
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001

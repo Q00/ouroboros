@@ -388,60 +388,38 @@ def _normalize_conflict_value(value: str) -> str:
 
 
 _EXPLICIT_GOAL_SECTION_PATTERNS: tuple[tuple[str, str, str, LedgerSource], ...] = (
-    (
-        "actors",
-        "actors.user_goal",
-        r"\bactors?\s+(?:is|are)\s+(?P<value>[^.;]+)",
-        LedgerSource.USER_GOAL,
-    ),
-    (
-        "inputs",
-        "inputs.user_goal",
-        r"\binputs?\s+(?:is|are)\s+(?P<value>[^.;]+)",
-        LedgerSource.USER_GOAL,
-    ),
-    (
-        "outputs",
-        "outputs.user_goal",
-        r"\boutputs?\s+(?:is|are)\s+(?P<value>[^.;]+)",
-        LedgerSource.USER_GOAL,
-    ),
+    ("actors", "actors.user_goal", r"actors?", LedgerSource.USER_GOAL),
+    ("inputs", "inputs.user_goal", r"inputs?", LedgerSource.USER_GOAL),
+    ("outputs", "outputs.user_goal", r"outputs?", LedgerSource.USER_GOAL),
     (
         "runtime_context",
         "runtime_context.user_goal",
-        r"\bruntime context\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        r"runtime context",
         LedgerSource.USER_GOAL,
     ),
-    (
-        "non_goals",
-        "non_goals.user_goal",
-        r"\bnon[- ]goals?\s+(?:is|are)\s+(?P<value>[^.;]+)",
-        LedgerSource.NON_GOAL,
-    ),
+    ("non_goals", "non_goals.user_goal", r"non[- ]goals?", LedgerSource.NON_GOAL),
     (
         "acceptance_criteria",
         "acceptance_criteria.user_goal",
-        r"\bacceptance criteria\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        r"acceptance criteria",
         LedgerSource.USER_GOAL,
     ),
     (
         "verification_plan",
         "verification_plan.user_goal",
-        r"\bverification plan\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        r"verification plan",
         LedgerSource.USER_GOAL,
     ),
-    (
-        "failure_modes",
-        "failure_modes.user_goal",
-        r"\bfailure modes?\s+(?:is|are)\s+(?P<value>[^.;]+)",
-        LedgerSource.USER_GOAL,
-    ),
-    (
-        "constraints",
-        "constraints.user_goal",
-        r"\bconstraints?\s+(?:is|are)\s+(?P<value>[^.;]+)",
-        LedgerSource.USER_GOAL,
-    ),
+    ("failure_modes", "failure_modes.user_goal", r"failure modes?", LedgerSource.USER_GOAL),
+    ("constraints", "constraints.user_goal", r"constraints?", LedgerSource.USER_GOAL),
+)
+
+_EXPLICIT_GOAL_SECTION_LABEL_PATTERN = "|".join(
+    f"(?:{label_pattern})"
+    for _section_name, _key, label_pattern, _source in _EXPLICIT_GOAL_SECTION_PATTERNS
+)
+_EXPLICIT_GOAL_SECTION_BOUNDARY = (
+    rf"(?=\s+(?:{_EXPLICIT_GOAL_SECTION_LABEL_PATTERN})\s+(?:is|are)\s+|\s*$)"
 )
 
 
@@ -457,8 +435,13 @@ def _hydrate_explicit_goal_sections(ledger: SeedDraftLedger, goal: str) -> None:
     """
     if not goal:
         return
-    for section_name, key, pattern, source in _EXPLICIT_GOAL_SECTION_PATTERNS:
-        match = re.search(pattern, goal, flags=re.IGNORECASE)
+    for section_name, key, label_pattern, source in _EXPLICIT_GOAL_SECTION_PATTERNS:
+        pattern = (
+            rf"\b(?:{label_pattern})\s+(?:is|are)\s+"
+            rf"(?P<value>.*?)"
+            rf"{_EXPLICIT_GOAL_SECTION_BOUNDARY}"
+        )
+        match = re.search(pattern, goal, flags=re.IGNORECASE | re.DOTALL)
         if match is None:
             continue
         value = _clean_goal_fact(match.group("value"))
@@ -479,7 +462,7 @@ def _hydrate_explicit_goal_sections(ledger: SeedDraftLedger, goal: str) -> None:
 
 
 def _clean_goal_fact(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip(" ,:")
+    return re.sub(r"\s+", " ", value).strip(" ,:;")
 
 
 def _truncate(value: str, *, limit: int = 500) -> str:
