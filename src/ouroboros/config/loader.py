@@ -58,9 +58,11 @@ from ouroboros.core.errors import ConfigError  # noqa: E402
 
 _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
 _KIRO_LLM_BACKENDS = frozenset({"kiro", "kiro_cli"})
+_COPILOT_LLM_BACKENDS = frozenset({"copilot", "copilot_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
+_COPILOT_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -864,6 +866,40 @@ def get_codex_cli_path() -> str | None:
     return None
 
 
+def get_copilot_cli_path() -> str | None:
+    """Get GitHub Copilot CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_COPILOT_CLI_PATH environment variable
+        2. config.yaml orchestrator.copilot_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Stale env var / config values that don't point to an executable are
+    treated as missing so setup discovery can fall back to PATH instead of
+    persisting an unusable explicit path.
+
+    Returns:
+        Path to Copilot CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_COPILOT_CLI_PATH", "").strip()
+    if env_path:
+        resolved = str(Path(env_path).expanduser())
+        if shutil.which(resolved):
+            return resolved
+
+    try:
+        config = load_config()
+        copilot_path = getattr(config.orchestrator, "copilot_cli_path", None)
+        if copilot_path:
+            resolved = str(Path(copilot_path).expanduser())
+            if shutil.which(resolved):
+                return resolved
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_kiro_cli_path() -> str | None:
     """Get Kiro CLI path from environment variable or config file.
 
@@ -1025,6 +1061,8 @@ def get_llm_backend() -> str:
         "claude": "claude",
         "claude_code": "claude_code",
         "codex": "codex",
+        "copilot": "copilot",
+        "copilot_cli": "copilot",
         "gemini": "gemini",
         "kiro": "kiro",
         "kiro_cli": "kiro",
@@ -1084,6 +1122,8 @@ def _default_model_for_backend(
         return _CODEX_DEFAULT_MODEL
     if resolved in _KIRO_LLM_BACKENDS:
         return _KIRO_DEFAULT_MODEL
+    if resolved in _COPILOT_LLM_BACKENDS:
+        return _COPILOT_DEFAULT_MODEL
     return default_model
 
 
@@ -1112,6 +1152,8 @@ def _normalize_configured_model_for_backend(
         return _CODEX_DEFAULT_MODEL
     if resolved in _KIRO_LLM_BACKENDS and candidate == default_model:
         return _KIRO_DEFAULT_MODEL
+    if resolved in _COPILOT_LLM_BACKENDS and candidate == default_model:
+        return _COPILOT_DEFAULT_MODEL
 
     return candidate
 
@@ -1128,7 +1170,7 @@ def _normalize_configured_models_for_backend(
         return _default_models_for_backend(default_models, backend=backend)
 
     if (
-        _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS
+        _resolve_llm_backend_for_models(backend) in (_CODEX_LLM_BACKENDS | _COPILOT_LLM_BACKENDS)
         and normalized == default_models
     ):
         return _default_models_for_backend(default_models, backend=backend)

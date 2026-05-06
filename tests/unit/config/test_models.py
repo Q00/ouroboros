@@ -673,6 +673,12 @@ class TestRuntimeProfileConfig:
             RuntimeProfileConfig(backend_profile="   ")
         assert "runtime_profile.backend_profile" in str(exc_info.value)
 
+    def test_runtime_profile_default_accepts_copilot_backends(self) -> None:
+        config = RuntimeProfileConfig(default="copilot", stages={"execute": "copilot_cli"})
+
+        assert config.default == "copilot"
+        assert config.stages == {"execute": "copilot_cli"}
+
     def test_runtime_profile_default_accepts_kiro_backends(self) -> None:
         assert RuntimeProfileConfig(default="kiro").default == "kiro"
         assert RuntimeProfileConfig(default="kiro_cli").default == "kiro_cli"

@@ -1573,7 +1573,7 @@ requires-dist = [
     { name = "textual", marker = "extra == 'tui'", specifier = ">=1.0.0,<9.0.0" },
     { name = "typer", specifier = ">=0.12.0,<1.0.0" },
 ]
-provides-extras = ["all", "claude", "dashboard", "litellm", "mcp", "tui"]
+provides-extras = ["all", "claude", "copilot", "dashboard", "litellm", "mcp", "tui"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -31,6 +31,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
         return CodexCliLLMAdapter
+    if name == "CopilotCliLLMAdapter":
+        from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
+
+        return CopilotCliLLMAdapter
     if name == "OpenCodeLLMAdapter":
         from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
@@ -50,6 +54,7 @@ __all__ = [
     # Implementations (AnthropicAdapter is the recommended default)
     "AnthropicAdapter",
     "CodexCliLLMAdapter",
+    "CopilotCliLLMAdapter",
     "OpenCodeLLMAdapter",
     "LiteLLMAdapter",
     # Factory helpers

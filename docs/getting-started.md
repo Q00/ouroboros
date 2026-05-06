@@ -149,6 +149,7 @@ uv run ouroboros --version            # verify CLI
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
 | OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
 | Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), `pip install ouroboros-ai[claude]` (shares the Claude extras for the Agent SDK types). Then `ouroboros setup --runtime kiro` to register the Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
+| GitHub Copilot CLI backend | Python >= 3.12, `copilot` on PATH, `gh` on PATH (`gh auth login`), `pip install 'ouroboros-ai[mcp]'` (or `pipx`/`uv tool` install). Then `ouroboros setup --runtime copilot` to live-discover available models, pick a default, and register the Ouroboros MCP server in `~/.copilot/mcp-config.json` |
 
 ---
 
@@ -172,10 +173,10 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | kiro
+  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | kiro | copilot
 
 llm:
-  backend: claude_code      # claude_code | codex | litellm | kiro
+  backend: claude_code      # claude_code | codex | litellm | kiro | copilot
 
 logging:
   level: info
@@ -348,6 +349,8 @@ For backend-specific configuration:
 - [Claude Code runtime guide](runtime-guides/claude-code.md)
 - [Codex CLI runtime guide](runtime-guides/codex.md)
 - [OpenCode runtime guide](runtime-guides/opencode.md)
+- [Kiro CLI runtime guide](runtime-guides/kiro.md)
+- [GitHub Copilot CLI runtime guide](runtime-guides/copilot.md)
 
 ---
 
@@ -447,5 +450,7 @@ ouroboros cancel execution <session_id>
 - [Claude Code runtime guide](runtime-guides/claude-code.md) -- backend-specific setup
 - [Codex CLI runtime guide](runtime-guides/codex.md) -- backend-specific setup
 - [OpenCode runtime guide](runtime-guides/opencode.md) -- backend-specific setup
+- [Kiro CLI runtime guide](runtime-guides/kiro.md) -- backend-specific setup
+- [GitHub Copilot CLI runtime guide](runtime-guides/copilot.md) -- backend-specific setup with live model discovery
 
 Need help? Open an issue on [GitHub](https://github.com/Q00/ouroboros/issues).

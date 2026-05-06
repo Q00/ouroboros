@@ -251,6 +251,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "hermes_cli": "hermes_cli",
     "kiro": "kiro",
     "kiro_cli": "kiro",
+    "copilot": "copilot_cli",
+    "copilot_cli": "copilot_cli",
 }
 
 

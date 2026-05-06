@@ -284,6 +284,13 @@ def test_factory_rejection_message_lists_supported_backends() -> None:
 
 def test_mcp_llm_backend_enum_includes_gemini() -> None:
     from ouroboros.cli.commands.mcp import AgentRuntimeBackend, LLMBackend
+    from ouroboros.cli.commands.run import AgentRuntimeBackend as RunAgentRuntimeBackend
 
     assert LLMBackend("gemini") is LLMBackend.GEMINI
+    assert LLMBackend("kiro") is LLMBackend.KIRO
     assert AgentRuntimeBackend("gemini") is AgentRuntimeBackend.GEMINI
+    assert AgentRuntimeBackend("copilot") is AgentRuntimeBackend.COPILOT
+    assert AgentRuntimeBackend("kiro") is AgentRuntimeBackend.KIRO
+    assert RunAgentRuntimeBackend("gemini") is RunAgentRuntimeBackend.GEMINI
+    assert RunAgentRuntimeBackend("copilot") is RunAgentRuntimeBackend.COPILOT
+    assert RunAgentRuntimeBackend("kiro") is RunAgentRuntimeBackend.KIRO
