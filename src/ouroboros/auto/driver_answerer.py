@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import re
 from typing import Protocol
 
@@ -44,6 +45,7 @@ class DriverAutoAnswerer:
 
     backend: str | None = None
     brake: AutoBrakeMode = AutoBrakeMode.ON
+    cwd: str | Path | None = None
     adapter: LLMAdapter | None = None
     baseline: AutoAnswerer = field(default_factory=AutoAnswerer)
     timeout_seconds: float | None = 60.0
@@ -70,6 +72,7 @@ class DriverAutoAnswerer:
             self.adapter = create_llm_adapter(
                 backend=self.backend,
                 use_case="interview",
+                cwd=self.cwd,
                 allowed_tools=[],
                 max_turns=1,
                 timeout=self.timeout_seconds,
@@ -115,14 +118,18 @@ class DriverAutoAnswerer:
         if risk:
             assumptions.append(f"brake off auto-sent risky driver answer: {risk}")
             confidence = min(confidence, 0.62)
+        tagged_text = _tag_driver_text(
+            text, backend=self.backend or "driver", brake=self.brake, risk=risk
+        )
         return AutoAnswer(
-            text=_tag_driver_text(
-                text, backend=self.backend or "driver", brake=self.brake, risk=risk
-            ),
+            text=tagged_text,
             source=AutoAnswerSource.DRIVER,
             confidence=confidence,
             ledger_updates=_ledger_updates_for(
-                scaffold, risk=risk, backend=self.backend or "driver"
+                scaffold,
+                driver_text=tagged_text,
+                risk=risk,
+                backend=self.backend or "driver",
             ),
             assumptions=assumptions,
             non_goals=list(scaffold.non_goals),
@@ -217,9 +224,29 @@ def _tag_driver_text(text: str, *, backend: str, brake: AutoBrakeMode, risk: str
 
 
 def _ledger_updates_for(
-    scaffold: AutoAnswer, *, risk: str | None, backend: str
+    scaffold: AutoAnswer, *, driver_text: str, risk: str | None, backend: str
 ) -> list[tuple[str, LedgerEntry]]:
-    updates = list(scaffold.ledger_updates)
+    updates = [
+        (
+            section,
+            LedgerEntry(
+                key=entry.key,
+                value=driver_text,
+                source=LedgerSource.INFERENCE,
+                confidence=min(entry.confidence, 0.72),
+                status=LedgerStatus.WEAK
+                if entry.status == LedgerStatus.CONFIRMED
+                else entry.status,
+                reversible=entry.reversible,
+                rationale=(
+                    "Selected-driver answer was sent to the interview; ledger value "
+                    f"mirrors that exact answer. Deterministic scaffold was: {entry.value}"
+                ),
+                evidence=[*entry.evidence, f"driver:{backend}"],
+            ),
+        )
+        for section, entry in scaffold.ledger_updates
+    ]
     if risk:
         updates.append(
             (

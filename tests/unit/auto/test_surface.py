@@ -1207,9 +1207,10 @@ async def test_auto_handler_resume_uses_persisted_cwd_without_revalidating_serve
 
 
 @pytest.mark.asyncio
-async def test_auto_handler_uses_llm_backend_as_default_interview_driver(
+async def test_auto_handler_without_driver_keeps_deterministic_answerer(
     monkeypatch, tmp_path
 ) -> None:
+    from ouroboros.auto.answerer import AutoAnswerer
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.mcp.tools import auto_handler as auto_module
 
@@ -1217,8 +1218,7 @@ async def test_auto_handler_uses_llm_backend_as_default_interview_driver(
 
     class FakePipeline:
         def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003
-            captured["answerer_backend"] = driver.answerer.backend
-            captured["answerer_brake"] = driver.answerer.brake.value
+            captured["answerer_type"] = type(driver.answerer)
 
         async def run(self, run_state):  # noqa: ANN001
             captured["state_driver"] = run_state.interview_driver_backend
@@ -1245,9 +1245,8 @@ async def test_auto_handler_uses_llm_backend_as_default_interview_driver(
 
     assert result.is_ok
     assert captured == {
-        "answerer_backend": "codex",
-        "answerer_brake": "on",
-        "state_driver": "codex",
+        "answerer_type": AutoAnswerer,
+        "state_driver": None,
         "state_brake": "on",
     }
 

@@ -17,6 +17,7 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
+from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.driver_answerer import DriverAutoAnswerer
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
@@ -239,6 +240,7 @@ async def _run_auto(
                 f"but --brake {brake_mode.value} was requested"
             )
             raise ValueError(msg)
+        state.interview_driver_backend = driver
     else:
         if goal is None or not goal.strip():
             raise ValueError("goal is required when not resuming")
@@ -276,12 +278,15 @@ async def _run_auto(
     start_execute = StartExecuteSeedHandler(
         execute_handler=execute_seed, agent_runtime_backend=runtime, opencode_mode=opencode_mode
     )
-    selected_answerer = DriverAutoAnswerer(
-        backend=state.interview_driver_backend,
-        brake=state.brake,
-        timeout_seconds=60.0,
-    )
-    state.interview_driver_backend = selected_answerer.backend
+    selected_answerer = AutoAnswerer()
+    if state.interview_driver_backend is not None:
+        selected_answerer = DriverAutoAnswerer(
+            backend=state.interview_driver_backend,
+            brake=state.brake,
+            cwd=state.cwd,
+            timeout_seconds=60.0,
+        )
+        state.interview_driver_backend = selected_answerer.backend
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         answerer=selected_answerer,

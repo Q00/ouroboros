@@ -15,6 +15,7 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
+from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.driver_answerer import DriverAutoAnswerer
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
@@ -177,7 +178,7 @@ class AutoHandler:
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
-            state.interview_driver_backend = requested_driver or self.llm_backend
+            state.interview_driver_backend = requested_driver
             state.brake = requested_brake_mode or AutoBrakeMode.ON
         state.runtime_backend = runtime_backend
         state.opencode_mode = opencode_mode
@@ -205,12 +206,15 @@ class AutoHandler:
             mcp_tool_prefix=self.mcp_tool_prefix,
         )
 
-        selected_answerer = DriverAutoAnswerer(
-            backend=state.interview_driver_backend,
-            brake=state.brake,
-            timeout_seconds=60.0,
-        )
-        state.interview_driver_backend = selected_answerer.backend
+        selected_answerer = AutoAnswerer()
+        if state.interview_driver_backend is not None:
+            selected_answerer = DriverAutoAnswerer(
+                backend=state.interview_driver_backend,
+                brake=state.brake,
+                cwd=cwd,
+                timeout_seconds=60.0,
+            )
+            state.interview_driver_backend = selected_answerer.backend
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             answerer=selected_answerer,

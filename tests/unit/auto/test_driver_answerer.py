@@ -53,6 +53,41 @@ async def test_driver_answerer_brake_off_answers_risky_question() -> None:
 
 
 @pytest.mark.asyncio
+async def test_driver_answerer_ledger_updates_mirror_driver_answer() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    adapter = FakeAdapter("Use Typer and verify with pytest.")
+    answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
+
+    answer = await answerer.answer("Which runtime and framework should be used?", ledger)
+
+    assert answer.ledger_updates
+    assert all(entry.value == answer.text for _section, entry in answer.ledger_updates)
+    assert {entry.source.value for _section, entry in answer.ledger_updates} == {"inference"}
+    assert any("driver:codex" in entry.evidence for _section, entry in answer.ledger_updates)
+
+
+@pytest.mark.asyncio
+async def test_driver_answerer_constructs_adapter_with_session_cwd(monkeypatch, tmp_path) -> None:
+    from ouroboros.auto import driver_answerer as module
+
+    captured: dict[str, object] = {}
+    adapter = FakeAdapter("Use the checked-out project conventions.")
+
+    def fake_create_llm_adapter(**kwargs):  # noqa: ANN003, ANN202
+        captured.update(kwargs)
+        return adapter
+
+    monkeypatch.setattr(module, "create_llm_adapter", fake_create_llm_adapter)
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, cwd=tmp_path)
+
+    answer = await answerer.answer("Which runtime and framework should be used?", ledger)
+
+    assert answer.source == AutoAnswerSource.DRIVER
+    assert captured["cwd"] == tmp_path
+
+
+@pytest.mark.asyncio
 async def test_driver_answerer_brake_on_gates_risky_question() -> None:
     ledger = SeedDraftLedger.from_goal("Deploy a service")
     adapter = FakeAdapter("This should not be called")
