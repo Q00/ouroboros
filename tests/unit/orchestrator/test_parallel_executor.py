@@ -27,6 +27,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelACExecutor,
     ParallelExecutionResult,
     StageExecutionOutcome,
+    render_parallel_completion_message,
     render_parallel_verification_report,
 )
 
@@ -83,6 +84,41 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
 
 class TestParallelACExecutor:
     """Tests for staged hybrid result handling."""
+
+    def test_verification_report_uses_task_completion_terms(self) -> None:
+        parallel_result = ParallelExecutionResult(
+            stages=(),
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Create tasks",
+                    success=True,
+                    is_decomposed=True,
+                    sub_results=(
+                        ACExecutionResult(
+                            ac_index=100,
+                            ac_content="Create task storage",
+                            success=False,
+                            final_message="Storage failed",
+                        ),
+                    ),
+                ),
+            ),
+            success_count=0,
+            failure_count=1,
+        )
+
+        report = render_parallel_verification_report(parallel_result, 1)
+        completion = render_parallel_completion_message(parallel_result, 1)
+
+        assert "## Task Results" in report
+        assert "### Task 1: [COMPLETED] Create tasks" in report
+        assert "#### Subtask 1.1: [FAILED] Create task storage" in report
+        assert "## AC Results" not in report
+        assert "[PASS]" not in report
+        assert "[FAIL]" not in report
+        assert "Task Status:" in completion
+        assert "- Task 1: [COMPLETED] Create tasks (1 subtasks)" in completion
 
     @pytest.mark.asyncio
     async def test_emit_subtask_event_preserves_full_content_with_compact_label(self) -> None:

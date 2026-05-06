@@ -256,13 +256,17 @@ def _looks_like_project_root(path: object) -> bool:
 def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None:
     """Parse legacy parallel execution output into task completion results.
 
-    Legacy reports render worker execution as ``### AC N: [PASS|FAIL]``.  Those
-    lines describe execution completion, not formal evaluator/verifier AC
-    verdicts, so they populate ``task_results`` instead of ``ac_results``.
+    Legacy reports rendered worker execution as ``### AC N: [PASS|FAIL]``.
+    New reports render the same execution signal as
+    ``### Task N: [COMPLETED|FAILED]``. Both describe execution completion, not
+    formal evaluator/verifier AC verdicts, so they populate ``task_results``
+    instead of ``ac_results``.
     """
     from ouroboros.core.lineage import EvaluationSummary, TaskResult
 
-    task_line_matches = re.findall(r"### AC (\d+): \[(PASS|FAIL)\]\s*(.*)", artifact)
+    task_line_matches = re.findall(
+        r"### (?:Task|AC) (\d+): \[(COMPLETED|FAILED|PASS|FAIL)\]\s*(.*)", artifact
+    )
     if not task_line_matches:
         return None
 
@@ -273,7 +277,7 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
     for ac_num_str, status, description in task_line_matches:
         task_idx = int(ac_num_str) - 1
         task_content = seed_acs[task_idx] if task_idx < len(seed_acs) else description.strip()
-        completed = status == "PASS"
+        completed = status in {"COMPLETED", "PASS"}
         task_results.append(
             TaskResult(
                 task_index=task_idx,
@@ -282,7 +286,7 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
                 completed=completed,
                 source_ac_index=task_idx,
                 evidence=description.strip(),
-                execution_method="legacy_parallel_report",
+                execution_method="parallel_report",
             )
         )
 
@@ -1341,9 +1345,10 @@ def create_ouroboros_server(
     def _evaluate_mechanically(artifact: str, seed: Any) -> EvaluationSummary | None:
         """Parse legacy execution completion output without fabricating AC verdicts.
 
-        The parallel executor historically emits ``### AC N: [PASS/FAIL]`` lines
-        for worker execution completion.  Keep that output parseable, but map it
-        to task completion results rather than formal ``ACResult`` verdicts.
+        The parallel executor emits worker task completion lines. Keep both the
+        current ``### Task N: [COMPLETED/FAILED]`` syntax and legacy
+        ``### AC N: [PASS/FAIL]`` syntax parseable, but map them to task
+        completion results rather than formal ``ACResult`` verdicts.
         """
         return _parse_legacy_execution_task_summary(artifact, seed)
 

@@ -155,10 +155,9 @@ async def test_ralph_handler_returns_job_id_and_completes_loop() -> None:
         assert job_id.startswith("job_")
 
         snapshot = await job_manager.get_snapshot(job_id)
-        for _ in range(500):
-            if snapshot.is_terminal:
-                break
-            await asyncio.sleep(0.01)
+        deadline = asyncio.get_running_loop().time() + 30.0
+        while not snapshot.is_terminal and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
             snapshot = await job_manager.get_snapshot(job_id)
         assert snapshot.status is JobStatus.COMPLETED
         assert snapshot.result_meta["iterations"] == 2
@@ -166,6 +165,34 @@ async def test_ralph_handler_returns_job_id_and_completes_loop() -> None:
         assert len(evolve.calls) == 2
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_ralph_handler_guides_plain_request_without_lineage_id() -> None:
+    handler = RalphHandler(evolve_handler=_FakeEvolveHandler(["converged"]))  # type: ignore[arg-type]
+
+    result = await handler.handle({"lineage_id": ""})
+
+    assert result.is_ok
+    tool_result = result.value
+    assert tool_result.is_error is True
+    assert tool_result.meta["status"] == "input_required"
+    assert tool_result.meta["missing"] == ["lineage_id"]
+    assert "ooo interview" in tool_result.text_content
+    assert "ooo seed" in tool_result.text_content
+
+
+@pytest.mark.asyncio
+async def test_ralph_handler_guides_whitespace_only_lineage_id() -> None:
+    evolve = _FakeEvolveHandler(["converged"])
+    handler = RalphHandler(evolve_handler=evolve)  # type: ignore[arg-type]
+
+    result = await handler.handle({"lineage_id": "   "})
+
+    assert result.is_ok
+    assert result.value.is_error is True
+    assert result.value.meta["status"] == "input_required"
+    assert evolve.calls == []
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,14 @@ class TestInstallCodexRules:
         assert not stale_namespaced_rule.exists()
         assert unrelated_rule.read_text(encoding="utf-8") == "keep me"
 
+    def test_packaged_rules_fail_closed_for_ooo_auto(self) -> None:
+        """Codex rules must route ``ooo auto`` to the real MCP tool, not manual work."""
+        rules = load_packaged_codex_rules()
+
+        assert "| `ooo auto ...` | `ouroboros_auto`" in rules
+        assert "Do not emulate it with manual" in rules
+        assert "If that MCP tool\nis unavailable" in rules
+
 
 class TestLoadPackagedCodexSkills:
     """Test packaged Codex skill entrypoint resolution helpers."""
@@ -138,6 +146,13 @@ class TestLoadPackagedCodexSkills:
         with resolve_packaged_codex_skill_path("run") as skill_md_path:
             assert skill_md_path.name == "SKILL.md"
             assert skill_md_path.read_text(encoding="utf-8").startswith("---\nname: run\n")
+
+    def test_packaged_auto_skill_forbids_manual_fallback(self) -> None:
+        """The auto skill body must not allow silent manual emulation."""
+        skill = load_packaged_codex_skill("auto")
+
+        assert "must be executed by invoking MCP tool `ouroboros_auto`" in skill
+        assert "manual fallback is not an `ooo auto` run" in skill
 
     def test_raises_when_explicit_packaged_skill_is_missing(self, tmp_path: Path) -> None:
         """Missing skill entrypoints should fail fast."""

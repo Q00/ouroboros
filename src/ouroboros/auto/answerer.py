@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
@@ -19,6 +20,40 @@ class AutoAnswerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     BLOCKER = "blocker"
+
+
+@dataclass(frozen=True, slots=True)
+class AutoAnswerContext:
+    """Bounded facts supplied by a caller before answering interview questions.
+
+    The answerer remains deterministic and does not inspect the repository on its
+    own; callers can pass already-collected facts with optional evidence labels.
+    """
+
+    repo_facts: Mapping[str, str] = field(default_factory=dict)
+    evidence: Mapping[str, Sequence[str]] = field(default_factory=dict)
+
+    def runtime_fact(self) -> tuple[str, Sequence[str]] | None:
+        """Return a complete runtime/project fact when one was supplied.
+
+        Narrow facts such as ``framework`` or ``package_manager`` are useful
+        evidence, but they do not by themselves answer the stronger
+        ``runtime_context`` ledger contract.
+        """
+        for key in ("runtime_context", "project_runtime"):
+            value = self.repo_facts.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip(), self.evidence.get(key, ())
+        return None
+
+    def partial_runtime_facts(self) -> tuple[tuple[str, str, Sequence[str]], ...]:
+        """Return bounded runtime-adjacent facts that are not complete context."""
+        facts: list[tuple[str, str, Sequence[str]]] = []
+        for key in ("framework", "package_manager", "project_structure"):
+            value = self.repo_facts.get(key)
+            if isinstance(value, str) and value.strip():
+                facts.append((key, value.strip(), self.evidence.get(key, ())))
+        return tuple(facts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +89,14 @@ class AutoAnswerer:
     exploration.  Later integrations may pass bounded repo facts into it.
     """
 
-    def answer(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:
-        """Answer ``question`` using a conservative policy."""
+    def answer(
+        self,
+        question: str,
+        ledger: SeedDraftLedger,
+        context: AutoAnswerContext | None = None,
+    ) -> AutoAnswer:
+        """Answer ``question`` using a conservative policy and optional bounded facts."""
+        context = context or AutoAnswerContext()
         lowered = question.lower()
         blocker = _blocker_for(question)
         if blocker is not None:
@@ -76,20 +117,10 @@ class AutoAnswerer:
             return self._feature_acceptance_answer(question)
         if _is_actor_or_io_question(lowered):
             return self._io_actor_answer(question)
+        if _is_runtime_context_question(lowered):
+            return self._runtime_answer(question, context)
         if _is_product_behavior_question(lowered):
             return self._product_behavior_answer(question)
-        if _matches_any(
-            lowered,
-            (
-                r"\bruntime\b",
-                r"\bstack\b",
-                r"\brepo\b",
-                r"\bframework\b",
-                r"\bproject structure\b",
-                r"\bproject runtime\b",
-            ),
-        ):
-            return self._runtime_answer(question)
 
         return self._default_answer(question, ledger)
 
@@ -200,20 +231,70 @@ class AutoAnswerer:
         ]
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
 
-    def _runtime_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
-        value = "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria."
-        updates = [
+    def _runtime_answer(self, question: str, context: AutoAnswerContext) -> AutoAnswer:  # noqa: ARG002
+        supplied_fact = context.runtime_fact()
+        partial_facts = context.partial_runtime_facts()
+        partial_evidence = [
+            evidence for _, _, evidence_items in partial_facts for evidence in evidence_items
+        ]
+        partial_summary = "; ".join(f"{key}: {value}" for key, value, _ in partial_facts)
+        partial_entries = [
             (
                 "runtime_context",
                 LedgerEntry(
-                    key="runtime.existing_project",
+                    key=f"runtime.partial.{key}",
                     value=value,
-                    source=LedgerSource.EXISTING_CONVENTION,
-                    confidence=0.78,
-                    status=LedgerStatus.DEFAULTED,
-                    rationale="Auto mode should avoid unnecessary stack choices.",
+                    source=LedgerSource.REPO_FACT,
+                    confidence=0.72,
+                    status=LedgerStatus.WEAK,
+                    rationale=(
+                        "Bounded repository fact informs runtime selection but does not "
+                        "fully confirm the runtime_context contract."
+                    ),
+                    evidence=list(evidence_items),
                 ),
+            )
+            for key, value, evidence_items in partial_facts
+        ]
+        if supplied_fact is not None:
+            value, evidence = supplied_fact
+            runtime_entry = LedgerEntry(
+                key="runtime.repo_fact",
+                value=value,
+                source=LedgerSource.REPO_FACT,
+                confidence=0.9,
+                status=LedgerStatus.CONFIRMED,
+                rationale="Bounded repository context was supplied to auto answerer.",
+                evidence=list(evidence),
+            )
+            answer_source = AutoAnswerSource.REPO_FACT
+            confidence = 0.9
+        else:
+            value = "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria."
+            if partial_summary:
+                value = f"{value} Supplied repo facts: {partial_summary}."
+            runtime_entry = LedgerEntry(
+                key="runtime.existing_project",
+                value=value,
+                source=LedgerSource.EXISTING_CONVENTION,
+                confidence=0.8 if partial_facts else 0.78,
+                status=LedgerStatus.DEFAULTED,
+                rationale=(
+                    "Auto mode should avoid unnecessary stack choices; supplied partial "
+                    "repo facts are recorded separately and do not confirm full runtime context."
+                    if partial_facts
+                    else "Auto mode should avoid unnecessary stack choices."
+                ),
+                evidence=partial_evidence,
+            )
+            answer_source = AutoAnswerSource.EXISTING_CONVENTION
+            confidence = 0.8 if partial_facts else 0.78
+        updates = [
+            (
+                "runtime_context",
+                runtime_entry,
             ),
+            *partial_entries,
             (
                 "constraints",
                 LedgerEntry(
@@ -226,7 +307,7 @@ class AutoAnswerer:
                 ),
             ),
         ]
-        return AutoAnswer(value, AutoAnswerSource.EXISTING_CONVENTION, 0.78, updates)
+        return AutoAnswer(value, answer_source, confidence, updates)
 
     def _io_actor_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
         value = "Assume a single local user operating through the requested interface; inputs and outputs should be explicit command/API arguments and stable returned text or artifacts."
@@ -382,6 +463,31 @@ def _acceptance_subject(question: str) -> str:
 def _slug_key(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     return slug[:64] or "requested_behavior"
+
+
+def _is_runtime_context_question(lowered: str) -> bool:
+    runtime_terms = (
+        r"runtime",
+        r"stack",
+        r"repo",
+        r"repository",
+        r"repository runtime",
+        r"framework",
+        r"package manager",
+        r"project structure",
+        r"project runtime",
+    )
+    runtime_term = r"(?:" + "|".join(runtime_terms) + r")"
+    selection_verbs = (
+        r"(?:use|used|using|uses|choose|select|configure|adopt|manage|managed|structure|organize)"
+    )
+
+    return bool(
+        re.search(rf"^\s*(which|what)\s+{runtime_term}\s*\??\s*$", lowered)
+        or re.search(rf"\b(which|what)\b.+\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
+        or re.search(rf"\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
+        or re.search(rf"\b{selection_verbs}\b.+\b{runtime_term}\b", lowered)
+    )
 
 
 def _is_product_behavior_question(lowered: str) -> bool:

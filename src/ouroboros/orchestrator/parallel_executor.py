@@ -314,18 +314,18 @@ def _render_ac_section(
     heading_level: int,
     include_header: bool = True,
 ) -> list[str]:
-    """Render a single AC or Sub-AC section for verification/audit output."""
+    """Render a single Task or Subtask section for verification/audit output."""
     lines: list[str] = []
     if include_header:
-        status = "PASS" if result.success else "FAIL"
-        label = "AC" if len(index_path) == 1 else "Sub-AC"
+        status = "COMPLETED" if result.success else "FAILED"
+        label = "Task" if len(index_path) == 1 else "Subtask"
         lines.append(
             f"{'#' * heading_level} {label} {'.'.join(str(i) for i in index_path)}: "
             f"[{status}] {result.ac_content}"
         )
 
     if result.is_decomposed and result.sub_results:
-        lines.append(f"Decomposed into {len(result.sub_results)} Sub-ACs")
+        lines.append(f"Decomposed into {len(result.sub_results)} Subtasks")
         for idx, sub_result in enumerate(result.sub_results, start=1):
             if lines:
                 lines.append("")
@@ -419,7 +419,7 @@ def render_parallel_verification_report(
         lines.append(f"Feedback Metadata JSON: {json.dumps(feedback_metadata, sort_keys=True)}")
 
     lines.append("")
-    lines.append("## AC Results")
+    lines.append("## Task Results")
     for result in parallel_result.results:
         lines.append("")
         lines.extend(
@@ -450,15 +450,15 @@ def render_parallel_completion_message(
         lines.append(f"Skipped: {parallel_result.skipped_count}")
 
     lines.append("")
-    lines.append("AC Status:")
+    lines.append("Task Status:")
     for result in parallel_result.results:
         if result.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY:
-            status = "PASS"
+            status = "COMPLETED"
             suffix = " (externally satisfied)"
         else:
-            status = "PASS" if result.success else "FAIL"
-            suffix = f" ({len(result.sub_results)} sub-ACs)" if result.is_decomposed else ""
-        lines.append(f"- AC {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
+            status = "COMPLETED" if result.success else "FAILED"
+            suffix = f" ({len(result.sub_results)} subtasks)" if result.is_decomposed else ""
+        lines.append(f"- Task {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
     return "\n".join(lines)
 
 

@@ -2575,10 +2575,10 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert "Commands Run:" not in result.value.final_message
-        assert "AC Status:" in result.value.final_message
+        assert "Task Status:" in result.value.final_message
         verification_report = result.value.summary["verification_report"]
-        assert "### AC 1: [PASS] Tasks can be created" in verification_report
-        assert "#### Sub-AC 1.1: [PASS] Create task storage" in verification_report
+        assert "### Task 1: [COMPLETED] Tasks can be created" in verification_report
+        assert "#### Subtask 1.1: [COMPLETED] Create task storage" in verification_report
         assert "Bash: uv run pytest tests/unit/test_runner.py -q" in verification_report
         assert "Write: /tmp/project/task_store.py" in verification_report
         assert "Decomposed placeholder should not leak" not in verification_report
