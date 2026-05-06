@@ -260,6 +260,89 @@ async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_supplies_bounded_repo_facts_to_answerer(tmp_path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "\n".join(
+            [
+                "[project]",
+                'name = "demo-cli"',
+                'requires-python = ">=3.12"',
+                'dependencies = ["typer>=0.12"]',
+                "",
+                "[build-system]",
+                'build-backend = "hatchling.build"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("Which runtime and framework should we use?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["runtime_context"].entries.clear()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert answers and "[repo_fact]" in answers[0]
+    runtime_entries = ledger.sections["runtime_context"].entries
+    repo_entry = next(entry for entry in runtime_entries if entry.key == "runtime.repo_fact")
+    assert repo_entry.source == LedgerSource.REPO_FACT
+    assert repo_entry.status == LedgerStatus.CONFIRMED
+    assert repo_entry.evidence == ["pyproject.toml", "src/", "tests/"]
+    assert "Python project requiring >=3.12" in repo_entry.value
+    assert "Typer CLI" in repo_entry.value
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_keeps_runtime_default_without_repo_facts(tmp_path) -> None:
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("Which runtime and framework should we use?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["runtime_context"].entries.clear()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert answers and "[existing_convention]" in answers[0]
+    runtime_entries = ledger.sections["runtime_context"].entries
+    assert runtime_entries[-1].source == LedgerSource.EXISTING_CONVENTION
+    assert runtime_entries[-1].status == LedgerStatus.DEFAULTED
+    assert runtime_entries[-1].evidence == []
+
+
+@pytest.mark.asyncio
 async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_1")

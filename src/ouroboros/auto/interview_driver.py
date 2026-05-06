@@ -8,9 +8,16 @@ from dataclasses import dataclass, field
 import re
 from typing import Protocol
 
-from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerSource, AutoBlocker
+from ouroboros.auto.answerer import (
+    AutoAnswer,
+    AutoAnswerContext,
+    AutoAnswerer,
+    AutoAnswerSource,
+    AutoBlocker,
+)
 from ouroboros.auto.gap_detector import Gap, GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
+from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 
@@ -58,6 +65,7 @@ class AutoInterviewDriver:
 
     backend: InterviewBackend
     answerer: AutoAnswerer = field(default_factory=AutoAnswerer)
+    context_provider: Callable[[str], AutoAnswerContext] = repo_auto_answer_context
     gap_detector: GapDetector = field(default_factory=GapDetector)
     store: AutoStore | None = None
     timeout_seconds: float = 60.0
@@ -66,6 +74,7 @@ class AutoInterviewDriver:
     async def run(self, state: AutoPipelineState, ledger: SeedDraftLedger) -> AutoInterviewResult:
         """Run bounded auto interview until Seed-ready or blocked."""
         self._ensure_interview_phase(state)
+        answer_context = self.context_provider(state.cwd)
         interview_tool_name = "interview.start"
         try:
             if state.interview_session_id:
@@ -118,7 +127,7 @@ class AutoInterviewDriver:
             state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
             self._save(state)
 
-            answer = self._answer_with_gap_steering(turn.question, ledger)
+            answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
             if answer.blocker is not None:
                 self.answerer.apply(answer, ledger, question=turn.question)
                 state.ledger = ledger.to_dict()
@@ -184,8 +193,10 @@ class AutoInterviewDriver:
             "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
         )
 
-    def _answer_with_gap_steering(self, question: str, ledger: SeedDraftLedger) -> AutoAnswer:
-        answer = self.answerer.answer(question, ledger)
+    def _answer_with_gap_steering(
+        self, question: str, ledger: SeedDraftLedger, context: AutoAnswerContext
+    ) -> AutoAnswer:
+        answer = self.answerer.answer(question, ledger, context)
         if answer.blocker is not None:
             return answer
         gaps = self.gap_detector.detect(ledger)
@@ -208,7 +219,7 @@ class AutoInterviewDriver:
                 confidence=1.0,
                 blocker=blocker,
             )
-        return self.answerer.answer(_gap_prompt(next_gap), ledger)
+        return self.answerer.answer(_gap_prompt(next_gap), ledger, context)
 
     def _handle_completed_turn(
         self, state: AutoPipelineState, ledger: SeedDraftLedger, turn: InterviewTurn, rounds: int
