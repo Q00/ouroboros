@@ -36,6 +36,13 @@ def test_load_env_file_does_not_override_existing_values(
     assert os.environ["FIRST"] == "existing"
 
 
+def test_load_env_file_ignores_directory_path(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.mkdir()
+
+    _load_env_file(env_path)
+
+
 def test_load_env_file_skips_template_placeholders(tmp_path: Path, monkeypatch) -> None:
     """Template placeholders should not block later env values from loading."""
     repo_env = tmp_path / "repo.env"

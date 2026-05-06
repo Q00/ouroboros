@@ -115,7 +115,7 @@ def _is_placeholder_api_key(value: str) -> bool:
 
 
 def _load_env_file(path: Path) -> None:
-    if not path.exists():
+    if not path.is_file():
         return
 
     for raw_line in path.read_text().splitlines():
