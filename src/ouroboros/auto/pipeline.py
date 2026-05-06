@@ -35,6 +35,11 @@ class AutoPipelineResult:
     job_id: str | None = None
     run_session_id: str | None = None
     run_subagent: dict[str, Any] | None = None
+    current_round: int = 0
+    pending_question: str | None = None
+    last_progress_message: str | None = None
+    last_progress_at: str | None = None
+    last_grade: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -376,6 +381,11 @@ class AutoPipeline:
             job_id=state.job_id,
             run_session_id=state.run_session_id,
             run_subagent=run_subagent or state.run_subagent or None,
+            current_round=state.current_round,
+            pending_question=state.pending_question,
+            last_progress_message=state.last_progress_message,
+            last_progress_at=state.last_progress_at,
+            last_grade=state.last_grade,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,

@@ -96,19 +96,7 @@ class AutoHandler:
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
-        meta: dict[str, Any] = {
-            "status": result.status,
-            "auto_session_id": result.auto_session_id,
-            "phase": result.phase,
-            "grade": result.grade,
-            "seed_path": result.seed_path,
-            "interview_session_id": result.interview_session_id,
-            "execution_id": result.execution_id,
-            "job_id": result.job_id,
-            "run_session_id": result.run_session_id,
-            "resume_command": f"ooo auto --resume {result.auto_session_id}",
-            "blocker": result.blocker,
-        }
+        meta = _result_meta(result)
         text = _format_result(result)
         if result.run_subagent is not None:
             meta["_subagent"] = result.run_subagent
@@ -193,6 +181,30 @@ class AutoHandler:
             skip_run=skip_run,
         )
         return await pipeline.run(state)
+
+
+def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
+    """Build MCP metadata for clients that render auto progress outside CLI text."""
+    meta: dict[str, Any] = {
+        "status": result.status,
+        "auto_session_id": result.auto_session_id,
+        "phase": result.phase,
+        "current_round": result.current_round,
+        "last_progress_message": result.last_progress_message,
+        "last_progress_at": result.last_progress_at,
+        "resume_command": f"ooo auto --resume {result.auto_session_id}",
+        "blocker": result.blocker,
+        "seed_path": result.seed_path,
+        "grade": result.grade,
+        "last_grade": result.last_grade,
+        "interview_session_id": result.interview_session_id,
+        "execution_id": result.execution_id,
+        "job_id": result.job_id,
+        "run_session_id": result.run_session_id,
+    }
+    if result.pending_question:
+        meta["pending_question"] = result.pending_question
+    return meta
 
 
 def _resolved_opencode_mode(runtime_backend: str | None, opencode_mode: str | None) -> str | None:

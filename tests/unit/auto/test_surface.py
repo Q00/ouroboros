@@ -401,6 +401,115 @@ async def test_auto_handler_forwards_run_subagent_envelope(monkeypatch) -> None:
     assert '"_subagent"' in result.value.content[0].text
 
 
+@pytest.mark.asyncio
+async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> None:
+    async def fake_run(self, arguments):  # noqa: ARG001
+        from ouroboros.auto.pipeline import AutoPipelineResult
+
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id="auto_test",
+            phase="interview",
+            grade="B",
+            seed_path="/tmp/seed.yaml",
+            interview_session_id="interview_1",
+            execution_id="execution_1",
+            job_id="job_1",
+            run_session_id="session_1",
+            current_round=2,
+            pending_question="Which runtime should be used?",
+            last_progress_message="asking interview round 2/12",
+            last_progress_at="2026-05-01T12:00:00+00:00",
+            last_grade="B",
+            blocker="waiting for interview answer",
+        )
+
+    monkeypatch.setattr(AutoHandler, "_run", fake_run)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI"})
+
+    assert result.is_ok
+    assert result.value.is_error is True
+    assert result.value.meta == {
+        "status": "blocked",
+        "auto_session_id": "auto_test",
+        "phase": "interview",
+        "current_round": 2,
+        "last_progress_message": "asking interview round 2/12",
+        "last_progress_at": "2026-05-01T12:00:00+00:00",
+        "resume_command": "ooo auto --resume auto_test",
+        "blocker": "waiting for interview answer",
+        "seed_path": "/tmp/seed.yaml",
+        "grade": "B",
+        "last_grade": "B",
+        "interview_session_id": "interview_1",
+        "execution_id": "execution_1",
+        "job_id": "job_1",
+        "run_session_id": "session_1",
+        "pending_question": "Which runtime should be used?",
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_meta_uses_pipeline_state_progress(monkeypatch, tmp_path) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        async def run(self, run_state):  # noqa: ANN001
+            run_state.transition(AutoPhase.INTERVIEW, "asking interview round 3/12")
+            run_state.current_round = 3
+            run_state.pending_question = "What should the command output?"
+            run_state.last_progress_message = "asking interview round 3/12"
+            run_state.last_progress_at = "2026-05-01T12:30:00+00:00"
+            run_state.seed_path = "/tmp/seed.yaml"
+            run_state.last_grade = "A"
+            captured["auto_session_id"] = run_state.auto_session_id
+            return AutoPipelineResult(
+                status=run_state.phase.value,
+                auto_session_id=run_state.auto_session_id,
+                phase=run_state.phase.value,
+                seed_path=run_state.seed_path,
+                current_round=run_state.current_round,
+                pending_question=run_state.pending_question,
+                last_progress_message=run_state.last_progress_message,
+                last_progress_at=run_state.last_progress_at,
+                last_grade=run_state.last_grade,
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI", "cwd": str(tmp_path)})
+
+    assert result.is_ok
+    assert result.value.meta["auto_session_id"] == captured["auto_session_id"]
+    assert result.value.meta["phase"] == "interview"
+    assert result.value.meta["current_round"] == 3
+    assert result.value.meta["pending_question"] == "What should the command output?"
+    assert result.value.meta["last_progress_message"] == "asking interview round 3/12"
+    assert result.value.meta["last_progress_at"] == "2026-05-01T12:30:00+00:00"
+    assert result.value.meta["seed_path"] == "/tmp/seed.yaml"
+    assert result.value.meta["last_grade"] == "A"
+    assert result.value.meta["resume_command"] == (
+        f"ooo auto --resume {captured['auto_session_id']}"
+    )
+
+
 def test_cli_opencode_plugin_uses_subprocess_for_plain_cli(monkeypatch) -> None:
     from ouroboros.cli.commands import auto as auto_command
 
