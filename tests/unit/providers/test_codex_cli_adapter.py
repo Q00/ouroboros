@@ -900,6 +900,21 @@ class TestCodexCliLLMAdapter:
         assert context["openai_api_key_present"] is False
         assert "CODEX_HOME/auth.json" in result.error.details["remediation"]
 
+    def test_codex_failure_details_does_not_classify_endpoint_only_errors_as_auth(
+        self,
+    ) -> None:
+        details = CodexCliLLMAdapter._codex_failure_details(
+            returncode=1,
+            session_id="thread_1",
+            stderr="Reading prompt from stdin...",
+            stdout_errors=["429 from https://api.openai.com/v1/responses"],
+            message="429 from https://api.openai.com/v1/responses",
+        )
+
+        assert details["returncode"] == 1
+        assert "failure_category" not in details
+        assert "remediation" not in details
+
     @pytest.mark.asyncio
     async def test_complete_emits_tool_started_callbacks_from_json_events(self) -> None:
         """Chat renderers can show nested tool/MCP progress before completion."""
@@ -955,6 +970,47 @@ class TestCodexCliLLMAdapter:
         assert callback_events == [
             ("tool_started", "mcp__ouroboros__ouroboros_interview: Build a tool"),
             ("tool", "mcp__ouroboros__ouroboros_interview: Build a tool"),
+        ]
+
+    def test_emit_callback_splits_started_file_change_and_web_search_events(self) -> None:
+        callback_events: list[tuple[str, str]] = []
+        adapter = CodexCliLLMAdapter(
+            cli_path="codex",
+            on_message=lambda message_type, content: callback_events.append(
+                (message_type, content)
+            ),
+        )
+
+        adapter._emit_callback_for_event(
+            {
+                "type": "item.started",
+                "item": {"type": "file_change", "path": "src/demo.py"},
+            }
+        )
+        adapter._emit_callback_for_event(
+            {
+                "type": "item.completed",
+                "item": {"type": "file_change", "path": "src/demo.py"},
+            }
+        )
+        adapter._emit_callback_for_event(
+            {
+                "type": "item.started",
+                "item": {"type": "web_search", "query": "codex oauth"},
+            }
+        )
+        adapter._emit_callback_for_event(
+            {
+                "type": "item.completed",
+                "item": {"type": "web_search", "query": "codex oauth"},
+            }
+        )
+
+        assert callback_events == [
+            ("tool_started", "Edit: src/demo.py"),
+            ("tool", "Edit: src/demo.py"),
+            ("tool_started", "WebSearch: codex oauth"),
+            ("tool", "WebSearch: codex oauth"),
         ]
 
     def test_extract_stdout_errors_returns_messages_in_arrival_order(self) -> None:

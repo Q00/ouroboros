@@ -65,9 +65,11 @@ _RETRYABLE_ERROR_PATTERNS = (
 _CODEX_AUTH_FAILURE_PATTERNS = (
     "missing bearer or basic authentication",
     "401 unauthorized",
+    "unauthorized",
     "invalid api key",
     "no api key",
-    "api key",
+    "missing api key",
+    "invalid bearer token",
 )
 _OPENAI_RESPONSES_ENDPOINT = "api.openai.com/v1/responses"
 
@@ -559,7 +561,7 @@ class CodexCliLLMAdapter:
         }
         auth_failure = cls._looks_like_codex_auth_failure(message)
         openai_responses = cls._uses_openai_responses_endpoint(message)
-        if auth_failure or openai_responses:
+        if auth_failure:
             details.update(
                 {
                     "failure_category": "codex_auth",
@@ -687,12 +689,13 @@ class CodexCliLLMAdapter:
 
         if item_type == "file_change":
             tool_info = self._format_tool_info("Edit", {"file_path": self._extract_path(item)})
-            self._on_message("tool", tool_info)
+            self._on_message("tool_started" if event_type == "item.started" else "tool", tool_info)
             return
 
         if item_type == "web_search":
-            tool_info = self._format_tool_info("WebSearch", {"query": self._extract_text(item)})
-            self._on_message("tool", tool_info)
+            query = item.get("query") if isinstance(item.get("query"), str) else self._extract_text(item)
+            tool_info = self._format_tool_info("WebSearch", {"query": query})
+            self._on_message("tool_started" if event_type == "item.started" else "tool", tool_info)
 
     async def _iter_stream_lines(
         self,
