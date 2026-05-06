@@ -78,6 +78,34 @@ def _seed(
     )
 
 
+def _fully_specified_hello_goal() -> str:
+    return (
+        "Produce only an A-grade Seed for a future tiny CLI. "
+        "Actor is a local developer or automated agent. "
+        "Inputs are no CLI arguments and no stdin. "
+        "Outputs are exactly hello followed by one trailing newline on stdout, no stderr, exit code 0. "
+        "Runtime context is a local Unix-like shell in a temporary scratch directory outside real projects. "
+        "Constraints are Seed artifact only, Python 3 standard library only, and no real-project edits. "
+        "Non-goals are implementation in this run, package publishing, external dependencies, network, auth, persistence, and real-project edits. "
+        "Acceptance criteria are Seed artifact only, scratch repo isolation, exact stdout newline behavior, empty stderr, and exit status 0. "
+        "Verification plan is future checks for stdout, stderr, and exit code without executing in this Seed-only run. "
+        "Failure modes are real-project edits, execution during skip-run, missing exact output checks, or out-of-scope dependencies."
+    )
+
+
+def test_seed_draft_ledger_hydrates_explicit_goal_facts() -> None:
+    ledger = SeedDraftLedger.from_goal(_fully_specified_hello_goal())
+
+    assert ledger.is_seed_ready()
+    statuses = ledger.section_statuses()
+    for section in ("actors", "inputs", "outputs", "runtime_context"):
+        assert statuses[section] == LedgerStatus.CONFIRMED
+    assert "local developer" in ledger.sections["actors"].entries[-1].value
+    assert "no CLI arguments" in ledger.sections["inputs"].entries[-1].value
+    assert "hello" in ledger.sections["outputs"].entries[-1].value
+    assert "temporary scratch directory" in ledger.sections["runtime_context"].entries[-1].value
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -299,6 +327,51 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     assert result.status == "complete"
     assert result.grade == "A"
     assert result.job_id is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_uses_explicit_goal_facts_before_completed_interview(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_hello", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("fully specified completed interview should not need another answer")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed(
+            ac=("`python hello.py` prints exactly `hello\\n` to stdout and exits 0",)
+        ).model_copy(update={"goal": state.goal})
+
+    saved: list[str] = []
+
+    def save(seed: Seed) -> str:
+        path = str(tmp_path / f"{seed.metadata.seed_id}.yaml")
+        saved.append(path)
+        return path
+
+    state = AutoPipelineState(goal=_fully_specified_hello_goal(), cwd=str(tmp_path))
+    state.skip_run = True
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        seed_saver=save,
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.grade == "A"
+    assert result.seed_path == saved[0]
+    assert state.phase == AutoPhase.COMPLETE
+    assert state.seed_id is not None
+    assert state.seed_path == saved[0]
+    assert state.last_grade == "A"
+    assert state.job_id is None
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
+import re
 from typing import Any
 
 
@@ -186,6 +187,7 @@ class SeedDraftLedger:
                 ),
             ),
         )
+        _hydrate_explicit_goal_sections(ledger, clean_goal)
         return ledger
 
     def add_entry(self, section_name: str, entry: LedgerEntry) -> None:
@@ -383,6 +385,101 @@ class SeedDraftLedger:
 
 def _normalize_conflict_value(value: str) -> str:
     return " ".join(value.strip().casefold().split())
+
+
+_EXPLICIT_GOAL_SECTION_PATTERNS: tuple[tuple[str, str, str, LedgerSource], ...] = (
+    (
+        "actors",
+        "actors.user_goal",
+        r"\bactors?\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "inputs",
+        "inputs.user_goal",
+        r"\binputs?\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "outputs",
+        "outputs.user_goal",
+        r"\boutputs?\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "runtime_context",
+        "runtime_context.user_goal",
+        r"\bruntime context\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "non_goals",
+        "non_goals.user_goal",
+        r"\bnon[- ]goals?\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.NON_GOAL,
+    ),
+    (
+        "acceptance_criteria",
+        "acceptance_criteria.user_goal",
+        r"\bacceptance criteria\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "verification_plan",
+        "verification_plan.user_goal",
+        r"\bverification plan\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "failure_modes",
+        "failure_modes.user_goal",
+        r"\bfailure modes?\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "constraints",
+        "constraints.user_goal",
+        r"\bconstraints?\s+(?:is|are)\s+(?P<value>[^.;]+)",
+        LedgerSource.USER_GOAL,
+    ),
+)
+
+
+def _hydrate_explicit_goal_sections(ledger: SeedDraftLedger, goal: str) -> None:
+    """Populate required ledger sections from explicit structured goal facts.
+
+    ``ooo auto`` callers often provide a complete, sentence-shaped brief such as
+    "Actor is ... Inputs are ... Outputs are ...".  The interview answerer only
+    updates sections when the backend asks matching questions, so a completed
+    interview could otherwise block with empty required sections even though the
+    user goal already contained the facts.  Keep this parser deliberately
+    narrow: it only confirms sections with explicit ``<section> is/are`` labels.
+    """
+    if not goal:
+        return
+    for section_name, key, pattern, source in _EXPLICIT_GOAL_SECTION_PATTERNS:
+        match = re.search(pattern, goal, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        value = _clean_goal_fact(match.group("value"))
+        if not value:
+            continue
+        ledger.add_entry(
+            section_name,
+            LedgerEntry(
+                key=key,
+                value=value,
+                source=source,
+                confidence=0.93,
+                status=LedgerStatus.CONFIRMED,
+                reversible=False,
+                rationale=f"Explicitly supplied in the initial auto goal for {section_name}.",
+            ),
+        )
+
+
+def _clean_goal_fact(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip(" ,:")
 
 
 def _truncate(value: str, *, limit: int = 500) -> str:
