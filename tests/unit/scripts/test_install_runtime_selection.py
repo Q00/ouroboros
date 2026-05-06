@@ -181,3 +181,41 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
         "Update the case statement in scripts/install.sh to mirror the "
         "pyproject extras."
     )
+
+
+def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
+    """`[all]` under uv must mirror pyproject's full version specifiers, not
+    just the package names.
+
+    Bot follow-up on PR #660: the package-name check was insufficient — a
+    silent change to a pin range (e.g. relaxing ``<1.0.0`` to ``<2.0.0`` in
+    pyproject without updating install.sh, or vice versa) would have slipped
+    past the existing test. Each pyproject pin string is checked verbatim
+    against the captured ``--with`` arguments so any drift fails here.
+    """
+    extras = _read_pyproject_extras()
+
+    # Collect every dependency string declared by an extra we install via uv
+    # --with (the ``copilot`` extra has no Python deps, so nothing to pin).
+    expected_pins: list[str] = []
+    for extra_name in _EXTRA_TO_PACKAGES:
+        for dep in extras.get(extra_name, []):
+            stripped = dep.strip()
+            if stripped:
+                expected_pins.append(stripped)
+
+    # Sanity: pyproject must declare at least one pin we expect to enforce.
+    # If this fails the parsing is broken or the extras went empty.
+    assert expected_pins, "no pyproject pins discovered — parity check inert"
+
+    result = _run_installer(tmp_path, env={"OUROBOROS_INSTALL_RUNTIME": "all"})
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+
+    drifted = sorted(pin for pin in expected_pins if f"--with {pin}" not in calls)
+    assert not drifted, (
+        "install.sh `[all]` --with list has drifted from pyproject pins.\n"
+        f"Missing or mismatched: {drifted}\n"
+        "Update the case statement in scripts/install.sh so each "
+        "`--with <spec>` string matches pyproject [project.optional-dependencies]."
+    )
