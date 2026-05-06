@@ -24,6 +24,7 @@ class BackendCapability:
     cli_name: str | None = None
     cli_config_key: str | None = None
     soft_tool_enforcement: bool = False
+    supports_tool_envelope: bool = True
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -76,11 +77,12 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         name="hermes",
         aliases=("hermes_cli",),
         supports_runtime=True,
-        supports_llm=False,
-        supports_interview_driver=False,
+        supports_llm=True,
+        supports_interview_driver=True,
         switchable_runtime=True,
         cli_name="hermes",
         cli_config_key="hermes_cli_path",
+        supports_tool_envelope=False,
     ),
     BackendCapability(
         name="kiro",
@@ -183,8 +185,17 @@ def soft_tool_enforcement_backends() -> frozenset[str]:
     return frozenset(c.name for c in _CAPABILITIES if c.soft_tool_enforcement)
 
 
+def backend_supports_tool_envelope(name: str | None) -> bool:
+    """Return whether a backend accepts an engine-owned tool envelope."""
+    if name is None:
+        return True
+    capability = get_backend_capability(name)
+    return True if capability is None else capability.supports_tool_envelope
+
+
 __all__ = [
     "BackendCapability",
+    "backend_supports_tool_envelope",
     "get_backend_capability",
     "interview_driver_backend_choices",
     "llm_backend_choices",

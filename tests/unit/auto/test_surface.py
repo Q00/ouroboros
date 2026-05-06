@@ -10,7 +10,11 @@ from ouroboros.auto.adapters import HandlerInterviewBackend
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.main import app
 from ouroboros.core.types import Result
-from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.authoring_handlers import (
+    GenerateSeedHandler,
+    InterviewHandler,
+    _interview_allowed_tools,
+)
 from ouroboros.mcp.tools.auto_handler import (
     AutoHandler,
     _authoring_interview_handler,
@@ -35,6 +39,17 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "copilot",
         "kiro",
     }
+
+
+def test_interview_allowed_tools_omits_unsupported_hermes_envelope(monkeypatch) -> None:
+    assert _interview_allowed_tools("hermes") is None
+    assert _interview_allowed_tools("codex")
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.authoring_handlers.resolve_llm_backend",
+        lambda *_args, **_kwargs: "hermes",
+    )
+    assert _interview_allowed_tools(None) is None
 
 
 def test_cli_auto_help_is_registered() -> None:

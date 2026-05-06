@@ -571,6 +571,49 @@ class TestGetEngine:
             assert call_kwargs.kwargs["llm_adapter"] is mock_adapter
             assert call_kwargs.kwargs["model"] == "claude-opus-4-6"
 
+    def test_omits_tool_envelope_for_hermes_backend(self) -> None:
+        """Hermes is interview-capable but does not expose auditable tool envelopes."""
+        with (
+            patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter") as mock_create,
+            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model") as mock_model,
+            patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
+        ):
+            mock_create.return_value = MagicMock()
+            mock_model.return_value = "default"
+            mock_engine_cls.create.return_value = MagicMock()
+
+            handler = PMInterviewHandler(llm_backend="hermes")
+            handler._get_engine()
+
+            mock_create.assert_called_once_with(
+                backend="hermes",
+                max_turns=1,
+                use_case="interview",
+                allowed_tools=None,
+            )
+
+    def test_omits_tool_envelope_for_configured_hermes_backend(self) -> None:
+        """Default-configured Hermes also omits unsupported interview envelopes."""
+        with (
+            patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter") as mock_create,
+            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model") as mock_model,
+            patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
+            patch("ouroboros.mcp.tools.pm_handler.resolve_llm_backend", return_value="hermes"),
+        ):
+            mock_create.return_value = MagicMock()
+            mock_model.return_value = "default"
+            mock_engine_cls.create.return_value = MagicMock()
+
+            handler = PMInterviewHandler()
+            handler._get_engine()
+
+            mock_create.assert_called_once_with(
+                backend=None,
+                max_turns=1,
+                use_case="interview",
+                allowed_tools=None,
+            )
+
     def test_uses_custom_data_dir(self, tmp_path: Path) -> None:
         """When data_dir is set, passes it to PMInterviewEngine.create."""
         with (

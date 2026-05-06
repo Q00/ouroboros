@@ -16,6 +16,7 @@ from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
+from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
     AUTO_COMPLETE_STREAK_REQUIRED,
@@ -60,7 +61,7 @@ from ouroboros.orchestrator.policy import (
     allowed_runtime_builtin_tool_names,
 )
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.providers import create_llm_adapter
+from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
@@ -102,11 +103,14 @@ _INTERVIEW_COMPLETION_PHRASES = (
 )
 
 
-def _interview_allowed_tools(runtime_backend: str | None) -> list[str]:
+def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
     """Return the policy-derived read-only tool envelope for interviews."""
+    effective_backend = resolve_llm_backend(runtime_backend)
+    if not backend_supports_tool_envelope(effective_backend):
+        return None
     return allowed_runtime_builtin_tool_names(
         PolicyContext(
-            runtime_backend=runtime_backend,
+            runtime_backend=effective_backend,
             session_role=PolicySessionRole.INTERVIEW,
             execution_phase=PolicyExecutionPhase.INTERVIEW,
         )
