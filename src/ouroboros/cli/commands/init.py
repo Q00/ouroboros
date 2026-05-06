@@ -112,6 +112,10 @@ def _make_message_callback(debug: bool):
             display = first_line[:100] + "..." if len(first_line) > 100 else first_line
             if display:
                 console.print(f"  [dim]💭 {display}[/dim]")
+        elif msg_type == "tool_started":
+            # External chat renderers and debug terminals can show tool/MCP progress
+            # before completion when providers stream start events.
+            console.print(f"  [cyan]▶ {content}[/cyan]")
         elif msg_type == "tool":
             # Tool info now includes details like "Read: /path/to/file"
             console.print(f"  [yellow]🔧 {content}[/yellow]")
