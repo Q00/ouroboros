@@ -418,8 +418,10 @@ _EXPLICIT_GOAL_SECTION_LABEL_PATTERN = "|".join(
     f"(?:{label_pattern})"
     for _section_name, _key, label_pattern, _source in _EXPLICIT_GOAL_SECTION_PATTERNS
 )
+_EXPLICIT_GOAL_SECTION_START = r"(?:^|(?<=[.;!?])\s+|(?:\r?\n)\s*(?:[-*]\s*)?)"
 _EXPLICIT_GOAL_SECTION_BOUNDARY = (
-    rf"(?=\s+(?:{_EXPLICIT_GOAL_SECTION_LABEL_PATTERN})\s+(?:is|are)\s+|\s*$)"
+    rf"(?=(?:[.;!?]\s+|(?:\r?\n)\s*(?:[-*]\s*)?)"
+    rf"(?:{_EXPLICIT_GOAL_SECTION_LABEL_PATTERN})\s+(?:is|are)\s+|\s*$)"
 )
 
 
@@ -437,7 +439,7 @@ def _hydrate_explicit_goal_sections(ledger: SeedDraftLedger, goal: str) -> None:
         return
     for section_name, key, label_pattern, source in _EXPLICIT_GOAL_SECTION_PATTERNS:
         pattern = (
-            rf"\b(?:{label_pattern})\s+(?:is|are)\s+"
+            rf"{_EXPLICIT_GOAL_SECTION_START}\b(?:{label_pattern})\s+(?:is|are)\s+"
             rf"(?P<value>.*?)"
             rf"{_EXPLICIT_GOAL_SECTION_BOUNDARY}"
         )

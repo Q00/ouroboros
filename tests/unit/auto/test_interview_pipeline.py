@@ -129,6 +129,26 @@ def test_seed_draft_ledger_preserves_punctuation_inside_explicit_goal_facts() ->
     assert "Constraints are" not in runtime_context
 
 
+def test_seed_draft_ledger_ignores_inline_section_label_phrases() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are no CLI arguments. "
+        "Outputs are stable stdout. "
+        "Runtime context is local Python 3.11. "
+        "Constraints are the Seed must mention acceptance criteria are important to reviewers. "
+        "Non-goals are network calls. "
+        "Acceptance criteria are stdout includes hello. "
+        "Verification plan is run pytest. "
+        "Failure modes are missing stdout assertion."
+    )
+
+    assert ledger.is_seed_ready()
+    constraints = ledger.sections["constraints"].entries[-1].value
+    acceptance_criteria = ledger.sections["acceptance_criteria"].entries[-1].value
+    assert "acceptance criteria are important" in constraints
+    assert acceptance_criteria == "stdout includes hello"
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
