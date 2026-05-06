@@ -449,6 +449,7 @@ class InputValidator:
         "seed_content",
         "current_output",
         "prompt",
+        "goal",
         "initial_context",
         "answer",
         "current_approach",

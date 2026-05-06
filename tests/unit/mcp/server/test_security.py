@@ -217,6 +217,24 @@ class TestInputValidator:
         assert result.is_err
         assert "Potentially dangerous" in str(result.error)
 
+    def test_validate_allows_goal_punctuation_as_freetext(self) -> None:
+        """Natural-language tool goals can contain punctuation like semicolons."""
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_auto",
+            {"goal": "Create a Seed; do not edit real projects", "skip_run": True},
+        )
+
+        assert result.is_ok
+
+    def test_validate_still_rejects_shell_metacharacters_in_non_freetext_fields(self) -> None:
+        """Shell metacharacter checks still protect non-freetext arguments."""
+        validator = InputValidator()
+        result = validator.validate("tool", {"name": "safe; rm -rf /tmp/nope"})
+
+        assert result.is_err
+        assert "Shell metacharacter" in str(result.error)
+
 
 class TestRateLimiter:
     """Test RateLimiter class."""

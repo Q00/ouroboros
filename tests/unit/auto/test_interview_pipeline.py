@@ -78,6 +78,140 @@ def _seed(
     )
 
 
+def _fully_specified_hello_goal() -> str:
+    return (
+        "Produce only an A-grade Seed for a future tiny CLI. "
+        "Actor is a local developer or automated agent. "
+        "Inputs are no CLI arguments and no stdin. "
+        "Outputs are exactly hello followed by one trailing newline on stdout, no stderr, exit code 0. "
+        "Runtime context is a local Unix-like shell in a temporary scratch directory outside real projects. "
+        "Constraints are Seed artifact only, Python 3 standard library only, and no real-project edits. "
+        "Non-goals are implementation in this run, package publishing, external dependencies, network, auth, persistence, and real-project edits. "
+        "Acceptance criteria are Seed artifact only, scratch repo isolation, exact stdout newline behavior, empty stderr, and exit status 0. "
+        "Verification plan is future checks for stdout, stderr, and exit code without executing in this Seed-only run. "
+        "Failure modes are real-project edits, execution during skip-run, missing exact output checks, or out-of-scope dependencies."
+    )
+
+
+def test_seed_draft_ledger_hydrates_explicit_goal_facts() -> None:
+    ledger = SeedDraftLedger.from_goal(_fully_specified_hello_goal())
+
+    assert ledger.is_seed_ready()
+    statuses = ledger.section_statuses()
+    for section in ("actors", "inputs", "outputs", "runtime_context"):
+        assert statuses[section] == LedgerStatus.CONFIRMED
+    assert "local developer" in ledger.sections["actors"].entries[-1].value
+    assert "no CLI arguments" in ledger.sections["inputs"].entries[-1].value
+    assert "hello" in ledger.sections["outputs"].entries[-1].value
+    assert "temporary scratch directory" in ledger.sections["runtime_context"].entries[-1].value
+
+
+def test_seed_draft_ledger_preserves_punctuation_inside_explicit_goal_facts() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are config path ./fixtures/hello.txt; use Python 3.11. "
+        "Outputs are write ./out/hello.txt and print hello; goodbye. "
+        "Runtime context is Python 3.11 on linux; cwd is /tmp/demo.v1. "
+        "Constraints are stdlib only. "
+        "Non-goals are network calls. "
+        "Acceptance criteria are hello.txt exists and stdout is hello. "
+        "Verification plan is run python3.11 ./hello.py. "
+        "Failure modes are missing ./out/hello.txt."
+    )
+
+    assert ledger.is_seed_ready()
+    inputs = ledger.sections["inputs"].entries[-1].value
+    outputs = ledger.sections["outputs"].entries[-1].value
+    runtime_context = ledger.sections["runtime_context"].entries[-1].value
+    assert "./fixtures/hello.txt; use Python 3.11" in inputs
+    assert "write ./out/hello.txt and print hello; goodbye" in outputs
+    assert "Python 3.11 on linux; cwd is /tmp/demo.v1" in runtime_context
+    assert "Constraints are" not in runtime_context
+
+
+def test_seed_draft_ledger_ignores_inline_section_label_phrases() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are no CLI arguments. "
+        "Outputs are stable stdout. "
+        "Runtime context is local Python 3.11. "
+        "Constraints are the Seed must mention acceptance criteria are important to reviewers. "
+        "Non-goals are network calls. "
+        "Acceptance criteria are stdout includes hello. "
+        "Verification plan is run pytest. "
+        "Failure modes are missing stdout assertion."
+    )
+
+    assert ledger.is_seed_ready()
+    constraints = ledger.sections["constraints"].entries[-1].value
+    acceptance_criteria = ledger.sections["acceptance_criteria"].entries[-1].value
+    assert "acceptance criteria are important" in constraints
+    assert acceptance_criteria == "stdout includes hello"
+
+
+def test_seed_draft_ledger_hydrates_markdown_bulleted_goal() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "- Actor is a local developer\n"
+        "- Inputs are no CLI arguments\n"
+        "- Outputs are stable stdout\n"
+        "- Runtime context is local Python 3.11\n"
+        "- Constraints are stdlib only\n"
+        "- Non-goals are network calls\n"
+        "- Acceptance criteria are stdout includes hello\n"
+        "- Verification plan is run pytest\n"
+        "- Failure modes are missing stdout assertion"
+    )
+
+    assert ledger.is_seed_ready()
+    assert "actors" not in ledger.open_gaps()
+    assert ledger.sections["actors"].entries[-1].value == "a local developer"
+    assert ledger.sections["inputs"].entries[-1].value == "no CLI arguments"
+
+
+def test_seed_draft_ledger_uses_later_repeated_goal_label_as_correction() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are no CLI arguments. "
+        "Outputs are json. "
+        "Outputs are yaml. "
+        "Runtime context is local Python 3.11. "
+        "Constraints are stdlib only. "
+        "Non-goals are network calls. "
+        "Acceptance criteria are stdout includes hello. "
+        "Verification plan is run pytest. "
+        "Failure modes are missing stdout assertion."
+    )
+
+    assert ledger.is_seed_ready()
+    outputs = ledger.sections["outputs"].entries
+    assert [(entry.value, entry.status) for entry in outputs] == [
+        ("json", LedgerStatus.WEAK),
+        ("yaml", LedgerStatus.CONFIRMED),
+    ]
+
+
+def test_seed_draft_ledger_uses_later_repeated_non_goal_as_correction() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are no CLI arguments. "
+        "Outputs are stable stdout. "
+        "Runtime context is local Python 3.11. "
+        "Constraints are stdlib only. "
+        "Non-goals are network calls. "
+        "Non-goals are network calls and package publishing. "
+        "Acceptance criteria are stdout includes hello. "
+        "Verification plan is run pytest. "
+        "Failure modes are missing stdout assertion."
+    )
+
+    assert ledger.is_seed_ready()
+    non_goals = ledger.sections["non_goals"].entries
+    assert [(entry.value, entry.status) for entry in non_goals] == [
+        ("network calls", LedgerStatus.WEAK),
+        ("network calls and package publishing", LedgerStatus.CONFIRMED),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -299,6 +433,51 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
     assert result.status == "complete"
     assert result.grade == "A"
     assert result.job_id is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_uses_explicit_goal_facts_before_completed_interview(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_hello", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("fully specified completed interview should not need another answer")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed(
+            ac=("`python hello.py` prints exactly `hello\\n` to stdout and exits 0",)
+        ).model_copy(update={"goal": state.goal})
+
+    saved: list[str] = []
+
+    def save(seed: Seed) -> str:
+        path = str(tmp_path / f"{seed.metadata.seed_id}.yaml")
+        saved.append(path)
+        return path
+
+    state = AutoPipelineState(goal=_fully_specified_hello_goal(), cwd=str(tmp_path))
+    state.skip_run = True
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        seed_saver=save,
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.grade == "A"
+    assert result.seed_path == saved[0]
+    assert state.phase == AutoPhase.COMPLETE
+    assert state.seed_id is not None
+    assert state.seed_path == saved[0]
+    assert state.last_grade == "A"
+    assert state.job_id is None
 
 
 @pytest.mark.asyncio

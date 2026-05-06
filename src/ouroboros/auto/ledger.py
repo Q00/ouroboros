@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
+import re
 from typing import Any
 
 
@@ -186,6 +187,7 @@ class SeedDraftLedger:
                 ),
             ),
         )
+        _hydrate_explicit_goal_sections(ledger, clean_goal)
         return ledger
 
     def add_entry(self, section_name: str, entry: LedgerEntry) -> None:
@@ -205,7 +207,7 @@ class SeedDraftLedger:
         ]
         if (
             same_key_entries
-            and entry.source == LedgerSource.USER_GOAL
+            and entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
             and entry.status == LedgerStatus.CONFIRMED
         ):
             for existing in same_key_entries:
@@ -383,6 +385,84 @@ class SeedDraftLedger:
 
 def _normalize_conflict_value(value: str) -> str:
     return " ".join(value.strip().casefold().split())
+
+
+_EXPLICIT_GOAL_SECTION_PATTERNS: tuple[tuple[str, str, str, LedgerSource], ...] = (
+    ("actors", "actors.user_goal", r"actors?", LedgerSource.USER_GOAL),
+    ("inputs", "inputs.user_goal", r"inputs?", LedgerSource.USER_GOAL),
+    ("outputs", "outputs.user_goal", r"outputs?", LedgerSource.USER_GOAL),
+    (
+        "runtime_context",
+        "runtime_context.user_goal",
+        r"runtime context",
+        LedgerSource.USER_GOAL,
+    ),
+    ("non_goals", "non_goals.user_goal", r"non[- ]goals?", LedgerSource.NON_GOAL),
+    (
+        "acceptance_criteria",
+        "acceptance_criteria.user_goal",
+        r"acceptance criteria",
+        LedgerSource.USER_GOAL,
+    ),
+    (
+        "verification_plan",
+        "verification_plan.user_goal",
+        r"verification plan",
+        LedgerSource.USER_GOAL,
+    ),
+    ("failure_modes", "failure_modes.user_goal", r"failure modes?", LedgerSource.USER_GOAL),
+    ("constraints", "constraints.user_goal", r"constraints?", LedgerSource.USER_GOAL),
+)
+
+_EXPLICIT_GOAL_SECTION_LABEL_PATTERN = "|".join(
+    f"(?:{label_pattern})"
+    for _section_name, _key, label_pattern, _source in _EXPLICIT_GOAL_SECTION_PATTERNS
+)
+_EXPLICIT_GOAL_SECTION_START = r"(?:^\s*(?:[-*]\s*)?|(?<=[.;!?])\s+|(?:\r?\n)\s*(?:[-*]\s*)?)"
+_EXPLICIT_GOAL_SECTION_BOUNDARY = (
+    rf"(?=(?:[.;!?]\s+|(?:\r?\n)\s*(?:[-*]\s*)?)"
+    rf"(?:{_EXPLICIT_GOAL_SECTION_LABEL_PATTERN})\s+(?:is|are)\s+|\s*$)"
+)
+
+
+def _hydrate_explicit_goal_sections(ledger: SeedDraftLedger, goal: str) -> None:
+    """Populate required ledger sections from explicit structured goal facts.
+
+    ``ooo auto`` callers often provide a complete, sentence-shaped brief such as
+    "Actor is ... Inputs are ... Outputs are ...".  The interview answerer only
+    updates sections when the backend asks matching questions, so a completed
+    interview could otherwise block with empty required sections even though the
+    user goal already contained the facts.  Keep this parser deliberately
+    narrow: it only confirms sections with explicit ``<section> is/are`` labels.
+    """
+    if not goal:
+        return
+    for section_name, key, label_pattern, source in _EXPLICIT_GOAL_SECTION_PATTERNS:
+        pattern = (
+            rf"{_EXPLICIT_GOAL_SECTION_START}\b(?:{label_pattern})\s+(?:is|are)\s+"
+            rf"(?P<value>.*?)"
+            rf"{_EXPLICIT_GOAL_SECTION_BOUNDARY}"
+        )
+        for match in re.finditer(pattern, goal, flags=re.IGNORECASE | re.DOTALL):
+            value = _clean_goal_fact(match.group("value"))
+            if not value:
+                continue
+            ledger.add_entry(
+                section_name,
+                LedgerEntry(
+                    key=key,
+                    value=value,
+                    source=source,
+                    confidence=0.93,
+                    status=LedgerStatus.CONFIRMED,
+                    reversible=False,
+                    rationale=f"Explicitly supplied in the initial auto goal for {section_name}.",
+                ),
+            )
+
+
+def _clean_goal_fact(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip(" ,:;")
 
 
 def _truncate(value: str, *, limit: int = 500) -> str:
