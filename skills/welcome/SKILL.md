@@ -23,14 +23,32 @@ When this skill is invoked, follow this flow:
 
 ### Pre-Check: Already Completed?
 
-First, check `~/.ouroboros/prefs.json` for `welcomeCompleted`:
+First, check `~/.ouroboros/prefs.json` for `welcomeCompleted`. For upgrades from older releases, also treat legacy `welcomeShown: true` as completed so the welcome prompt does not reappear forever:
 
 ```bash
 PREFFILE="$HOME/.ouroboros/prefs.json"
 
 if [ -f "$PREFFILE" ]; then
-  WELCOME_COMPLETED=$(jq -r '.welcomeCompleted // empty' "$PREFFILE" 2>/dev/null)
-  WELCOME_VERSION=$(jq -r '.welcomeVersion // empty' "$PREFFILE" 2>/dev/null)
+  WELCOME_COMPLETED=$(python3 - <<'PY'
+import json, os
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+try:
+    prefs = json.load(open(path, encoding='utf-8'))
+except Exception:
+    prefs = {}
+print(prefs.get('welcomeCompleted') or ('legacy-welcomeShown' if prefs.get('welcomeShown') else ''))
+PY
+)
+  WELCOME_VERSION=$(python3 - <<'PY'
+import json, os
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+try:
+    prefs = json.load(open(path, encoding='utf-8'))
+except Exception:
+    prefs = {}
+print(prefs.get('welcomeVersion') or '')
+PY
+)
 
   if [ -n "$WELCOME_COMPLETED" ] && [ "$WELCOME_COMPLETED" != "null" ]; then
     ALREADY_COMPLETED="true"
@@ -58,7 +76,30 @@ Use **AskUserQuestion**:
 - **Re-run welcome**: Continue to Step 1 below
 
 **If `--skip` flag present:**
-- Mark `welcomeShown: true` (if not exists)
+- Merge `welcomeShown: true`, `welcomeCompleted: <current timestamp>`, and `welcomeVersion` into `~/.ouroboros/prefs.json` without deleting existing keys:
+  ```bash
+python3 - <<'PY'
+import json, os
+from datetime import UTC, datetime
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path, encoding='utf-8') as f:
+        prefs = json.load(f)
+    if not isinstance(prefs, dict):
+        prefs = {}
+except Exception:
+    prefs = {}
+prefs.update({
+    'welcomeShown': True,
+    'welcomeCompleted': datetime.now(UTC).isoformat(),
+    'welcomeVersion': '0.14.0',
+})
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(prefs, f, indent=2)
+    f.write('\n')
+PY
+  ```
 - Show brief message:
   ```
   Ouroboros welcome skipped.

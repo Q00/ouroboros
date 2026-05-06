@@ -85,11 +85,30 @@ Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`
 }
 ```
 
-- **Star on GitHub**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`
-- **Skip for now**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`
-- **Other**: Save `{"star_asked": true}`
+- **Star on GitHub**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, then merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`
+- **Skip for now**: Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`
+- **Other**: Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`
 
-Create `~/.ouroboros/` directory if it doesn't exist.
+Create `~/.ouroboros/` directory if it doesn't exist. Preserve any existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion` when updating `star_asked`:
+
+```bash
+python3 - <<'PY'
+import json, os
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path, encoding='utf-8') as f:
+        prefs = json.load(f)
+    if not isinstance(prefs, dict):
+        prefs = {}
+except Exception:
+    prefs = {}
+prefs['star_asked'] = True
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(prefs, f, indent=2)
+    f.write('\n')
+PY
+```
 
 If `star_asked` is already `true`, skip this step silently.
 

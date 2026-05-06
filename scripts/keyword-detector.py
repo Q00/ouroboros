@@ -157,13 +157,22 @@ def is_mcp_configured() -> bool:
 
 
 def is_first_time() -> bool:
-    """Check if this is the user's first interaction (welcome not yet completed)."""
+    """Check if this is the user's first interaction.
+
+    Older onboarding flows wrote ``welcomeShown`` or other preference keys without
+    ``welcomeCompleted``. Treat any valid existing prefs as a non-first-run state
+    so upgrades do not repeatedly auto-trigger the welcome experience.
+    """
     try:
         prefs_path = Path.home() / ".ouroboros" / "prefs.json"
         if not prefs_path.exists():
             return True
         prefs = json.loads(prefs_path.read_text())
-        return not prefs.get("welcomeCompleted", False)
+        if not isinstance(prefs, dict):
+            return True
+        if prefs.get("welcomeCompleted") or prefs.get("welcomeShown"):
+            return False
+        return not bool(prefs)
     except Exception:
         return True
 

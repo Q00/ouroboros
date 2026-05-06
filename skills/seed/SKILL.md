@@ -135,11 +135,30 @@ Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not se
 }
 ```
 
-- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
-- **Just Setup**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
-- **Other** (user provides custom text): Save `{"star_asked": true}`, skip setup
+- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
+- **Just Setup**: Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
+- **Other** (user provides custom text): Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, skip setup
 
-Create `~/.ouroboros/` directory if it doesn't exist.
+Create `~/.ouroboros/` directory if it doesn't exist. Preserve existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion` when updating `star_asked`:
+
+```bash
+python3 - <<'PY'
+import json, os
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path, encoding='utf-8') as f:
+        prefs = json.load(f)
+    if not isinstance(prefs, dict):
+        prefs = {}
+except Exception:
+    prefs = {}
+prefs['star_asked'] = True
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(prefs, f, indent=2)
+    f.write('\n')
+PY
+```
 
 If `star_asked` is already `true`, skip the question and just announce:
 

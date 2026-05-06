@@ -13,6 +13,38 @@ _spec.loader.exec_module(_mod)
 detect_keywords = _mod.detect_keywords
 SETUP_BYPASS_SKILLS = _mod.SETUP_BYPASS_SKILLS
 main = _mod.main
+is_first_time = _mod.is_first_time
+
+
+class TestFirstTimePrefs:
+    def test_missing_prefs_file_is_first_time(self, tmp_path):
+        home = tmp_path
+        with patch.object(_mod.Path, "home", return_value=home):
+            assert is_first_time() is True
+
+    def test_welcome_completed_marks_not_first_time(self, tmp_path):
+        prefs_dir = tmp_path / ".ouroboros"
+        prefs_dir.mkdir()
+        (prefs_dir / "prefs.json").write_text('{"welcomeCompleted": "2026-05-06T00:00:00Z"}')
+
+        with patch.object(_mod.Path, "home", return_value=tmp_path):
+            assert is_first_time() is False
+
+    def test_legacy_welcome_shown_marks_not_first_time(self, tmp_path):
+        prefs_dir = tmp_path / ".ouroboros"
+        prefs_dir.mkdir()
+        (prefs_dir / "prefs.json").write_text('{"welcomeShown": true}')
+
+        with patch.object(_mod.Path, "home", return_value=tmp_path):
+            assert is_first_time() is False
+
+    def test_existing_star_prompt_pref_marks_not_first_time(self, tmp_path):
+        prefs_dir = tmp_path / ".ouroboros"
+        prefs_dir.mkdir()
+        (prefs_dir / "prefs.json").write_text('{"star_asked": true}')
+
+        with patch.object(_mod.Path, "home", return_value=tmp_path):
+            assert is_first_time() is False
 
 
 class TestDetectKeywords:
