@@ -280,9 +280,7 @@ class TestCheckLitellmImport:
 
 
 class TestCheckCodexOauthAuth:
-    def test_passes_when_codex_auth_json_exists_without_openai_key(
-        self, tmp_path, monkeypatch
-    ):
+    def test_passes_when_codex_auth_json_exists_without_openai_key(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()
         (codex_home / "auth.json").write_text("{}", encoding="utf-8")
