@@ -321,7 +321,7 @@ class AutoPipeline:
             state.job_id = _optional_str(run_meta.get("job_id"))
             state.execution_id = _optional_str(run_meta.get("execution_id"))
         except TimeoutError as exc:
-            _mark_unknown_run_handoff(state)
+            _mark_unknown_run_handoff(state, status="unknown_timeout")
             state.mark_blocked(
                 f"run start timed out after {self.run_start_timeout_seconds:.0f}s",
                 tool_name="run_starter",
@@ -427,8 +427,23 @@ def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:
     state.mark_failed(message, tool_name="auto_pipeline")
 
 
-def _mark_unknown_run_handoff(state: AutoPipelineState) -> None:
-    state.run_handoff_status = "unknown_no_handle"
+def _mark_unknown_run_handoff(
+    state: AutoPipelineState, *, status: str = "unknown_no_handle"
+) -> None:
+    if status == "unknown_no_handle" and state.run_handoff_status in {
+        "unknown_no_handle",
+        "unknown_timeout",
+    }:
+        status = state.run_handoff_status
+    state.run_handoff_status = status
+    if status == "unknown_timeout":
+        state.run_handoff_guidance = (
+            "Run starter timed out before a durable tracking handle was captured. "
+            "The runtime may still have created an execution. Resume will not start "
+            "another run automatically or risk duplicate execution; inspect the "
+            "runtime for an existing execution before rerunning manually."
+        )
+        return
     state.run_handoff_guidance = (
         "Run starter was attempted, but no durable tracking handle was captured. "
         "Resume will not start another run automatically or risk duplicate execution; "

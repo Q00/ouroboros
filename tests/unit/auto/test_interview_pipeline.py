@@ -1235,8 +1235,11 @@ async def test_pipeline_blocks_duplicate_run_after_start_timeout(tmp_path) -> No
     second = await pipeline.run(state)
 
     assert first.status == "blocked"
+    assert first.run_handoff_status == "unknown_timeout"
+    assert "may still have created an execution" in (first.run_handoff_guidance or "")
     assert state.run_start_attempted is True
     assert second.status == "blocked"
+    assert second.run_handoff_status == "unknown_timeout"
     assert "duplicate execution" in (second.blocker or "")
     assert calls == 1
 
