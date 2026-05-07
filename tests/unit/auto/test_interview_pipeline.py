@@ -2246,6 +2246,62 @@ async def test_pipeline_rejects_attach_without_unknown_handoff(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_pipeline_rejects_attach_against_complete_session_without_unknown_handoff(
+    tmp_path,
+) -> None:
+    """Attach must not silently succeed against an already-complete session.
+
+    Regression for the bot's blocking finding on PR #685: ``--attach-execution``
+    used to be parsed only after the early ``COMPLETE`` return, so misuse
+    against a skip-run or already-complete session exited with status
+    ``complete`` and exit code 0 with no state change. The pipeline now hoists
+    attach validation before the ``COMPLETE`` early return and returns a
+    transient blocker without mutating durable ``state.last_error``.
+    """
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.COMPLETE, "complete")
+    AutoStore(tmp_path).save(state)
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=None,
+        store=AutoStore(tmp_path),
+        attach_execution_id="exec_misuse",
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "unknown run handoff" in (result.blocker or "")
+    assert result.phase == "complete"
+    # Per-invocation misuse must not leak into durable state.last_error,
+    # so a later plain --resume of the same session must show no blocker.
+    assert state.last_error is None
+    assert state.execution_id is None
+    assert state.attached_run_handle is None
+
+
+@pytest.mark.asyncio
 async def test_pipeline_records_unsupported_reconciliation_without_restart(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")

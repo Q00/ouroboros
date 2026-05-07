@@ -95,6 +95,23 @@ class AutoPipeline:
                 return self._result(state, ledger, blocker=state.last_error)
         self._save(state)
 
+        if state.phase == AutoPhase.COMPLETE and (
+            self.attach_execution_id or self.attach_job_id or self.attach_run_session_id
+        ):
+            attached, attach_transient = self._attach_run_if_requested(state)
+            if attached is not None:
+                self._save(state)
+                if attached is False:
+                    blocker = attach_transient or state.last_error
+                else:
+                    blocker = None
+                status_override = "blocked" if attached is False else None
+                return self._result(
+                    state,
+                    ledger,
+                    blocker=blocker,
+                    status_override=status_override,
+                )
         if self.reconcile_run and state.phase == AutoPhase.COMPLETE:
             reconciled, transient_blocker = self._reconcile_run_if_requested(state)
             if reconciled is not None:
@@ -284,7 +301,7 @@ class AutoPipeline:
                 return self._result(state, ledger, review=review)
 
         if state.phase == AutoPhase.RUN:
-            attached = self._attach_run_if_requested(state)
+            attached, _attach_transient = self._attach_run_if_requested(state)
             if attached is not None:
                 self._save(state)
                 return self._result(state, ledger, review=review)
@@ -450,12 +467,24 @@ class AutoPipeline:
             blocker=blocker or state.last_error,
         )
 
-    def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:
+    def _attach_run_if_requested(self, state: AutoPipelineState) -> tuple[bool | None, str | None]:
+        """Apply an attach request, returning ``(outcome, transient_blocker)``.
+
+        Mirrors :meth:`_reconcile_run_if_requested`:
+
+        - ``outcome`` is ``None`` when no attach was requested, ``True`` for a
+          successful attach, and ``False`` when the request fails validation.
+        - ``transient_blocker`` carries an invocation-only error message that
+          must surface to the caller for the current call only. It is used for
+          the invalid-context-on-complete case where mutating
+          ``state.last_error`` durably would leak the misuse into every later
+          plain ``--resume``/``--status`` response.
+        """
         handle = _first_nonempty(
             self.attach_execution_id, self.attach_job_id, self.attach_run_session_id
         )
         if handle is None:
-            return None
+            return None, None
         if not state.run_start_attempted or state.run_handoff_status not in {
             "unknown_no_handle",
             "unknown_timeout",
@@ -464,8 +493,17 @@ class AutoPipeline:
                 "--attach-execution requires an auto session with unknown run handoff "
                 "status after a prior run start attempt"
             )
+            if state.phase == AutoPhase.COMPLETE:
+                # Keep the terminal phase intact and avoid corrupting durable
+                # state.last_error: future plain --resume/--status calls must
+                # not report this per-invocation misuse as a steady-state
+                # blocker. The message is returned as a transient blocker so
+                # the current call still surfaces it via the result.
+                state.last_tool_name = "run_starter"
+                state.mark_progress(msg, tool_name="run_starter")
+                return False, msg
             state.mark_blocked(msg, tool_name="run_starter")
-            return False
+            return False, None
         state.execution_id = _optional_str(self.attach_execution_id)
         state.job_id = _optional_str(self.attach_job_id)
         state.run_session_id = _optional_str(self.attach_run_session_id)
@@ -484,7 +522,7 @@ class AutoPipeline:
         state.run_reconciliation_source = None
         state.run_reconciled_at = None
         state.transition(AutoPhase.COMPLETE, "attached existing execution handle")
-        return True
+        return True, None
 
     def _reconcile_run_if_requested(
         self, state: AutoPipelineState
