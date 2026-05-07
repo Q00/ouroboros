@@ -1494,6 +1494,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "anyio" },
+    { name = "jsonschema" },
     { name = "prompt-toolkit" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -1553,6 +1554,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5.0.0" },
     { name = "claude-agent-sdk", marker = "extra == 'all'", specifier = ">=0.1.0,<1.0.0" },
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.0,<1.0.0" },
+    { name = "jsonschema", specifier = ">=4.21.0,<5.0.0" },
     { name = "litellm", marker = "extra == 'all'", specifier = ">=1.80.0,<=1.82.6" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.80.0,<=1.82.6" },
     { name = "mcp", marker = "extra == 'all'", specifier = ">=1.26.0,<2.0.0" },

@@ -24,8 +24,8 @@ runtime side effects.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -128,7 +128,7 @@ class AuditSpec:
     events: tuple[str, ...]
 
     @staticmethod
-    def standard_four_events() -> "AuditSpec":
+    def standard_four_events() -> AuditSpec:
         return AuditSpec(
             events=(
                 "plugin.invoked",
