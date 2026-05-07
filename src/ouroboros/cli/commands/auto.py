@@ -316,11 +316,53 @@ async def _run_auto(
     return result
 
 
+_OPENCODE_RUNTIMES = frozenset({"opencode", "opencode_cli"})
+
+
+def _format_runtime_labels(
+    runtime_backend: str | None, opencode_mode: str | None
+) -> tuple[str, str]:
+    """Return (authoring backend, run backend) labels for status/result output.
+
+    Both auto entry points demote ``opencode_mode == "plugin"`` to
+    ``"subprocess"`` because a ``_subagent`` envelope would have no
+    receiver outside an active OpenCode bridge plugin session. The two
+    entry points differ in scope:
+
+    - ``cli/commands/auto.py`` (this file) overwrites
+      ``state.opencode_mode`` to ``"subprocess"`` for **both** authoring
+      and run-handoff handlers.
+    - ``mcp/tools/auto_handler.py`` only demotes the authoring handlers
+      and keeps the persisted ``"plugin"`` value for the run-handoff
+      handler, because that one is invoked from inside the OpenCode
+      session that owns the bridge plugin.
+
+    The labels here faithfully reflect the persisted ``state``: in CLI
+    flow that is always ``"subprocess"`` after demotion, in MCP flow it
+    can still be ``"plugin"`` (visible via ``--status`` on a session
+    that was created by the MCP entry point). Authoring is always shown
+    as in-process because both entry points hand the authoring handler
+    the demoted ``"subprocess"`` value.
+    """
+    backend_name = runtime_backend or "unspecified"
+    authoring = f"in-process ({backend_name})"
+    backend_key = (runtime_backend or "").strip().lower()
+    mode_key = (opencode_mode or "").strip().lower()
+    if backend_key in _OPENCODE_RUNTIMES and mode_key:
+        run_label = f"{runtime_backend} ({opencode_mode})"
+    else:
+        run_label = backend_name
+    return authoring, run_label
+
+
 def _print_status(state: AutoPipelineState) -> None:
     """Print a compact read-only summary for a persisted auto session."""
     print_info("Auto session status")
     console.print(f"Auto session: [cyan]{state.auto_session_id}[/]")
     console.print(f"Phase: [bold]{state.phase.value}[/]")
+    authoring, run_label = _format_runtime_labels(state.runtime_backend, state.opencode_mode)
+    console.print(f"Authoring backend: [bold]{authoring}[/]")
+    console.print(f"Run backend: [bold]{run_label}[/]")
     console.print(f"Last progress: {state.last_progress_message}")
     console.print(f"Last progress at: {state.last_progress_at}")
     if state.interview_session_id:
@@ -382,6 +424,9 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         print_info("Auto pipeline status")
     console.print(f"Auto session: [cyan]{result.auto_session_id}[/]")
     console.print(f"Status: [bold]{result.status}[/]")
+    authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
+    console.print(f"Authoring backend: [bold]{authoring}[/]")
+    console.print(f"Run backend: [bold]{run_label}[/]")
     if result.grade:
         console.print(f"Seed grade: [bold]{result.grade}[/]")
     if result.interview_session_id:

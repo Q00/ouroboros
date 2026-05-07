@@ -266,3 +266,163 @@ def test_resume_rejects_lower_bound_override(tmp_path) -> None:
                     skip_run=False,
                 )
             )
+
+
+def test_auto_status_prints_authoring_and_run_backend(tmp_path) -> None:
+    """`ooo auto --status` must show authoring + run backend labels."""
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = "codex"
+    state.opencode_mode = None
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    with patch("ouroboros.cli.commands.auto.AutoStore") as store_cls:
+        store_cls.return_value = store
+        result = runner.invoke(app, ["auto", "--status", "--resume", state.auto_session_id])
+
+    assert result.exit_code == 0
+    output = _plain(result.output)
+    assert "Authoring backend: in-process (codex)" in output
+    assert "Run backend: codex" in output
+
+
+def test_auto_status_reports_in_process_for_persisted_opencode_plugin(tmp_path) -> None:
+    """Persisted opencode-plugin (saved by MCP entry point) renders correctly.
+
+    Both auto entry points demote plugin → subprocess for authoring,
+    so the status output must read in-process for authoring even when
+    the persisted state still carries `plugin` (this happens for
+    sessions created by `mcp/tools/auto_handler.py`, which keeps
+    `plugin` for the run-handoff handler only).
+    """
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = "opencode"
+    state.opencode_mode = "plugin"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    with patch("ouroboros.cli.commands.auto.AutoStore") as store_cls:
+        store_cls.return_value = store
+        result = runner.invoke(app, ["auto", "--status", "--resume", state.auto_session_id])
+
+    assert result.exit_code == 0
+    output = _plain(result.output)
+    assert "Authoring backend: in-process (opencode)" in output
+    assert "Run backend: opencode (plugin)" in output
+    assert "dispatched" not in output
+
+
+def test_auto_status_reports_subprocess_for_cli_demoted_session(tmp_path) -> None:
+    """Sessions created via the CLI entry point persist subprocess for both phases."""
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = "opencode"
+    state.opencode_mode = "subprocess"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    with patch("ouroboros.cli.commands.auto.AutoStore") as store_cls:
+        store_cls.return_value = store
+        result = runner.invoke(app, ["auto", "--status", "--resume", state.auto_session_id])
+
+    assert result.exit_code == 0
+    output = _plain(result.output)
+    assert "Authoring backend: in-process (opencode)" in output
+    assert "Run backend: opencode (subprocess)" in output
+
+
+def test_auto_result_pipeline_carries_runtime_labels(tmp_path) -> None:
+    """AutoPipelineResult propagates runtime_backend/opencode_mode for printing."""
+    import asyncio
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    captured: dict[str, str | None] = {}
+
+    async def fake_pipeline_run(self, state):  # noqa: ARG001
+        captured["runtime"] = state.runtime_backend
+        captured["mode"] = state.opencode_mode
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+            grade="A",
+            runtime_backend=state.runtime_backend,
+            opencode_mode=state.opencode_mode,
+        )
+
+    with patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run):
+        result = asyncio.run(
+            _run_auto(
+                goal="safe goal",
+                resume=None,
+                runtime="codex",
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=True,
+            )
+        )
+
+    assert captured["runtime"] == "codex"
+    assert captured["mode"] is None
+    assert result.runtime_backend == "codex"
+    assert result.opencode_mode is None
+
+
+def test_run_auto_demotes_plugin_to_subprocess_in_state(tmp_path) -> None:
+    """`_run_auto` must overwrite persisted plugin opencode_mode to subprocess."""
+    import asyncio
+
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state = AutoPipelineState(goal="resume goal", cwd=str(tmp_path))
+    state.runtime_backend = "opencode"
+    state.opencode_mode = "plugin"
+    state.skip_run = True
+    state.max_interview_rounds = 2
+    state.max_repair_rounds = 1
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    captured: dict[str, str | None] = {}
+
+    async def fake_pipeline_run(self, state):  # noqa: ARG001
+        captured["runtime"] = state.runtime_backend
+        captured["mode"] = state.opencode_mode
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+            runtime_backend=state.runtime_backend,
+            opencode_mode=state.opencode_mode,
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+        asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=state.auto_session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=False,
+            )
+        )
+
+    assert captured["runtime"] == "opencode"
+    assert captured["mode"] == "subprocess"

@@ -51,6 +51,8 @@ class AutoPipelineResult:
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
+    runtime_backend: str | None = None
+    opencode_mode: str | None = None
 
 
 @dataclass(slots=True)
@@ -448,6 +450,8 @@ class AutoPipeline:
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
+            runtime_backend=state.runtime_backend,
+            opencode_mode=state.opencode_mode,
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:
