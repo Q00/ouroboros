@@ -1190,3 +1190,61 @@ def test_auto_answerer_still_blocks_compliance_policy_regulated_questions() -> N
         assert answer.source == AutoAnswerSource.BLOCKER, question
         assert answer.blocker is not None, question
         assert answer.blocker.reason == reason, question
+
+
+def test_auto_answerer_routes_safe_regulated_product_questions_to_product_behavior_answerer() -> (
+    None
+):
+    """Safe regulated-product questions must route to _product_behavior_answer(), not _default_answer().
+
+    When _is_safe_product_regulated_question() passes a question through the risky-fallback
+    gate, _is_product_behavior_question() must also return True so the router at answerer.py:122
+    sends the question to _product_behavior_answer().  If that alignment is missing the question
+    silently falls to _default_answer(), which produces a generic conservative-MVP ledger entry
+    that discards the regulated-product feature semantics.
+
+    Three bot example questions from ouroboros-agent[bot] BLOCKING on #738 (answerer.py:741):
+    - ``Should users be able to download GDPR exports?``
+    - ``Should admins be able to view PII fields in the admin panel?``
+    - ``Should the app allow users to access their GDPR data?``
+
+    Assertions:
+    1. answer.blocker is None  (gate passes)
+    2. answer.source == CONSERVATIVE_DEFAULT  (product-behavior, not BLOCKER)
+    3. ledger_updates contain a subject-specific key (not the generic conservative_mvp key
+       from _default_answer), confirming the regulated-product feature is preserved.
+    4. The ledger entry value or the answer text includes the regulated noun
+       (gdpr / pii) so the subject is not silently stripped.
+    """
+    answerer = AutoAnswerer()
+    ledger = SeedDraftLedger.from_goal("Build a regulated data app")
+
+    cases = [
+        ("Should users be able to download GDPR exports?", "gdpr"),
+        ("Should admins be able to view PII fields in the admin panel?", "pii"),
+        ("Should the app allow users to access their GDPR data?", "gdpr"),
+    ]
+
+    for question, regulated_noun in cases:
+        answer = answerer.answer(question, ledger)
+
+        # Gate passed — not blocked
+        assert answer.blocker is None, question
+        assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question
+
+        # Routed to _product_behavior_answer() — ledger has subject-specific keys,
+        # not the generic "constraints.conservative_mvp" key from _default_answer().
+        update_keys = [u[1].key for u in answer.ledger_updates]
+        assert any("behavior." in k for k in update_keys), (
+            f"Expected subject-specific behavior key in ledger updates for {question!r}, "
+            f"got {update_keys}"
+        )
+        assert not any(k == "constraints.conservative_mvp" for k in update_keys), (
+            f"Question {question!r} fell through to _default_answer() (conservative_mvp key found)"
+        )
+
+        # Regulated noun preserved in the answer text or a ledger entry value
+        combined = answer.text + " ".join(u[1].value for u in answer.ledger_updates)
+        assert regulated_noun in combined.lower(), (
+            f"Regulated noun {regulated_noun!r} not found in answer/ledger for {question!r}"
+        )

@@ -540,6 +540,16 @@ def _is_product_behavior_question(lowered: str) -> bool:
             r"\b(should|must|can|will|do|does|enforce|track|edit|subscribe)\b",
             lowered,
         )
+        # Covers product-semantics verbs used by _is_safe_product_regulated_question()
+        # that are not already matched above (download, allow, expose, render, enable,
+        # support) and the "be able to <verb>" phrasing gap for view/access.
+        # Ensures any question allowed past the risky-fallback gate also routes to
+        # _product_behavior_answer() rather than silently falling to _default_answer().
+        or re.search(
+            r"\b(should|must|can|will|do|does|is|are)\b.+\b(be able to\s+)?"
+            r"(download|allow|expose|render|enable|support|view|access)\b",
+            lowered,
+        )
     )
 
 
