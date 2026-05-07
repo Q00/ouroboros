@@ -320,20 +320,21 @@ class SeedDraftLedger:
     def summary(self) -> dict[str, Any]:
         """Return a bounded summary suitable for CLI/MCP output."""
         statuses = self.section_statuses()
-        provenance = self._provenance_index()
-        # Only resolved sections (CONFIRMED/DEFAULTED/INFERRED) are classified
-        # as evidence-backed or assumption-only.  Sections that are still
-        # MISSING/WEAK/CONFLICTING/BLOCKED at the aggregate level are reported
-        # via ``open_gaps`` instead, so a section with a defaulted entry plus a
-        # later blocker is not misrepresented as grounded.
+        # Only resolved sections (CONFIRMED/DEFAULTED/INFERRED) appear in the
+        # provenance surface.  Sections that are still MISSING/WEAK/CONFLICTING/
+        # BLOCKED at the aggregate level are reported via ``open_gaps`` instead,
+        # so a section with a defaulted entry plus a later blocker is not
+        # misrepresented as grounded in either the raw provenance map or the
+        # derived evidence/assumption classification.
         resolved_sections = {
             name for name, status in statuses.items() if status in _RESOLVED_STATUSES
         }
+        provenance = self._provenance_index(resolved_sections)
         evidence_backed_set = {
             section
             for source in _EVIDENCE_BACKED_SOURCES
             for section in provenance.get(source.value, ())
-        } & resolved_sections
+        }
         evidence_backed = sorted(evidence_backed_set)
         assumption_only = sorted(resolved_sections - evidence_backed_set)
         return {
@@ -362,10 +363,18 @@ class SeedDraftLedger:
             "assumption_only_sections": assumption_only,
         }
 
-    def _provenance_index(self) -> dict[str, list[str]]:
-        """Group active section names by ledger source for #640 surface visibility."""
+    def _provenance_index(self, resolved_sections: set[str]) -> dict[str, list[str]]:
+        """Group resolved section names by ledger source for #640 surface visibility.
+
+        ``resolved_sections`` is the set of sections whose aggregate status is
+        CONFIRMED/DEFAULTED/INFERRED.  Sections still in
+        MISSING/WEAK/CONFLICTING/BLOCKED are excluded so the surface never
+        attributes a source to a section the ledger reports as unresolved.
+        """
         index: dict[str, set[str]] = {source.value: set() for source in LedgerSource}
         for section in self.sections.values():
+            if section.name not in resolved_sections:
+                continue
             for entry in section.entries:
                 if entry.status in _INACTIVE_STATUSES:
                     continue

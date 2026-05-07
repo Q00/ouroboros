@@ -1082,6 +1082,11 @@ def test_ledger_summary_excludes_unresolved_sections_from_classification() -> No
     assert "constraints" not in summary["evidence_backed_sections"]
     assert "constraints" not in summary["assumption_only_sections"]
     assert "constraints" in summary["open_gaps"]
+    # The raw provenance dict must also exclude unresolved sections so MCP
+    # consumers cannot attribute a source to a section the ledger considers
+    # blocked.
+    for source_sections in summary["provenance"].values():
+        assert "constraints" not in source_sections
 
 
 def test_ledger_summary_treats_non_goal_entries_as_evidence_backed() -> None:
