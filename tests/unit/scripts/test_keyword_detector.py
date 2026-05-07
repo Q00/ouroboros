@@ -139,6 +139,11 @@ class TestSetupBypass:
         assert "/ouroboros:setup" in SETUP_BYPASS_SKILLS
         assert "/ouroboros:help" in SETUP_BYPASS_SKILLS
 
+    def test_resume_session_in_bypass_list(self):
+        # resume-session reads the EventStore directly and is meant to be used
+        # exactly when the MCP server is unreachable. It must bypass the gate.
+        assert "/ouroboros:resume-session" in SETUP_BYPASS_SKILLS
+
 
 class TestMainGate:
     """When MCP is not configured, bypass skills should NOT redirect to setup."""
@@ -204,3 +209,23 @@ class TestMainGate:
         out = capsys.readouterr().out
         assert "/ouroboros:auto" in out
         assert "/ouroboros:setup" not in out
+
+    @patch.object(_mod, "is_mcp_configured", return_value=False)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_resume_session_bypasses_setup_gate(self, _first, _mcp, capsys):
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = "ooo resume-session"
+            main()
+        out = capsys.readouterr().out
+        assert "/ouroboros:setup" not in out
+        assert "/ouroboros:resume-session" in out
+
+    @patch.object(_mod, "is_mcp_configured", return_value=False)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_resume_short_alias_bypasses_setup_gate(self, _first, _mcp, capsys):
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = "ooo resume"
+            main()
+        out = capsys.readouterr().out
+        assert "/ouroboros:setup" not in out
+        assert "/ouroboros:resume-session" in out

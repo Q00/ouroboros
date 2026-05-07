@@ -31,10 +31,13 @@ _configure_utf8_stdio()
 
 # Skills that work without MCP setup (bypass the setup gate)
 # qa has a built-in fallback that adopts the qa-judge agent directly
+# resume-session reads the EventStore directly — its purpose is recovering after
+# an MCP disconnect, so the no-MCP path is exactly when the user needs it.
 SETUP_BYPASS_SKILLS = [
     "/ouroboros:setup",
     "/ouroboros:help",
     "/ouroboros:qa",
+    "/ouroboros:resume-session",
 ]
 
 # Keyword → skill mapping
