@@ -84,7 +84,7 @@ def auto_command(
         bool, typer.Option("--skip-run", help="Stop after A-grade Seed creation.")
     ] = False,
     interview_strategy: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--interview-strategy",
             help=(
@@ -92,10 +92,12 @@ def auto_command(
                 "classifier and OUROBOROS_AUTO_OPERATIONAL env gate; 'always' "
                 "forces interview-first regardless of goal shape; 'never' "
                 "skips the interview when the classifier authorizes a direct "
-                "path and otherwise blocks with an actionable message."
+                "path and otherwise blocks with an actionable message. On "
+                "resume, an explicit value (including 'auto') overwrites the "
+                "persisted strategy; omitting the flag preserves it."
             ),
         ),
-    ] = "auto",
+    ] = None,
     show_ledger: Annotated[
         bool, typer.Option("--show-ledger", help="Print assumptions and non-goals.")
     ] = False,
@@ -122,10 +124,12 @@ def auto_command(
     if not resume and (goal is None or not goal.strip()):
         print_error("goal is required unless --resume is provided")
         raise typer.Exit(1)
-    if interview_strategy not in {"auto", "always", "never"}:
-        print_error(
-            "--interview-strategy must be one of: auto, always, never"
-        )
+    if interview_strategy is not None and interview_strategy not in {
+        "auto",
+        "always",
+        "never",
+    }:
+        print_error("--interview-strategy must be one of: auto, always, never")
         raise typer.Exit(1)
     try:
         result = asyncio.run(
@@ -171,15 +175,19 @@ async def _run_auto(
     max_interview_rounds: int | None,
     max_repair_rounds: int | None,
     skip_run: bool,
-    interview_strategy: str = "auto",
+    interview_strategy: str | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
     if resume:
         state = store.load(resume)
-        # Allow callers to switch interview strategy on resume.  This is
-        # how operators escape a CREATED-blocked session that requested a
-        # direct path before the operational executor was available.
-        if interview_strategy != "auto":
+        # Allow callers to switch interview strategy on resume.  ``None``
+        # means the flag was omitted: preserve the persisted strategy.
+        # Any explicit value (``auto``, ``always``, ``never``) overwrites
+        # the persisted strategy so operators can follow the blocker
+        # guidance precisely as it is printed -- including the
+        # ``--interview-strategy=auto`` escape hatch out of a session
+        # persisted with ``never``.
+        if interview_strategy is not None:
             state.interview_strategy = interview_strategy
         persisted_runtime = state.runtime_backend
         if persisted_runtime is None and state.opencode_mode is not None:
@@ -231,7 +239,7 @@ async def _run_auto(
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
-        state.interview_strategy = interview_strategy
+        state.interview_strategy = interview_strategy or "auto"
 
     if runtime == "opencode":
         opencode_mode = state.opencode_mode or get_opencode_mode()

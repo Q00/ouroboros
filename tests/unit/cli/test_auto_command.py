@@ -158,6 +158,105 @@ def test_resume_raises_persisted_bound_when_cli_overrides_higher(tmp_path) -> No
     assert captured["state_max_repair_rounds"] == 1
 
 
+def test_explicit_interview_strategy_auto_overrides_persisted_never_on_resume(
+    tmp_path,
+) -> None:
+    """Resume with --interview-strategy=auto must update persisted strategy.
+
+    Without the sentinel-default fix, Typer always supplied the default
+    string ``"auto"``, making explicit ``--interview-strategy=auto``
+    indistinguishable from omission and silently ignored on resume.
+    The blocker guidance "rerun with --interview-strategy=auto" depends
+    on this distinction working.
+    """
+    import asyncio
+
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state = AutoPipelineState(goal="some operational goal", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.interview_strategy = "never"
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    captured: dict[str, str] = {}
+
+    async def fake_pipeline_run(self, run_state):  # noqa: ARG001
+        captured["interview_strategy"] = run_state.interview_strategy
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id=run_state.auto_session_id,
+            phase="blocked",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+
+        asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=state.auto_session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=False,
+                interview_strategy="auto",
+            )
+        )
+
+    assert captured["interview_strategy"] == "auto"
+
+
+def test_omitted_interview_strategy_preserves_persisted_strategy_on_resume(
+    tmp_path,
+) -> None:
+    """Omitting --interview-strategy keeps the persisted strategy unchanged."""
+    import asyncio
+
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state = AutoPipelineState(goal="some operational goal", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.interview_strategy = "never"
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    captured: dict[str, str] = {}
+
+    async def fake_pipeline_run(self, run_state):  # noqa: ARG001
+        captured["interview_strategy"] = run_state.interview_strategy
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id=run_state.auto_session_id,
+            phase="blocked",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+
+        asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=state.auto_session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=False,
+                interview_strategy=None,
+            )
+        )
+
+    assert captured["interview_strategy"] == "never"
+
+
 def test_resume_rejects_lower_bound_override(tmp_path) -> None:
     """Tightening a bound on resume must be refused — never trap a session further."""
     import asyncio
