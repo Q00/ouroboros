@@ -22,6 +22,7 @@ from ouroboros.cli.commands import (
     detect,
     init,
     mcp,
+    plugin,
     pm,
     resume,
     run,
@@ -53,6 +54,7 @@ app.add_typer(setup.app, name="setup")
 app.add_typer(detect.app, name="detect")
 app.add_typer(tui.app, name="tui")
 app.add_typer(pm.app, name="pm")
+app.add_typer(plugin.app, name="plugin")
 app.add_typer(resume.app, name="resume")
 app.add_typer(uninstall.app, name="uninstall")
 
