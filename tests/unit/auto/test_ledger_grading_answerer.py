@@ -622,6 +622,43 @@ def test_auto_answerer_routes_common_input_output_prompts_to_io_ledger() -> None
         assert not {"constraints", "failure_modes"} >= updated_sections
 
 
+def test_auto_answerer_routes_multilingual_questions_by_ledger_intent() -> None:
+    answerer = AutoAnswerer()
+    cases = (
+        ("¿Quién es el usuario principal?", {"actors", "inputs", "outputs"}),
+        ("Quelles sorties le CLI doit-il produire?", {"actors", "inputs", "outputs"}),
+        (
+            "Quels critères d'acceptation le rapport doit-il satisfaire?",
+            {"acceptance_criteria", "verification_plan"},
+        ),
+        ("¿Cómo verificamos que funciona?", {"verification_plan", "acceptance_criteria"}),
+        ("어떤 런타임과 저장소 구조를 사용해야 하나요?", {"runtime_context", "constraints"}),
+        ("哪些功能不在范围内?", {"non_goals"}),
+        ("リポジトリのランタイムは何を使いますか?", {"runtime_context", "constraints"}),
+    )
+
+    for question, expected_sections in cases:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+
+        assert answer.blocker is None, question
+        assert expected_sections <= updated_sections, question
+
+
+def test_auto_answerer_unknown_multilingual_question_uses_safe_default() -> None:
+    answer = AutoAnswerer().answer(
+        "¿Cuál es el color favorito del tablero?",
+        SeedDraftLedger.from_goal("Build a dashboard"),
+    )
+
+    assert answer.blocker is None
+    assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT
+    assert [entry.key for _section, entry in answer.ledger_updates] == [
+        "constraints.conservative_mvp",
+        "failure_modes.unverified_or_scope_creep",
+    ]
+
+
 def test_auto_answerer_blocks_production_environment_selection_variants() -> None:
     questions = (
         "Which production environment should we deploy to?",

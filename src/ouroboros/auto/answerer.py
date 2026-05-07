@@ -22,6 +22,17 @@ class AutoAnswerSource(StrEnum):
     BLOCKER = "blocker"
 
 
+class QuestionIntent(StrEnum):
+    """Ledger-level intent inferred from an interview question."""
+
+    NON_GOALS = "non_goals"
+    VERIFICATION = "verification"
+    ACCEPTANCE_CRITERIA = "acceptance_criteria"
+    ACTOR_IO = "actor_io"
+    RUNTIME_CONTEXT = "runtime_context"
+    PRODUCT_BEHAVIOR = "product_behavior"
+
+
 @dataclass(frozen=True, slots=True)
 class AutoAnswerContext:
     """Bounded facts supplied by a caller before answering interview questions.
@@ -104,7 +115,8 @@ class AutoAnswerer:
     ) -> AutoAnswer:
         """Answer ``question`` using a conservative policy and optional bounded facts."""
         context = context or AutoAnswerContext()
-        lowered = question.lower()
+        lowered = _normalize_question(question)
+        intents = _classify_question_intents(question)
         blocker = _blocker_for(question)
         if blocker is not None:
             return AutoAnswer(
@@ -114,20 +126,20 @@ class AutoAnswerer:
                 blocker=blocker,
             )
 
-        if _matches_any(
-            lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
-        ):
+        if QuestionIntent.NON_GOALS in intents:
             return self._non_goal_answer(question, ledger)
-        if _is_verification_question(lowered):
+        if QuestionIntent.VERIFICATION in intents:
             return self._verification_answer(question)
-        if _is_feature_acceptance_question(lowered):
+        if QuestionIntent.ACCEPTANCE_CRITERIA in intents:
             return self._feature_acceptance_answer(question)
-        if _is_actor_or_io_question(lowered):
-            answer = self._io_actor_answer(question)
-        elif _is_runtime_context_question(lowered):
+        if QuestionIntent.RUNTIME_CONTEXT in intents and _should_preserve_runtime_route(lowered):
             answer = self._runtime_answer(question, context)
-        elif _is_product_behavior_question(lowered):
+        elif QuestionIntent.PRODUCT_BEHAVIOR in intents:
             answer = self._product_behavior_answer(question)
+        elif QuestionIntent.ACTOR_IO in intents:
+            answer = self._io_actor_answer(question)
+        elif QuestionIntent.RUNTIME_CONTEXT in intents:
+            answer = self._runtime_answer(question, context)
         else:
             answer = self._default_answer(question, ledger)
 
@@ -502,6 +514,264 @@ class AutoAnswerer:
         )
 
 
+_INTENT_CUES: Mapping[QuestionIntent, tuple[str, ...]] = {
+    QuestionIntent.NON_GOALS: (
+        "non-goal",
+        "non goal",
+        "out of scope",
+        "scope boundary",
+        "exclude",
+        "not do",
+        "won't do",
+        "will not do",
+        "no hacer",
+        "fuera de alcance",
+        "hors périmètre",
+        "hors perimetre",
+        "nicht ziel",
+        "fuera del alcance",
+        "범위 제외",
+        "하지 않을",
+        "비목표",
+        "対象外",
+        "不在范围",
+        "范围外",
+        "不做",
+        "非目标",
+    ),
+    QuestionIntent.VERIFICATION: (
+        "verify",
+        "verification",
+        "validate",
+        "validation",
+        "test",
+        "definition of done",
+        "done criteria",
+        "how know it works",
+        "cómo verific",
+        "como verific",
+        "validar",
+        "vérifier",
+        "verifier",
+        "vérification",
+        "verifikation",
+        "검증",
+        "테스트",
+        "확인",
+        "検証",
+        "测试",
+        "驗證",
+        "验证",
+    ),
+    QuestionIntent.ACCEPTANCE_CRITERIA: (
+        "acceptance criteria",
+        "acceptance criterion",
+        "acceptance",
+        "success criteria",
+        "completion criteria",
+        "criterios de aceptación",
+        "criterios de aceptacion",
+        "critères d'acceptation",
+        "criteres d'acceptation",
+        "akzeptanzkriterien",
+        "인수 조건",
+        "수락 기준",
+        "허용 기준",
+        "受け入れ基準",
+        "验收标准",
+        "驗收標準",
+    ),
+    QuestionIntent.ACTOR_IO: (
+        "actor",
+        "actors",
+        "user",
+        "users",
+        "persona",
+        "stakeholder",
+        "input",
+        "inputs",
+        "output",
+        "outputs",
+        "argument",
+        "arguments",
+        "usuario",
+        "usuarios",
+        "entrada",
+        "entradas",
+        "salida",
+        "salidas",
+        "utilisateur",
+        "utilisateurs",
+        "entrée",
+        "entree",
+        "sortie",
+        "benutzer",
+        "eingabe",
+        "ausgabe",
+        "사용자",
+        "입력",
+        "출력",
+        "利用者",
+        "ユーザー",
+        "入力",
+        "出力",
+        "用户",
+        "使用者",
+        "输入",
+        "輸入",
+        "输出",
+        "輸出",
+    ),
+    QuestionIntent.RUNTIME_CONTEXT: (
+        "runtime",
+        "stack",
+        "repo",
+        "repository",
+        "framework",
+        "package manager",
+        "project structure",
+        "project runtime",
+        "architecture",
+        "estructura del proyecto",
+        "repositorio",
+        "estructura",
+        "référentiel",
+        "referentiel",
+        "cadre",
+        "gestionnaire de paquets",
+        "projektstruktur",
+        "laufzeit",
+        "저장소",
+        "레포",
+        "런타임",
+        "프레임워크",
+        "패키지 매니저",
+        "프로젝트 구조",
+        "リポジトリ",
+        "ランタイム",
+        "フレームワーク",
+        "项目结构",
+        "專案結構",
+        "运行时",
+        "執行環境",
+        "框架",
+    ),
+}
+
+
+def _normalize_question(question: str) -> str:
+    return re.sub(r"\s+", " ", question.casefold()).strip()
+
+
+def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
+    """Classify interview text by ledger intent, not only English phrasing.
+
+    The classifier intentionally maps broad concept cues to ledger sections and
+    then lets the existing handlers produce conservative answers.  Unknown
+    questions return no intent and keep the existing default fallback.
+    """
+    lowered = _normalize_question(question)
+    intents: set[QuestionIntent] = set()
+
+    if _matches_any(
+        lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
+    ) or _contains_intent_cue(lowered, QuestionIntent.NON_GOALS):
+        intents.add(QuestionIntent.NON_GOALS)
+    if _is_verification_question(lowered) or _contains_intent_cue(
+        lowered, QuestionIntent.VERIFICATION
+    ):
+        intents.add(QuestionIntent.VERIFICATION)
+    if _is_feature_acceptance_question(lowered) or _contains_intent_cue(
+        lowered, QuestionIntent.ACCEPTANCE_CRITERIA
+    ):
+        intents.add(QuestionIntent.ACCEPTANCE_CRITERIA)
+    if _is_actor_or_io_question(lowered) or _contains_actor_io_intent_cue(lowered):
+        intents.add(QuestionIntent.ACTOR_IO)
+    if _is_runtime_context_question(lowered) or _contains_intent_cue(
+        lowered, QuestionIntent.RUNTIME_CONTEXT
+    ):
+        intents.add(QuestionIntent.RUNTIME_CONTEXT)
+    if _is_product_behavior_question(lowered):
+        intents.add(QuestionIntent.PRODUCT_BEHAVIOR)
+
+    return frozenset(intents)
+
+
+def _contains_intent_cue(lowered: str, intent: QuestionIntent) -> bool:
+    return any(cue in lowered for cue in _INTENT_CUES[intent])
+
+
+def _contains_actor_io_intent_cue(lowered: str) -> bool:
+    io_cues = (
+        "input",
+        "inputs",
+        "output",
+        "outputs",
+        "argument",
+        "arguments",
+        "entrada",
+        "entradas",
+        "salida",
+        "salidas",
+        "entrée",
+        "entree",
+        "sortie",
+        "eingabe",
+        "ausgabe",
+        "입력",
+        "출력",
+        "入力",
+        "出力",
+        "输入",
+        "輸入",
+        "输出",
+        "輸出",
+    )
+    if any(cue in lowered for cue in io_cues):
+        return True
+
+    actor_cues = (
+        "actor",
+        "actors",
+        "persona",
+        "stakeholder",
+        "usuario",
+        "usuarios",
+        "utilisateur",
+        "utilisateurs",
+        "benutzer",
+        "사용자",
+        "利用者",
+        "ユーザー",
+        "用户",
+        "使用者",
+    )
+    actor_question_cues = (
+        "who",
+        "which user",
+        "what user",
+        "primary user",
+        "end user",
+        "quién",
+        "quien",
+        "quiénes",
+        "quienes",
+        "qui ",
+        "quel utilisateur",
+        "welche benutzer",
+        "wer ",
+        "누구",
+        "어떤 사용자",
+        "誰",
+        "どのユーザー",
+        "谁",
+        "哪些用户",
+    )
+    return any(cue in lowered for cue in actor_cues) and any(
+        cue in lowered for cue in actor_question_cues
+    )
+
+
 def _is_verification_question(lowered: str) -> bool:
     return bool(
         _matches_any(
@@ -579,6 +849,21 @@ def _is_runtime_context_question(lowered: str) -> bool:
         or re.search(rf"\b(which|what)\b.+\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
         or re.search(rf"\b{runtime_term}\b.+\b{selection_verbs}\b", lowered)
         or re.search(rf"\b{selection_verbs}\b.+\b{runtime_term}\b", lowered)
+    )
+
+
+def _should_preserve_runtime_route(lowered: str) -> bool:
+    """Prefer runtime context only for stack/repo selection questions.
+
+    Broad intent cues intentionally recognise words like "runtime" and "repo"
+    across languages.  Product questions can also contain those words ("runtime
+    status", "repo integration"), so preserve the runtime route only when the
+    established English selector recognises an actual stack/repository choice.
+    Regulated runtime fallback questions still pass through the later safe
+    product reroute unless a grounded repo fact was supplied.
+    """
+    return _is_runtime_context_question(lowered) and not re.search(
+        r"\bruntime\s+status\b|\bstatus\b.+\bruntime\b", lowered
     )
 
 
