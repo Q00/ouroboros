@@ -341,6 +341,42 @@ async def test_auto_pipeline_resume_does_not_synthesize_spurious_phase_event(
     assert persisted.progress_events[0]["phase"] == "complete"
 
 
+def test_auto_pipeline_progress_events_ring_buffer_caps_at_limit() -> None:
+    """The persisted progress_events log must cap at ``_PROGRESS_EVENT_LIMIT``.
+
+    Regression for the bot non-blocking note: the new ring-buffer
+    behavior was previously untested at the boundary, so an accidental
+    off-by-one truncation or unbounded growth bug could quietly bloat
+    the persisted state file across long-running sessions.
+    """
+    from ouroboros.auto.pipeline import _PROGRESS_EVENT_LIMIT, AutoPipeline
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+
+    class _StubInterviewDriver:
+        async def run(self, _state, _ledger):  # noqa: ARG002
+            raise AssertionError("driver must not run for this unit-test")
+
+    async def _stub_seed_generator(_session_id):  # noqa: ARG001
+        raise AssertionError("seed generator must not run for this unit-test")
+
+    pipeline = AutoPipeline(_StubInterviewDriver(), _stub_seed_generator)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
+    state.transition(AutoPhase.INTERVIEW, "primed")
+
+    # Force-fire ``_emit`` past the cap. Each call mutates the phase
+    # message and bumps repair so dedup never short-circuits.
+    for tick in range(_PROGRESS_EVENT_LIMIT + 25):
+        pipeline._emit(state, kind="phase", message=f"phase tick {tick}")
+
+    assert len(state.progress_events) == _PROGRESS_EVENT_LIMIT
+    # The eviction is FIFO: the oldest (`tick=0`) entries are dropped
+    # and the newest (`tick=_PROGRESS_EVENT_LIMIT + 24`) survives.
+    first_tick = state.progress_events[0]["message"]
+    last_tick = state.progress_events[-1]["message"]
+    assert first_tick == "phase tick 25"
+    assert last_tick == f"phase tick {_PROGRESS_EVENT_LIMIT + 24}"
+
+
 @pytest.mark.asyncio
 async def test_auto_handler_meta_tolerates_unloadable_state_after_run(
     monkeypatch, tmp_path
