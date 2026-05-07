@@ -118,6 +118,14 @@ The same diagram lives in
 [Q00/ouroboros-plugins/docs/architecture.md](https://github.com/Q00/ouroboros-plugins/blob/main/docs/architecture.md)
 and is the canonical reference for both repos.
 
+> **Note.** Ouroboros-core's own `docs/architecture.md` still presents
+> the older `PLUGIN LAYER` framing at the time this RFC merges. That
+> divergence is intentional and tracked in #727; the diagram above is
+> the authoritative one for new work, and the core architecture doc
+> will be updated to match as part of #727. Until that update lands,
+> any apparent disagreement between the two diagrams MUST be resolved
+> in favor of this RFC.
+
 ## Why Defense-Oriented
 
 Three reasons the plugin layer is plumbing, not a product:
@@ -299,11 +307,12 @@ not redundant: `add` calls `install`; `install` never calls `add`.
 it is targeting:
 
 - **Default form** — `ooo plugin install <name>` — succeeds **only if
-  exactly one** known catalog (i.e. a previously `add`-ed
-  `plugin_home` repository or a registered `local_path` source) exposes
-  a plugin with that `name`. If two or more sources expose the same
-  `name`, the command MUST exit with an "ambiguous plugin name" error
-  listing the candidate sources; it MUST NOT pick one heuristically.
+  exactly one** known catalog (a previously `add`-ed `plugin_home`
+  repository or a previously registered `local_path` source — see
+  below) exposes a plugin with that `name`. If two or more sources
+  expose the same `name`, the command MUST exit with an "ambiguous
+  plugin name" error listing the candidate sources; it MUST NOT pick
+  one heuristically.
 - **Qualified form** — `ooo plugin install <name> --from <repo-url>`
   (or `--from <local-path>`) — selects an explicit source and is
   required whenever the default form would be ambiguous. CI / scripts
@@ -314,6 +323,26 @@ it is targeting:
   source providing `<name>` MUST instruct the user to run
   `ooo plugin add <repo-url>` first; it MUST NOT silently search the
   network.
+
+**How sources enter the known catalog.** v0 has exactly two registration
+paths, one per `source.type` that can produce a user trust record:
+
+- `plugin_home` sources are registered by `ooo plugin add <repo-url>`
+  (the repo URL becomes a known catalog at that moment, regardless of
+  whether the user proceeds to install anything from the selection
+  prompt). Subsequent `install`s can address that `name` without
+  re-fetching.
+- `local_path` sources are registered the first time the user runs
+  `ooo plugin install <name> --from <local-path>` against an absolute
+  path. The qualified form is therefore both a register-on-first-use
+  and an install in the same command; there is no separate
+  `register-local` verb in v0. The path is recorded as a known catalog
+  in the trust store; later `install <name>` calls can address it via
+  the default form if it is unambiguous.
+
+`first_party` sources do not go through registration at all — they are
+populated at boot from the core release artifact, as documented under
+the Manifest Schema section.
 
 **Plugin name → command-namespace mapping.** Every installed plugin's
 manifest `name` field IS the user-facing command namespace, with no
