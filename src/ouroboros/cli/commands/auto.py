@@ -89,6 +89,25 @@ def auto_command(
     status: Annotated[
         bool, typer.Option("--status", help="Print persisted auto session status without running.")
     ] = False,
+    attach_execution: Annotated[
+        str | None,
+        typer.Option(
+            "--attach-execution",
+            help="Attach an externally verified execution id to an unknown run handoff.",
+        ),
+    ] = None,
+    attach_job: Annotated[
+        str | None,
+        typer.Option("--attach-job", help="Attach an externally verified job id."),
+    ] = None,
+    attach_session: Annotated[
+        str | None,
+        typer.Option("--attach-session", help="Attach an externally verified run session id."),
+    ] = None,
+    attach_source: Annotated[
+        str | None,
+        typer.Option("--attach-source", help="Source label for an attached run handle."),
+    ] = None,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -118,6 +137,10 @@ def auto_command(
                 max_interview_rounds=max_interview_rounds,
                 max_repair_rounds=max_repair_rounds,
                 skip_run=skip_run,
+                attach_execution=attach_execution,
+                attach_job=attach_job,
+                attach_session=attach_session,
+                attach_source=attach_source,
             )
         )
     except Exception as exc:
@@ -152,8 +175,18 @@ async def _run_auto(
     max_interview_rounds: int | None,
     max_repair_rounds: int | None,
     skip_run: bool,
+    attach_execution: str | None = None,
+    attach_job: str | None = None,
+    attach_session: str | None = None,
+    attach_source: str | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
+    attach_requested = any(
+        isinstance(item, str) and item.strip()
+        for item in (attach_execution, attach_job, attach_session)
+    )
+    if attach_requested and not resume:
+        raise ValueError("--attach-execution/--attach-job/--attach-session require --resume")
     if resume:
         state = store.load(resume)
         persisted_runtime = state.runtime_backend
@@ -242,6 +275,10 @@ async def _run_auto(
         seed_saver=save_seed,
         seed_loader=load_seed,
         skip_run=skip_run,
+        attach_execution_id=attach_execution,
+        attach_job_id=attach_job,
+        attach_run_session_id=attach_session,
+        attach_source=attach_source,
     )
     result = await pipeline.run(state)
     return result
@@ -275,6 +312,10 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Run handoff status: [bold]{state.run_handoff_status}[/]")
     if state.run_handoff_guidance:
         console.print(f"Run handoff guidance: [yellow]{state.run_handoff_guidance}[/]")
+    if state.attached_run_handle:
+        console.print(f"Attached run handle: {state.attached_run_handle}")
+        console.print(f"Attached run source: {state.attached_run_source}")
+        console.print(f"Attached at: {state.attached_at}")
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
     console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
@@ -304,6 +345,10 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"Run handoff status: [bold]{result.run_handoff_status}[/]")
     if result.run_handoff_guidance:
         console.print(f"Run handoff guidance: [yellow]{result.run_handoff_guidance}[/]")
+    if result.attached_run_handle:
+        console.print(f"Attached run handle: {result.attached_run_handle}")
+        console.print(f"Attached run source: {result.attached_run_source}")
+        console.print(f"Attached at: {result.attached_at}")
     if show_ledger:
         if result.assumptions:
             console.print("Assumptions:")

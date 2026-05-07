@@ -1225,3 +1225,47 @@ async def test_auto_handler_rejects_zero_loop_bounds() -> None:
         assert result.is_err
         assert field_name in str(result.error)
         assert ">= 1" in str(result.error)
+
+
+def test_auto_state_loads_legacy_sessions_without_attached_run_fields() -> None:
+    from ouroboros.auto.state import AutoPipelineState
+
+    payload = AutoPipelineState(goal="Build a CLI", cwd="/repo").to_dict()
+    payload.pop("attached_run_handle")
+    payload.pop("attached_run_source")
+    payload.pop("attached_at")
+
+    restored = AutoPipelineState.from_dict(payload)
+
+    assert restored.attached_run_handle is None
+    assert restored.attached_run_source is None
+    assert restored.attached_at is None
+
+
+def test_auto_handler_definition_exposes_attach_arguments() -> None:
+    names = {param.name for param in AutoHandler().definition.parameters}
+
+    assert {"attach_execution", "attach_job", "attach_session", "attach_source"} <= names
+
+
+def test_auto_handler_meta_exposes_attached_run_fields() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _result_meta
+
+    meta = _result_meta(
+        AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+            execution_id="exec_existing",
+            run_handoff_status="attached",
+            attached_run_handle="exec_existing",
+            attached_run_source="operator",
+            attached_at="2026-05-07T00:00:00+00:00",
+        )
+    )
+
+    assert meta["run_handoff_status"] == "attached"
+    assert meta["attached_run_handle"] == "exec_existing"
+    assert meta["attached_run_source"] == "operator"
+    assert meta["attached_at"] == "2026-05-07T00:00:00+00:00"

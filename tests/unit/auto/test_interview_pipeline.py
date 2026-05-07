@@ -2155,3 +2155,91 @@ async def test_resume_after_interview_max_rounds_can_continue_when_bound_raised(
     assert result.status == "complete", f"resume blocked: {result.blocker!r}"
     assert state.phase == AutoPhase.COMPLETE
     assert answer_calls, "interview backend must be re-engaged on resume"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_attaches_run_handle_after_unknown_handoff_without_restart(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("attach-only resume must not start another run")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.run_start_attempted = True
+    state.run_handoff_status = "unknown_no_handle"
+    state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        attach_execution_id="exec_existing",
+        attach_source="operator",
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_handoff_status == "attached"
+    assert result.execution_id == "exec_existing"
+    assert result.attached_run_handle == "exec_existing"
+    assert result.attached_run_source == "operator"
+    assert result.attached_at is not None
+    assert state.run_start_attempted is True
+    assert state.execution_id == "exec_existing"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_attach_without_unknown_handoff(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=None,
+        store=AutoStore(tmp_path),
+        attach_execution_id="exec_existing",
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "unknown run handoff" in (result.blocker or "")
+    assert state.execution_id is None

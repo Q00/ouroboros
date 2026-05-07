@@ -42,6 +42,9 @@ class AutoPipelineResult:
     last_grade: str | None = None
     run_handoff_status: str | None = None
     run_handoff_guidance: str | None = None
+    attached_run_handle: str | None = None
+    attached_run_source: str | None = None
+    attached_at: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -61,6 +64,10 @@ class AutoPipeline:
     seed_saver: SeedSaver | None = None
     seed_loader: SeedLoader | None = None
     skip_run: bool = False
+    attach_execution_id: str | None = None
+    attach_job_id: str | None = None
+    attach_run_session_id: str | None = None
+    attach_source: str | None = None
     seed_timeout_seconds: float = 120.0
     run_start_timeout_seconds: float = 60.0
 
@@ -257,6 +264,10 @@ class AutoPipeline:
                 return self._result(state, ledger, review=review)
 
         if state.phase == AutoPhase.RUN:
+            attached = self._attach_run_if_requested(state)
+            if attached is not None:
+                self._save(state)
+                return self._result(state, ledger, review=review)
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = "started"
                 state.run_handoff_guidance = None
@@ -402,10 +413,43 @@ class AutoPipeline:
             last_grade=state.last_grade,
             run_handoff_status=state.run_handoff_status,
             run_handoff_guidance=state.run_handoff_guidance,
+            attached_run_handle=state.attached_run_handle,
+            attached_run_source=state.attached_run_source,
+            attached_at=state.attached_at,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
         )
+
+    def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:
+        handle = _first_nonempty(
+            self.attach_execution_id, self.attach_job_id, self.attach_run_session_id
+        )
+        if handle is None:
+            return None
+        if not state.run_start_attempted or state.run_handoff_status not in {
+            "unknown_no_handle",
+            "unknown_timeout",
+        }:
+            msg = (
+                "--attach-execution requires an auto session with unknown run handoff "
+                "status after a prior run start attempt"
+            )
+            state.mark_blocked(msg, tool_name="run_starter")
+            return False
+        state.execution_id = _optional_str(self.attach_execution_id)
+        state.job_id = _optional_str(self.attach_job_id)
+        state.run_session_id = _optional_str(self.attach_run_session_id)
+        state.attached_run_handle = handle
+        state.attached_run_source = _optional_str(self.attach_source) or "manual"
+        state.attached_at = utc_now_iso()
+        state.run_handoff_status = "attached"
+        state.run_handoff_guidance = (
+            "Attached an externally verified execution handle to this auto session; "
+            "resume will use the attached handle and will not start a duplicate run."
+        )
+        state.transition(AutoPhase.COMPLETE, "attached existing execution handle")
+        return True
 
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
@@ -476,5 +520,13 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
     return None
 
 
+def _first_nonempty(*values: str | None) -> str | None:
+    for value in values:
+        normalized = _optional_str(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
 def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
+    return value.strip() if isinstance(value, str) and value.strip() else None

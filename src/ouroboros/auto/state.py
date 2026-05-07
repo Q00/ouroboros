@@ -103,6 +103,9 @@ class AutoPipelineState:
     run_start_attempted: bool = False
     run_handoff_status: str | None = None
     run_handoff_guidance: str | None = None
+    attached_run_handle: str | None = None
+    attached_run_source: str | None = None
+    attached_at: str | None = None
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -194,6 +197,9 @@ class AutoPipelineState:
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
+        payload.setdefault("attached_run_handle", None)
+        payload.setdefault("attached_run_source", None)
+        payload.setdefault("attached_at", None)
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -296,6 +302,9 @@ class AutoPipelineState:
             "run_session_id",
             "run_handoff_status",
             "run_handoff_guidance",
+            "attached_run_handle",
+            "attached_run_source",
+            "attached_at",
             "last_grade",
             "pending_question",
             "last_tool_name",

@@ -86,6 +86,30 @@ class AutoHandler:
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    "attach_execution",
+                    ToolInputType.STRING,
+                    "Attach an externally verified execution id to an unknown run handoff",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    "attach_job",
+                    ToolInputType.STRING,
+                    "Attach an externally verified job id to an unknown run handoff",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    "attach_session",
+                    ToolInputType.STRING,
+                    "Attach an externally verified run session id to an unknown run handoff",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    "attach_source",
+                    ToolInputType.STRING,
+                    "Source label for an attached run handle",
+                    required=False,
+                ),
             ),
         )
 
@@ -113,6 +137,13 @@ class AutoHandler:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_skip_run = bool(arguments.get("skip_run", False))
+        attach_execution = _optional_text_arg(arguments, "attach_execution")
+        attach_job = _optional_text_arg(arguments, "attach_job")
+        attach_session = _optional_text_arg(arguments, "attach_session")
+        attach_source = _optional_text_arg(arguments, "attach_source")
+        attach_requested = any((attach_execution, attach_job, attach_session))
+        if attach_requested and not (isinstance(resume, str) and resume):
+            raise ValueError("attach_* arguments require resume")
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -179,6 +210,10 @@ class AutoHandler:
             seed_saver=save_seed,
             seed_loader=load_seed,
             skip_run=skip_run,
+            attach_execution_id=attach_execution,
+            attach_job_id=attach_job,
+            attach_run_session_id=attach_session,
+            attach_source=attach_source,
         )
         return await pipeline.run(state)
 
@@ -208,6 +243,10 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["run_handoff_status"] = result.run_handoff_status
     if result.run_handoff_guidance:
         meta["run_handoff_guidance"] = result.run_handoff_guidance
+    if result.attached_run_handle:
+        meta["attached_run_handle"] = result.attached_run_handle
+        meta["attached_run_source"] = result.attached_run_source
+        meta["attached_at"] = result.attached_at
     return meta
 
 
@@ -215,6 +254,16 @@ def _resolved_opencode_mode(runtime_backend: str | None, opencode_mode: str | No
     if runtime_backend != "opencode":
         return None
     return opencode_mode or get_opencode_mode()
+
+
+def _optional_text_arg(arguments: dict[str, Any], name: str) -> str | None:
+    value = arguments.get(name)
+    if value in {None, ""}:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        msg = f"{name} must be a non-empty string"
+        raise ValueError(msg)
+    return value.strip()
 
 
 def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:
@@ -384,6 +433,10 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Run handoff status: {result.run_handoff_status}")
     if result.run_handoff_guidance:
         lines.append(f"Run handoff guidance: {result.run_handoff_guidance}")
+    if result.attached_run_handle:
+        lines.append(f"Attached run handle: {result.attached_run_handle}")
+        lines.append(f"Attached run source: {result.attached_run_source}")
+        lines.append(f"Attached at: {result.attached_at}")
     if result.assumptions:
         lines.append("Assumptions:")
         lines.extend(f"- {item}" for item in result.assumptions)
