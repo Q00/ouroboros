@@ -83,22 +83,47 @@ async def test_driver_answerer_brake_off_answers_risky_question() -> None:
 
 
 @pytest.mark.asyncio
-async def test_driver_answerer_preserves_scaffold_ledger_values() -> None:
+async def test_driver_answerer_ledger_values_reflect_driver_answer_and_flag_conflict() -> None:
+    """Driver mode must not silently leave the persisted ledger reflecting the
+    deterministic scaffold while the transcript carries the driver's freeform
+    answer. The values must be the driver answer, status CONFLICTING, and the
+    original scaffold value preserved as evidence.
+    """
+    from ouroboros.auto.ledger import LedgerStatus
+
     ledger = SeedDraftLedger.from_goal("Build a CLI")
     question = "Which runtime and framework should be used?"
-    adapter = FakeAdapter("Use Typer and verify with pytest.")
+    driver_text = "Use Typer and verify with pytest."
+    adapter = FakeAdapter(driver_text)
     answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
     scaffold = answerer.baseline.answer(question, ledger)
 
     answer = await answerer.answer(question, ledger)
 
     assert answer.ledger_updates
-    assert all(entry.value != answer.text for _section, entry in answer.ledger_updates)
-    assert [(section, entry.key, entry.source) for section, entry in answer.ledger_updates] == [
+    structural_updates = [
+        (section, entry)
+        for section, entry in answer.ledger_updates
+        if not entry.key.startswith("risk.auto_driver")
+    ]
+    # The structural keys (section + key + source) match the scaffold so
+    # downstream Seed generation stays section-aware.
+    assert [(section, entry.key, entry.source) for section, entry in structural_updates] == [
         (section, entry.key, entry.source) for section, entry in scaffold.ledger_updates
     ]
-    assert any("driver:codex" in entry.evidence for _section, entry in answer.ledger_updates)
-    assert any("Driver answer was:" in entry.rationale for _section, entry in answer.ledger_updates)
+    # But the values are now the driver answer (verbatim), not the scaffold's.
+    for _section, entry in structural_updates:
+        assert driver_text in entry.value
+        assert entry.status == LedgerStatus.CONFLICTING
+        assert entry.confidence <= 0.4
+        assert "driver:codex" in entry.evidence
+        assert "auto_interview_transcript" in entry.evidence
+    # Original scaffold values are preserved in rationale as evidence so
+    # divergence between transcript and ledger is not silently lost.
+    scaffold_values = {entry.value for _section, entry in scaffold.ledger_updates if entry.value}
+    if scaffold_values:
+        rationale_text = " ".join(entry.rationale or "" for _section, entry in structural_updates)
+        assert any(value in rationale_text for value in scaffold_values)
 
 
 @pytest.mark.asyncio

@@ -232,22 +232,35 @@ def _tag_driver_text(text: str, *, backend: str, brake: AutoBrakeMode, risk: str
 def _ledger_updates_for(
     scaffold: AutoAnswer, *, driver_text: str, risk: str | None, backend: str
 ) -> list[tuple[str, LedgerEntry]]:
+    """Build ledger updates that reflect the driver's actual freeform answer.
+
+    The deterministic scaffold provides the structural keys (so downstream
+    seed-generation stays section-aware), but each entry's value is replaced
+    with the driver's freeform answer and marked CONFLICTING with reduced
+    confidence so the grading/Seed-ready gates treat the entry as needing
+    verification rather than as a confirmed scaffold choice. This prevents
+    the transcript (driver answer) and the persisted ledger (scaffold value)
+    from diverging silently into two competing sources of truth.
+    """
     updates = [
         (
             section,
             LedgerEntry(
                 key=entry.key,
-                value=entry.value,
+                value=f"driver:{backend} answer (verbatim): {driver_text}",
                 source=entry.source,
-                confidence=min(entry.confidence, 0.72),
-                status=entry.status,
+                confidence=min(entry.confidence, 0.4),
+                status=LedgerStatus.CONFLICTING,
                 reversible=entry.reversible,
                 rationale=(
-                    "Selected-driver answer was sent to the interview; structured ledger "
-                    "state preserves the deterministic scaffold to avoid collapsing "
-                    f"section-specific contracts. Driver answer was: {driver_text}"
+                    "Selected-driver freeform answer is the canonical source; the "
+                    "scaffold's structural key is kept so Seed generation stays "
+                    "section-aware, but the value is the driver answer verbatim and "
+                    "the entry is marked CONFLICTING so grading and the Seed-ready "
+                    "gate flag it for verification before A-grade. Original "
+                    f"scaffold value (kept only as evidence): {entry.value}"
                 ),
-                evidence=[*entry.evidence, f"driver:{backend}"],
+                evidence=[*entry.evidence, f"driver:{backend}", "auto_interview_transcript"],
             ),
         )
         for section, entry in scaffold.ledger_updates
