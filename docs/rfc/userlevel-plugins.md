@@ -511,27 +511,38 @@ subject is designed to defeat:
    entrypoint without touching the manifest produces a new
    `artifact_digest`, hence a new triple, hence un-trusted required
    scopes. For `plugin_home` and `local_path` this is checked on
-   **every invocation** (the firewall recomputes the canonical-tarball
-   sha256 against the on-disk subtree before each call and fails
-   closed on drift, exactly as the per-source-type rule above
-   specifies). For `first_party` it is checked at **boot only**, on
-   the explicit grounds that the core release artifact is the unit of
-   trust there and tampering with it is out of scope for the plugin
-   firewall.
+   **every invocation** (the firewall recomputes the canonical tree
+   hash defined above against the on-disk subtree before each call
+   and fails closed on drift, exactly as the per-source-type rule
+   above specifies — note that the digest is **not** a tarball hash;
+   the tar-independent serialization is what makes long paths and
+   symlinks safe). For `first_party` it is checked at **boot only**,
+   on the explicit grounds that the core release artifact is the unit
+   of trust there and tampering with it is out of scope for the
+   plugin firewall.
 
 Concrete obligations on the lifecycle commands:
 
 - `ooo plugin remove <name>` MUST delete **every trust record for the
   install subject — past and present**, not only records bound to the
-  currently-active triple. Concretely, it deletes any lockfile entry
-  whose `(source.type, source_identity)` pair matches the removed
-  plugin (any historical `artifact_digest`), AND removes the installed
-  snapshot (for `plugin_home`) or the catalog registration (for
-  `local_path`). This closes the otherwise-silent regrant path where a
-  user could downgrade or reinstall back to an old digest and inherit
-  prior trust. No "tombstone with implicit re-grant" behavior is
-  permitted — uninstall fully revokes, including for any earlier
-  version of the same install subject.
+  currently-active triple. The lockfile entry shape includes the
+  plugin's manifest `name` alongside its `(source.type,
+  source_identity, artifact_digest)`, so the deletion scope is records
+  matching `(name, source.type, source_identity)` for any historical
+  `artifact_digest` — explicitly **scoped to this plugin name**, never
+  to other sibling plugins installed from the same `plugin_home` repo
+  URL or the same `local_path` directory. (A catalog repo can host
+  multiple plugins; removing one MUST NOT de-trust its siblings.)
+  After clearing those records, `remove` also removes the installed
+  snapshot for the `plugin_home` plugin (its own subdirectory under
+  `~/.ouroboros/plugins/<...>/`, not the parent catalog) or, for
+  `local_path`, removes only this plugin's catalog registration while
+  leaving the on-disk path untouched. This closes the otherwise-silent
+  regrant path where a user could downgrade or reinstall back to an
+  old digest and inherit prior trust, while preserving siblings. No
+  "tombstone with implicit re-grant" behavior is permitted — uninstall
+  fully revokes, including for any earlier version of the same install
+  subject.
 - `ooo plugin install` MUST compute the new triple (recomputing
   `artifact_digest` from the just-installed bytes, not copying it from
   upstream metadata) and, if any field differs from a previously-trusted
