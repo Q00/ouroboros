@@ -51,6 +51,11 @@ class AutoPipelineResult:
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
+    resume_capability: str = "resume"
+    """String form of :class:`AutoResumeCapability`. Defaults to ``"resume"``
+    so existing test constructions of ``AutoPipelineResult(...)`` keep their
+    historical behavior. ``AutoPipeline._result()`` overrides it from the
+    persisted state's :meth:`AutoPipelineState.resume_capability`."""
 
 
 @dataclass(slots=True)
@@ -448,6 +453,7 @@ class AutoPipeline:
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
+            resume_capability=state.resume_capability().value,
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:
