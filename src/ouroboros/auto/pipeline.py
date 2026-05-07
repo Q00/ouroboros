@@ -521,7 +521,17 @@ class AutoPipeline:
         state.run_reconciliation_status = None
         state.run_reconciliation_source = None
         state.run_reconciled_at = None
-        state.transition(AutoPhase.COMPLETE, "attached existing execution handle")
+        if state.phase == AutoPhase.COMPLETE:
+            # Operator recovery for an already-terminal complete-but-unknown
+            # handoff: keep the durable terminal phase and just record progress.
+            # COMPLETE -> COMPLETE is not a legal transition, and the session
+            # is already in the right place; just acknowledge the attach.
+            state.mark_progress(
+                "attached existing execution handle to terminal complete session",
+                tool_name="run_starter",
+            )
+        else:
+            state.transition(AutoPhase.COMPLETE, "attached existing execution handle")
         return True, None
 
     def _reconcile_run_if_requested(
@@ -591,6 +601,15 @@ class AutoPipeline:
             "--attach-execution/--attach-job/--attach-session, or add a runtime-specific "
             "reconciler that returns attached, not_found, ambiguous, or unsupported."
         )
+        if state.phase == AutoPhase.COMPLETE:
+            # The session has already reached terminal complete with an unknown
+            # handoff (the documented supported scenario). Preserve the durable
+            # terminal phase and surface the unsupported result as a transient
+            # blocked status override at the caller; do not attempt the illegal
+            # COMPLETE -> BLOCKED transition that mark_blocked would force.
+            state.last_tool_name = "run_starter"
+            state.mark_progress(state.run_handoff_guidance, tool_name="run_starter")
+            return False, state.run_handoff_guidance
         state.mark_blocked(state.run_handoff_guidance, tool_name="run_starter")
         return False, None
 

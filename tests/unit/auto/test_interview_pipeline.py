@@ -2302,6 +2302,129 @@ async def test_pipeline_rejects_attach_against_complete_session_without_unknown_
 
 
 @pytest.mark.asyncio
+async def test_pipeline_attaches_handle_to_terminal_complete_unknown_handoff(tmp_path) -> None:
+    """Successful attach against an already-terminal complete-but-unknown
+    handoff must not crash on an illegal ``COMPLETE -> COMPLETE`` transition.
+
+    Regression for the bot's blocking finding on PR #685: legitimate operator
+    recovery for a terminal complete session with
+    ``run_handoff_status="unknown_no_handle"`` used to raise ``ValueError``
+    from ``state.transition`` because the pipeline always called
+    ``state.transition(AutoPhase.COMPLETE, ...)`` on the success branch.
+    """
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("attach against complete must not start another run")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "complete")
+    state.run_start_attempted = True
+    state.run_handoff_status = "unknown_no_handle"
+    AutoStore(tmp_path).save(state)
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        attach_execution_id="exec_recovered",
+        attach_source="operator",
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.phase == "complete"
+    assert result.run_handoff_status == "attached"
+    assert result.execution_id == "exec_recovered"
+    assert result.attached_run_handle == "exec_recovered"
+    assert state.phase == AutoPhase.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_pipeline_records_unsupported_reconciliation_on_terminal_complete(
+    tmp_path,
+) -> None:
+    """Unsupported generic reconcile against a terminal complete-but-unknown
+    handoff must not crash on an illegal ``COMPLETE -> BLOCKED`` transition.
+
+    Regression for the bot's blocking finding on PR #685: the public contract
+    documents complete-but-unknown handoffs as a supported blocked-result
+    scenario, but the unsupported branch used to call ``state.mark_blocked``
+    (forcing ``COMPLETE -> BLOCKED``) and raise ``ValueError`` instead of
+    surfacing the unsupported result with a transient blocked status.
+    """
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("reconcile against complete must not start another run")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "complete")
+    state.run_start_attempted = True
+    state.run_handoff_status = "unknown_timeout"
+    AutoStore(tmp_path).save(state)
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        reconcile_run=True,
+        reconcile_source="generic",
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.phase == "complete"
+    assert result.run_reconciliation_status == "unsupported"
+    assert "No duplicate run was started" in (result.run_handoff_guidance or "")
+    # Durable phase stays terminal complete; no illegal COMPLETE -> BLOCKED
+    # transition was attempted, and state.last_error stays clean for later
+    # plain --resume/--status calls.
+    assert state.phase == AutoPhase.COMPLETE
+    assert state.last_error is None
+
+
+@pytest.mark.asyncio
 async def test_pipeline_records_unsupported_reconciliation_without_restart(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
