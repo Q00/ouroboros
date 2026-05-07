@@ -13,12 +13,11 @@ from pathlib import Path
 import pytest
 
 from ouroboros.plugin.manifest import (
+    SUPPORTED_SCHEMA_VERSIONS,
     PluginManifest,
     PluginManifestError,
     load_manifest,
-    SUPPORTED_SCHEMA_VERSIONS,
 )
-
 
 REFERENCE_MANIFEST: dict = {
     "schema_version": "0.1",

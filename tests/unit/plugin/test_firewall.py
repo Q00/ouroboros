@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-import pytest
+import subprocess
 
 from ouroboros.plugin.firewall import (
-    InvocationResult,
     invoke_plugin,
 )
 from ouroboros.plugin.manifest import load_manifest
@@ -19,7 +14,6 @@ from ouroboros.plugin.trust_store import TrustStore
 from ouroboros.plugin.userlevel_registry import (
     UserLevelProgramRegistry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

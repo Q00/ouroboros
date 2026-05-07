@@ -30,18 +30,17 @@ ledger writer (#737). Tests pass a list-appender for inspection.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import hashlib
 import shlex
 import subprocess
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Iterable, Literal
+from typing import Literal
 
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
-
 
 SCHEMA_VERSION = "0.1"
 
@@ -60,7 +59,7 @@ class InvocationResult:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _source_type_for_event(manifest: PluginManifest) -> str:
