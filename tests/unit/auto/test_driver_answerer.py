@@ -79,6 +79,13 @@ async def test_driver_answerer_brake_off_answers_risky_question() -> None:
     assert "driver=codex" in answer.text
     assert "brake=off" in answer.text
     assert "risk=" in answer.text
+    assert answer.metadata.risk == "destructive or financial/production choice"
+    assert answer.metadata.confidence == answer.confidence
+    assert answer.metadata.provenance == (
+        "driver:codex",
+        "brake:off",
+        "scaffold_source:conservative_default",
+    )
     assert adapter.prompts
 
 
@@ -279,4 +286,11 @@ async def test_driver_answerer_brake_on_gates_risky_question() -> None:
 
     assert answer.blocker is not None
     assert "requires approval" in answer.blocker.reason
+    assert answer.metadata.risk == "destructive or financial/production choice"
+    assert answer.metadata.confidence == 1.0
+    assert answer.metadata.provenance == (
+        "driver:codex",
+        "brake:on",
+        "scaffold_source:conservative_default",
+    )
     assert adapter.prompts == []

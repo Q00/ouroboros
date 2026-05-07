@@ -11,6 +11,7 @@ from ouroboros.auto.answerer import (
     AutoAnswer,
     AutoAnswerContext,
     AutoAnswerer,
+    AutoAnswerMetadata,
     AutoAnswerSource,
     AutoBlocker,
 )
@@ -66,6 +67,13 @@ class DriverAutoAnswerer:
                 source=AutoAnswerSource.BLOCKER,
                 confidence=1.0,
                 blocker=AutoBlocker(reason=reason, question=question),
+                metadata=_answer_metadata(
+                    backend=self.backend or "driver",
+                    brake=self.brake,
+                    risk=risk,
+                    confidence=1.0,
+                    scaffold=scaffold,
+                ),
             )
 
         if self.adapter is None:
@@ -101,6 +109,13 @@ class DriverAutoAnswerer:
                     reason=f"selected driver {self.backend} failed to answer: {result.error}",
                     question=question,
                 ),
+                metadata=_answer_metadata(
+                    backend=self.backend or "driver",
+                    brake=self.brake,
+                    risk="driver answer unavailable",
+                    confidence=1.0,
+                    scaffold=scaffold,
+                ),
             )
         text = _clean_driver_text(result.value.content)
         if not text:
@@ -111,6 +126,13 @@ class DriverAutoAnswerer:
                 blocker=AutoBlocker(
                     reason=f"selected driver {self.backend} returned an empty answer",
                     question=question,
+                ),
+                metadata=_answer_metadata(
+                    backend=self.backend or "driver",
+                    brake=self.brake,
+                    risk="empty driver answer",
+                    confidence=1.0,
+                    scaffold=scaffold,
                 ),
             )
 
@@ -134,6 +156,13 @@ class DriverAutoAnswerer:
             ),
             assumptions=assumptions,
             non_goals=list(scaffold.non_goals),
+            metadata=_answer_metadata(
+                backend=self.backend or "driver",
+                brake=self.brake,
+                risk=risk,
+                confidence=confidence,
+                scaffold=scaffold,
+            ),
         )
 
     def apply(self, answer: AutoAnswer, ledger: SeedDraftLedger, *, question: str) -> None:
@@ -227,6 +256,26 @@ def _tag_driver_text(text: str, *, backend: str, brake: AutoBrakeMode, risk: str
     if risk:
         tags.append(f"risk={risk}")
     return f"[{' ; '.join(tags)}] {text}"
+
+
+def _answer_metadata(
+    *,
+    backend: str,
+    brake: AutoBrakeMode,
+    risk: str | None,
+    confidence: float,
+    scaffold: AutoAnswer,
+) -> AutoAnswerMetadata:
+    """Build structured selected-driver provenance for downstream audit surfaces."""
+    return AutoAnswerMetadata(
+        risk=risk,
+        confidence=max(0.0, min(1.0, float(confidence))),
+        provenance=(
+            f"driver:{backend}",
+            f"brake:{brake.value}",
+            f"scaffold_source:{scaffold.source.value}",
+        ),
+    )
 
 
 def _ledger_updates_for(

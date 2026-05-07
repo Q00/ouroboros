@@ -6,7 +6,7 @@ state plus deterministic quality gates that a higher-level supervisor can use
 before starting execution.
 """
 
-from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerSource
+from ouroboros.auto.answerer import AutoAnswer, AutoAnswerer, AutoAnswerMetadata, AutoAnswerSource
 from ouroboros.auto.grading import GradeGate, GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewDriver, AutoInterviewResult, InterviewTurn
 from ouroboros.auto.ledger import LedgerEntry, LedgerSection, SeedDraftLedger
@@ -17,6 +17,7 @@ from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoPolicy, AutoS
 
 __all__ = [
     "AutoAnswer",
+    "AutoAnswerMetadata",
     "AutoAnswerSource",
     "AutoAnswerer",
     "AutoInterviewDriver",
