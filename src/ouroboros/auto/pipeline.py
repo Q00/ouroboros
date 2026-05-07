@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
+from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore, utc_now_iso
@@ -75,9 +76,16 @@ class AutoPipeline:
     reconcile_source: str | None = None
     seed_timeout_seconds: float = 120.0
     run_start_timeout_seconds: float = 60.0
+    progress_callback: AutoProgressCallback | None = None
+    _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
+    _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
+    _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
+        self._last_emitted_phase = None
+        self._last_emitted_grade = None
+        self._last_emitted_repair = None
         ledger = (
             SeedDraftLedger.from_dict(state.ledger)
             if state.ledger
@@ -251,6 +259,8 @@ class AutoPipeline:
             state.last_grade = review.grade_result.grade.value
             state.findings = [asdict(finding) for finding in review.findings]
             state.ledger = ledger.to_dict()
+            self._maybe_emit_repair(state)
+            self._maybe_emit_grade(state)
             if self.seed_saver is not None:
                 try:
                     state.seed_path = self.seed_saver(seed)
@@ -559,6 +569,53 @@ class AutoPipeline:
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
             self.store.save(state)
+        self._maybe_emit_phase(state)
+
+    def _maybe_emit_phase(self, state: AutoPipelineState) -> None:
+        phase = state.phase.value
+        if phase == self._last_emitted_phase:
+            return
+        self._last_emitted_phase = phase
+        self._emit(state, "phase", state.last_progress_message)
+
+    def _maybe_emit_grade(self, state: AutoPipelineState) -> None:
+        grade = state.last_grade
+        if grade is None or grade == self._last_emitted_grade:
+            return
+        self._last_emitted_grade = grade
+        self._emit(state, "grade", f"Seed grade {grade}", grade=grade)
+
+    def _maybe_emit_repair(self, state: AutoPipelineState) -> None:
+        rounds = state.repair_round
+        if rounds <= 0 or rounds == self._last_emitted_repair:
+            return
+        self._last_emitted_repair = rounds
+        self._emit(state, "repair", f"repair round {rounds}", round=rounds)
+
+    def _emit(
+        self,
+        state: AutoPipelineState,
+        kind: str,
+        message: str,
+        *,
+        round: int | None = None,
+        grade: str | None = None,
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        event = AutoProgressEvent(
+            auto_session_id=state.auto_session_id,
+            phase=state.phase.value,
+            kind=kind,
+            message=message,
+            round=round,
+            grade=grade,
+        )
+        try:
+            self.progress_callback(event)
+        except Exception:
+            # Observers must never break the pipeline. Swallow callback errors.
+            pass
 
 
 def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:
