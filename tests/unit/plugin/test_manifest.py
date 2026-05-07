@@ -304,6 +304,25 @@ def test_duplicate_permission_scope_rejected(tmp_path: Path) -> None:
     assert "duplicate permission scope" in excinfo.value.args[0]
 
 
+def test_blank_entrypoint_command_rejected(tmp_path: Path) -> None:
+    """A whitespace-only `entrypoint.command` is rejected at load time.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    d86743c: the schema only enforced `minLength: 1`, so a command like
+    "   " loaded fine. At invocation time `shlex.split` yields zero
+    tokens, the firewall would then prepend the subcommand name and try
+    to exec it as the binary — a misleading runtime failure after
+    `plugin.invoked` was already emitted. The loader now rejects this
+    at the manifest boundary so the runtime path is never reached.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["entrypoint"]["command"] = "   "
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/entrypoint/command"
+    assert "non-whitespace token" in excinfo.value.args[0]
+
+
 def test_duplicate_command_name_rejected(tmp_path: Path) -> None:
     """Two commands sharing a name within one manifest are rejected.
 

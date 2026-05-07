@@ -353,9 +353,27 @@ def load_manifest(path: str | Path) -> PluginManifest:
             )
         )
     permissions = tuple(permissions_list)
+    # The schema only enforces `minLength: 1`, which lets a whitespace-only
+    # command like "   " through. At invocation time `shlex.split` of such
+    # a command yields zero tokens; the firewall would then prepend the
+    # subcommand name and try to exec the literal subcommand as the
+    # binary — a misleading runtime failure that escapes after
+    # `plugin.invoked` has already been emitted. Reject here at the
+    # manifest boundary.
+    import shlex
+
+    entrypoint_command_raw = raw["entrypoint"]["command"]
+    if not entrypoint_command_raw.strip() or not shlex.split(entrypoint_command_raw):
+        raise PluginManifestError(
+            "entrypoint.command must contain at least one non-whitespace token",
+            path=str(manifest_path),
+            json_pointer="/entrypoint/command",
+            expected="shell command with >= 1 executable token",
+            got=repr(entrypoint_command_raw),
+        )
     entrypoint = Entrypoint(
         type=raw["entrypoint"]["type"],
-        command=raw["entrypoint"]["command"],
+        command=entrypoint_command_raw,
     )
 
     audit_raw = raw.get("audit")
