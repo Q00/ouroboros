@@ -128,9 +128,7 @@ class Lockfile:
         body = "\n".join(lines).rstrip() + "\n"
 
         # Write to temp file in the same directory, then atomic rename.
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".plugins.lock.", dir=str(self.path.parent)
-        )
+        fd, tmp_path = tempfile.mkstemp(prefix=".plugins.lock.", dir=str(self.path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(body)

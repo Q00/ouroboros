@@ -159,11 +159,15 @@ def inspect_command(
     name: Annotated[str, typer.Argument(help="Installed plugin name.")],
     lockfile_path: Annotated[
         Path | None,
-        typer.Option("--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."),
+        typer.Option(
+            "--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."
+        ),
     ] = None,
     trust_root: Annotated[
         Path | None,
-        typer.Option("--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."),
+        typer.Option(
+            "--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."
+        ),
     ] = None,
 ) -> None:
     """Show installed plugin metadata + trust state.
@@ -201,9 +205,7 @@ def inspect_command(
     if entry.git_sha:
         console.print(f"  git_sha:        {entry.git_sha}")
     console.print(f"  trust_state:    {_trust_state_label(manifest, record)}")
-    console.print(
-        f"  granted_scopes: {', '.join(granted) if granted else '(none)'}"
-    )
+    console.print(f"  granted_scopes: {', '.join(granted) if granted else '(none)'}")
     if record is not None and record.version != manifest.version:
         # Loud signal so users understand why "trust_state" flipped back
         # to installed even though the trust file still lists grants.
@@ -215,8 +217,7 @@ def inspect_command(
     missing = _missing_required(manifest, record)
     if missing:
         console.print(
-            f"  missing scopes: {', '.join(missing)} "
-            f"(invocation will be blocked until granted)"
+            f"  missing scopes: {', '.join(missing)} (invocation will be blocked until granted)"
         )
 
 
@@ -224,11 +225,15 @@ def inspect_command(
 def list_command(
     lockfile_path: Annotated[
         Path | None,
-        typer.Option("--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."),
+        typer.Option(
+            "--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."
+        ),
     ] = None,
     trust_root: Annotated[
         Path | None,
-        typer.Option("--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."),
+        typer.Option(
+            "--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."
+        ),
     ] = None,
     json_output: Annotated[
         bool,
@@ -255,9 +260,7 @@ def list_command(
         # Re-load the manifest so trust_state reflects the same gate the
         # firewall enforces (required-scope set + version match), not
         # just "did the user grant any scope at all".
-        manifest_path = (
-            Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
-        )
+        manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
         try:
             manifest = load_manifest(manifest_path)
             trust_state = _trust_state_label(manifest, record)

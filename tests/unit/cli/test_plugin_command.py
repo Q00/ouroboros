@@ -44,7 +44,11 @@ REFERENCE_MANIFEST: dict = {
 
 @pytest.fixture
 def runner() -> CliRunner:
-    return CliRunner(mix_stderr=False) if "mix_stderr" in CliRunner.__init__.__code__.co_varnames else CliRunner()
+    return (
+        CliRunner(mix_stderr=False)
+        if "mix_stderr" in CliRunner.__init__.__code__.co_varnames
+        else CliRunner()
+    )
 
 
 def _write_manifest(dir_: Path, payload: dict) -> Path:
@@ -66,9 +70,7 @@ def test_discover_valid_manifest(runner: CliRunner, tmp_path: Path) -> None:
     assert "github:read" in result.output  # required scope listed
 
 
-def test_discover_invalid_manifest_exits_nonzero(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_discover_invalid_manifest_exits_nonzero(runner: CliRunner, tmp_path: Path) -> None:
     """A schema-violating manifest produces a friendly error and exit 1."""
     bad = {**REFERENCE_MANIFEST, "name": "Bad Name"}  # whitespace breaks pattern
     plugin_dir = tmp_path / "bad"
@@ -98,9 +100,7 @@ def test_inspect_uninstalled_plugin_errors(runner: CliRunner, tmp_path: Path) ->
     assert "is not installed" in result.output
 
 
-def test_inspect_installed_untrusted(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_inspect_installed_untrusted(runner: CliRunner, tmp_path: Path) -> None:
     """An installed-but-untrusted plugin reports trust_state=installed and
     flags the missing required scope."""
     plugin_home = tmp_path / "plugin_home"
@@ -316,9 +316,7 @@ def test_inspect_partial_trust_reports_installed_not_trusted(
     assert "github:pull_request:write" in result.output
 
 
-def test_inspect_stale_version_reports_installed(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_inspect_stale_version_reports_installed(runner: CliRunner, tmp_path: Path) -> None:
     """Regression: a trust file recorded for an older plugin version
     must NOT make `inspect` say "trusted" — the firewall treats it as
     invalidated, and the CLI must agree.
