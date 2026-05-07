@@ -214,6 +214,54 @@ def test_duplicate_command_name_rejected(tmp_path: Path) -> None:
     assert "review" in excinfo.value.args[0]
 
 
+def test_duplicate_permission_scope_rejected(tmp_path: Path) -> None:
+    """Duplicate permission scopes within a plugin must be rejected.
+
+    The firewall treats `scope` as the unique permission identifier:
+    `_required_permissions()` would emit one `plugin.permission_used`
+    event per duplicate, and `_scope_risk_index()` silently lets the
+    last entry win for the blocked-message risk label. Two
+    `github:read` entries with conflicting `risk` or `required` values
+    therefore produce inconsistent UX and audit data instead of being
+    rejected at load time.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {
+            "scope": "github:read",
+            "risk": "destructive",  # same scope, different risk
+            "required": False,  # and different required flag
+            "reason": "would overwrite the first entry's risk label",
+        },
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/permissions/1/scope"
+    assert "duplicate" in excinfo.value.args[0].lower()
+    assert "github:read" in excinfo.value.args[0]
+
+
+def test_duplicate_capability_name_rejected(tmp_path: Path) -> None:
+    """Duplicate capability names within a plugin must be rejected.
+
+    Downstream code keys capability decisions on `name`; a duplicate
+    silently shadows another entry's `access` and `reason`.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["capabilities"] = [
+        {"name": "ledger", "access": "write", "reason": "Record decisions."},
+        # Same name, different access -> would silently shadow.
+        {"name": "ledger", "access": "read", "reason": "Conflicting duplicate."},
+        {"name": "provenance", "access": "write", "reason": "Record context."},
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/capabilities/1/name"
+    assert "duplicate" in excinfo.value.args[0].lower()
+    assert "ledger" in excinfo.value.args[0]
+
+
 def test_invalid_json_decodes_to_useful_error(tmp_path: Path) -> None:
     """Bonus: garbage JSON is reported with a useful message."""
     target = tmp_path / "ouroboros.plugin.json"

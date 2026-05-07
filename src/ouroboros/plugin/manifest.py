@@ -309,6 +309,22 @@ def load_manifest(path: str | Path) -> PluginManifest:
         Capability(name=c["name"], access=c["access"], reason=c.get("reason", ""))
         for c in raw["capabilities"]
     )
+    # Reject duplicate capability names. Downstream code keys capability
+    # decisions on `name`, so a duplicate would silently shadow another
+    # entry's `access` / `reason`.
+    seen_capability_names: set[str] = set()
+    for cap in capabilities:
+        if cap.name in seen_capability_names:
+            idx = next(i for i, c in enumerate(capabilities) if c.name == cap.name and c is cap)
+            raise PluginManifestError(
+                f"duplicate capability name {cap.name!r}",
+                path=str(manifest_path),
+                json_pointer=f"/capabilities/{idx}/name",
+                expected="unique capability name within the plugin",
+                got=f"second occurrence of {cap.name!r}",
+            )
+        seen_capability_names.add(cap.name)
+
     permissions = tuple(
         Permission(
             scope=p["scope"],
@@ -318,6 +334,25 @@ def load_manifest(path: str | Path) -> PluginManifest:
         )
         for p in raw["permissions"]
     )
+    # Reject duplicate permission scopes. The firewall treats `scope` as
+    # the unique permission identifier: `_required_permissions()` would
+    # emit one `plugin.permission_used` event per duplicate, and
+    # `_scope_risk_index()` would silently let the last entry win for
+    # the blocked-message risk label. Two `github:read` entries with
+    # different `risk` or `required` values therefore produce
+    # inconsistent UX and audit data instead of being rejected.
+    seen_scopes: set[str] = set()
+    for perm in permissions:
+        if perm.scope in seen_scopes:
+            idx = next(i for i, p in enumerate(permissions) if p.scope == perm.scope and p is perm)
+            raise PluginManifestError(
+                f"duplicate permission scope {perm.scope!r}",
+                path=str(manifest_path),
+                json_pointer=f"/permissions/{idx}/scope",
+                expected="unique permission scope within the plugin",
+                got=f"second occurrence of {perm.scope!r}",
+            )
+        seen_scopes.add(perm.scope)
     entrypoint = Entrypoint(
         type=raw["entrypoint"]["type"],
         command=raw["entrypoint"]["command"],
