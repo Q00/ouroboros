@@ -17,9 +17,9 @@ The pipeline test uses a fake interview driver so the real backend
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+import json
 
 from ouroboros.auto.gh_pr_provider import (
     CommandResult,
@@ -55,7 +55,9 @@ class _RecordingDriver:
         )
 
 
-def _build_pipeline(*, env_enabled: bool, store: AutoStore) -> tuple[AutoPipeline, _RecordingDriver]:
+def _build_pipeline(
+    *, env_enabled: bool, store: AutoStore
+) -> tuple[AutoPipeline, _RecordingDriver]:
     driver = _RecordingDriver()
 
     async def _seed_generator(_session_id: str) -> Seed:  # pragma: no cover
@@ -99,8 +101,7 @@ def test_ambiguous_goal_falls_back_to_interview(tmp_path) -> None:
     pipeline, driver = _build_pipeline(env_enabled=True, store=store)
     state = AutoPipelineState(
         goal=(
-            "plan how we should fix https://github.com/Q00/ouroboros/issues/692 "
-            "before any merge"
+            "plan how we should fix https://github.com/Q00/ouroboros/issues/692 before any merge"
         ),
         cwd=str(tmp_path),
     )
@@ -182,9 +183,7 @@ def test_gate_blocks_merge_when_ci_is_pending_and_records_audit() -> None:
     classification = classify_goal(
         "merge https://github.com/Q00/ouroboros/pull/689 once CI is green"
     )
-    decision: MergePolicyDecision = evaluate_merge(
-        classification=classification, status=status
-    )
+    decision: MergePolicyDecision = evaluate_merge(classification=classification, status=status)
     assert decision.allowed is False
     assert any("CI state is pending" in r for r in decision.blocking_reasons)
 
@@ -197,6 +196,4 @@ def test_gate_blocks_merge_when_ci_is_pending_and_records_audit() -> None:
     # Resume safety: the audit record survives serialization.
     restored = SeedDraftLedger.from_dict(ledger.to_dict())
     assert restored.merge_policy_decisions == ledger.merge_policy_decisions
-    assert (
-        restored.merge_policy_decisions[-1]["decision"]["allowed"] is False
-    )
+    assert restored.merge_policy_decisions[-1]["decision"]["allowed"] is False

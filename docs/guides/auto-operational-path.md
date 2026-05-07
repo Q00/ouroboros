@@ -87,16 +87,44 @@ default `auto` strategy: without it set, the classifier is consulted
 | `never`  | any       | ineligible     | BLOCKED with "switch to `--interview-strategy=auto`" |
 
 A goal is **eligible** when `goal_classifier.classify_goal` returns
-`direct_run_allowed=True`.  At time of writing this means: a concrete
-PR or issue URL is present **and** an operational verb (`merge`, `fix`,
-`review`, …) is present **and** there is no ambiguous planning verb
-(`plan`, `investigate`, `어떻게`).  `/pulls` list URLs paired with a
-destructive verb are intentionally **not** eligible — the user must
-narrow the target through interview before anything destructive runs.
+`direct_run_allowed=True`.  All of these must hold:
+
+- exactly one PR URL **or** exactly one issue URL is present (multiple
+  PR/issue URLs make the mutation target ambiguous);
+- the operational verb's anchor requirement matches: PR-mutation verbs
+  (`merge`, `squash`, `force-push`, `delete-branch`, `close`, `reopen`,
+  `rebase`, `fix`, `머지`, `수정`, `개선`) require a PR URL — an Issue
+  URL alone is the wrong target type and forces interview;
+- read-only verbs (`review`, `comment`, `analyze`, `summarize`, `리뷰`,
+  `분석`) work against either a PR or an Issue URL;
+- no ambiguous planning verb is present (`plan`, `design`,
+  `investigate`, `explore`, `어떻게`).
+
+`/pulls` list URLs paired with a destructive verb are intentionally
+**not** eligible — the user must narrow the target through interview
+before anything destructive runs.
+
+`GoalClassification.from_dict` enforces the invariant
+`interview_required != direct_run_allowed`, so contradictory persisted
+records (both True or both False) are refused on load.
 
 The persisted classification is **sticky**: an operator who edits the
 goal field on a persisted state file cannot flip the routing decision
 on resume.
+
+### Resume contract
+
+Sessions blocked at the routing gate are recoverable.  The CLI flag
+`--interview-strategy` takes a sentinel default (omitted leaves the
+persisted strategy unchanged), and an explicit value — *including*
+`--interview-strategy=auto` — overwrites the persisted strategy on
+resume.  This is what makes the blocker guidance ("rerun with
+`--interview-strategy=auto`") actually work.
+
+`_recoverable_phase_for_tool("goal_classifier")` maps to
+`AutoPhase.INTERVIEW`, so a session blocked from `CREATED` re-enters
+the interview path on resume rather than returning the same blocked
+result forever.
 
 ---
 
@@ -108,13 +136,14 @@ positive evidence:
 | Check | Default | Failure → blocks because |
 |---|---|---|
 | Classifier consistency | always | `HIGH` risk + `requires_confirmation=False` is treated as a classifier bug |
+| Action ↔ classification match | `require_action_classification_match=True` | A LOW-risk goal cannot authorize MERGE/CLOSE/etc.; each action requires a minimum classified risk tier |
 | Write permission | always | No push/merge access |
 | Target branch | `{main, master}` (overridable via `MergePolicy`) | Branch not allow-listed |
 | Draft state | `block_on_draft=True` | PR not ready for review |
 | `mergeable=False` | always | Conflicts |
 | `mergeable=None` | always | GitHub still computing |
-| CI state | `require_passing_ci=True` | Pending or failing |
-| Approving reviews (MERGE) | `require_approval=True` | <1 approval or any CHANGES_REQUESTED |
+| CI state | `require_passing_ci=True` | Pending or failing (also blocks on a malformed `statusCheckRollup` — non-list / list-of-non-dicts → `UNKNOWN`, never silently `SUCCESS`) |
+| Approving reviews (MERGE) | `require_approval=True` | <1 approval or any CHANGES_REQUESTED.  GitHub's aggregate `reviewDecision` is authoritative: a stale `COMMENTED` from an approver does not flip the verdict. |
 
 Each invocation of the gate appends a JSON record to
 `SeedDraftLedger.merge_policy_decisions`.  The audit log survives
