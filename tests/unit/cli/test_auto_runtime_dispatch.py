@@ -151,6 +151,52 @@ def test_run_auto_demotes_persisted_opencode_plugin_to_subprocess(tmp_path) -> N
     assert should_dispatch_via_plugin("opencode", "subprocess") is False
 
 
+def test_run_auto_demotes_fresh_session_opencode_plugin_to_subprocess(tmp_path) -> None:
+    """Fresh `--runtime opencode` session with `get_opencode_mode() == "plugin"` is demoted.
+
+    This pins the *fresh-session* branch of the OpenCode plugin
+    demotion. `_run_auto()` reads the persisted opencode_mode for
+    resumes but falls back to ``get_opencode_mode()`` (the configured
+    default) for new sessions; both paths must demote ``"plugin"`` to
+    ``"subprocess"`` for both authoring and run-handoff handlers,
+    because the standalone CLI process cannot host the OpenCode bridge
+    plugin envelope.
+    """
+    handlers = _capture_handler_construction()
+
+    with (
+        patch("ouroboros.cli.commands.auto.get_opencode_mode", return_value="plugin"),
+        patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
+        patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
+        patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_noop_run),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="safe goal",
+                resume=None,
+                runtime="opencode",
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=True,
+            )
+        )
+
+    interview_kwargs = handlers["interview"].call_args.kwargs
+    generate_kwargs = handlers["generate"].call_args.kwargs
+    execute_kwargs = handlers["execute"].call_args.kwargs
+    start_kwargs = handlers["start_execute"].call_args.kwargs
+
+    assert interview_kwargs["agent_runtime_backend"] == "opencode"
+    assert interview_kwargs["opencode_mode"] == "subprocess"
+    assert generate_kwargs["opencode_mode"] == "subprocess"
+    assert execute_kwargs["opencode_mode"] == "subprocess"
+    assert start_kwargs["opencode_mode"] == "subprocess"
+
+    assert should_dispatch_via_plugin("opencode", "subprocess") is False
+
+
 def test_run_auto_keeps_opencode_subprocess_in_process(tmp_path) -> None:
     """OpenCode in subprocess mode (no persisted plugin) stays in-process."""
     state = AutoPipelineState(goal="resume goal", cwd=str(tmp_path))
