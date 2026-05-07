@@ -153,8 +153,13 @@ class PluginManifest:
     version: str
     source: SourceSpec
     commands: tuple[CommandSpec, ...]
-    capabilities: frozenset[Capability]
-    permissions: frozenset[Permission]
+    # Capabilities and permissions preserve manifest declaration order.
+    # The firewall's `permission_used` emission and blocked-scope error
+    # message both walk these in order, so the persisted audit trail and
+    # user-facing UX are deterministic. Using `tuple` (instead of
+    # `frozenset`) makes that explicit at the type level.
+    capabilities: tuple[Capability, ...]
+    permissions: tuple[Permission, ...]
     entrypoint: Entrypoint
     description: str = ""
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
@@ -283,11 +288,11 @@ def load_manifest(path: str | Path) -> PluginManifest:
     )
 
     commands = tuple(_build_command(c) for c in raw["commands"])
-    capabilities = frozenset(
+    capabilities = tuple(
         Capability(name=c["name"], access=c["access"], reason=c.get("reason", ""))
         for c in raw["capabilities"]
     )
-    permissions = frozenset(
+    permissions = tuple(
         Permission(
             scope=p["scope"],
             risk=p["risk"],

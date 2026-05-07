@@ -380,6 +380,63 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     assert "not found" in result.message.lower()
 
 
+def test_required_permission_order_matches_manifest_declaration(tmp_path: Path) -> None:
+    """Manifest declaration order must drive both the blocked-scope error
+    message (which names the FIRST missing required scope) and the
+    `plugin.permission_used` event order.
+
+    Pre-fix, `manifest.permissions` was a `frozenset`, so iteration order
+    was undefined and the firewall's UX/audit ordering became
+    process-dependent. Now `permissions` is a tuple preserving the JSON
+    declaration order; both downstream behaviors must follow.
+    """
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    # Three required permissions in a specific JSON order.
+    payload["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {"scope": "shell:execute", "risk": "destructive", "required": True},
+        {"scope": "github:repo:read", "risk": "read_only", "required": True},
+    ]
+    program = _make_program(tmp_path, payload)
+
+    # Untrusted call -> blocked message names the FIRST declared scope.
+    blocked_events: list[dict] = []
+    blocked = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=None,
+        event_sink=blocked_events.append,
+        correlation_id="corr-order-blocked",
+        subprocess_runner=_fake_runner(),
+    )
+    assert blocked.status == "blocked"
+    assert "github:read" in blocked.message
+    assert blocked.message.index("github:read") < blocked.message.index("github-pr-ops")
+
+    # Fully trust then re-invoke; permission_used events follow declaration order.
+    store = TrustStore(root=tmp_path / "trust")
+    for scope in ("github:read", "shell:execute", "github:repo:read"):
+        store.grant(plugin="github-pr-ops", version="0.1.0", scope=scope, granted_by="u")
+    trust = store.read("github-pr-ops")
+    happy_events: list[dict] = []
+    happy = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=happy_events.append,
+        correlation_id="corr-order-happy",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    assert happy.status == "success"
+    permission_events = [
+        e for e in happy_events if e["event_type"] == "plugin.permission_used"
+    ]
+    scopes_in_order = [e["permissions_used"][0] for e in permission_events]
+    assert scopes_in_order == ["github:read", "shell:execute", "github:repo:read"]
+
+
 @pytest.mark.parametrize(
     "exc, expected_code, descriptor_substr",
     [
