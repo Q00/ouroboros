@@ -461,8 +461,8 @@ class AutoPipeline:
             "unknown_timeout",
         }:
             msg = (
-                "--attach-execution requires an auto session with unknown run handoff "
-                "status after a prior run start attempt"
+                "Attach requires an auto session with unknown run handoff status "
+                "after a prior run start attempt"
             )
             state.mark_blocked(msg, tool_name="run_starter")
             return False
@@ -526,7 +526,7 @@ class AutoPipeline:
             "unknown_timeout",
         }:
             msg = (
-                "--reconcile-run requires an auto session with unknown run handoff "
+                "Reconciliation requires an auto session with unknown run handoff "
                 "status after a prior run start attempt"
             )
             state.run_reconciliation_status = "invalid_context"
@@ -549,9 +549,9 @@ class AutoPipeline:
         state.run_reconciled_at = utc_now_iso()
         state.run_handoff_guidance = (
             "Generic reconciliation has no runtime-specific discovery adapter for this "
-            "unknown handoff. No duplicate run was started. Attach a verified handle with "
-            "--attach-execution/--attach-job/--attach-session, or add a runtime-specific "
-            "reconciler that returns attached, not_found, ambiguous, or unsupported."
+            "unknown handoff. No duplicate run was started. Attach a verified execution, "
+            "job, or run session handle, or add a runtime-specific reconciler that returns "
+            "attached, not_found, ambiguous, or unsupported."
         )
         state.mark_blocked(state.run_handoff_guidance, tool_name="run_starter")
         return False, None
