@@ -547,7 +547,11 @@ Concrete obligations on the lifecycle commands:
   snapshot for the `plugin_home` plugin (its own subdirectory under
   `~/.ouroboros/plugins/<...>/`, not the parent catalog) or, for
   `local_path`, removes only this plugin's catalog registration while
-  leaving the on-disk path untouched. This closes the otherwise-silent
+  leaving the on-disk path untouched. `remove` ALSO deletes any
+  disable record for the plugin's install subject — once the user has
+  uninstalled it, the disable signal no longer applies and a future
+  fresh install starts un-trusted-but-enabled (the standard new-trust
+  prompt path), not silently disabled. This closes the otherwise-silent
   regrant path where a user could downgrade or reinstall back to an
   old digest and inherit prior trust, while preserving siblings. No
   "tombstone with implicit re-grant" behavior is permitted — uninstall
@@ -558,23 +562,52 @@ Concrete obligations on the lifecycle commands:
   upstream metadata) and, if any field differs from a previously-trusted
   record for the same `name`, MUST treat the install as a fresh trust
   subject (all `required: true` permissions begin un-trusted).
-- `ooo plugin trust ...` writes a record bound to the current triple of
-  the named plugin. Trust does NOT carry across triple changes, ever,
-  including version bumps from the same source (digest changes ⇒ new
-  trust subject). `trust` also clears the `disabled` flag below.
+- `ooo plugin trust ...` writes a trust record bound to the current
+  triple of the named plugin. Trust does NOT carry across triple
+  changes, ever, including version bumps from the same source (digest
+  changes ⇒ new trust subject). `trust` also clears any disable record
+  for the plugin's install subject (see `disable` below) — that is the
+  re-enable path.
 - `ooo plugin disable <name>` is the **revocation primitive** for both
-  third-party plugins and first-party programs. It MUST:
-  - delete every trust record bound to the plugin's current triple
-    (so the firewall's pre-invocation trust check refuses on the next
-    invocation, exactly as if the user had never run `trust`);
-  - set a durable `disabled: true` flag in the lockfile (or, for
-    first-party, in core's in-process disabled set persisted to a
-    sibling override file) — this prevents boot-time implicit grants
-    from re-attaching on the next start;
+  third-party plugins and first-party programs. The third-party
+  lockfile carries two kinds of records, each with its own key shape,
+  precisely so the disable signal cannot be lost by a digest rotation:
+  - **Trust records** — keyed by `(name, source.type, source_identity,
+    artifact_digest)` — express "the user has granted these scopes to
+    *this exact artifact*". They are wiped whenever any field of the
+    triple changes.
+  - **Disable records** — keyed by `(name, source.type,
+    source_identity)` (no `artifact_digest`) — express "the user has
+    disabled this plugin, regardless of which version is installed".
+    They survive every digest change, including upgrades and any
+    `remove + add` cycle that lands the same `(source.type,
+    source_identity)` again. (For first-party programs the disable
+    records live in `~/.ouroboros/first-party-overrides.json` keyed
+    by `name` only, per the Manifest Schema section above; the lock-
+    file holds zero first-party rows.)
+
+  `disable` MUST therefore:
+  - delete every trust record bound to the plugin's install subject
+    (every `artifact_digest` for the matching
+    `(name, source.type, source_identity)`), so the firewall's
+    pre-invocation trust check refuses on the next invocation as if
+    the user had never run `trust`;
+  - write a disable record keyed by `(name, source.type,
+    source_identity)` (or, for first-party, by `name`) — this record
+    is the binding signal across upgrades; it is **not** stored on a
+    trust-record row and is **not** lost when the trust row's digest
+    changes;
   - leave the installed bytes and manifest in place, so re-enabling
     is cheap and identity-preserving.
+
+  The firewall MUST consult the disable record before any invocation,
+  independently of whether trust records exist. A plugin with no
+  `required: true` permissions therefore cannot bypass `disable` by
+  having an empty trust subject — the disable check fires first and
+  fails closed regardless of permission shape.
+
   Re-enabling is performed by re-running `ooo plugin trust …` on the
-  same plugin: that clears the `disabled` flag and writes fresh trust
+  same plugin: that deletes the disable record AND writes fresh trust
   records bound to the *current* triple. There is no separate `enable`
   verb in v0; the trust prompt is the only re-grant entrypoint, which
   keeps every grant decision explicit and recorded.
