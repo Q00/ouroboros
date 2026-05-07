@@ -66,6 +66,15 @@ class AutoBlocker:
 
 
 @dataclass(frozen=True, slots=True)
+class AutoAnswerMetadata:
+    """Structured provenance for auto answers that need audit context."""
+
+    risk: str | None = None
+    confidence: float | None = None
+    provenance: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AutoAnswer:
     """Answer plus structured ledger updates."""
 
@@ -76,6 +85,7 @@ class AutoAnswer:
     assumptions: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     blocker: AutoBlocker | None = None
+    metadata: AutoAnswerMetadata = field(default_factory=AutoAnswerMetadata)
 
     @property
     def prefixed_text(self) -> str:
