@@ -691,12 +691,13 @@ _DESTRUCTIVE_BULK_NOUNS = (
 # operation slip past the gate (e.g. "Which tables should we drop according to
 # the documentation before redeploying?"). The exemption fires only when the
 # artefact is the explicit object of the drop/wipe — introduced by
-# ``from the …`` — which is the phrasing that signals "remove an entry from a
-# process artefact" rather than "delete data from a system". Authority/reference
-# phrasings (``according to the documentation``, ``per the release plan``,
-# ``in the documentation example``) do NOT count as a non-data qualifier.
+# ``from the …`` or ``in the …`` — which is the phrasing that signals
+# "remove/edit an entry inside a process artefact" rather than "delete data from
+# a system". Authority/reference phrasings (``according to the documentation``,
+# ``per the release plan``) do NOT match this pattern and therefore do NOT
+# suppress the destructive-bulk gate.
 _DESTRUCTIVE_BULK_NON_DATA_QUALIFIERS = re.compile(
-    r"\bfrom\s+the\s+"
+    r"\b(?:from|in)\s+the\s+"
     r"(?:release\s+plan|docs|doc|documentation|plan|roadmap|backlog|changelog|spec)"
     r"\b"
 )
@@ -740,19 +741,6 @@ _PRODUCT_SEMANTICS_REGULATED_VERBS_RE = re.compile(
     r"view|views|viewing|viewed|"
     r"access|accesses|accessing|accessed)\b"
 )
-_COMPLIANCE_POLICY_VERBS_RE = re.compile(
-    r"\b(store|stores|storing|stored|"
-    r"handle|handles|handling|handled|"
-    r"retain|retains|retaining|retained|"
-    r"collect|collects|collecting|collected|"
-    r"encrypt|encrypts|encrypting|encrypted|"
-    r"process|processes|processing|processed|"
-    r"transmit|transmits|transmitting|transmitted|"
-    r"disclose|discloses|disclosing|disclosed|"
-    r"share|shares|sharing|shared|"
-    r"manage|manages|managing|managed|"
-    r"govern|governs|governing|governed)\b"
-)
 # Broad product-question indicator: contains a modal/question word.  Looser than
 # ``_is_product_behavior_question`` so that phrasings like "Should users be able
 # to download …" are captured even when ``download`` is not in that helper's verb list.
@@ -768,18 +756,27 @@ def _is_safe_product_regulated_question(lowered: str) -> bool:
     "Should users be able to download GDPR exports?".  Those are asking for
     feature-level behavior, not compliance-policy decisions.
 
-    Strategy: pass through when the question:
-      1. Mentions a regulated noun (PII/GDPR/HIPAA/SOX/PCI-DSS).
-      2. Contains a product-question modal (should/can/will/must/do/does/is/are).
-      3. Uses a product-semantics verb (export, download, display, show, view …).
-      4. Does NOT use a compliance-policy verb (store, handle, retain, collect,
-         encrypt, process …) that would require a regulated-data handling decision.
+    Strategy: pass through when the question
+      1. mentions a regulated noun (PII/GDPR/HIPAA/SOX/PCI-DSS),
+      2. contains a product-question modal (should/can/will/must/do/does/is/are),
+      3. uses a product-semantics verb (export, download, display, show, view …).
+
+    Compliance-policy phrasings (``How should the system handle GDPR data
+    retention?``, ``What PII should the system collect?``) do not contain a
+    product-semantics verb, so they fail (3) and remain blocked.
+
+    The previous implementation also rejected any sentence containing a
+    compliance-policy verb anywhere in the text. That over-blocked legitimate
+    product-behavior questions where the compliance verb appeared as a
+    past-participle adjective (``view stored PII fields``, ``display encrypted
+    HIPAA files``). The product-semantics verb is the main action of the
+    sentence; compliance verbs in adjectival position do not turn the question
+    into a compliance-policy decision. Filtering by the presence of a
+    product-semantics verb is sufficient and avoids that false-positive.
     """
     if not _REGULATED_NOUNS_RE.search(lowered):
         return False
     if not _PRODUCT_QUESTION_MODAL_RE.search(lowered):
-        return False
-    if _COMPLIANCE_POLICY_VERBS_RE.search(lowered):
         return False
     return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))
 

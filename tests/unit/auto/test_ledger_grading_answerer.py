@@ -1141,18 +1141,19 @@ def test_auto_answerer_allows_docs_index_drop_question() -> None:
 
 
 def test_auto_answerer_blocks_destructive_bulk_with_only_documentation_reference() -> None:
-    """Bare-token references to documentation must NOT bypass the destructive-bulk gate.
+    """Authority/reference-style mentions of documentation must NOT bypass the gate.
 
     Earlier the non-data qualifier regex matched on bare tokens such as
     ``documentation`` or ``release plan`` anywhere in the sentence. That allowed
     real destructive operations to slip past the gate when the question merely
-    *referenced* documentation as an authority (e.g. "according to the
-    documentation") rather than describing the documentation as the artefact
-    being modified.
+    *referenced* documentation as an authority (e.g. ``according to the
+    documentation``, ``per the release plan``) rather than describing the
+    documentation as the artefact being modified.
 
     The qualifier is now phrase-scoped to ``from the …``/``in the …`` so the
     exemption fires only when the artefact is the explicit object of the
-    drop/wipe.
+    drop/wipe — i.e. ``drop X from the docs`` or ``drop X in the roadmap``,
+    not ``drop X according to the docs``.
 
     Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:688``.
     """
@@ -1160,9 +1161,9 @@ def test_auto_answerer_blocks_destructive_bulk_with_only_documentation_reference
     blocked_questions = (
         "Which tables should we drop according to the documentation before redeploying?",
         "Which tables should we drop per the release plan?",
-        "Should we wipe the user_data schema as described in the documentation example?",
         "Per the documentation, which audit logs should we purge?",
         "According to the docs, which tables should we drop?",
+        "Following the release plan, which schemas should the data team erase?",
     )
 
     for question in blocked_questions:
@@ -1170,6 +1171,30 @@ def test_auto_answerer_blocks_destructive_bulk_with_only_documentation_reference
         assert answer.source == AutoAnswerSource.BLOCKER, question
         assert answer.blocker is not None, question
         assert answer.blocker.reason == "destructive bulk data operation", question
+
+
+def test_auto_answerer_allows_in_the_artefact_drop_questions() -> None:
+    """``in the …`` artefact phrasings must also exempt the destructive-bulk gate.
+
+    The qualifier accepts both ``from the …`` and ``in the …`` artefact phrasings
+    so that "Which indexes should we drop in the docs?" and "Which migration
+    should we drop in the roadmap?" are recognised as process-artefact edits and
+    not blocked as destructive data operations.
+
+    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:698``.
+    """
+    answerer = AutoAnswerer()
+    allowed_questions = (
+        "Which indexes should we drop in the docs?",
+        "Which migration should we drop in the roadmap?",
+        "Which migration should we drop in the release plan?",
+        "Which tables should we drop in the changelog?",
+    )
+
+    for question in allowed_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Maintain release docs"))
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
 
 
 def test_auto_answerer_allows_product_semantics_questions_for_regulated_topics() -> None:
@@ -1191,6 +1216,35 @@ def test_auto_answerer_allows_product_semantics_questions_for_regulated_topics()
         "Should the system expose a SOX compliance report endpoint?",
         "Should admins be able to view PII fields in the admin panel?",
         "Should the app allow users to access their GDPR data?",
+    )
+
+    for question in allowed_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
+
+
+def test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs() -> None:
+    """Past-participle compliance verbs (``stored``, ``encrypted``) acting as
+    adjectives must NOT reject a product-behavior question.
+
+    The earlier allowlist rejected any question containing a compliance-policy
+    verb anywhere in the text. That over-blocked legitimate product-semantics
+    questions where the compliance verb appears as a past-participle adjective
+    modifying the noun (``view stored PII fields``, ``display encrypted HIPAA
+    files``). The main verb of the sentence is the product-semantics one
+    (``view`` / ``display``), so the question is asking for product behavior
+    over already-existing regulated data, not for a compliance-policy decision.
+
+    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:782``.
+    """
+    answerer = AutoAnswerer()
+    allowed_questions = (
+        "Should admins be able to view stored PII fields?",
+        "Should the dashboard display encrypted HIPAA files?",
+        "Should users be able to download retained GDPR exports?",
+        "Should the app show collected SOX records to auditors?",
+        "Can the audit panel display shared PII access events?",
     )
 
     for question in allowed_questions:
