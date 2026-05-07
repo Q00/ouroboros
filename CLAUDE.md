@@ -69,6 +69,7 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 | Command | Loads |
 |---------|-------|
 | `ooo` | — |
+| `ooo auto` | MCP: `ouroboros_auto` |
 | `ooo interview` | `ouroboros:socratic-interviewer` |
 | `ooo seed` | `ouroboros:seed-architect` |
 | `ooo run` | MCP required |

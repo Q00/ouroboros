@@ -104,9 +104,9 @@ class TestDetectKeywords:
     def test_ooo_auto_does_not_collide_with_autopilot_natural_language(self):
         # Make sure the `auto` pattern does not over-match unrelated phrases.
         result = detect_keywords("turn on autopilot")
-        assert (
-            result["suggested_skill"] != "/ouroboros:auto"
-        ), "bare 'autopilot' should not route to ooo auto"
+        assert result["suggested_skill"] != "/ouroboros:auto", (
+            "bare 'autopilot' should not route to ooo auto"
+        )
 
 
 class TestSetupBypass:
