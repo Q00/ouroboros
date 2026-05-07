@@ -135,9 +135,7 @@ class TestHermesCliRuntime:
         ):
             monkeypatch.delenv(name, raising=False)
 
-    def test_default_timeouts_match_class_attributes(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_timeouts_match_class_attributes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._clear_timeout_env(monkeypatch)
         runtime = HermesCliRuntime(cli_path="hermes")
         assert (
