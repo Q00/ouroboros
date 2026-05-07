@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from ouroboros.auto.repo_context import repo_auto_answer_context
 
@@ -207,3 +208,24 @@ def test_repo_context_handles_javascript_without_lockfile(tmp_path) -> None:
     assert "package_manager" not in context.repo_facts
     assert context.repo_facts["test_command"] == "package script `test`: vitest run"
     assert context.evidence["test_command"] == ("package.json",)
+
+
+def test_repo_context_skips_go_facts_when_go_mod_unreadable(tmp_path, monkeypatch) -> None:
+    go_mod = tmp_path / "go.mod"
+    go_mod.write_text("module example.com/demo\n", encoding="utf-8")
+    (tmp_path / "go.sum").write_text("", encoding="utf-8")
+
+    real_read_text = Path.read_text
+
+    def fake_read_text(self, *args, **kwargs):
+        if self == go_mod:
+            raise OSError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert "project_kind" not in context.repo_facts
+    assert "package_manager" not in context.repo_facts
+    assert context.evidence == {}

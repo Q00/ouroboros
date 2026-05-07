@@ -165,6 +165,8 @@ def _add_go_facts(root: Path, facts: dict[str, str], evidence: dict[str, tuple[s
     if not go_mod.is_file():
         return
     module_name = _read_go_module(go_mod)
+    if module_name is None:
+        return
     project_kind = "Go module declared in go.mod"
     if module_name:
         project_kind = f"Go module {module_name!r} declared in go.mod"
@@ -243,17 +245,18 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _read_go_module(path: Path) -> str:
+def _read_go_module(path: Path) -> str | None:
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped == "module":
-                return ""
-            if stripped.startswith("module "):
-                parts = stripped.split(None, 1)
-                return parts[1].strip() if len(parts) > 1 else ""
+        text = path.read_text(encoding="utf-8")
     except OSError:
-        return ""
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "module":
+            return ""
+        if stripped.startswith("module "):
+            parts = stripped.split(None, 1)
+            return parts[1].strip() if len(parts) > 1 else ""
     return ""
 
 
