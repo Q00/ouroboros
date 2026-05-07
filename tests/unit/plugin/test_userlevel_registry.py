@@ -158,6 +158,50 @@ def test_global_singleton_persists_within_session(tmp_path: Path) -> None:
     assert a is b
 
 
+def test_replace_with_changed_namespace_releases_old_namespace(tmp_path: Path) -> None:
+    """`register(replace=True)` on a plugin that changed namespace must
+    free the old namespace mapping.
+
+    Pre-fix, `_namespace_owner` retained both the stale old namespace and
+    the new one pointing at the same plugin name. A later
+    `unregister(name)` only popped the *new* namespace, leaving the old
+    one permanently shadowed and rejecting any other plugin that tried to
+    claim it.
+    """
+    registry = UserLevelProgramRegistry()
+
+    v1 = _load_ref(tmp_path / "v1")  # namespace="github-pr"
+    registry.register(v1)
+
+    # Re-register the same plugin name with a NEW namespace, replace=True.
+    v2_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    v2_payload["version"] = "0.2.0"
+    v2_payload["commands"][0]["namespace"] = "github-pr-v2"
+    v2 = load_manifest(_write_manifest(tmp_path / "v2", v2_payload))
+    registry.register(v2, replace=True)
+
+    # Old namespace must be free again.
+    assert registry.get_by_namespace("github-pr") is None
+    # New namespace owns the program.
+    found = registry.get_by_namespace("github-pr-v2")
+    assert found is not None
+    assert found.manifest.version == "0.2.0"
+
+    # And a different plugin can now claim the old namespace.
+    other_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    other_payload["name"] = "plugin-other"
+    other = load_manifest(_write_manifest(tmp_path / "other", other_payload))
+    registry.register(other)  # must not raise — namespace "github-pr" is free
+
+    # Unregistering the replaced plugin must drop only its current ns.
+    assert registry.unregister("github-pr-ops") is True
+    assert registry.get_by_namespace("github-pr-v2") is None
+    # The other plugin's ownership of "github-pr" is unaffected.
+    other_found = registry.get_by_namespace("github-pr")
+    assert other_found is not None
+    assert other_found.name == "plugin-other"
+
+
 def test_skill_registry_unaffected(tmp_path: Path) -> None:
     """Test 10: existing skill registry tests still work — no state shared.
 

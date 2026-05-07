@@ -111,6 +111,19 @@ class UserLevelProgramRegistry:
                     f"refusing to register {manifest.name!r}"
                 )
 
+            # When `replace=True` is used to update a plugin that previously
+            # claimed a different namespace, drop the stale mapping so the
+            # old namespace becomes free again. Without this, the old entry
+            # in `_namespace_owner` keeps pointing at this plugin and a
+            # subsequent `unregister(name)` only frees the *new* namespace,
+            # leaving the old one permanently shadowed.
+            if existing is not None:
+                old_namespace = existing.namespace
+                if old_namespace != namespace and (
+                    self._namespace_owner.get(old_namespace) == manifest.name
+                ):
+                    self._namespace_owner.pop(old_namespace, None)
+
             program = RegisteredProgram(manifest=manifest)
             self._by_name[manifest.name] = program
             self._namespace_owner[namespace] = manifest.name
