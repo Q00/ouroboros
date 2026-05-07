@@ -6,6 +6,7 @@ import asyncio
 from enum import Enum
 import os
 from pathlib import Path
+import sys
 from typing import Annotated
 
 import typer
@@ -137,6 +138,7 @@ def auto_command(
     if not resume and (goal is None or not goal.strip()):
         print_error("goal is required unless --resume is provided")
         raise typer.Exit(1)
+    driver = _prompt_driver_if_missing(driver=driver, resume=resume)
     try:
         result = asyncio.run(
             _run_auto(
@@ -172,6 +174,30 @@ def _safe_default_cwd() -> Path:
 
 _DEFAULT_MAX_INTERVIEW_ROUNDS = 12
 _DEFAULT_MAX_REPAIR_ROUNDS = 5
+
+
+def _prompt_driver_if_missing(*, driver: str | None, resume: str | None) -> str | None:
+    """Prompt interactive new sessions to opt into a selected interview driver."""
+    if driver is not None or resume:
+        return driver
+    if get_auto_interview_driver_backend() is not None:
+        return driver
+    if not sys.stdin.isatty():
+        return driver
+    if not typer.confirm("Use an interview driver to answer auto questions?", default=True):
+        return driver
+
+    choices = interview_driver_backend_choices()
+    default = "hermes" if "hermes" in choices else choices[0]
+    prompt = f"Interview driver ({', '.join(choices)})"
+    while True:
+        selected = typer.prompt(prompt, default=default).strip()
+        try:
+            resolve_interview_driver_backend(selected)
+        except ValueError:
+            print_error(f"Unsupported interview driver backend: {selected}")
+            continue
+        return selected
 
 
 async def _run_auto(

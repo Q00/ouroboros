@@ -51,6 +51,57 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     assert "auto_test" in result.output
 
 
+def test_auto_prompts_for_driver_when_interactive_and_unconfigured() -> None:
+    """Interactive plain `ooo auto` should offer selected-driver mode."""
+    from ouroboros.cli.commands.auto import _prompt_driver_if_missing
+
+    with (
+        patch("ouroboros.cli.commands.auto.get_auto_interview_driver_backend", return_value=None),
+        patch("ouroboros.cli.commands.auto.sys.stdin.isatty", return_value=True),
+        patch("ouroboros.cli.commands.auto.typer.confirm", return_value=True) as confirm,
+        patch("ouroboros.cli.commands.auto.typer.prompt", return_value="hermes") as prompt,
+    ):
+        driver = _prompt_driver_if_missing(driver=None, resume=None)
+
+    assert driver == "hermes"
+    confirm.assert_called_once()
+    prompt.assert_called_once()
+
+
+def test_auto_prompt_decline_keeps_deterministic_driver() -> None:
+    """Declining the interactive driver prompt preserves existing deterministic mode."""
+    from ouroboros.cli.commands.auto import _prompt_driver_if_missing
+
+    with (
+        patch("ouroboros.cli.commands.auto.get_auto_interview_driver_backend", return_value=None),
+        patch("ouroboros.cli.commands.auto.sys.stdin.isatty", return_value=True),
+        patch("ouroboros.cli.commands.auto.typer.confirm", return_value=False),
+        patch("ouroboros.cli.commands.auto.typer.prompt") as prompt,
+    ):
+        driver = _prompt_driver_if_missing(driver=None, resume=None)
+
+    assert driver is None
+    prompt.assert_not_called()
+
+
+def test_auto_prompt_skips_when_configured_driver_exists() -> None:
+    """Configured defaults should avoid an extra prompt."""
+    from ouroboros.cli.commands.auto import _prompt_driver_if_missing
+
+    with (
+        patch(
+            "ouroboros.cli.commands.auto.get_auto_interview_driver_backend",
+            return_value="hermes",
+        ),
+        patch("ouroboros.cli.commands.auto.sys.stdin.isatty", return_value=True),
+        patch("ouroboros.cli.commands.auto.typer.confirm") as confirm,
+    ):
+        driver = _prompt_driver_if_missing(driver=None, resume=None)
+
+    assert driver is None
+    confirm.assert_not_called()
+
+
 def _persisted_state_with_bounds(tmp_path, *, max_interview_rounds: int, max_repair_rounds: int):
     """Persist a blocked auto session with a known loop budget for resume tests."""
     from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore

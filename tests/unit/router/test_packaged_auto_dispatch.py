@@ -21,5 +21,31 @@ def test_packaged_auto_skill_dispatches_to_ouroboros_auto(tmp_path: Path) -> Non
         "max_interview_rounds": "",
         "max_repair_rounds": "",
         "skip_run": True,
+        "driver": "",
+        "brake": "",
     }
     assert result.first_argument == "Audit the open PRs --skip-run"
+
+
+def test_packaged_auto_skill_dispatches_driver_and_brake_to_ouroboros_auto(
+    tmp_path: Path,
+) -> None:
+    """Lock selected-driver options on the packaged ``ooo auto`` skill surface."""
+    prompt = 'ooo auto "Audit the open PRs" --driver hermes --brake off'
+
+    result = resolve_skill_dispatch(prompt, cwd=tmp_path)
+
+    assert isinstance(result, Resolved)
+    assert result.command_prefix == "ooo auto"
+    assert result.mcp_tool == "ouroboros_auto"
+    assert result.mcp_args == {
+        "goal": "Audit the open PRs",
+        "resume": "",
+        "cwd": str(tmp_path),
+        "max_interview_rounds": "",
+        "max_repair_rounds": "",
+        "skip_run": "",
+        "driver": "hermes",
+        "brake": "off",
+    }
+    assert result.first_argument == "Audit the open PRs --driver hermes --brake off"
