@@ -160,9 +160,7 @@ class PluginManifest:
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
 
 
-def _load_schema(
-    schema_version: str, *, manifest_path: str | Path
-) -> dict[str, Any]:
+def _load_schema(schema_version: str, *, manifest_path: str | Path) -> dict[str, Any]:
     """Load the vendored schema for `schema_version`.
 
     Reuses `manifest_path` as the `path` field on any raised error so the
