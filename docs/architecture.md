@@ -12,7 +12,14 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                 OUROBOROS ARCHITECTURE                                               │
+│                            USERLEVEL PROGRAMS LAYER  (Section 7)                                     │
+│        Installable plugins:  github-pr-ops  ·  jira-sync  ·  release-coordinator   ...               │
+│        First-party programs: ooo auto       ·  ooo run    ·  ooo pm                                  │
+└──────────────────────────────────────────────┬──────────────────────────────────────────────────────┘
+                                               │ declared manifest contract / declared scopes
+                                               ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                          OUROBOROS ARCHITECTURE  (core, Sections 1–6)                                │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                                     │
 │  ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐                 │
@@ -60,11 +67,14 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 > **Note**: This layer is the in-process registry of bundled skills and agents
 > that ship with core. It is **not** the user-installable UserLevel plugin
-> layer (introduced in #725). User-installable plugins live one layer above
-> this — see [`Section 7: UserLevel Programs Layer`](#7-userlevel-programs-layer)
-> below and the canonical RFC at
-> [`docs/rfc/userlevel-plugins.md`](./rfc/userlevel-plugins.md). Do not
-> conflate the two in PRs.
+> layer (introduced in [#725](https://github.com/Q00/ouroboros/issues/725)).
+> User-installable plugins live one layer above this — see
+> [`Section 7: UserLevel Programs Layer`](#7-userlevel-programs-layer) below.
+> The full layer-model and contract are described in issue
+> [#725](https://github.com/Q00/ouroboros/issues/725); a long-form RFC is
+> being drafted in PR [#743](https://github.com/Q00/ouroboros/pull/743) and
+> will land at `docs/rfc/userlevel-plugins.md` once merged. Do not conflate
+> the two registries in PRs.
 
 ### 2. Core Layer
 **Immutable data models and specifications**
@@ -106,7 +116,9 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 ### 7. UserLevel Programs Layer
 
 **User-installable workflows built on top of core primitives** (introduced
-in #725; canonical reference: [`docs/rfc/userlevel-plugins.md`](./rfc/userlevel-plugins.md)).
+in [#725](https://github.com/Q00/ouroboros/issues/725); long-form RFC in
+flight in PR [#743](https://github.com/Q00/ouroboros/pull/743), which will
+land at `docs/rfc/userlevel-plugins.md`).
 
 This layer is distinct from the in-process Skills & Agents Registry
 (Section 1):
