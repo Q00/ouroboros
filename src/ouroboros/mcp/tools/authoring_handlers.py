@@ -1249,11 +1249,21 @@ class InterviewHandler:
         # Use injected or create interview engine
         # max_turns=1: MCP is a pure question generator. No tool use needed.
         # Main session handles codebase exploration and answering.
+        #
+        # ``strict_mcp_config=True`` is opt-in here — and ONLY here — so the
+        # subprocess spawned for question generation cannot rediscover the
+        # plugin-provided ouroboros MCP server when this handler runs as a
+        # child of Claude Code's MCP host (where ``mcp__plugin_ouroboros_*``
+        # tools are auto-registered).  Without this, the subprocess
+        # recurses on ``ouroboros_interview`` and exits at ``--max-turns 1``.
+        # CLI interview entrypoints (``ooo init`` / ``ooo pm``) do NOT pass
+        # this flag, so they keep plugin/project ``.mcp.json`` servers.
         llm_adapter = self.llm_adapter or create_llm_adapter(
             backend=self.llm_backend,
             max_turns=1,
             use_case="interview",
             allowed_tools=_interview_allowed_tools(self.llm_backend),
+            strict_mcp_config=True,
         )
         engine = self.interview_engine or InterviewEngine(
             llm_adapter=llm_adapter,

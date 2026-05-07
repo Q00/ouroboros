@@ -120,6 +120,7 @@ def create_llm_adapter(
     timeout: float | None = None,
     max_retries: int = 3,
     io_recorder: IOJournalRecorder | None = None,
+    strict_mcp_config: bool = False,
 ) -> LLMAdapter:
     """Create an LLM adapter from config or explicit options."""
     resolved_backend = resolve_llm_backend(backend)
@@ -162,12 +163,14 @@ def create_llm_adapter(
             max_turns=max_turns,
             on_message=on_message,
             timeout=timeout,
-            # Interview is the only path that must avoid recursing into the
-            # ouroboros MCP server when launched from inside Claude Code's
-            # MCP context. Other callers keep plugin/project MCP servers
-            # reachable so explicit envelopes (e.g. ``mcp__ouroboros__qa``)
-            # remain functional.
-            strict_mcp_config=use_case == "interview",
+            # Forwarded as-is.  The factory does NOT auto-derive
+            # ``strict_mcp_config`` from ``use_case`` because non-MCP
+            # interview entrypoints (CLI ``ooo init`` / ``ooo pm``) need
+            # to keep plugin and project ``.mcp.json`` servers reachable.
+            # Only the nested MCP-tool entrypoint
+            # (``InterviewHandler.handle`` in
+            # ``mcp/tools/authoring_handlers.py``) opts in.
+            strict_mcp_config=strict_mcp_config,
         )
     if resolved_backend == "codex":
         return CodexCliLLMAdapter(

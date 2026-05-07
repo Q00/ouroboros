@@ -90,21 +90,38 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, ClaudeCodeAdapter)
         assert adapter._cwd == "/tmp/project"
 
-    def test_claude_code_interview_use_case_enables_strict_mcp_config(self) -> None:
-        """Interview is the only path that must avoid recursing into the
-        ouroboros MCP server, so the factory opts into ``strict_mcp_config``
-        for the Claude adapter exclusively on ``use_case="interview"``."""
+    def test_claude_code_interview_use_case_does_not_auto_enable_strict_mcp_config(
+        self,
+    ) -> None:
+        """``use_case="interview"`` MUST NOT auto-enable strict MCP isolation.
+
+        CLI interview entrypoints (``ooo init`` / ``ooo pm``) take this
+        path and rely on plugin/project ``.mcp.json`` servers being
+        reachable for brownfield repository tooling.  Only the nested
+        MCP-tool entrypoint opts in explicitly.
+        """
         adapter = create_llm_adapter(
             backend="claude_code",
             use_case="interview",
             allowed_tools=["Read"],
         )
         assert isinstance(adapter, ClaudeCodeAdapter)
+        assert adapter._strict_mcp_config is False
+
+    def test_claude_code_explicit_strict_mcp_config_is_forwarded(self) -> None:
+        """The MCP nested-interview handler opts in via this explicit flag."""
+        adapter = create_llm_adapter(
+            backend="claude_code",
+            use_case="interview",
+            allowed_tools=["Read"],
+            strict_mcp_config=True,
+        )
+        assert isinstance(adapter, ClaudeCodeAdapter)
         assert adapter._strict_mcp_config is True
 
-    def test_claude_code_default_use_case_keeps_plugin_mcp_servers(self) -> None:
-        """Default callers (non-interview) must keep plugin/project MCP
-        servers reachable, even when an explicit envelope is supplied."""
+    def test_claude_code_default_keeps_plugin_mcp_servers(self) -> None:
+        """Default callers (no opt-in) must keep plugin/project MCP servers
+        reachable, even when an explicit envelope is supplied."""
         adapter = create_llm_adapter(
             backend="claude_code",
             allowed_tools=["Read", "mcp__ouroboros__qa"],

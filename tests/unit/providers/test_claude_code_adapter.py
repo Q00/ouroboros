@@ -688,15 +688,32 @@ class TestJsonSchemaHandling:
         assert "AskUserQuestion" not in options_call_kwargs["tools"]
         assert "Write" in options_call_kwargs["disallowed_tools"]
         # Generic explicit envelopes must not silently drop plugin/project
-        # MCP servers — only opt-in callers (e.g. the interview policy
-        # path) should set strict_mcp_config. Otherwise envelopes that
-        # include MCP names like ``mcp__ouroboros__qa`` would lose access
-        # to those tools at runtime.
+        # MCP servers — only opt-in callers (the nested MCP-tool entrypoint
+        # in ``mcp/tools/authoring_handlers.py``) should request strict
+        # isolation.  Otherwise envelopes that include MCP names like
+        # ``mcp__ouroboros__qa`` would lose access to those tools at runtime.
         assert "strict_mcp_config" not in options_call_kwargs
+        assert "strict-mcp-config" not in (options_call_kwargs.get("extra_args") or {})
 
     @pytest.mark.asyncio
-    async def test_strict_mcp_config_opt_in_forwards_to_sdk(self) -> None:
-        """Opt-in strict_mcp_config flag flows through to the SDK options."""
+    async def test_strict_mcp_config_uses_extra_args_when_options_supports_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Opt-in MCP isolation forwards via ``extra_args`` on SDKs that
+        expose ``extra_args`` but not ``strict_mcp_config`` as a typed field.
+
+        This matches the supported SDK pin range
+        (``claude-agent-sdk>=0.1.0,<1.0.0``) where the latest releases
+        accept the flag only through CLI passthrough.
+        """
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset({"extra_args", "allowed_tools", "tools"}),
+        )
+
         allowed_tools = ["Read", "Grep"]
         adapter = ClaudeCodeAdapter(
             allowed_tools=allowed_tools,
@@ -728,7 +745,95 @@ class TestJsonSchemaHandling:
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert options_call_kwargs["allowed_tools"] == allowed_tools
         assert options_call_kwargs["tools"] == allowed_tools
+        # Flag forwarded via CLI passthrough surface, not as a typed kwarg.
+        assert "strict_mcp_config" not in options_call_kwargs
+        assert options_call_kwargs.get("extra_args", {}).get("strict-mcp-config") is None
+        assert "strict-mcp-config" in options_call_kwargs.get("extra_args", {})
+
+    @pytest.mark.asyncio
+    async def test_strict_mcp_config_uses_typed_field_when_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Forward to a typed ``strict_mcp_config`` field if a future SDK
+        adds one, in preference to the CLI passthrough form."""
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset({"extra_args", "allowed_tools", "tools", "strict_mcp_config"}),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=["Read"], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
         assert options_call_kwargs.get("strict_mcp_config") is True
+        # Should not double-pass via extra_args when the typed field is present.
+        assert "strict-mcp-config" not in (options_call_kwargs.get("extra_args") or {})
+
+    @pytest.mark.asyncio
+    async def test_strict_mcp_config_skipped_when_sdk_lacks_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the SDK exposes neither surface, opt-in degrades silently
+        instead of crashing ``ClaudeAgentOptions(**options_kwargs)``."""
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset({"allowed_tools", "tools"}),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=["Read"], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert "strict_mcp_config" not in options_call_kwargs
+        assert "extra_args" not in options_call_kwargs
 
     @pytest.mark.asyncio
     async def test_default_tool_policy_does_not_set_strict_mcp_config(self) -> None:
@@ -759,6 +864,7 @@ class TestJsonSchemaHandling:
 
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert "strict_mcp_config" not in options_call_kwargs
+        assert "strict-mcp-config" not in (options_call_kwargs.get("extra_args") or {})
 
 
 class TestErrorDiagnostics:
