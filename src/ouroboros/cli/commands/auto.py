@@ -379,6 +379,10 @@ def _print_status(state: AutoPipelineState) -> None:
     authoring, run_label = _format_runtime_labels(state.runtime_backend, state.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
+    invoked_by = state.invoked_by()
+    if invoked_by != "direct":
+        source = (state.provenance or {}).get("source", "unknown")
+        console.print(f"Invoked by: [bold]{invoked_by}[/] (source={_rich_escape(source)})")
     console.print(f"Last progress: {state.last_progress_message}")
     console.print(f"Last progress at: {state.last_progress_at}")
     if state.interview_session_id:
@@ -444,6 +448,9 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
+    if result.invoked_by != "direct":
+        source = (result.provenance or {}).get("source", "unknown")
+        console.print(f"Invoked by: [bold]{result.invoked_by}[/] (source={_rich_escape(source)})")
     if result.grade:
         console.print(f"Seed grade: [bold]{result.grade}[/]")
     if result.interview_session_id:

@@ -61,6 +61,8 @@ class AutoPipelineResult:
     blocker: str | None = None
     runtime_backend: str | None = None
     opencode_mode: str | None = None
+    invoked_by: str = "direct"
+    provenance: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -488,6 +490,8 @@ class AutoPipeline:
             blocker=blocker or state.last_error,
             runtime_backend=state.runtime_backend,
             opencode_mode=state.opencode_mode,
+            invoked_by=state.invoked_by(),
+            provenance=dict(state.provenance) if state.provenance else None,
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:

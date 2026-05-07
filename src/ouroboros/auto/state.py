@@ -298,6 +298,23 @@ class AutoPipelineState:
         """Return True when the state cannot continue automatically."""
         return self.phase in TERMINAL_PHASES
 
+    def invoked_by(self) -> str:
+        """Return the high-level invocation source for blocker/summary output.
+
+        ``direct`` covers all CLI-originated runs (no provenance, or
+        ``source == "cli"``). Anything else with a recognized non-cli source
+        is ``gateway``. Provenance present but missing a usable ``source``
+        becomes ``unknown`` so misconfigured integrations are visible.
+        """
+        if not self.provenance:
+            return "direct"
+        source = self.provenance.get("source")
+        if source == "cli":
+            return "direct"
+        if isinstance(source, str) and source.strip():
+            return "gateway"
+        return "unknown"
+
     def is_stale(self, now: datetime | None = None) -> bool:
         """Return True when current phase has exceeded its configured timeout."""
         if self.is_terminal():
