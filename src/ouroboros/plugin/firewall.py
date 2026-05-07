@@ -34,6 +34,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
+from pathlib import Path
 import shlex
 import subprocess
 from typing import Literal
@@ -160,6 +161,35 @@ def _format_blocked_message(plugin_name: str, missing: list[str], risks: dict[st
 
 def _scope_risk_index(manifest: PluginManifest) -> dict[str, str]:
     return {p.scope: p.risk for p in manifest.permissions}
+
+
+def _resolve_plugin_cwd(manifest: PluginManifest) -> str | None:
+    """Working directory the firewall should anchor the subprocess in.
+
+    Returns the manifest's source path (resolved to absolute) for
+    `local_path` / `plugin_home` plugins so relative entrypoints and
+    file accesses don't depend on where `ooo` was invoked from. For
+    first-party plugins (which ship inside the binary) and any source
+    type without a usable path, returns None and the subprocess
+    inherits the caller's cwd.
+    """
+    src = manifest.source
+    if src.type not in {"local_path", "plugin_home"}:
+        return None
+    if not src.path:
+        return None
+    candidate = Path(src.path).expanduser()
+    # Only anchor when the directory actually exists. The firewall
+    # already converts spawn-time OSError to `plugin.failed`, so a
+    # missing dir would surface there with a clean message; we just
+    # don't want subprocess.run to raise FileNotFoundError before we
+    # even get to record the launch event.
+    if not candidate.is_dir():
+        return None
+    try:
+        return str(candidate.resolve())
+    except OSError:  # pragma: no cover — unresolvable symlink on weird FS
+        return str(candidate)
 
 
 def invoke_plugin(
@@ -300,7 +330,41 @@ def invoke_plugin(
 
     # 5. Run entrypoint out-of-process.
     cmd_template = manifest.entrypoint.command
-    cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
+    cmd_template_parts = shlex.split(cmd_template)
+    if not cmd_template_parts:
+        # The schema rejects an empty `command`, but a whitespace-only
+        # value historically slipped through and `shlex.split(" ")` returns
+        # `[]`. The firewall contract is to fail cleanly with a terminal
+        # `plugin.failed` event on any launch error — never raise out of
+        # `invoke_plugin`. Treat this as an unbuildable entrypoint.
+        message = f"entrypoint command is empty or whitespace: {cmd_template!r}"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={"correlation_id": correlation_id},
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=126,
+            message=message,
+            events=tuple(emitted),
+        )
+    cmd_argv = cmd_template_parts + [command_name] + list(argv)
+
+    # Compute the working directory the entrypoint should run in.
+    # `local_path` / `plugin_home` manifests carry their own location;
+    # relative entrypoints like `./run.sh` and commands that read files
+    # from the plugin directory only work when the subprocess is anchored
+    # there. `first_party` plugins ship inside the binary and have no
+    # plugin-local directory, so we let them inherit the caller's cwd.
+    cwd = _resolve_plugin_cwd(manifest)
     runner = subprocess_runner or subprocess.run
     try:
         completed = runner(
@@ -308,6 +372,7 @@ def invoke_plugin(
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd,
         )
     except OSError as exc:
         # Broader than FileNotFoundError so the firewall always reaches

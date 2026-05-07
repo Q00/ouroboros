@@ -463,6 +463,165 @@ def test_entrypoint_permission_error_emits_failed_126(tmp_path: Path) -> None:
     assert "not executable" in result.message
 
 
+def test_subprocess_runs_with_cwd_for_local_path_manifest(tmp_path: Path) -> None:
+    """Regression: `local_path` / `plugin_home` manifests carry their
+    own location, and relative entrypoints (`./run.sh`) or commands
+    that read files from the plugin directory only work when the
+    subprocess is anchored there. The firewall must pass `cwd=...`
+    to subprocess.run, not silently inherit the caller's cwd.
+    """
+    # Use a real existing directory so the firewall's existence check
+    # accepts the path. tmp_path is the cleanest such directory.
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["source"] = {"type": "local_path", "path": str(tmp_path)}
+    program = _make_program(tmp_path, payload)
+
+    captured: dict = {}
+
+    def _runner(argv, *args, **kwargs):
+        captured["argv"] = argv
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-cwd",
+        subprocess_runner=_runner,
+    )
+    assert result.status == "success"
+    # subprocess was invoked with cwd anchored to the plugin's source.path,
+    # not to wherever the caller happened to be.
+    assert captured["cwd"] is not None
+    assert Path(captured["cwd"]).resolve() == tmp_path.resolve()
+
+
+def test_subprocess_inherits_cwd_for_first_party_manifest(tmp_path: Path) -> None:
+    """First-party plugins ship inside the binary and have no plugin-
+    local directory, so the firewall must NOT pin a `cwd`."""
+    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
+    fp["name"] = "ooo-builtin"
+    fp["source"] = {"type": "first_party"}
+    fp["permissions"] = []
+    fp["commands"] = [
+        {
+            "namespace": "builtin",
+            "name": "run",
+            "summary": "Run.",
+            "usage": "ooo builtin run",
+            "risk": "write",
+        }
+    ]
+    program = _make_program(tmp_path, fp)
+
+    captured: dict = {}
+
+    def _runner(argv, *args, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    invoke_plugin(
+        program,
+        command_name="run",
+        argv=[],
+        trust_record=None,
+        event_sink=events.append,
+        correlation_id="corr-fp",
+        subprocess_runner=_runner,
+    )
+    assert captured["cwd"] is None, (
+        "first-party plugins must inherit the caller's cwd; "
+        "the firewall has no plugin-local directory to pin"
+    )
+
+
+def test_whitespace_entrypoint_emits_failed_not_crash(tmp_path: Path) -> None:
+    """Regression: an entrypoint command that's only whitespace passed
+    `minLength: 1` schema validation in earlier revisions and made
+    `shlex.split(" ")` return `[]`. The firewall must still emit a
+    terminal `plugin.failed` event with a clear message rather than
+    crash the caller.
+
+    The schema now also rejects whitespace-only commands, but the
+    firewall keeps a defense-in-depth runtime guard so a constructed
+    manifest (e.g. via a fixture or a future lax schema) cannot bypass
+    the audit-output contract.
+    """
+    # Build the manifest manually so it bypasses the schema's tightened
+    # `\\S` pattern — we're testing the firewall's runtime guard, not
+    # the schema.
+    from ouroboros.plugin.manifest import (
+        CommandSpec,
+        Entrypoint,
+        Permission,
+        PluginManifest,
+        SourceSpec,
+    )
+    from ouroboros.plugin.userlevel_registry import UserLevelProgramRegistry
+
+    bad_manifest = PluginManifest(
+        schema_version="0.1",
+        name="github-pr-ops",
+        version="0.1.0",
+        source=SourceSpec(type="local_path", path=str(tmp_path)),
+        commands=(
+            CommandSpec(
+                namespace="github-pr",
+                name="review",
+                summary="x",
+                usage="x",
+                risk="read_only",
+                requires_confirmation=False,
+                arguments=(),
+            ),
+        ),
+        capabilities=(),
+        permissions=(Permission(scope="github:read", risk="read_only", required=True),),
+        entrypoint=Entrypoint(type="command", command="   "),
+    )
+    program = UserLevelProgramRegistry().register(bad_manifest)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    runner_called = False
+
+    def _spy(*args, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-empty-cmd",
+        subprocess_runner=_spy,
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    assert runner_called is False, "must not even attempt subprocess.run([...])"
+    types = [e["event_type"] for e in events]
+    assert types[-1] == "plugin.failed"
+    assert "empty or whitespace" in result.message
+
+
 def test_entrypoint_generic_oserror_emits_failed_126(tmp_path: Path) -> None:
     """Regression: a generic OSError (e.g. ENOEXEC) must also land on a
     `plugin.failed` event with a 126-class exit code rather than
