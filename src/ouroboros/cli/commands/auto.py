@@ -299,9 +299,7 @@ def _print_resume_hint(state: AutoPipelineState) -> None:
             f"{state.last_tool_name or 'the last step'} from scratch)"
         )
     )
-    console.print(
-        f"{label}: [bold]ooo auto --resume {state.auto_session_id}[/]{note}"
-    )
+    console.print(f"{label}: [bold]ooo auto --resume {state.auto_session_id}[/]{note}")
 
 
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
@@ -343,31 +341,27 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
 
 
 def _print_resume_hint_for_result(result: AutoPipelineResult) -> None:
-    if result.status == "complete":
+    """Print the resume hint for a freshly-finished run.
+
+    The persisted state is the single source of truth for capability —
+    reloading it here lets ``_print_resume_hint`` (used by ``--status``) and
+    this code share one classifier (``resume_capability_for_state``). Earlier
+    revisions reimplemented the classifier from ``AutoPipelineResult`` fields
+    only, which omitted ``seed_artifact`` / ``run_start_attempted`` and made
+    the hint lie for cases such as a ``seed_saver`` failure or an
+    unknown-handle run timeout. (Bot-flagged in #714 review.)
+    """
+    try:
+        state = AutoStore().load(result.auto_session_id)
+    except Exception:
+        # If the state file disappeared between run and print, fall back to
+        # the previous low-fidelity hint rather than raising during a
+        # success/failure render.
+        if result.status == "complete":
+            return
+        console.print(f"Resume: [bold]ooo auto --resume {result.auto_session_id}[/]")
         return
-    has_handle = any(
-        (
-            result.interview_session_id,
-            result.pending_question,
-            result.seed_path,
-            result.execution_id,
-            result.job_id,
-            result.run_session_id,
-        )
-    )
-    if has_handle:
-        console.print(
-            f"Resume: [bold]ooo auto --resume {result.auto_session_id}[/]"
-        )
-        return
-    if result.status in {"blocked", "failed"}:
-        console.print(
-            f"Retry: [bold]ooo auto --resume {result.auto_session_id}[/]"
-            " (no persisted interview/run handle yet — this re-attempts "
-            "the last step from scratch)"
-        )
-        return
-    console.print(f"Resume: [bold]ooo auto --resume {result.auto_session_id}[/]")
+    _print_resume_hint(state)
 
 
 __all__ = ["app"]

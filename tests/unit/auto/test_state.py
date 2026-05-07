@@ -414,10 +414,7 @@ def test_resume_capability_loads_blocked_session_fixture() -> None:
     interview.start with no interview_session_id. The CLI must classify this
     as RETRY, not RESUME, so users are not misled by the hint."""
     fixture = (
-        Path(__file__).resolve().parents[2]
-        / "fixtures"
-        / "auto"
-        / "auto_blocked_session.json"
+        Path(__file__).resolve().parents[2] / "fixtures" / "auto" / "auto_blocked_session.json"
     )
     assert fixture.exists()
     import json
@@ -428,3 +425,40 @@ def test_resume_capability_loads_blocked_session_fixture() -> None:
     assert state.last_tool_name == "interview.start"
     assert state.interview_session_id is None
     assert resume_capability_for_state(state) is ResumeCapability.RETRY
+
+
+def test_resume_capability_unknown_run_handoff_is_unavailable() -> None:
+    """When the run starter was attempted but no durable handle was
+    captured, the pipeline refuses to retry the run automatically — so the
+    CLI MUST classify this as UNAVAILABLE rather than RESUME, even though
+    a Seed artifact is persisted. (Bot-flagged in #714 review.)"""
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo")
+    state.transition(AutoPhase.INTERVIEW, "i")
+    state.transition(AutoPhase.SEED_GENERATION, "g")
+    state.transition(AutoPhase.REVIEW, "r")
+    state.transition(AutoPhase.RUN, "run")
+    # Simulate the unknown-handoff shape: pipeline tried to start a run,
+    # got no job_id / execution_id / run_session_id back, and blocked.
+    state.run_start_attempted = True
+    state.seed_artifact = {"placeholder": True}  # seed survived an earlier phase
+    state.run_handoff_status = "unknown_no_handle"
+    state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
+    assert state.job_id is None
+    assert state.execution_id is None
+    assert state.run_session_id is None
+    assert resume_capability_for_state(state) is ResumeCapability.UNAVAILABLE
+
+
+def test_resume_capability_seed_saver_failure_is_resume() -> None:
+    """A blocked seed_saver failure leaves seed_artifact persisted but no
+    seed_path. ``--resume`` will reload the artifact and continue, so this
+    classifies as RESUME — verifies the classifier consults seed_artifact
+    (the previous result-only classifier missed this case)."""
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo")
+    state.transition(AutoPhase.INTERVIEW, "i")
+    state.transition(AutoPhase.SEED_GENERATION, "g")
+    state.transition(AutoPhase.REVIEW, "r")
+    state.seed_artifact = {"goal": "Build a CLI"}
+    state.mark_failed("seed save failed: disk full", tool_name="seed_saver")
+    assert state.seed_path is None
+    assert resume_capability_for_state(state) is ResumeCapability.RESUME

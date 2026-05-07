@@ -64,13 +64,31 @@ def resume_capability_for_state(state: AutoPipelineState) -> ResumeCapability:
     consistent between ``--status`` and a freshly-finished run. Rules:
 
     * ``COMPLETE`` → ``UNAVAILABLE`` — nothing to resume.
-    * Any persisted continuation handle (``interview_session_id``,
-      ``pending_question``, ``seed_artifact``/``seed_path``, ``execution_id``,
-      ``job_id``, ``run_session_id``) → ``RESUME``.
+    * Run-handoff was attempted but no durable tracking handle was captured
+      (``run_start_attempted`` is True and all of ``job_id`` /
+      ``execution_id`` / ``run_session_id`` are None) → ``UNAVAILABLE``.
+      ``AutoPipeline.run`` explicitly refuses to start another execution in
+      this case, so advertising ``Resume:`` would lie. (Bot-flagged in #714
+      review.)
+    * Any other persisted continuation handle (``interview_session_id``,
+      ``pending_question``, ``seed_artifact``/``seed_path``,
+      ``execution_id``, ``job_id``, ``run_session_id``) → ``RESUME``.
     * Otherwise, blocked/failed (or in-progress without a handle) → ``RETRY``.
     """
     if state.phase == AutoPhase.COMPLETE:
         return ResumeCapability.UNAVAILABLE
+
+    # Unknown run handoff: pipeline refuses to retry the run automatically to
+    # avoid duplicate execution. Resume cannot continue, so we MUST NOT
+    # advertise it as RESUME even though a Seed artifact is persisted.
+    has_run_handle = bool(state.job_id or state.execution_id or state.run_session_id)
+    if (
+        state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}
+        and state.run_start_attempted
+        and not has_run_handle
+    ):
+        return ResumeCapability.UNAVAILABLE
+
     if (
         state.interview_session_id
         or state.pending_question
