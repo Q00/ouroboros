@@ -117,6 +117,62 @@ async def test_cli_run_auto_threads_progress_callback_to_pipeline(monkeypatch, t
     assert captured["progress_callback"] is cb
 
 
+def test_auto_interview_driver_emits_progress_via_callback() -> None:
+    """The interview driver must fire the progress callback on every save.
+
+    AutoPipeline pushes its progress callback into the driver at the start
+    of run() so the longest-running phase (interview rounds) surfaces
+    live snapshots through the same contract as phase / grade / repair
+    events emitted from the pipeline itself.
+    """
+    from ouroboros.auto.interview_driver import AutoInterviewDriver
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+
+    captured: list[AutoProgressEvent] = []
+
+    class _StubBackend:
+        async def start(self, _goal, *, cwd):  # noqa: ARG002
+            raise AssertionError("not used in this test")
+
+        async def answer(self, _session_id, _answer):  # noqa: ARG002
+            raise AssertionError("not used in this test")
+
+        async def resume(self, _session_id):  # noqa: ARG002
+            raise AssertionError("not used in this test")
+
+    driver = AutoInterviewDriver(_StubBackend(), progress_callback=captured.append)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
+    state.transition(AutoPhase.INTERVIEW, "asking interview round 1/12")
+
+    driver._save(state)
+    state.mark_progress("answered round 1/12 from repo_fact", tool_name="auto_answerer")
+    driver._save(state)
+    # A second save with the same message must not emit a duplicate.
+    driver._save(state)
+
+    assert [event.message for event in captured] == [
+        "asking interview round 1/12",
+        "answered round 1/12 from repo_fact",
+    ]
+    assert all(event.kind == "phase" for event in captured)
+    assert all(event.phase == "interview" for event in captured)
+
+
+def test_auto_interview_driver_swallows_callback_errors() -> None:
+    from ouroboros.auto.interview_driver import AutoInterviewDriver
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+
+    def exploding(_event):
+        raise RuntimeError("observer failure")
+
+    driver = AutoInterviewDriver(object(), progress_callback=exploding)  # type: ignore[arg-type]
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
+    state.transition(AutoPhase.INTERVIEW, "asking interview round 1/12")
+
+    # Must not raise even though the observer always raises.
+    driver._save(state)
+
+
 def test_cli_auto_quiet_suppresses_progress_lines(monkeypatch, tmp_path) -> None:
     """End-to-end: --quiet must not stream progress lines to the user."""
     from ouroboros.auto.state import AutoStore

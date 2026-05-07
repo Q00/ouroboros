@@ -97,6 +97,11 @@ class AutoPipeline:
         self._last_emitted_phase = None
         self._last_emitted_grade = None
         self._last_emitted_repair = None
+        # Push the same progress callback down into the interview driver so
+        # the longest-running phase (auto interview rounds) emits live
+        # snapshots through the same observer contract instead of forcing
+        # consumers to scrape persisted state for per-round updates.
+        self.interview_driver.progress_callback = self.progress_callback
         ledger = (
             SeedDraftLedger.from_dict(state.ledger)
             if state.ledger

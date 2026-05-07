@@ -17,6 +17,7 @@ from ouroboros.auto.answerer import (
 )
 from ouroboros.auto.gap_detector import Gap, GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
+from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
@@ -70,9 +71,36 @@ class AutoInterviewDriver:
     store: AutoStore | None = None
     timeout_seconds: float = 60.0
     max_rounds: int = 12
+    progress_callback: AutoProgressCallback | None = None
+    _last_emitted_message: str | None = field(default=None, init=False, repr=False)
+
+    def _emit(self, state: AutoPipelineState) -> None:
+        """Emit a progress snapshot for the current state via the callback.
+
+        Deduped on ``last_progress_message`` so consumers do not see a
+        torrent of identical events for unchanged state. Callback errors
+        are swallowed so an observer can never break the interview loop.
+        """
+        if self.progress_callback is None:
+            return
+        message = state.last_progress_message
+        if message == self._last_emitted_message:
+            return
+        self._last_emitted_message = message
+        event = AutoProgressEvent(
+            auto_session_id=state.auto_session_id,
+            phase=state.phase.value,
+            kind="phase",
+            message=message,
+        )
+        try:
+            self.progress_callback(event)
+        except Exception:
+            pass
 
     async def run(self, state: AutoPipelineState, ledger: SeedDraftLedger) -> AutoInterviewResult:
         """Run bounded auto interview until Seed-ready or blocked."""
+        self._last_emitted_message = None
         self._ensure_interview_phase(state)
         answer_context = self.context_provider(state.cwd)
         interview_tool_name = "interview.start"
@@ -267,6 +295,10 @@ class AutoInterviewDriver:
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
             self.store.save(state)
+        # Per-round / per-error progress lives in ``state.last_progress_message``;
+        # emit it here so observers see every interview-loop save without each
+        # call site needing to remember to fire the callback.
+        self._emit(state)
 
 
 class FunctionInterviewBackend:
