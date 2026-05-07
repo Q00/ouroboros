@@ -48,17 +48,25 @@ class InterviewBackendWithPrepare(InterviewBackend, Protocol):
     """Optional protocol surface for backends that can split session creation
     from the (potentially slow) first-question generation.
 
-    Backends that implement ``prepare`` MUST return a durable session id whose
-    follow-up state is recoverable via ``resume(session_id)``. The auto driver
-    persists this id to ``AutoPipelineState`` immediately, so a subsequent
-    timeout in ``start``/``resume`` does not strand the session without a
-    handle.
+    Contract:
+
+    1. ``prepare(goal, cwd=...)`` allocates an interview session server-side
+       and returns its durable id. It MUST NOT generate the first question.
+       The id MUST be the same handle that ``resume(session_id)`` accepts.
+    2. The auto driver persists the returned id to ``AutoPipelineState``
+       immediately so a timeout in step 3 does not strand the session.
+    3. The auto driver then calls ``resume(prepared_id)`` to obtain the
+       first question. Backends MUST return that same ``session_id`` from
+       ``resume`` — the driver rejects a mismatch as a backend bug.
+    4. Backends without ``prepare`` (or returning ``None`` / raising) keep
+       the legacy single-call ``start`` path unchanged.
     """
 
     async def prepare(self, goal: str, *, cwd: str) -> str | None:
         """Register an interview session and return its id without generating
         the first question. Return ``None`` to fall back to the legacy
-        single-call ``start`` path."""
+        single-call ``start`` path. The returned id MUST be recoverable via
+        :meth:`resume`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,19 +122,41 @@ class AutoInterviewDriver:
             else:
                 prepared_id = await self._maybe_prepare_session(state)
                 if prepared_id is not None:
+                    # Persist the durable interview handle BEFORE the slow
+                    # first-question call. A subsequent timeout in
+                    # ``resume(prepared_id)`` no longer strands the session.
                     state.interview_session_id = prepared_id
                     state.mark_progress(
                         "interview session prepared; awaiting first question",
                         tool_name="interview.prepare",
                     )
                     self._save(state)
-                turn = _validate_turn(
-                    await self._with_timeout(
-                        self.backend.start(state.goal, cwd=state.cwd),
-                        state,
-                        tool_name=interview_tool_name,
+                    # The backend has already allocated the session in
+                    # ``prepare()``; ``resume(prepared_id)`` returns the first
+                    # question rather than re-creating a session in
+                    # ``start()`` (which would orphan the prepared id).
+                    turn = _validate_turn(
+                        await self._with_timeout(
+                            self.backend.resume(prepared_id),
+                            state,
+                            tool_name=interview_tool_name,
+                        )
                     )
-                )
+                    if turn.session_id != prepared_id:
+                        msg = (
+                            "interview backend returned session_id "
+                            f"{turn.session_id!r} after prepare/resume to "
+                            f"{prepared_id!r}; refusing to drift"
+                        )
+                        raise RuntimeError(msg)
+                else:
+                    turn = _validate_turn(
+                        await self._with_timeout(
+                            self.backend.start(state.goal, cwd=state.cwd),
+                            state,
+                            tool_name=interview_tool_name,
+                        )
+                    )
                 state.interview_session_id = turn.session_id
                 state.pending_question = turn.question
                 self._save(state)

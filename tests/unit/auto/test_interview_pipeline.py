@@ -265,15 +265,26 @@ async def test_interview_driver_persists_session_id_before_first_question(
     tmp_path,
 ) -> None:
     """A backend that supports prepare() must have its session id persisted
-    before start() runs so a first-question timeout still leaves a resumable
-    handle on the auto state."""
+    before the first-question call runs, so a timeout in
+    ``resume(prepared_id)`` still leaves a resumable handle on the auto
+    state. The driver MUST call ``resume(prepared_id)`` for the first
+    question rather than ``start()`` again — calling ``start()`` would
+    orphan the prepared id. (Bot-flagged in #706 review.)"""
+
+    start_calls: list[tuple[str, str]] = []
+    resume_calls: list[str] = []
 
     async def prepare(goal: str, cwd: str) -> str | None:  # noqa: ARG001
         return "interview_pre_42"
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        await asyncio.sleep(0.5)
-        return InterviewTurn("never returned", "interview_pre_42")
+        start_calls.append((goal, cwd))
+        return InterviewTurn("must not be reached", "interview_pre_42")
+
+    async def resume(session_id: str) -> InterviewTurn:
+        resume_calls.append(session_id)
+        await asyncio.sleep(0.5)  # exceeds timeout below
+        return InterviewTurn("never returned", session_id)
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("done", session_id, seed_ready=True)
@@ -282,18 +293,62 @@ async def test_interview_driver_persists_session_id_before_first_question(
     ledger = SeedDraftLedger.from_goal(state.goal)
     store = AutoStore(tmp_path)
     driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer, prepare=prepare),
+        FunctionInterviewBackend(start, answer, resume=resume, prepare=prepare),
         store=store,
         timeout_seconds=0.05,
     )
 
     result = await driver.run(state, ledger)
 
+    # Driver took the prepare → resume path, NOT prepare → start.
+    assert start_calls == []
+    assert resume_calls == ["interview_pre_42"]
+    # Timeout produced a blocked result, but the prepared id is durable.
     assert result.status == "blocked"
     assert state.interview_session_id == "interview_pre_42"
     persisted = store.load(state.auto_session_id)
     assert persisted.interview_session_id == "interview_pre_42"
     assert state.last_tool_name == "interview.start"
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_rejects_resume_returning_drifted_session_id(
+    tmp_path,
+) -> None:
+    """A backend that returns a different session_id from ``resume`` after
+    ``prepare`` is misbehaving. The driver MUST NOT silently accept the
+    drift — it raises so the contract violation is visible. (Spec for the
+    new prepare/resume contract introduced for #706.)"""
+
+    async def prepare(goal: str, cwd: str) -> str | None:  # noqa: ARG001
+        return "interview_pre_42"
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("start must not be called when prepare succeeds")
+
+    async def resume(session_id: str) -> InterviewTurn:  # noqa: ARG001
+        # Bug: returns a different id than what was prepared.
+        return InterviewTurn("first?", "interview_DRIFTED")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, resume=resume, prepare=prepare),
+        store=AutoStore(tmp_path),
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    # The driver catches the RuntimeError and routes it to the standard
+    # blocker path (so the misbehavior is observable in state, not a crash).
+    assert result.status == "blocked"
+    assert "refusing to drift" in (result.blocker or "")
+    # The persisted id remains the prepared one — the drift is rejected.
+    assert state.interview_session_id == "interview_pre_42"
 
 
 @pytest.mark.asyncio
