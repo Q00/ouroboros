@@ -110,19 +110,33 @@ class AutoAnswerer:
         if _matches_any(
             lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
         ):
-            return self._non_goal_answer(question, ledger)
-        if _is_verification_question(lowered):
-            return self._verification_answer(question)
-        if _is_feature_acceptance_question(lowered):
-            return self._feature_acceptance_answer(question)
-        if _is_actor_or_io_question(lowered):
-            return self._io_actor_answer(question)
-        if _is_runtime_context_question(lowered):
-            return self._runtime_answer(question, context)
-        if _is_product_behavior_question(lowered):
-            return self._product_behavior_answer(question)
+            answer = self._non_goal_answer(question, ledger)
+        elif _is_verification_question(lowered):
+            answer = self._verification_answer(question)
+        elif _is_feature_acceptance_question(lowered):
+            answer = self._feature_acceptance_answer(question)
+        elif _is_actor_or_io_question(lowered):
+            answer = self._io_actor_answer(question)
+        elif _is_runtime_context_question(lowered):
+            answer = self._runtime_answer(question, context)
+        elif _is_product_behavior_question(lowered):
+            answer = self._product_behavior_answer(question)
+        else:
+            answer = self._default_answer(question, ledger)
 
-        return self._default_answer(question, ledger)
+        if answer.source in _RISKY_FALLBACK_SOURCES:
+            risky_blocker = _risky_fallback_blocker_for(question, lowered)
+            if risky_blocker is not None:
+                return AutoAnswer(
+                    text=(
+                        "Cannot safely decide automatically with a generic default: "
+                        f"{risky_blocker.reason}"
+                    ),
+                    source=AutoAnswerSource.BLOCKER,
+                    confidence=1.0,
+                    blocker=risky_blocker,
+                )
+        return answer
 
     def apply(self, answer: AutoAnswer, ledger: SeedDraftLedger, *, question: str) -> None:
         """Apply answer updates to ``ledger``."""
@@ -626,6 +640,52 @@ def _is_safe_product_sensitive_question(lowered: str) -> bool:
             ),
         )
     )
+
+
+_RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
+    {
+        AutoAnswerSource.CONSERVATIVE_DEFAULT,
+        AutoAnswerSource.ASSUMPTION,
+    }
+)
+
+
+_RISKY_FALLBACK_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        r"\b(pii|personally identifiable information)\b",
+        "regulated personal data handling",
+    ),
+    (
+        r"\b(gdpr|hipaa|sox|pci[- ]?dss)\b",
+        "regulated data handling",
+    ),
+    (
+        r"\b(truncate|purge)\b.+\b(table|tables|schema|schemas)\b",
+        "destructive bulk data operation",
+    ),
+)
+
+
+def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | None:
+    """Return a blocker when a fallback answer would touch a high-risk topic.
+
+    Once an answer has been routed to a deterministic fallback (CONSERVATIVE_DEFAULT
+    or ASSUMPTION) we prefer to surface the question for human review when the
+    topic is high-risk: regulated personal data handling or destructive bulk
+    schema/table operations.  These topics have no defensible generic default,
+    while production-deployment and credential authority are already gated by
+    the explicit ``_blocker_for`` allow/deny lists.
+
+    Product-feature questions covered by existing safe-allowlists — such as
+    "should users be able to configure production credentials?" — are skipped
+    so the auto pipeline keeps answering them with feature semantics.
+    """
+    if _is_safe_product_branch_question(lowered) or _is_safe_product_sensitive_question(lowered):
+        return None
+    for pattern, reason in _RISKY_FALLBACK_PATTERNS:
+        if re.search(pattern, lowered):
+            return AutoBlocker(reason=reason, question=question)
+    return None
 
 
 def _blocker_for(question: str) -> AutoBlocker | None:

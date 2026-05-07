@@ -963,3 +963,53 @@ def test_auto_answerer_still_blocks_real_production_credential_authority() -> No
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
         assert answer.blocker is not None
         assert answer.source == AutoAnswerSource.BLOCKER
+
+
+def test_auto_answerer_blocks_regulated_data_questions_instead_of_falling_back() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        ("What PII should the system collect?", "regulated personal data handling"),
+        (
+            "Which fields are HIPAA regulated and how should we store them?",
+            "regulated data handling",
+        ),
+        ("How should the migration purge tables for old users?", "destructive bulk data operation"),
+    )
+
+    for question, reason in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
+        assert answer.source == AutoAnswerSource.BLOCKER, question
+        assert answer.blocker is not None, question
+        assert answer.blocker.reason == reason, question
+
+
+def test_auto_answerer_does_not_block_regulated_topic_when_repo_fact_supplied() -> None:
+    answerer = AutoAnswerer()
+    context = AutoAnswerContext(
+        repo_facts={"runtime_context": "Compliance worker on Python 3.14 (HIPAA-aware)"},
+        evidence={"runtime_context": ("docs/compliance.md",)},
+    )
+
+    answer = answerer.answer(
+        "Which runtime should the HIPAA worker use?",
+        SeedDraftLedger.from_goal("Build a HIPAA worker"),
+        context,
+    )
+
+    assert answer.source == AutoAnswerSource.REPO_FACT
+    assert answer.blocker is None
+
+
+def test_auto_answerer_skips_risky_fallback_for_safe_product_credential_questions() -> None:
+    answerer = AutoAnswerer()
+    questions = (
+        "Should users be able to configure production credentials?",
+        "Should the app store production credentials?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(
+            question, SeedDraftLedger.from_goal("Build credential management settings")
+        )
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
