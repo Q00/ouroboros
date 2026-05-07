@@ -659,7 +659,9 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
 _DESTRUCTIVE_BULK_VERBS = (
     r"truncate|truncates|truncating|truncated|"
     r"purge|purges|purging|purged|"
-    r"wipe|wipes|wiping|wiped"
+    r"wipe|wipes|wiping|wiped|"
+    r"drop|drops|dropping|dropped|"
+    r"erase|erases|erasing|erased"
 )
 _DESTRUCTIVE_BULK_NOUNS = (
     r"table|tables|schema|schemas|"

@@ -1081,10 +1081,13 @@ def test_auto_answerer_blocks_destructive_bulk_operations_in_either_order() -> N
         "How should the migration purge tables for old users?",
         "Should we wipe the user_data schema during the rollout?",
         "How should the system truncate the audit databases?",
+        "Which tables should the migration drop?",
+        "Should we erase these schemas before re-seeding?",
         # noun-then-verb (reverse phrasing)
         "Which tables should the migration truncate?",
         "Which schemas should the cleanup script purge?",
         "Which migrations should we wipe before redeploying?",
+        "Which schemas should the data team erase tomorrow?",
     )
 
     for question in blocked_questions:
