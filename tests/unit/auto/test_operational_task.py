@@ -279,3 +279,54 @@ def test_repo_path_does_not_double_count_when_inside_url() -> None:
     assert result.targets == ("https://github.com/owner/repo/pull/1",)
     # The repo identifier alone should not appear as an extra target.
     assert "owner/repo" not in result.targets
+
+
+# Bot follow-up: false-positive prose phrases must NOT be classified as repos.
+# (Bot-flagged in #719 / #721 review.)
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "and/or",
+        "yes/no",
+        "true/false",
+        "input/output",
+        "to/from",
+        "either/or",
+        "n/a",
+        "foo/bar",
+        "foo/baz",
+        "lorem/ipsum",
+    ],
+)
+def test_prose_slash_phrases_are_not_treated_as_repo_targets(phrase: str) -> None:
+    """English idioms and metasyntactic placeholders that share the
+    ``a/b`` shape MUST NOT enter ``targets`` and MUST NOT flip the
+    pipeline into the direct-run path."""
+    result = classify_operational_task(f"review and improve {phrase} docs")
+    assert phrase not in result.targets
+    assert "repo_path" not in result.reasons
+    # Falls back to the interview because no actual target was identified.
+    assert result.interview_required is True
+    assert result.direct_run_allowed is False
+
+
+@pytest.mark.parametrize(
+    "repo",
+    ["owner/r", "o/repo", "a/b1", "u-1/r-2", "u_1/r_2"],
+)
+def test_short_or_minimal_repo_names_are_recognized(repo: str) -> None:
+    """Legitimate but short repo names like ``owner/r`` or ``o/repo`` MUST
+    classify as repo targets (with a review/fix verb) instead of falling
+    back to the interview path. (Bot-flagged in #719 review, third round.)"""
+    result = classify_operational_task(f"fix the failing tests in {repo}")
+    assert repo in result.targets
+    assert result.interview_required is False
+    assert result.direct_run_allowed is True
+
+
+def test_repo_with_digits_or_dashes_recognized() -> None:
+    """Realistic repo names with digits / dashes / dots (no idiom shape)
+    classify as targets immediately."""
+    result = classify_operational_task("fix failing tests in shaun0927/ouroboros-ai")
+    assert "shaun0927/ouroboros-ai" in result.targets
+    assert result.interview_required is False

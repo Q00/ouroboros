@@ -87,12 +87,54 @@ _REVIEW_KO = ("리뷰", "검토", "개선", "수정")
 # ``owner/repo`` style identifier. The classifier accepts this as a target
 # alongside full URLs so operational asks like ``fix the failing tests in
 # owner/repo`` are recognized without requiring a fully-qualified URL.
-# (Bot-flagged in #719 review.) Excludes common false positives such as
-# ``and/or`` by requiring at least one digit/dash/underscore in either
-# component.
+# (Bot-flagged in #719 review.)
+#
+# The regex is intentionally permissive — both halves only require a single
+# alphanumeric character so legitimate short repo names (``owner/r``,
+# ``o/repo``) match. Common English idioms with the same surface shape
+# (``and/or``, ``and/or``, ``yes/no``, ``foo/bar``) are filtered out at the
+# value level by ``_REPO_PROSE_FALSE_POSITIVES`` below — that has a much
+# better signal-to-noise ratio than chasing every common pattern in regex.
 _REPO_PATH_RE = re.compile(
-    r"(?<![\w/])([A-Za-z0-9][\w\-.]*?[\w-]/[A-Za-z0-9][\w\-.]*[A-Za-z0-9_])(?![\w/])",
+    r"(?<![\w/])([A-Za-z0-9][\w\-.]*/[A-Za-z0-9][\w\-.]*)(?![\w/])",
 )
+
+# Phrases that share the ``a/b`` shape but are English idioms or placeholder
+# names rather than repo identifiers. Compared case-insensitively. Adding to
+# this list is the standard way to handle a new false positive flagged by a
+# review without re-tuning the regex. (Bot-flagged in #719 / #721 review.)
+_REPO_PROSE_FALSE_POSITIVES: Final[frozenset[str]] = frozenset(
+    {
+        # Common English connectives.
+        "and/or",
+        "or/and",
+        "either/or",
+        "neither/nor",
+        "to/from",
+        "from/to",
+        "yes/no",
+        "true/false",
+        "on/off",
+        "pass/fail",
+        "input/output",
+        "front/back",
+        "this/that",
+        "today/tomorrow",
+        "stop/start",
+        "start/stop",
+        "n/a",
+        # Placeholder / metasyntactic identifiers — rarely real repo names
+        # and almost always appear as examples in prose.
+        "foo/bar",
+        "foo/baz",
+        "bar/baz",
+        "lorem/ipsum",
+    }
+)
+
+
+def _is_repo_prose_false_positive(value: str) -> bool:
+    return value.lower() in _REPO_PROSE_FALSE_POSITIVES
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,13 +195,17 @@ def _extract_targets(
             matches.append((match.start(), kind, match.group(0)))
 
     # Repo identifiers — only added when not already covered by a URL match
-    # at the same span. Use a coverage check on the spans we already have.
+    # at the same span AND not a common-prose false positive. Use a coverage
+    # check on the spans we already have.
     covered = [(start, start + len(val)) for start, _kind, val in matches]
     for match in _REPO_PATH_RE.finditer(goal):
         m_start, m_end = match.start(), match.end()
         if any(start <= m_start and m_end <= end for start, end in covered):
             continue
-        matches.append((m_start, "repo", match.group(1)))
+        value = match.group(1)
+        if _is_repo_prose_false_positive(value):
+            continue
+        matches.append((m_start, "repo", value))
 
     matches.sort(key=lambda triple: triple[0])
 
