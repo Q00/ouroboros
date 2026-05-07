@@ -146,6 +146,27 @@ def redact_provenance(raw: Any) -> dict[str, Any] | None:
     return cleaned
 
 
+class AutoResumeCapability(StrEnum):
+    """Classification of what ``--resume`` will actually do for a session.
+
+    The value is **never persisted** — it is a pure derivation from the
+    persisted :class:`AutoPipelineState` fields. See
+    :meth:`AutoPipelineState.resume_capability` for the decision matrix.
+    """
+
+    NONE = "none"
+    """Cannot resume; the session is done or unrecoverable."""
+
+    RETRY = "retry"
+    """Re-runs the failed step from scratch — no prior progress is reused."""
+
+    PARTIAL_RESUME = "partial_resume"
+    """Resumes with some context preserved; pick-up point is approximate."""
+
+    RESUME = "resume"
+    """Continues exactly where it left off with full context."""
+
+
 TERMINAL_PHASES = {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}
 _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.CREATED: {AutoPhase.INTERVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
@@ -333,6 +354,103 @@ class AutoPipelineState:
         current = now or datetime.now(UTC)
         last = datetime.fromisoformat(self.last_progress_at)
         return (current - last).total_seconds() > timeout
+
+    def resume_capability(self) -> AutoResumeCapability:
+        """Classify what ``--resume`` will actually do for the current state.
+
+        This is a pure derivation — the result is never persisted. The
+        classification mirrors the actual control flow in
+        :meth:`AutoPipeline.run` and :meth:`AutoInterviewDriver.run`.
+
+        Decision matrix (only the highlights — see the plan and tests for
+        the full table):
+
+        * :attr:`AutoPhase.COMPLETE` -> :attr:`AutoResumeCapability.NONE`
+          (completed sessions render no resume hint).
+        * :attr:`AutoPhase.REPAIR` is non-terminal — a fresh ``--resume``
+          will transition the state back to ``REVIEW``, so the capability
+          is :attr:`AutoResumeCapability.RESUME`.
+        * Other non-terminal phases also classify as ``RESUME``.
+        * :attr:`AutoPhase.BLOCKED` / :attr:`AutoPhase.FAILED` consult
+          ``_recoverable_phase_for_tool`` first; an unmapped or missing
+          ``last_tool_name`` yields ``NONE``.
+        * The hot ``#688`` cell: ``BLOCKED`` + ``last_tool_name ==
+          "interview.start"`` + ``interview_session_id is None``
+          classifies as :attr:`AutoResumeCapability.RETRY` because
+          resuming re-runs ``interview.start`` from scratch with no
+          recovered state.
+
+        Returns:
+            The :class:`AutoResumeCapability` value for the current state.
+        """
+        # Lazy import to avoid the ``state.py`` <-> ``pipeline.py`` cycle.
+        from ouroboros.auto.pipeline import _recoverable_phase_for_tool  # noqa: PLC0415
+
+        if self.phase == AutoPhase.COMPLETE:
+            return AutoResumeCapability.NONE
+
+        if self.phase not in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
+            # CREATED, INTERVIEW, SEED_GENERATION, REVIEW, REPAIR, RUN.
+            # Pipeline.run() will simply continue from the current phase.
+            # REPAIR explicitly transitions to REVIEW on resume, so this is
+            # still a true RESUME (not a partial one).
+            return AutoResumeCapability.RESUME
+
+        # --- BLOCKED or FAILED ---
+        recoverable = _recoverable_phase_for_tool(self.last_tool_name)
+        if recoverable is None:
+            return AutoResumeCapability.NONE
+
+        tool = self.last_tool_name
+
+        # Interview phase tools.
+        if recoverable == AutoPhase.INTERVIEW:
+            if tool == "interview.start" and not self.interview_session_id:
+                # The #688 case: interview.start timed out before producing
+                # a session id. Resuming re-runs interview.start from
+                # scratch — that is a retry, not a continuation.
+                return AutoResumeCapability.RETRY
+            if self.interview_session_id:
+                if self.pending_question:
+                    return AutoResumeCapability.RESUME
+                return AutoResumeCapability.PARTIAL_RESUME
+            # Interview-tool but no session id (rare for tools other than
+            # interview.start); treat as a retry rather than asserting.
+            return AutoResumeCapability.RETRY
+
+        # Seed generation. We reconcile seed_artifact, seed_path, and
+        # interview_session_id: a persisted artifact is the strongest
+        # signal; a seed_path means we can re-load the Seed; otherwise we
+        # need the interview session to regenerate.
+        if recoverable == AutoPhase.SEED_GENERATION:
+            if self.seed_artifact:
+                return AutoResumeCapability.RESUME
+            if self.seed_path:
+                return AutoResumeCapability.PARTIAL_RESUME
+            if self.interview_session_id:
+                return AutoResumeCapability.RESUME
+            return AutoResumeCapability.NONE
+
+        # Review phase tools (seed_saver / grade_gate / seed_loader).
+        if recoverable == AutoPhase.REVIEW:
+            if self.seed_artifact:
+                return AutoResumeCapability.RESUME
+            if self.seed_path:
+                return AutoResumeCapability.PARTIAL_RESUME
+            return AutoResumeCapability.NONE
+
+        # Run phase. Persisted run handles let us short-circuit to
+        # COMPLETE; otherwise we need a Seed (artifact > path).
+        if recoverable == AutoPhase.RUN:
+            if any((self.job_id, self.execution_id, self.run_session_id)):
+                return AutoResumeCapability.RESUME
+            if self.seed_artifact:
+                return AutoResumeCapability.RESUME
+            if self.seed_path:
+                return AutoResumeCapability.PARTIAL_RESUME
+            return AutoResumeCapability.NONE
+
+        return AutoResumeCapability.NONE  # defensive
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dictionary."""
