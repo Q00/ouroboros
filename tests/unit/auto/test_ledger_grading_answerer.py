@@ -1064,3 +1064,31 @@ def test_auto_answerer_blocks_existing_convention_runtime_fallback_for_regulated
     assert answer.source == AutoAnswerSource.BLOCKER
     assert answer.blocker is not None
     assert answer.blocker.reason == "regulated data handling"
+
+
+def test_auto_answerer_blocks_destructive_bulk_operations_in_either_order() -> None:
+    """Destructive bulk operations must be blocked regardless of verb/noun order.
+
+    The previous matcher only caught ``verb ... noun`` phrasings such as
+    ``purge tables``, so reversed phrasings ``Which tables should the
+    migration truncate?`` slipped through. Broaden the verb vocabulary
+    (truncate/purge/wipe with their tense variants) and the noun list
+    (tables/schemas/databases/indexes/migrations) and cover both orders.
+    """
+    answerer = AutoAnswerer()
+    blocked_questions = (
+        # verb-then-noun
+        "How should the migration purge tables for old users?",
+        "Should we wipe the user_data schema during the rollout?",
+        "How should the system truncate the audit databases?",
+        # noun-then-verb (reverse phrasing)
+        "Which tables should the migration truncate?",
+        "Which schemas should the cleanup script purge?",
+        "Which migrations should we wipe before redeploying?",
+    )
+
+    for question in blocked_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build cleanup tooling"))
+        assert answer.source == AutoAnswerSource.BLOCKER, question
+        assert answer.blocker is not None, question
+        assert answer.blocker.reason == "destructive bulk data operation", question
