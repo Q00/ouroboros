@@ -38,12 +38,7 @@ from ouroboros.auto.interview_driver import (
     FunctionInterviewBackend,
     InterviewTurn,
 )
-from ouroboros.auto.ledger import (
-    LedgerEntry,
-    LedgerSource,
-    LedgerStatus,
-    SeedDraftLedger,
-)
+from ouroboros.auto.ledger import LedgerSource, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_reviewer import SeedReview
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
@@ -107,35 +102,6 @@ def _build_a_grade_seed(goal: str) -> Seed:
     )
 
 
-def _fill_ledger_ready(ledger: SeedDraftLedger) -> None:
-    """Populate every required ledger section with conservative defaults."""
-    defaults = {
-        "actors": "Single local CLI user",
-        "inputs": "No CLI args, no stdin",
-        "outputs": "Stdout hello with newline, exit 0",
-        "constraints": "Use existing project patterns",
-        "non_goals": "No cloud sync",
-        "acceptance_criteria": "Stdout equals hello newline",
-        "verification_plan": "Run the CLI and assert stdout/exit",
-        "failure_modes": "Non-zero exit code",
-        "runtime_context": "Local Unix-like shell with Python 3",
-    }
-    for section, value in defaults.items():
-        source = (
-            LedgerSource.NON_GOAL if section == "non_goals" else LedgerSource.CONSERVATIVE_DEFAULT
-        )
-        ledger.add_entry(
-            section,
-            LedgerEntry(
-                key=f"{section}.test_default",
-                value=value,
-                source=source,
-                confidence=0.85,
-                status=LedgerStatus.DEFAULTED,
-            ),
-        )
-
-
 class _AGradeRepairer:
     """Stub repairer that always returns an A-grade review without mutating the Seed."""
 
@@ -190,12 +156,13 @@ def _build_pipeline(
     interview_answer: Any,
     seed_generator: Any,
     seed_saver: Any,
+    max_rounds: int = 4,
 ) -> tuple[AutoPipeline, AutoStore]:
     store = AutoStore(tmp_path / "auto_store")
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(interview_start, interview_answer),
         store=store,
-        max_rounds=4,
+        max_rounds=max_rounds,
         timeout_seconds=2.0,
     )
     pipeline = AutoPipeline(
@@ -451,20 +418,16 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert intercept.mcp_tool == "ouroboros_auto"
     assert intercept.command_prefix == "ooo auto"
 
-    # The packaged ``skills/auto/SKILL.md`` ships exactly six ``mcp_args``
-    # template keys. Lock the full set so a renamed/dropped key in the shipped
-    # frontmatter regresses this test.
+    # The runtime contract requires ``goal`` and ``cwd`` to be substituted from
+    # the dispatched command and runtime cwd. Other frontmatter keys
+    # (``resume``, ``max_*``, ``skip_run``) are optional from the runtime's
+    # perspective and may legitimately be added/removed in a backward-compatible
+    # manner. Use a superset assertion on the required keys plus value asserts
+    # on the substituted ones so this test does not freeze the full frontmatter
+    # shape.
     args = arguments_log[0]
-    assert set(args.keys()) == {
-        "goal",
-        "resume",
-        "cwd",
-        "max_interview_rounds",
-        "max_repair_rounds",
-        "skip_run",
-    }, (
-        f"packaged ooo auto frontmatter must declare exactly the documented "
-        f"mcp_args keys; got {sorted(args.keys())!r}"
+    assert {"goal", "cwd"} <= set(args.keys()), (
+        f"packaged ooo auto frontmatter must declare goal/cwd mcp_args; got {sorted(args.keys())!r}"
     )
     assert args["goal"] == user_goal, (
         f"resolve_skill_dispatch must inject the user goal via $goal; got {args!r}"
@@ -499,23 +462,90 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
 # This is intentionally a post-dispatch unit-style test: it constructs
 # ``AutoPipeline`` directly to exercise the ledger-hydration + interview-fill
 # wiring landed in PR #652. The dispatch boundary itself is covered by Case 1.
+#
+# Unlike a happy-path stub, this test:
+#   * starts from a *bare* ledger (``SeedDraftLedger.from_goal`` only — no
+#     pre-filled actors/inputs/outputs/runtime_context); the goal text is
+#     deliberately sparse so the explicit-fact parser in ``from_goal`` cannot
+#     pre-hydrate any required section,
+#   * drives the real production ``AutoInterviewDriver`` + ``AutoAnswerer``
+#     through ``FunctionInterviewBackend`` by returning question text that
+#     routes to ``_io_actor_answer`` / ``_runtime_answer`` /
+#     ``_non_goal_answer`` / ``_verification_answer`` etc.,
+#   * only signals ``seed_ready=True`` *after* those sections are populated.
+#
+# A regression that drops the ledger-hydration step (e.g. the driver stops
+# calling ``answerer.apply`` so ``ledger_updates`` never land in the ledger)
+# would leave the four required sections empty, ``ledger.is_seed_ready()``
+# would return False, and ``_handle_completed_turn`` would mark the state as
+# ``BLOCKED`` rather than ``COMPLETE``. The post-run assertions below would
+# then fire.
 # ---------------------------------------------------------------------------
 
 
 async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> None:
-    """A sparse goal must still reach the Seed phase through the interview path."""
+    """A sparse goal must still reach Seed via real interview-fill ledger hydration.
+
+    The backend returns a fixed sequence of questions whose text triggers the
+    production ``AutoAnswerer`` heuristics that hydrate ``actors``, ``inputs``,
+    ``outputs``, ``runtime_context``, ``non_goals``, ``acceptance_criteria``,
+    ``verification_plan``, and ``failure_modes`` from a deliberately sparse
+    user goal. Only after those questions are exhausted does the backend
+    signal ``seed_ready=True``.
+    """
+    # Sparse goal: no "Actor is...", "Inputs are...", "Outputs are...",
+    # "Runtime context is..." labels. ``SeedDraftLedger.from_goal`` therefore
+    # leaves all four sections empty -- the only way to reach Seed is for the
+    # interview-fill path to populate them.
+    sparse_goal = "Build a hello CLI"
+
+    # Sanity check: a bare ``from_goal`` on this sparse text leaves the four
+    # required sections empty. This guards the test from a future change to
+    # ``from_goal`` silently pre-hydrating sections and turning case 2 back
+    # into a false positive.
+    bare_ledger = SeedDraftLedger.from_goal(sparse_goal)
+    for section_name in ("actors", "inputs", "outputs", "runtime_context"):
+        assert bare_ledger.sections[section_name].entries == [], (
+            f"sparse goal must leave {section_name!r} empty after from_goal; "
+            f"got {bare_ledger.sections[section_name].entries!r}"
+        )
+
+    # A fixed, ordered sequence of questions whose text routes through the
+    # production ``AutoAnswerer`` to populate every required ledger section.
+    # The driver also calls ``answerer.apply``, which records each Q/A in
+    # ``ledger.question_history``, so we additionally assert the question
+    # text propagated end-to-end.
+    interview_questions = [
+        "Who are the actors, inputs, and outputs for this task?",
+        "Which runtime stack should we use?",
+        "What conservative constraints and failure modes should bound this MVP?",
+        "What non-goals should explicitly remain out of scope?",
+        "Which command output verifies the acceptance criteria?",
+    ]
+
     captured_answers: list[str] = []
+    questions_emitted: list[str] = []
+    turn_index = {"value": 0}
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        questions_emitted.append(interview_questions[0])
         return InterviewTurn(
-            question="What else should we know about this hello CLI?",
+            question=interview_questions[0],
             session_id="interview_dispatch_e2e_2",
         )
 
     async def answer(session_id: str, text: str) -> InterviewTurn:
         captured_answers.append(text)
-        # Mark seed ready on the first answer; the test pre-fills the ledger so
-        # the driver has everything it needs to converge.
+        turn_index["value"] += 1
+        next_idx = turn_index["value"]
+        if next_idx < len(interview_questions):
+            next_question = interview_questions[next_idx]
+            questions_emitted.append(next_question)
+            return InterviewTurn(question=next_question, session_id=session_id)
+        # All ledger-hydrating questions answered; the backend now signals
+        # Seed-ready. The driver verifies ``ledger.is_seed_ready()`` itself
+        # before transitioning out of INTERVIEW, so a regression in
+        # ledger-hydration would still be caught here as a BLOCKED phase.
         return InterviewTurn(
             question="done",
             session_id=session_id,
@@ -524,19 +554,15 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
         )
 
     async def seed_generator(session_id: str) -> Seed:  # noqa: ARG001
-        return _build_a_grade_seed("Build a hello CLI")
+        return _build_a_grade_seed(sparse_goal)
 
     seed_saver, saved_paths = _make_seed_saver(tmp_path)
 
-    state = AutoPipelineState(goal="Build a hello CLI", cwd=str(tmp_path))
+    state = AutoPipelineState(goal=sparse_goal, cwd=str(tmp_path))
     state.skip_run = True
-
-    # Pre-fill the ledger so the driver does not depend on the production
-    # answerer's heuristics for hermetic tests. The interview backend stub is
-    # what proves the dispatch path went through interview-fill before Seed.
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    _fill_ledger_ready(ledger)
-    state.ledger = ledger.to_dict()
+    # Critically: do NOT pre-fill ``state.ledger``. The pipeline must build
+    # one from ``from_goal`` and rely on interview-fill to converge.
+    assert state.ledger == {}, "state.ledger must start empty for the sparse-goal path"
 
     pipeline, _store = _build_pipeline(
         tmp_path=tmp_path,
@@ -544,13 +570,27 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
         interview_answer=answer,
         seed_generator=seed_generator,
         seed_saver=seed_saver,
+        max_rounds=len(interview_questions) + 2,
     )
 
     result = await pipeline.run(state)
 
-    assert captured_answers, (
-        "sparse goal must drive at least one answerer turn before Seed generation"
+    # The backend produced every scripted question and the driver answered
+    # each one before Seed generation began.
+    assert questions_emitted == interview_questions, (
+        f"interview backend must emit each scripted question before seed_ready; "
+        f"got {questions_emitted!r}"
     )
+    assert len(captured_answers) == len(interview_questions), (
+        f"driver must answer every scripted question; got {captured_answers!r}"
+    )
+    for prefixed in captured_answers:
+        assert prefixed.startswith("[from-auto]["), (
+            f"answers must be source-tagged from production answerer; got {prefixed!r}"
+        )
+
+    # The pipeline reached Seed: phase moved past INTERVIEW into REVIEW/COMPLETE,
+    # a Seed id was populated, and a Seed file was written.
     assert state.phase in {AutoPhase.COMPLETE, AutoPhase.REVIEW}
     assert state.phase is not AutoPhase.BLOCKED
     assert state.last_error is None
@@ -563,6 +603,86 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
     assert result.status == "complete"
     assert result.grade == "A"
     assert result.blocker is None
+
+    # The persisted ledger must show that the four required sections were
+    # hydrated by the *answerer*, not the goal-derived defaults. If a
+    # regression dropped ledger hydration, these sections would either be
+    # empty (causing the driver to BLOCK before reaching here) or contain
+    # only ``LedgerSource.USER_GOAL`` entries from ``from_goal``. We assert
+    # the exact answerer-supplied entry keys/sources/values that the
+    # production ``AutoAnswerer._io_actor_answer`` and ``_runtime_answer``
+    # emit -- a regression that bypasses the answerer would change the
+    # ``source`` field or drop these keys entirely.
+    final_ledger = SeedDraftLedger.from_dict(state.ledger)
+    expected_answerer_entries = {
+        "actors": ("actors.single_local_user", LedgerSource.ASSUMPTION, "Single local user"),
+        "inputs": (
+            "inputs.explicit_arguments",
+            LedgerSource.ASSUMPTION,
+            "Explicit command/API arguments derived from the task goal",
+        ),
+        "outputs": (
+            "outputs.stable_text_or_artifacts",
+            LedgerSource.ASSUMPTION,
+            "Stable text output or generated artifacts suitable for verification",
+        ),
+        "runtime_context": (
+            "runtime.existing_project",
+            LedgerSource.EXISTING_CONVENTION,
+            None,  # value contents asserted via prefix below
+        ),
+    }
+    for section_name, (
+        expected_key,
+        expected_source,
+        expected_value,
+    ) in expected_answerer_entries.items():
+        section = final_ledger.sections[section_name]
+        keys = [entry.key for entry in section.entries]
+        assert expected_key in keys, (
+            f"{section_name!r} must contain answerer-supplied entry {expected_key!r}; "
+            f"got {keys!r} -- a regression in interview-fill ledger hydration would "
+            f"drop this entry entirely"
+        )
+        matching = next(entry for entry in section.entries if entry.key == expected_key)
+        assert matching.source == expected_source, (
+            f"{section_name}.{expected_key} must come from {expected_source.value!r} "
+            f"(answerer-supplied), not goal-derived defaults; got {matching.source.value!r}"
+        )
+        if expected_value is not None:
+            assert matching.value == expected_value, (
+                f"{section_name}.{expected_key} value must match the answerer's "
+                f"deterministic output; got {matching.value!r}"
+            )
+    # Runtime-context entry is verbose; assert a stable prefix instead of the
+    # full sentence so minor wording tweaks in the answerer do not regress.
+    runtime_entry = next(
+        entry
+        for entry in final_ledger.sections["runtime_context"].entries
+        if entry.key == "runtime.existing_project"
+    )
+    assert runtime_entry.value.startswith("Use the existing repository runtime,"), (
+        f"runtime.existing_project value must come from _runtime_answer; got {runtime_entry.value!r}"
+    )
+
+    # The ledger must be Seed-ready end-to-end (no open gaps remain). This is
+    # the same predicate the driver checks before leaving INTERVIEW; asserting
+    # it here lets a regression that leaves any required section empty be
+    # diagnosed as a hydration failure, not a downstream pipeline issue.
+    assert final_ledger.is_seed_ready(), (
+        f"interview-fill must leave the ledger Seed-ready; open_gaps={final_ledger.open_gaps()!r}"
+    )
+
+    # Finally: each scripted question must appear in the ledger's
+    # ``question_history`` (recorded by ``answerer.apply``). This proves the
+    # driver routed every backend question through the answerer instead of
+    # silently skipping the hydration step.
+    recorded_questions = [item["question"] for item in final_ledger.question_history]
+    for question in interview_questions:
+        assert question in recorded_questions, (
+            f"answerer.apply must record question {question!r} in ledger history; "
+            f"got {recorded_questions!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
