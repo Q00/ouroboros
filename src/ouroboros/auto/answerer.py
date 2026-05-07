@@ -646,6 +646,12 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
     {
         AutoAnswerSource.CONSERVATIVE_DEFAULT,
         AutoAnswerSource.ASSUMPTION,
+        # ``_runtime_answer`` returns EXISTING_CONVENTION when no concrete
+        # repo fact was supplied. The text is still a generic
+        # "use the existing repository runtime" template, so for regulated
+        # topics it must be gated like any other fallback. A REPO_FACT-backed
+        # runtime answer (full ``runtime_context`` supplied) is unaffected.
+        AutoAnswerSource.EXISTING_CONVENTION,
     }
 )
 
