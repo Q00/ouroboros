@@ -170,6 +170,26 @@ class SeedDraftLedger:
     # ``None`` for legacy ledgers and for sessions that took the
     # interview-first route.
     direct_path_reason: str | None = None
+    # Audit log of merge-policy gate decisions (#689 PR-D).  Each entry
+    # is a JSON-shaped record produced by
+    # ``ouroboros.auto.merge_policy.record_decision_on_ledger``.  Empty
+    # for legacy ledgers and for sessions that never invoked the gate.
+    merge_policy_decisions: list[dict[str, Any]] = field(default_factory=list)
+
+    def record_merge_policy_decision(self, record: dict[str, Any]) -> None:
+        """Append a merge-policy decision record to the ledger.
+
+        The record is opaque to the ledger but must be a dict so the
+        whole ledger remains JSON-serializable.  Validation is
+        intentionally minimal here: the merge_policy module owns the
+        payload shape.
+        """
+        if not isinstance(record, dict):
+            msg = "merge policy decision record must be a dict"
+            raise ValueError(msg)
+        # Defensive deep-ish copy of top-level keys so callers cannot
+        # accidentally mutate stored audit data after the fact.
+        self.merge_policy_decisions.append(dict(record))
 
     def record_direct_path_reason(self, reason: str) -> None:
         """Persist why the auto pipeline skipped interview for this session.
@@ -340,6 +360,9 @@ class SeedDraftLedger:
             "sections": {name: section.to_dict() for name, section in self.sections.items()},
             "question_history": list(self.question_history),
             "direct_path_reason": self.direct_path_reason,
+            "merge_policy_decisions": [
+                dict(record) for record in self.merge_policy_decisions
+            ],
         }
 
     @classmethod
@@ -384,10 +407,18 @@ class SeedDraftLedger:
                 msg = "ledger direct_path_reason must be a non-empty string or null"
                 raise ValueError(msg)
 
+        merge_policy_decisions_raw = data.get("merge_policy_decisions", [])
+        if not isinstance(merge_policy_decisions_raw, list) or not all(
+            isinstance(item, dict) for item in merge_policy_decisions_raw
+        ):
+            msg = "ledger merge_policy_decisions must be a list of objects"
+            raise ValueError(msg)
+
         ledger = cls(
             sections=sections,
             question_history=[dict(item) for item in question_history],
             direct_path_reason=direct_path_reason,
+            merge_policy_decisions=[dict(record) for record in merge_policy_decisions_raw],
         )
         for required in REQUIRED_SECTIONS:
             ledger.sections.setdefault(required, LedgerSection(required))
