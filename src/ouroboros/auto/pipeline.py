@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ouroboros.auto.blocker_attribution import label_blocker
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
@@ -228,13 +229,22 @@ class AutoPipeline:
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
                 except TimeoutError as exc:
                     state.mark_blocked(
-                        f"seed generation timed out after {self.seed_timeout_seconds:.0f}s",
+                        label_blocker(
+                            state,
+                            f"seed generation timed out after {self.seed_timeout_seconds:.0f}s",
+                            phase="seed_generator",
+                        ),
                         tool_name="seed_generator",
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=str(exc) or state.last_error)
                 except Exception as exc:
-                    state.mark_failed(f"seed generation failed: {exc}", tool_name="seed_generator")
+                    state.mark_failed(
+                        label_blocker(
+                            state, f"seed generation failed: {exc}", phase="seed_generator"
+                        ),
+                        tool_name="seed_generator",
+                    )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
                 state.mark_progress("Seed generated", tool_name="seed_generator")
