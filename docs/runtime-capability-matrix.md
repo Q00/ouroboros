@@ -109,7 +109,17 @@ outside an active OpenCode bridge plugin session.
 | 1. Interview authoring  | in-process | in-process | in-process | in-process | in-process | in-process | in-process |
 | 2. Seed generation      | in-process | in-process | in-process | in-process | in-process | in-process | in-process |
 | 3. Seed repair          | in-process | in-process | in-process | in-process | in-process | in-process | in-process |
-| 4. Run handoff (Seed →) | claude adapter | codex adapter | opencode adapter (mode preserved for run only) | hermes adapter | gemini adapter | kiro adapter | copilot adapter |
+| 4. Run handoff (Seed →) | claude adapter | codex adapter | opencode adapter (see entry-point note below) | hermes adapter | gemini adapter | kiro adapter | copilot adapter |
+
+> **Run-handoff `opencode_mode` differs by entry point.** The CLI
+> entry point [`cli/commands/auto.py`](https://github.com/Q00/ouroboros/blob/main/src/ouroboros/cli/commands/auto.py)
+> demotes `opencode_mode == "plugin"` to `"subprocess"` for the
+> run-handoff handler too, because the standalone CLI process is not
+> running inside the OpenCode session that owns the bridge plugin.
+> The MCP entry point [`mcp/tools/auto_handler.py`](https://github.com/Q00/ouroboros/blob/main/src/ouroboros/mcp/tools/auto_handler.py)
+> only demotes the authoring handlers and keeps `"plugin"` for the
+> run-handoff handler, since it *is* invoked from inside the OpenCode
+> session. Authoring is in-process for both entry points.
 
 > **Common misconception:** `ooo auto --runtime codex` does **not** mean
 > "Codex runs the entire pipeline". The Ouroboros MCP server itself runs

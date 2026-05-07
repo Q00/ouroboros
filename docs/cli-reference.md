@@ -98,7 +98,7 @@ have no receiver outside an active OpenCode bridge plugin session.
 | 1. Interview authoring | `mcp.tools.authoring_handlers.InterviewHandler`        | In-process for every `--runtime` value. `opencode + plugin` is demoted to `subprocess` before the handler is constructed, so authoring never short-circuits to the bridge. |
 | 2. Seed generation     | `mcp.tools.authoring_handlers.GenerateSeedHandler`     | Same rule as interview authoring — always in-process for `ooo auto`.                                                                                                       |
 | 3. Seed repair         | `auto.seed_repairer.SeedRepairer`                      | In-process; never dispatched.                                                                                                                                               |
-| 4. Run handoff         | `mcp.tools.execution_handlers.StartExecuteSeedHandler` | Routed through the runtime adapter selected by `--runtime`. This is the *only* phase where the chosen backend executes agent work, and the only phase that can keep `opencode + plugin`. |
+| 4. Run handoff         | `mcp.tools.execution_handlers.StartExecuteSeedHandler` | Routed through the runtime adapter selected by `--runtime`. **CLI entry point** (`ouroboros auto`) also demotes `opencode + plugin` to `subprocess` here, because the standalone CLI process is not the OpenCode session that owns the bridge plugin. **MCP entry point** (`mcp/tools/auto_handler.py`) keeps `plugin` for run-handoff because it is invoked from inside the OpenCode session. |
 
 > **Why this matters:** `--runtime codex` does **not** mean "Codex performs
 > the interview". The Ouroboros MCP server still owns the first authoring
