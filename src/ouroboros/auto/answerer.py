@@ -656,6 +656,19 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
 )
 
 
+_DESTRUCTIVE_BULK_VERBS = (
+    r"truncate|truncates|truncating|truncated|"
+    r"purge|purges|purging|purged|"
+    r"wipe|wipes|wiping|wiped"
+)
+_DESTRUCTIVE_BULK_NOUNS = (
+    r"table|tables|schema|schemas|"
+    r"database|databases|"
+    r"index|indexes|indices|"
+    r"migration|migrations"
+)
+
+
 _RISKY_FALLBACK_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         r"\b(pii|personally identifiable information)\b",
@@ -665,8 +678,14 @@ _RISKY_FALLBACK_PATTERNS: tuple[tuple[str, str], ...] = (
         r"\b(gdpr|hipaa|sox|pci[- ]?dss)\b",
         "regulated data handling",
     ),
+    # Verb-then-noun, e.g. "How should the migration purge tables for old users?"
     (
-        r"\b(truncate|purge)\b.+\b(table|tables|schema|schemas)\b",
+        rf"\b(?:{_DESTRUCTIVE_BULK_VERBS})\b.+\b(?:{_DESTRUCTIVE_BULK_NOUNS})\b",
+        "destructive bulk data operation",
+    ),
+    # Noun-then-verb, e.g. "Which tables should the migration truncate?"
+    (
+        rf"\b(?:{_DESTRUCTIVE_BULK_NOUNS})\b.+\b(?:{_DESTRUCTIVE_BULK_VERBS})\b",
         "destructive bulk data operation",
     ),
 )
