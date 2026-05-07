@@ -352,6 +352,17 @@ class InterviewEngine:
             is_brownfield=state.is_brownfield,
         )
 
+        # Persist the freshly-created state immediately so that downstream
+        # failures (e.g. a question-generation timeout) still leave a
+        # resumable handle on disk.  See Q00/ouroboros#687.
+        save_result = await self.save_state(state)
+        if save_result.is_err:
+            log.warning(
+                "interview.start_save_failed",
+                interview_id=interview_id,
+                error=str(save_result.error),
+            )
+
         return Result.ok(state)
 
     async def ask_next_question(

@@ -989,6 +989,17 @@ class InterviewHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="interview_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Optional caller-supplied id for a brand-new interview. "
+                        "Bounded auto callers pre-allocate the id so a driver-level "
+                        "cancel cannot leave the auto state out of sync with the "
+                        "persisted interview file (see Q00/ouroboros#687)."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -1007,6 +1018,14 @@ class InterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
+        # Optional caller-supplied id for new interviews (Q00/ouroboros#687).
+        # Only honoured for the ``start`` action; ignored otherwise.
+        suggested_interview_id_arg = arguments.get("interview_id")
+        suggested_interview_id = (
+            suggested_interview_id_arg
+            if isinstance(suggested_interview_id_arg, str) and suggested_interview_id_arg
+            else None
+        )
         last_question = arguments.get("last_question")
 
         # --- Argument validation (before any dispatch) ---
@@ -1058,7 +1077,10 @@ class InterviewHandler:
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
                 from uuid import uuid4
 
-                interview_id = f"interview_{uuid4().hex[:16]}"
+                # Honour caller-supplied id when present (auto driver
+                # pre-allocates the id for Q00/ouroboros#687).  Fall back
+                # to a fresh uuid otherwise.
+                interview_id = suggested_interview_id or f"interview_{uuid4().hex[:16]}"
                 state = InterviewState(
                     interview_id=interview_id,
                     initial_context=resolved_context.value,
@@ -1190,7 +1212,11 @@ class InterviewHandler:
                         )
                     )
 
-                result = await engine.start_interview(resolved_context.value, cwd=cwd)
+                result = await engine.start_interview(
+                    resolved_context.value,
+                    cwd=cwd,
+                    interview_id=suggested_interview_id,
+                )
                 if result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -1218,10 +1244,11 @@ class InterviewHandler:
                             phase="question_generation",
                         )
                     )
+                    # ``InterviewEngine.start_interview`` already persisted
+                    # the initial state on disk (Q00/ouroboros#687), so the
+                    # ``session_id`` returned below is guaranteed resumable.
                     # Return recoverable result with session ID for retry
                     if "empty response" in error_msg.lower():
-                        # Persist state so the session can actually be resumed
-                        await engine.save_state(state)
                         amb_warning = _ambiguity_warning_for_failed_question(
                             live_score,
                             is_brownfield=state.is_brownfield,
@@ -1250,7 +1277,30 @@ class InterviewHandler:
                                 meta={"session_id": state.interview_id, "recoverable": True},
                             )
                         )
-                    return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
+                    # Generic question-generation failure (timeout etc.):
+                    # return a recoverable result so callers can resume
+                    # using the persisted ``session_id`` instead of losing
+                    # the interview handle (Q00/ouroboros#687).  Truncate
+                    # ``error_msg`` to avoid leaking provider internals into
+                    # the user-facing envelope; full details remain in the
+                    # ``interview_failed`` event emitted above.
+                    safe_error = error_msg[:200] if error_msg else "unknown error"
+                    return Result.ok(
+                        MCPToolResult(
+                            content=(
+                                MCPContentItem(
+                                    type=ContentType.TEXT,
+                                    text=(
+                                        f"Question generation failed: {safe_error}. "
+                                        f"Session ID: {state.interview_id}\n\n"
+                                        f'Resume with: session_id="{state.interview_id}"'
+                                    ),
+                                ),
+                            ),
+                            is_error=True,
+                            meta={"session_id": state.interview_id, "recoverable": True},
+                        )
+                    )
 
                 question = question_result.value
                 display_question = _format_question_with_ambiguity(question, live_score)

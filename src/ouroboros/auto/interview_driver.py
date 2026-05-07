@@ -5,8 +5,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+import inspect
 import re
 from typing import Protocol
+from uuid import uuid4
+
+import structlog
 
 from ouroboros.auto.answerer import (
     AutoAnswer,
@@ -19,6 +23,8 @@ from ouroboros.auto.gap_detector import Gap, GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,8 +40,16 @@ class InterviewTurn:
 class InterviewBackend(Protocol):
     """Minimal backend interface needed by the auto interview driver."""
 
-    async def start(self, goal: str, *, cwd: str) -> InterviewTurn:
-        """Start an interview and return the first question."""
+    async def start(
+        self, goal: str, *, cwd: str, interview_id: str | None = None
+    ) -> InterviewTurn:
+        """Start an interview and return the first question.
+
+        ``interview_id`` is an optional caller-supplied id.  Backends that
+        persist server-side state SHOULD honour it so a driver-level cancel
+        (e.g. ``asyncio.wait_for`` timeout) cannot leave the auto state with
+        an id that disagrees with the on-disk interview file.
+        """
 
     async def answer(self, session_id: str, answer: str) -> InterviewTurn:
         """Record an answer and return the next question or completion metadata."""
@@ -95,23 +109,47 @@ class AutoInterviewDriver:
                     state.pending_question = turn.question
                     self._save(state)
             else:
+                # Pre-allocate the interview id and persist it on auto state
+                # BEFORE invoking the backend.  ``asyncio.wait_for`` cancels
+                # the backend task on timeout, so any id only learned from
+                # the backend's return value would be lost.  Pre-allocation
+                # guarantees ``ooo auto --resume`` can find the persisted
+                # interview even when the first-question call is cancelled.
+                # See Q00/ouroboros#687.
+                preassigned_id = _generate_interview_id()
+                state.interview_session_id = preassigned_id
+                self._save(state)
                 turn = _validate_turn(
                     await self._with_timeout(
-                        self.backend.start(state.goal, cwd=state.cwd),
+                        self.backend.start(
+                            state.goal, cwd=state.cwd, interview_id=preassigned_id
+                        ),
                         state,
                         tool_name=interview_tool_name,
                     )
                 )
+                if turn.session_id != preassigned_id:
+                    # Misbehaving backend ignored the supplied id.  Auto
+                    # state would diverge from the on-disk interview file;
+                    # warn so operators can spot the contract violation.
+                    log.warning(
+                        "auto.interview.backend_ignored_preassigned_id",
+                        preassigned_id=preassigned_id,
+                        backend_id=turn.session_id,
+                        auto_session_id=state.auto_session_id,
+                    )
                 state.interview_session_id = turn.session_id
                 state.pending_question = turn.question
                 self._save(state)
         except TimeoutError as exc:
+            self._capture_partial_session_id(state, exc)
             state.mark_blocked(str(exc), tool_name=interview_tool_name)
             self._save(state)
             return AutoInterviewResult(
                 "blocked", state.interview_session_id, ledger, state.current_round, str(exc)
             )
         except Exception as exc:
+            self._capture_partial_session_id(state, exc)
             action = "resume" if interview_tool_name == "interview.resume" else "start"
             blocker = f"interview {action} failed: {exc}"
             state.mark_blocked(blocker, tool_name=interview_tool_name)
@@ -261,6 +299,28 @@ class AutoInterviewDriver:
         if self.store is not None:
             self.store.save(state)
 
+    @staticmethod
+    def _capture_partial_session_id(state: AutoPipelineState, exc: BaseException) -> None:
+        """Record a session id surfaced by a partial-success error on AutoState.
+
+        When ``backend.start`` fails after the handler has already persisted
+        the interview server-side, the backend raises
+        ``PartialInterviewStartError`` carrying the persisted ``session_id``.
+        Saving it on the auto state lets ``ooo auto --resume`` pick up the
+        same interview instead of creating a duplicate.  See
+        Q00/ouroboros#687.
+        """
+        if state.interview_session_id:
+            return
+        # Avoid coupling to the adapter module — local import keeps
+        # interview_driver importable on its own.
+        from ouroboros.auto.adapters import PartialInterviewStartError
+
+        if not isinstance(exc, PartialInterviewStartError):
+            return
+        if exc.session_id:
+            state.interview_session_id = exc.session_id
+
 
 class FunctionInterviewBackend:
     """Adapter for tests or local integrations built from callables."""
@@ -275,7 +335,13 @@ class FunctionInterviewBackend:
         self._answer = answer
         self._resume = resume
 
-    async def start(self, goal: str, *, cwd: str) -> InterviewTurn:
+    async def start(
+        self, goal: str, *, cwd: str, interview_id: str | None = None
+    ) -> InterviewTurn:
+        # Forward ``interview_id`` only to callables that opt into the new
+        # contract; plain ``(goal, cwd)`` callables remain compatible.
+        if "interview_id" in inspect.signature(self._start).parameters:
+            return await self._start(goal, cwd, interview_id=interview_id)  # type: ignore[call-arg]
         return await self._start(goal, cwd)
 
     async def answer(self, session_id: str, answer: str) -> InterviewTurn:
@@ -286,6 +352,11 @@ class FunctionInterviewBackend:
             msg = "interview resume is unavailable because no pending question is persisted"
             raise RuntimeError(msg)
         return await self._resume(session_id)
+
+
+def _generate_interview_id() -> str:
+    """Return a unique interview id matching the engine's plugin format."""
+    return f"interview_{uuid4().hex[:16]}"
 
 
 def _can_steer_with_gap_prompt(question: str) -> bool:

@@ -18,6 +18,20 @@ class HandlerError(RuntimeError):
     """Raised when an MCP handler returns an error result."""
 
 
+class PartialInterviewStartError(HandlerError):
+    """Raised when interview start failed but a session_id was persisted server-side.
+
+    Carries the persisted ``session_id`` so callers (e.g. the auto interview
+    driver) can record it on durable state and resume the same interview
+    after a transient first-question failure such as an LLM timeout.
+    See Q00/ouroboros#687.
+    """
+
+    def __init__(self, message: str, *, session_id: str) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+
+
 def _unwrap(result, *, tool_name: str) -> MCPToolResult:
     if result.is_err:
         error: MCPServerError = result.error
@@ -36,11 +50,33 @@ class HandlerInterviewBackend(InterviewBackend):
         self.handler = handler
         self.cwd = cwd
 
-    async def start(self, goal: str, *, cwd: str) -> InterviewTurn:
-        result = _unwrap(
-            await self.handler.handle({"initial_context": goal, "cwd": cwd or self.cwd}),
-            tool_name="ouroboros_interview",
-        )
+    async def start(
+        self, goal: str, *, cwd: str, interview_id: str | None = None
+    ) -> InterviewTurn:
+        arguments: dict[str, str] = {"initial_context": goal, "cwd": cwd or self.cwd}
+        if interview_id:
+            arguments["interview_id"] = interview_id
+        outcome = await self.handler.handle(arguments)
+        # Recoverable error path: handler persisted state but failed to
+        # produce the first question.  Surface the session_id so the auto
+        # driver can save it on the AutoPipelineState before reporting
+        # blocked.
+        if not outcome.is_err:
+            value = outcome.value
+            if value.is_error:
+                meta = value.meta or {}
+                session_id = _optional_str(meta.get("session_id")) or interview_id
+                if session_id:
+                    text = (
+                        value.content[0].text
+                        if value.content
+                        else "ouroboros_interview returned error"
+                    )
+                    raise PartialInterviewStartError(
+                        f"ouroboros_interview failed: {text}",
+                        session_id=session_id,
+                    )
+        result = _unwrap(outcome, tool_name="ouroboros_interview")
         return _turn_from_result(result)
 
     async def answer(self, session_id: str, answer: str) -> InterviewTurn:
