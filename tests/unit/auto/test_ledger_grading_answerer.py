@@ -1013,3 +1013,36 @@ def test_auto_answerer_skips_risky_fallback_for_safe_product_credential_question
         )
         assert answer.blocker is None, question
         assert answer.source != AutoAnswerSource.BLOCKER, question
+
+
+def test_auto_answerer_does_not_block_meta_questions_that_mention_regulated_topics() -> None:
+    """Acceptance/verification meta-questions must not be gated by keyword match.
+
+    Phrasing such as 'What acceptance criteria should the HIPAA worker satisfy?'
+    or 'Which command output verifies the GDPR export flow?' is asking for an
+    acceptance template or a verification plan, not for regulated-data
+    handling decisions.  These routes are safe templates and predate the
+    risky-fallback gate; they must continue to return non-blocker answers.
+    """
+    answerer = AutoAnswerer()
+    feature_acceptance_questions = (
+        "What acceptance criteria should the HIPAA worker satisfy?",
+        "What acceptance criteria should the GDPR exporter satisfy?",
+        "What acceptance criteria should the PII pipeline satisfy?",
+    )
+
+    for question in feature_acceptance_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
+        assert answer.blocker is None, question
+        assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question
+
+    verification_questions = (
+        "Which command output verifies the GDPR export flow?",
+        "How should we verify the HIPAA worker tests pass?",
+        "What is the verification plan for PII handling?",
+    )
+
+    for question in verification_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
+        assert answer.blocker is None, question
+        assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question

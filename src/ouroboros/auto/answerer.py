@@ -110,12 +110,12 @@ class AutoAnswerer:
         if _matches_any(
             lowered, (r"\bnon-goals?\b", r"\bout of scope\b", r"\bexclude\b", r"\bnot do\b")
         ):
-            answer = self._non_goal_answer(question, ledger)
-        elif _is_verification_question(lowered):
-            answer = self._verification_answer(question)
-        elif _is_feature_acceptance_question(lowered):
-            answer = self._feature_acceptance_answer(question)
-        elif _is_actor_or_io_question(lowered):
+            return self._non_goal_answer(question, ledger)
+        if _is_verification_question(lowered):
+            return self._verification_answer(question)
+        if _is_feature_acceptance_question(lowered):
+            return self._feature_acceptance_answer(question)
+        if _is_actor_or_io_question(lowered):
             answer = self._io_actor_answer(question)
         elif _is_runtime_context_question(lowered):
             answer = self._runtime_answer(question, context)
@@ -667,14 +667,20 @@ _RISKY_FALLBACK_PATTERNS: tuple[tuple[str, str], ...] = (
 
 
 def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | None:
-    """Return a blocker when a fallback answer would touch a high-risk topic.
+    """Return a blocker when a generative fallback answer would touch a high-risk topic.
 
-    Once an answer has been routed to a deterministic fallback (CONSERVATIVE_DEFAULT
-    or ASSUMPTION) we prefer to surface the question for human review when the
-    topic is high-risk: regulated personal data handling or destructive bulk
-    schema/table operations.  These topics have no defensible generic default,
-    while production-deployment and credential authority are already gated by
-    the explicit ``_blocker_for`` allow/deny lists.
+    The gate only fires for *generative* answer routes (actor/IO, runtime,
+    product behavior, default). Meta-question routes — non-goal listing,
+    verification policy, feature acceptance criteria — are checked earlier in
+    ``answer`` and never reach this function, because phrasing such as
+    "What acceptance criteria should the HIPAA worker satisfy?" is asking
+    about a generic acceptance template, not asking the auto pipeline to
+    decide regulated-data handling.
+
+    Targeted topics: regulated personal data (PII/GDPR/HIPAA/SOX/PCI-DSS) and
+    destructive bulk schema/table operations.  Production-deployment and
+    credential authority are already gated by the explicit ``_blocker_for``
+    allow/deny lists.
 
     Product-feature questions covered by existing safe-allowlists — such as
     "should users be able to configure production credentials?" — are skipped
