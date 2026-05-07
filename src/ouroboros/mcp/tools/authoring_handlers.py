@@ -67,6 +67,12 @@ log = structlog.get_logger(__name__)
 
 _DATA_DIR = Path.home() / ".ouroboros" / "data"
 
+# Strict format for caller-supplied ``interview_id`` arguments — matches
+# the server's own generation pattern (``f"interview_{uuid4().hex[:16]}"``)
+# so external clients cannot inject arbitrary identifiers.  See
+# Q00/ouroboros#723 review.
+_SUGGESTED_INTERVIEW_ID_RE = re.compile(r"^interview_[a-f0-9]{16}$")
+
 _LIVE_AMBIGUITY_MAX_RETRIES = 3
 
 _INTERVIEW_COMPLETION_SIGNALS = {
@@ -994,8 +1000,11 @@ class InterviewHandler:
                     type=ToolInputType.STRING,
                     description=(
                         "Optional caller-supplied id for a brand-new interview. "
-                        "Bounded auto callers pre-allocate the id so a driver-level "
-                        "cancel cannot leave the auto state out of sync with the "
+                        "Must match the server format 'interview_<16 lowercase hex>' "
+                        "and must NOT collide with an existing interview file. "
+                        "Only honoured for the start action; ignored for resume/answer. "
+                        "Used by the bounded auto driver to pre-allocate the id so a "
+                        "driver-level cancel cannot leave auto state out of sync with the "
                         "persisted interview file (see Q00/ouroboros#687)."
                     ),
                     required=False,
@@ -1045,6 +1054,38 @@ class InterviewHandler:
                     tool_name="ouroboros_interview",
                 )
             )
+
+        # Validate caller-supplied ``interview_id`` strictly to keep the
+        # MCP contract narrow.  The id must match the server's own
+        # ``interview_<16 hex>`` format (matching ``uuid4().hex[:16]``)
+        # and must not collide with an existing on-disk interview file —
+        # this prevents cross-client spoofing/hijacking and accidental
+        # reuse of an active session.  Q00/ouroboros#723 review.
+        if suggested_interview_id is not None:
+            if action != "start":
+                return Result.err(
+                    MCPToolError(
+                        "interview_id is only valid for new interviews; resume via session_id",
+                        tool_name="ouroboros_interview",
+                    )
+                )
+            if not _SUGGESTED_INTERVIEW_ID_RE.fullmatch(suggested_interview_id):
+                return Result.err(
+                    MCPToolError(
+                        "interview_id must match the server format 'interview_<16 hex>'",
+                        tool_name="ouroboros_interview",
+                    )
+                )
+            collision_path = (
+                self.data_dir or _DATA_DIR
+            ) / f"interview_{suggested_interview_id}.json"
+            if collision_path.exists():
+                return Result.err(
+                    MCPToolError(
+                        "interview_id collides with an existing interview; pick a fresh id",
+                        tool_name="ouroboros_interview",
+                    )
+                )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):

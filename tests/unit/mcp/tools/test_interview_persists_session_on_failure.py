@@ -110,7 +110,8 @@ async def test_subprocess_handler_honours_caller_supplied_interview_id(tmp_path:
         data_dir=tmp_path,
     )
 
-    caller_id = "interview_caller_supplied_42"
+    # Must match the strict server format ``interview_<16 hex>``.
+    caller_id = "interview_0123456789abcdef"
     outcome = await handler.handle(
         {
             "initial_context": "Build a CLI",
@@ -123,3 +124,79 @@ async def test_subprocess_handler_honours_caller_supplied_interview_id(tmp_path:
     meta = outcome.value.meta or {}
     assert meta.get("session_id") == caller_id
     assert (tmp_path / f"interview_{caller_id}.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_handler_rejects_malformed_interview_id(tmp_path: Path) -> None:
+    """A non-matching ``interview_id`` must hard-fail before any side effects."""
+
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {
+            "initial_context": "Build a CLI",
+            "cwd": str(tmp_path),
+            "interview_id": "not_in_server_format",
+        }
+    )
+
+    assert outcome.is_err
+    assert "server format" in str(outcome.error)
+    assert engine.saved_states == [], "engine must not run when id is rejected"
+
+
+@pytest.mark.asyncio
+async def test_subprocess_handler_rejects_colliding_interview_id(tmp_path: Path) -> None:
+    """Re-using an id that already has a state file must be refused."""
+
+    caller_id = "interview_0123456789abcdef"
+    # Pre-create the colliding file.
+    (tmp_path / f"interview_{caller_id}.json").write_text("{}", encoding="utf-8")
+
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {
+            "initial_context": "Build a CLI",
+            "cwd": str(tmp_path),
+            "interview_id": caller_id,
+        }
+    )
+
+    assert outcome.is_err
+    assert "collide" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_subprocess_handler_rejects_interview_id_on_resume_action(tmp_path: Path) -> None:
+    """``interview_id`` is only valid for new interviews; resume must reject it."""
+
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {
+            "session_id": "interview_existingsession",
+            "interview_id": "interview_0123456789abcdef",
+        }
+    )
+
+    assert outcome.is_err
+    assert "only valid for new interviews" in str(outcome.error)
