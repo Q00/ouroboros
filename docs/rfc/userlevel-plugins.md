@@ -291,11 +291,29 @@ unit of selection. Full UX details:
 **`add` vs `install`.** `add` is the **interactive entry point** intended
 for humans: it accepts a repo URL, fetches the catalog, presents the
 selection prompt, and then internally invokes `install` for each selected
-plugin. `install` is the **non-interactive primitive** addressed by
-plugin name (e.g. `ooo plugin install github-pr-ops`), used when the
-repository is already known to the system or when scripts/CI need to
-bypass the prompt. The two commands are layered, not redundant: `add`
-calls `install`; `install` never calls `add`.
+plugin. `install` is the **non-interactive primitive** used when scripts
+or CI need to bypass the selection prompt. The two commands are layered,
+not redundant: `add` calls `install`; `install` never calls `add`.
+
+`install` MUST be unambiguous about which `(source_identity, digest)`
+it is targeting:
+
+- **Default form** — `ooo plugin install <name>` — succeeds **only if
+  exactly one** known catalog (i.e. a previously `add`-ed
+  `plugin_home` repository or a registered `local_path` source) exposes
+  a plugin with that `name`. If two or more sources expose the same
+  `name`, the command MUST exit with an "ambiguous plugin name" error
+  listing the candidate sources; it MUST NOT pick one heuristically.
+- **Qualified form** — `ooo plugin install <name> --from <repo-url>`
+  (or `--from <local-path>`) — selects an explicit source and is
+  required whenever the default form would be ambiguous. CI / scripts
+  SHOULD prefer this form unconditionally, because catalog membership
+  can change over time and the qualified form is stable across that
+  drift.
+- **No catalog match** — `ooo plugin install <name>` with no known
+  source providing `<name>` MUST instruct the user to run
+  `ooo plugin add <repo-url>` first; it MUST NOT silently search the
+  network.
 
 **Plugin name → command-namespace mapping.** Every installed plugin's
 manifest `name` field IS the user-facing command namespace, with no
@@ -313,17 +331,29 @@ identify the trust subject. Trust records — and the lockfile entries in
 `~/.ouroboros/plugins.lock` — MUST be keyed by the tuple
 
 ```text
-( source.type , source.url , manifest_digest )
+( source.type , source_identity , manifest_digest )
 ```
 
-where `manifest_digest` is the sha256 of the canonical-form manifest at
-install time (and `source.url` is normalized — scheme, host, path, no
-trailing `.git`, no fragment). This closes the permission-escalation
-path that would otherwise exist when a user runs `remove` + `add` and a
-different repository ships a plugin with the same `name`: the reinstalled
-plugin presents a different `(source.url, manifest_digest)` triple, so
-the firewall MUST treat its required scopes as untrusted and force a
-fresh `ooo plugin trust` decision before invocation.
+where `source_identity` is dispatched on `source.type` so the key works
+across all enum values (this matters because `source.type` is
+`local_path | plugin_home | first_party`, none of which is necessarily
+URL-shaped):
+
+| `source.type` | `source_identity` | Notes |
+|---|---|---|
+| `plugin_home` | normalized repo URL the plugin was added from | This is the URL the user typed into `ooo plugin add <repo-url>`; normalization strips scheme variants, the trailing `.git`, and any fragment so the same repo cannot be smuggled in under aliases |
+| `local_path` | the absolute, resolved filesystem path of the plugin directory at install time | Symlinks are resolved; relative paths are rejected. Two installs of the same path resolve to the same `source_identity` |
+| `first_party` | the manifest `name` (the program is shipped inside the core release artifact) | First-party programs do not produce trust records in the user lockfile; their required permissions are populated as implicitly trusted at boot per the Manifest Schema section. The triple is recorded in core's in-process trust table for audit symmetry, not in `~/.ouroboros/plugins.lock` |
+
+`manifest_digest` is the sha256 of the canonical-form manifest at install
+time, in every case (including `first_party`).
+
+This closes the permission-escalation path that would otherwise exist
+when a user runs `remove` + `add` and a different repository ships a
+plugin with the same `name`: the reinstalled plugin presents a different
+`(source_identity, manifest_digest)` pair, so the firewall MUST treat
+its required scopes as untrusted and force a fresh `ooo plugin trust`
+decision before invocation.
 
 Concrete obligations on the lifecycle commands:
 
