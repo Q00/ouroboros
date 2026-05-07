@@ -23,9 +23,7 @@ def test_state_default_classification_is_none() -> None:
 
 def test_record_classification_persists_dict_and_reason() -> None:
     state = _make_state()
-    classification = classify_goal(
-        "https://github.com/Q00/ouroboros/pull/689 review please"
-    )
+    classification = classify_goal("https://github.com/Q00/ouroboros/pull/689 review please")
 
     state.record_classification(classification)
 
