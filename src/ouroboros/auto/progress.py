@@ -21,11 +21,21 @@ AutoProgressKind = Literal["phase", "grade", "repair"]
 class AutoProgressEvent:
     """Immutable observation of an auto pipeline state change.
 
+    Each event is a *snapshot* of the current pipeline state at the
+    moment of emission, not a delta. Consumers should treat the stream
+    as "the latest known state plus selected milestones".
+
     ``kind`` is the discriminant:
 
-    - ``phase``: a phase transition (including terminal phases) just occurred.
-    - ``grade``: a Seed review produced a grade.
-    - ``repair``: the repair round counter advanced.
+    - ``phase``: the pipeline phase just changed since the last
+      observation. ``AutoPipeline`` also emits a ``phase`` event on the
+      first save of every ``run()`` invocation — including resume paths
+      where no fresh transition occurred in this process — so observers
+      always learn the current phase without polling the store.
+    - ``grade``: a Seed review produced a new grade since the last
+      observation.
+    - ``repair``: the repair round counter advanced since the last
+      observation.
     """
 
     auto_session_id: str
