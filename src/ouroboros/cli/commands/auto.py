@@ -19,6 +19,7 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.provenance import invoked_by_label, load_provenance_from_env
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
@@ -204,6 +205,9 @@ async def _run_auto(
         state = AutoPipelineState(goal=goal.strip(), cwd=str(_safe_default_cwd()))
         state.runtime_backend = runtime
         state.skip_run = skip_run
+        provenance = load_provenance_from_env()
+        if provenance:
+            state.provenance = provenance
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
 
@@ -275,6 +279,11 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Run handoff status: [bold]{state.run_handoff_status}[/]")
     if state.run_handoff_guidance:
         console.print(f"Run handoff guidance: [yellow]{state.run_handoff_guidance}[/]")
+    if state.provenance:
+        console.print(
+            f"Invoked by: [bold]{invoked_by_label(state.provenance)}[/]"
+            f" (provenance keys: {', '.join(sorted(state.provenance))})"
+        )
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
     console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")

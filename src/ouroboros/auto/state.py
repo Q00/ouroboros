@@ -125,6 +125,7 @@ class AutoPipelineState:
             AutoPhase.RUN.value: 60,
         }
     )
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     def transition(self, next_phase: AutoPhase, message: str, *, error: str | None = None) -> None:
         """Move to ``next_phase`` after validating the phase state machine."""
@@ -194,6 +195,7 @@ class AutoPipelineState:
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
+        payload.setdefault("provenance", {})
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -277,6 +279,20 @@ class AutoPipelineState:
         if not isinstance(self.run_subagent, dict):
             msg = "run_subagent must be an object"
             raise ValueError(msg)
+        if not isinstance(self.provenance, dict):
+            msg = "provenance must be an object"
+            raise ValueError(msg)
+        if self.provenance:
+            from ouroboros.auto.provenance import redact_provenance
+
+            redacted = redact_provenance(self.provenance)
+            # Reject anything that would have been dropped — protects against a
+            # caller persisting raw rewrite payloads with sensitive fields.
+            extras = sorted(set(self.provenance) - set(redacted))
+            if extras:
+                msg = f"provenance contains disallowed keys: {', '.join(extras)}"
+                raise ValueError(msg)
+            self.provenance = redacted
         if self.ledger:
             try:
                 from ouroboros.auto.ledger import SeedDraftLedger
