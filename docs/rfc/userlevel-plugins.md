@@ -187,23 +187,37 @@ The user lockfile (`~/.ouroboros/plugins.lock`) holds **zero** first-
 party records, ever, in any state (trusted or disabled). All durable
 state for first-party programs lives in a sibling override file
 `~/.ouroboros/first-party-overrides.json`, owned by core. The override
-file contains one entry per `(first-party name, artifact_digest)` pair
-that the user has explicitly disabled; nothing else is persisted there.
+file contains one entry per first-party program **name** that the user
+has explicitly disabled; nothing else is persisted there.
+
+The override is keyed by `name` only — **not** by
+`(name, artifact_digest)`. This is the deliberate contract: an explicit
+user `disable` MUST persist across ordinary core upgrades, even though
+upgrades change `artifact_digest`. Pinning the override to a particular
+digest would silently re-enable the program on the next release that
+touches its bytes, which would be a surprising and security-relevant
+regression of the user's last explicit decision. The override is
+released only by an explicit `ooo plugin trust <name>` (the user
+re-decides), or by removing the program entirely from a future release
+(at which point the orphaned entry simply does not apply to anything
+and may be GC'd).
 
 The boot/disable/re-enable cycle works against that single file:
 
 1. **Boot.** For every first-party program present in the release
-   artifact, the firewall computes the program's `artifact_digest`
-   and looks up `(name, digest)` in the override file. If absent, the
-   program is implicitly trusted in-process (no lockfile write, no
-   override write — the trust is fully derived from "release artifact
-   present" + "no override saying otherwise"). If present, the
-   program starts disabled: required permissions are stripped from
-   the in-process trust table and invocation is refused.
+   artifact, the firewall looks up `name` in the override file. If
+   absent, the program is implicitly trusted in-process (no lockfile
+   write, no override write — the trust is fully derived from "release
+   artifact present" + "no override saying otherwise"). If present,
+   the program starts disabled: required permissions are stripped
+   from the in-process trust table and invocation is refused. The
+   override carries forward across upgrades unchanged.
 2. **`ooo plugin disable <name>` for a first-party program.** Writes
-   the `(name, current artifact_digest)` entry into the override
-   file. No lockfile changes. Effective immediately and on every
-   subsequent boot.
+   the `name` entry into the override file (the `artifact_digest` at
+   the time of disable MAY be recorded as audit metadata, but it is
+   **not** part of the key). No lockfile changes. Effective
+   immediately and on every subsequent boot, including across
+   upgrades.
 3. **`ooo plugin trust …` for a disabled first-party program.**
    Removes the matching entry from the override file. No lockfile
    write occurs — first-party trust grants are never persisted in
@@ -213,12 +227,8 @@ The boot/disable/re-enable cycle works against that single file:
    symmetry, but the persistence target is the override file, not
    the lockfile.
 
-Two follow-on consequences this model bakes in: (a) a release that
-renames or rotates a first-party program produces a new
-`artifact_digest`, so any stale override entry from an older release
-no longer matches and the new program starts trusted by default — the
-user can disable again if desired. (b) the lockfile remains a clean,
-third-party-only artifact, so any tooling that audits "what
+The follow-on consequence this model bakes in: the lockfile remains a
+clean, third-party-only artifact, so any tooling that audits "what
 third-party plugins do I trust?" never has to filter first-party rows
 out.
 
