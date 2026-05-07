@@ -91,6 +91,28 @@ class MergeAction(StrEnum):
     DELETE_BRANCH = "delete_branch"
 
 
+# Minimum classification risk required to authorize each destructive
+# action.  The merge action is the most destructive and demands a HIGH
+# verb in the goal (``merge``, ``머지`` …); CLOSE/REBASE only need a
+# MEDIUM verb (``close``, ``rebase``, ``fix``).  A LOW (read-only)
+# classification cannot authorize any of these actions: a goal like
+# ``review https://.../pull/689`` must never trigger a default-action
+# merge just because the repo state happens to be clean.
+_ACTION_MIN_RISK: dict[MergeAction, SideEffectRisk] = {
+    MergeAction.MERGE: SideEffectRisk.HIGH,
+    MergeAction.DELETE_BRANCH: SideEffectRisk.HIGH,
+    MergeAction.CLOSE: SideEffectRisk.MEDIUM,
+    MergeAction.REBASE: SideEffectRisk.MEDIUM,
+}
+
+_RISK_RANK: dict[SideEffectRisk, int] = {
+    SideEffectRisk.NONE: 0,
+    SideEffectRisk.LOW: 1,
+    SideEffectRisk.MEDIUM: 2,
+    SideEffectRisk.HIGH: 3,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class MergePolicyDecision:
     """Outcome of evaluating ``PullRequestStatus`` against the gate."""
@@ -127,6 +149,12 @@ class MergePolicy:
     # without an explicit confirmation signal because that combination
     # would mean the classifier mis-rated the destructiveness.
     require_confirmation_for_high_risk: bool = True
+    # When the requested action exceeds the goal's classified intent
+    # (e.g. action=MERGE for a goal classified LOW), fail closed so a
+    # clean PR plus a read-only goal cannot authorize a destructive
+    # default action.  Disable only in tests that want to exercise
+    # repository-only checks in isolation.
+    require_action_classification_match: bool = True
 
 
 def evaluate_merge(
@@ -166,6 +194,36 @@ def evaluate_merge(
             "Re-classify the goal or update GoalClassification semantics so a HIGH risk "
             "always forces requires_confirmation=True."
         )
+
+    if rules.require_action_classification_match:
+        required_min = _ACTION_MIN_RISK.get(action)
+        if required_min is None:
+            blocking_reasons.append(
+                f"action {action.value!r} has no policy-defined minimum risk; "
+                "gate fails closed for unrecognized actions"
+            )
+            required_actions.append(
+                "Add the action to _ACTION_MIN_RISK in merge_policy.py before "
+                "wiring it into the auto pipeline."
+            )
+            matched_signals.append(f"action:{action.value}=unmapped")
+        elif _RISK_RANK[classification.side_effect_risk] < _RISK_RANK[required_min]:
+            blocking_reasons.append(
+                f"goal classified as {classification.side_effect_risk.value} risk "
+                f"does not authorize action {action.value!r} "
+                f"(requires {required_min.value} risk)"
+            )
+            required_actions.append(
+                "Restate the goal with a verb that matches the requested action "
+                f"(for {action.value!r}, use a {required_min.value}-risk verb), "
+                "or invoke the gate with an action consistent with the goal."
+            )
+            matched_signals.append(
+                f"action:{action.value}=needs:{required_min.value}"
+                f"(have:{classification.side_effect_risk.value})"
+            )
+        else:
+            matched_signals.append(f"action:{action.value}=ok")
 
     if not status.has_write_permission:
         blocking_reasons.append("caller lacks repository write permission")
@@ -212,9 +270,7 @@ def evaluate_merge(
         blocking_reasons.append(
             f"CI state is {status.ci_state.value}; require success before merging"
         )
-        required_actions.append(
-            "Wait for CI to finish; investigate failures before re-running."
-        )
+        required_actions.append("Wait for CI to finish; investigate failures before re-running.")
         matched_signals.append(f"ci:{status.ci_state.value}")
     else:
         matched_signals.append(f"ci:{status.ci_state.value}")
@@ -225,9 +281,7 @@ def evaluate_merge(
             state is ReviewState.CHANGES_REQUESTED for state in status.review_states
         )
         if changes_requested:
-            blocking_reasons.append(
-                f"{changes_requested} reviewer(s) requested changes"
-            )
+            blocking_reasons.append(f"{changes_requested} reviewer(s) requested changes")
             required_actions.append("Address review feedback and re-request review.")
             matched_signals.append(f"reviews:changes_requested:{changes_requested}")
         if approved == 0:

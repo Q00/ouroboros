@@ -360,9 +360,7 @@ class SeedDraftLedger:
             "sections": {name: section.to_dict() for name, section in self.sections.items()},
             "question_history": list(self.question_history),
             "direct_path_reason": self.direct_path_reason,
-            "merge_policy_decisions": [
-                dict(record) for record in self.merge_policy_decisions
-            ],
+            "merge_policy_decisions": [dict(record) for record in self.merge_policy_decisions],
         }
 
     @classmethod
