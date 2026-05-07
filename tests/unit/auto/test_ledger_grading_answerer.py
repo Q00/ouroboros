@@ -1046,3 +1046,21 @@ def test_auto_answerer_does_not_block_meta_questions_that_mention_regulated_topi
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
         assert answer.blocker is None, question
         assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question
+
+
+def test_auto_answerer_blocks_existing_convention_runtime_fallback_for_regulated_topic() -> None:
+    """Generic 'use the existing repo runtime' fallback must also block for regulated topics.
+
+    ``_runtime_answer`` returns ``AutoAnswerSource.EXISTING_CONVENTION`` when
+    no concrete ``runtime_context`` repo fact is supplied.  The answer text
+    is still a generic template, so a regulated runtime question without
+    grounded facts must be gated like any other fallback path.
+    """
+    answer = AutoAnswerer().answer(
+        "Which runtime should the HIPAA worker use?",
+        SeedDraftLedger.from_goal("Build a HIPAA worker"),
+    )
+
+    assert answer.source == AutoAnswerSource.BLOCKER
+    assert answer.blocker is not None
+    assert answer.blocker.reason == "regulated data handling"
