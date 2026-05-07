@@ -159,8 +159,16 @@ class PluginManifest:
     version: str
     source: SourceSpec
     commands: tuple[CommandSpec, ...]
-    capabilities: frozenset[Capability]
-    permissions: frozenset[Permission]
+    # `capabilities` and `permissions` were `frozenset`s, but iteration
+    # order in a frozenset is unstable across hash seeds and Python
+    # versions. That instability leaks into `discover`/`inspect`/
+    # `list --json` CLI output and into the firewall's
+    # `plugin.permission_used` event ordering for multi-scope plugins,
+    # making replay/diffs non-deterministic. The schema enforces
+    # `uniqueItems: true` for both arrays, so a tuple preserves manifest
+    # order while still rejecting duplicates at validation time.
+    capabilities: tuple[Capability, ...]
+    permissions: tuple[Permission, ...]
     entrypoint: Entrypoint
     description: str = ""
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
@@ -441,11 +449,11 @@ def load_manifest(path: str | Path) -> PluginManifest:
     )
 
     commands = tuple(_build_command(c) for c in raw["commands"])
-    capabilities = frozenset(
+    capabilities = tuple(
         Capability(name=c["name"], access=c["access"], reason=c.get("reason", ""))
         for c in raw["capabilities"]
     )
-    permissions = frozenset(
+    permissions = tuple(
         Permission(
             scope=p["scope"],
             risk=p["risk"],

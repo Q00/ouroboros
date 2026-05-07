@@ -68,6 +68,17 @@ def _load_with_friendly_error(target: str) -> PluginManifest:
             f"manifest invalid:\n  path: {exc.path}\n  at: {loc}\n  expected: {exc.expected}\n  got: {exc.got}"
         )
         raise typer.Exit(code=1) from exc
+    except OSError as exc:
+        # Mirror the inspect/list error path: `discover` is also a
+        # diagnostic command, so an unreadable manifest (broken
+        # symlink, wrong permissions, transient I/O) must surface as a
+        # clean message instead of bubbling a raw OSError.
+        print_error(
+            f"manifest is unreadable: {path}: {exc}\n"
+            f"  Check the path and file permissions; "
+            f"`ooo plugin discover` cannot proceed without it."
+        )
+        raise typer.Exit(code=1) from exc
 
 
 _STATE_FILE_ERRORS: tuple[type[Exception], ...] = (

@@ -367,6 +367,35 @@ def test_inspect_stale_version_reports_installed(runner: CliRunner, tmp_path: Pa
     assert "github:read" in result.output
 
 
+def test_discover_unreadable_manifest_reports_friendly_error(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: `discover` is also a diagnostic command — an
+    unreadable manifest (chmod 000, broken symlink, transient I/O)
+    must surface as a friendly error rather than a raw OSError
+    traceback. Mirrors the same guarantee `inspect`/`list` make."""
+    import os
+    import sys
+
+    if sys.platform.startswith("win"):
+        pytest.skip("POSIX permission semantics required")
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses POSIX file permissions")
+
+    plugin_dir = tmp_path / "github-pr-ops"
+    manifest_path = _write_manifest(plugin_dir, REFERENCE_MANIFEST)
+    original_mode = manifest_path.stat().st_mode
+    manifest_path.chmod(0o000)
+    try:
+        result = runner.invoke(plugin_app, ["discover", str(plugin_dir)])
+    finally:
+        manifest_path.chmod(original_mode)
+
+    assert result.exit_code == 1
+    assert "manifest is unreadable" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_inspect_structurally_corrupt_lockfile_reports_friendly_error(
     runner: CliRunner, tmp_path: Path
 ) -> None:

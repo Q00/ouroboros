@@ -352,3 +352,79 @@ def test_unreadable_manifest_reports_structured_error(tmp_path: Path) -> None:
         assert excinfo.value.path == str(target)
     finally:
         target.chmod(0o644)
+
+
+def test_source_local_path_requires_path(tmp_path: Path) -> None:
+    """Regression: a `local_path` source manifest with no `path` is
+    invalid. The schema previously required only `type`, so the
+    location metadata could be omitted and the rest of the plugin
+    system would only fail later at install/runtime."""
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "local_path"}  # path missing
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    # The pointer lands on the source object — that's where the
+    # `required: ["type", "path"]` clause attaches.
+    assert excinfo.value.json_pointer.startswith("/source")
+
+
+def test_source_plugin_home_requires_path(tmp_path: Path) -> None:
+    """Regression: same gate for `plugin_home` source type. The
+    location is still mandatory metadata for the plugin system."""
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "plugin_home"}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer.startswith("/source")
+
+
+def test_source_first_party_path_optional(tmp_path: Path) -> None:
+    """First-party plugins ship with the binary, so they have no
+    on-disk path of their own. The conditional schema must NOT
+    require `path` when `type=first_party`."""
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["name"] = "ooo-builtin"
+    payload["source"] = {"type": "first_party"}
+    payload["permissions"] = []  # built-ins don't need external scopes
+    manifest = load_manifest(_write(tmp_path, payload))  # MUST NOT raise
+    assert manifest.source.type == "first_party"
+    assert manifest.source.path is None
+
+
+def test_capabilities_and_permissions_preserve_manifest_order(tmp_path: Path) -> None:
+    """Regression: `capabilities` and `permissions` used to be
+    `frozenset`s, so iteration order varied across hash seeds and
+    Python versions. That instability leaks into `discover`,
+    `inspect`, `list --json`, and the firewall's
+    `plugin.permission_used` event ordering for multi-scope plugins.
+    A tuple preserves the order the operator wrote in the manifest.
+    """
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    # Order chosen so an alphabetic sort or hash-keyed iteration would
+    # rearrange them, exposing any silent re-ordering in the loader.
+    payload["capabilities"] = [
+        {"name": "state", "access": "read"},
+        {"name": "ledger", "access": "write"},
+        {"name": "provenance", "access": "write"},
+        {"name": "seed", "access": "read"},
+    ]
+    payload["permissions"] = [
+        {"scope": "github:write", "risk": "destructive", "required": False},
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {"scope": "fs:read", "risk": "read_only", "required": True},
+    ]
+    manifest = load_manifest(_write(tmp_path, payload))
+
+    assert isinstance(manifest.capabilities, tuple)
+    assert isinstance(manifest.permissions, tuple)
+    assert [c.name for c in manifest.capabilities] == [
+        "state",
+        "ledger",
+        "provenance",
+        "seed",
+    ]
+    assert [p.scope for p in manifest.permissions] == [
+        "github:write",
+        "github:read",
+        "fs:read",
+    ]
