@@ -30,18 +30,17 @@ ledger writer (#737). Tests pass a list-appender for inspection.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import hashlib
 import shlex
 import subprocess
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Iterable, Literal
+from typing import Literal
 
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
-
 
 SCHEMA_VERSION = "0.1"
 
@@ -60,7 +59,7 @@ class InvocationResult:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _source_type_for_event(manifest: PluginManifest) -> str:
@@ -108,13 +107,29 @@ def _required_permissions(manifest: PluginManifest) -> list[str]:
     return [p.scope for p in manifest.permissions if p.required]
 
 
+def _record_matches_version(
+    manifest: PluginManifest,
+    trust_record: TrustRecord | None,
+) -> bool:
+    """A trust record is only authoritative when its version matches the
+    currently-installed manifest. Per Q00/ouroboros-plugins#9 Q4 lock,
+    a version bump invalidates prior grants — the firewall enforces that
+    here at runtime, even if `add`/`install` forgot to call
+    `reset_for_version_bump` (defense in depth)."""
+    return trust_record is not None and trust_record.version == manifest.version
+
+
 def _trust_state_label(
     manifest: PluginManifest,
     trust_record: TrustRecord | None,
 ) -> str:
     if manifest.source.type == "first_party":
         return "first_party"
-    if trust_record is not None and trust_record.granted_scopes:
+    if (
+        _record_matches_version(manifest, trust_record)
+        and trust_record is not None
+        and trust_record.granted_scopes
+    ):
         return "trusted"
     return "installed"
 
@@ -126,8 +141,11 @@ def _missing_required(
     required = _required_permissions(manifest)
     if not required:
         return []
-    if trust_record is None:
+    if not _record_matches_version(manifest, trust_record):
+        # Treat a version-mismatched record as if no trust were granted:
+        # the user must re-grant scopes against the new version.
         return list(required)
+    assert trust_record is not None  # narrowed by _record_matches_version
     return trust_record.missing(required)
 
 

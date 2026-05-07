@@ -16,9 +16,11 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
+from pathlib import Path
+import secrets
 import shutil
 import subprocess
-from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -80,9 +82,88 @@ def _trust_state_label(
     if manifest.source.type == "first_party":
         return "first_party"
     record = trust_store.read(manifest.name)
-    if record is not None and record.granted_scopes:
+    # Per Q00/ouroboros-plugins#9 Q4 lock: a stale record (its version no
+    # longer matches the installed manifest) does NOT count as trust.
+    if (
+        record is not None
+        and record.version == manifest.version
+        and record.granted_scopes
+    ):
         return "trusted"
     return "installed"
+
+
+def _atomic_replace_dir(src: Path, dest: Path) -> None:
+    """Copy `src` over `dest` atomically-as-possible.
+
+    Strategy:
+      1. Copy `src` into a sibling staging directory. If this fails, no
+         change to `dest`.
+      2. If `dest` already exists, rename it to a sibling `.bak-<rand>` dir
+         (atomic on the same filesystem).
+      3. Rename the staging dir into `dest` (atomic on the same filesystem).
+      4. On any error after step 2, restore the backup and surface the
+         original exception to the caller.
+      5. Best-effort cleanup of the backup once the swap succeeds.
+
+    This satisfies the locked contract that a failed `ooo plugin add` /
+    `install` MUST NOT erase a previously-installed plugin home (data-loss
+    avoidance).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    suffix = secrets.token_hex(6)
+    staging = dest.with_name(f"{dest.name}.staging-{suffix}")
+    backup = dest.with_name(f"{dest.name}.bak-{suffix}")
+
+    # Step 1: stage copy.
+    try:
+        shutil.copytree(src, staging)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    backup_used = False
+    try:
+        # Step 2: move existing dest aside.
+        if dest.exists():
+            os.rename(dest, backup)
+            backup_used = True
+        # Step 3: promote staging into place.
+        os.rename(staging, dest)
+    except Exception:
+        # Rollback: restore backup, drop staging.
+        if backup_used and not dest.exists() and backup.exists():
+            try:
+                os.rename(backup, dest)
+            except OSError:
+                pass
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    # Step 4: cleanup backup. Failure here is non-fatal — the new install
+    # is already in place.
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _maybe_invalidate_trust_for_version_bump(
+    *,
+    name: str,
+    new_version: str,
+    lock: Lockfile,
+    trust: TrustStore,
+) -> None:
+    """If a previous lockfile entry exists at a different version, reset
+    the trust file. Per Q00/ouroboros-plugins#9 Q4 lock — a version bump
+    must invalidate prior grants so the user is forced to re-consent."""
+    prior = lock.read().get(name)
+    if prior is None or prior.version == new_version:
+        return
+    if trust.read(name) is None:
+        return
+    trust.reset_for_version_bump(name, new_version)
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +238,11 @@ def inspect_command(
         raise typer.Exit(code=1) from exc
 
     record = trust.read(name)
-    granted = [g.scope for g in record.granted_scopes] if record else []
+    # A trust record whose version no longer matches the installed manifest
+    # is treated as if no scopes were granted — version bumps invalidate
+    # prior trust per Q00/ouroboros-plugins#9 Q4.
+    record_is_current = record is not None and record.version == manifest.version
+    granted = [g.scope for g in record.granted_scopes] if record_is_current and record else []
 
     print_info(f"{manifest.name} {manifest.version} ({entry.source_kind})")
     console.print(f"  installed_at:   {entry.installed_at}")
@@ -170,6 +255,11 @@ def inspect_command(
     console.print(
         f"  granted_scopes: {', '.join(granted) if granted else '(none)'}"
     )
+    if record is not None and not record_is_current:
+        console.print(
+            f"  trust note:     stored grants are for version {record.version!r} "
+            f"(stale — version bump cleared them; re-grant required)"
+        )
     required_perms = [p.scope for p in manifest.permissions if p.required]
     missing = [s for s in required_perms if s not in granted]
     if missing:
@@ -210,7 +300,15 @@ def list_command(
     rows = []
     for entry in sorted(entries.values(), key=lambda e: e.name):
         record = trust.read(entry.name)
-        scopes = [g.scope for g in record.granted_scopes] if record else []
+        # A trust record whose version no longer matches the installed
+        # manifest is treated as if no scopes were granted — version
+        # bumps invalidate prior trust per Q00/ouroboros-plugins#9 Q4.
+        record_is_current = record is not None and record.version == entry.version
+        scopes = (
+            [g.scope for g in record.granted_scopes]
+            if record_is_current and record
+            else []
+        )
         rows.append(
             {
                 "name": entry.name,
@@ -370,7 +468,7 @@ def _install_one(
         repository=repository,
         git_sha=git_sha,
         manifest_checksum=_manifest_checksum(plugin_home),
-        installed_at=datetime.datetime.now(tz=datetime.timezone.utc).strftime(
+        installed_at=datetime.datetime.now(tz=datetime.UTC).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
         plugin_home=str(plugin_home),
@@ -411,6 +509,14 @@ def add_command(
         Path | None,
         typer.Option("--lockfile", help="Override the lockfile path."),
     ] = None,
+    trust_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--trust-root",
+            help="Override the trust root (default: ~/.ouroboros/plugins). "
+            "Used to invalidate prior grants on a version bump.",
+        ),
+    ] = None,
 ) -> None:
     """Install one or more plugins from a repo URL or local path.
 
@@ -421,6 +527,7 @@ def add_command(
     cache_root = cache_root or Path.home() / ".ouroboros" / "cache"
     plugin_home_root = plugin_home_root or Path.home() / ".ouroboros" / "plugins"
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
+    trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
     if _looks_like_url(target):
         # Shallow clone into cache_root/<sanitized-host-path>.
@@ -459,9 +566,18 @@ def add_command(
     installed: list[str] = []
     for manifest in selected:
         plugin_home = plugin_home_root / manifest.name
-        if plugin_home.exists():
-            shutil.rmtree(plugin_home)
-        shutil.copytree(repo_root / "plugins" / manifest.name, plugin_home)
+        # Per Q4 lock: a version bump invalidates any prior grants. We
+        # check this BEFORE swapping the plugin home so that even a
+        # mid-install crash leaves the trust store consistent with the
+        # version that's about to be on disk.
+        _maybe_invalidate_trust_for_version_bump(
+            name=manifest.name,
+            new_version=manifest.version,
+            lock=lock,
+            trust=trust,
+        )
+        # Atomic install: prior plugin home survives any copy failure.
+        _atomic_replace_dir(repo_root / "plugins" / manifest.name, plugin_home)
         _install_one(
             manifest=manifest,
             plugin_home=plugin_home,
@@ -495,6 +611,14 @@ def install_command(
         Path | None,
         typer.Option("--lockfile"),
     ] = None,
+    trust_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--trust-root",
+            help="Override the trust root (default: ~/.ouroboros/plugins). "
+            "Used to invalidate prior grants on a version bump.",
+        ),
+    ] = None,
 ) -> None:
     """Register a single local plugin directory in the lockfile.
 
@@ -504,6 +628,7 @@ def install_command(
     """
     plugin_home_root = plugin_home_root or Path.home() / ".ouroboros" / "plugins"
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
+    trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
     src = path.expanduser().resolve()
     if not (src / "ouroboros.plugin.json").is_file():
@@ -519,9 +644,15 @@ def install_command(
         raise typer.Exit(code=1) from exc
 
     plugin_home = plugin_home_root / manifest.name
-    if plugin_home.exists():
-        shutil.rmtree(plugin_home)
-    shutil.copytree(src, plugin_home)
+    # Per Q4 lock: invalidate trust on version bump.
+    _maybe_invalidate_trust_for_version_bump(
+        name=manifest.name,
+        new_version=manifest.version,
+        lock=lock,
+        trust=trust,
+    )
+    # Atomic install: prior plugin home survives any copy failure.
+    _atomic_replace_dir(src, plugin_home)
 
     _install_one(
         manifest=manifest,
@@ -600,7 +731,7 @@ def trust_command(
             audit_event = {
                 "schema_version": "0.1",
                 "event_type": "plugin.trusted",
-                "occurred_at": datetime.datetime.now(tz=datetime.timezone.utc).strftime(
+                "occurred_at": datetime.datetime.now(tz=datetime.UTC).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 ),
                 "plugin": {
@@ -637,6 +768,14 @@ def disable_command(
         Path | None,
         typer.Option("--lockfile"),
     ] = None,
+    trust_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--trust-root",
+            help="Override the trust root (default: ~/.ouroboros/plugins). "
+            "Required when the plugin was trusted under a non-default root.",
+        ),
+    ] = None,
 ) -> None:
     """Disable an installed plugin (its trust file is wiped; lockfile entry stays)."""
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
@@ -645,8 +784,10 @@ def disable_command(
         print_error(f"{name!r} is not installed")
         raise typer.Exit(code=1)
     # Disabling = removing all trust grants. Lockfile entry remains so the
-    # user can re-enable with `ooo plugin trust ...`.
-    trust = TrustStore()
+    # user can re-enable with `ooo plugin trust ...`. Honor the explicit
+    # `--trust-root` override so that grants made under a non-default root
+    # are actually removed (not silently left behind).
+    trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
     trust.remove(name)
     print_success(f"Disabled {name} (re-grant scopes to re-enable)")
 
@@ -677,7 +818,13 @@ def remove_command(
         print_error(f"{name!r} is not installed")
         raise typer.Exit(code=1)
 
-    plugin_home = Path(entry.plugin_home).expanduser()
+    # Prefer the explicit `--plugin-home-root` override when provided so
+    # that callers (notably tests) can target a non-default install
+    # location even if the lockfile points elsewhere.
+    if plugin_home_root is not None:
+        plugin_home = (plugin_home_root.expanduser() / name)
+    else:
+        plugin_home = Path(entry.plugin_home).expanduser()
     if plugin_home.is_dir():
         shutil.rmtree(plugin_home)
 

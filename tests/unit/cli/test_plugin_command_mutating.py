@@ -18,7 +18,6 @@ from ouroboros.cli.commands.plugin import app as plugin_app
 from ouroboros.plugin.lockfile import Lockfile
 from ouroboros.plugin.trust_store import TrustStore
 
-
 REFERENCE_MANIFEST: dict = {
     "schema_version": "0.1",
     "name": "github-pr-ops",
@@ -342,6 +341,260 @@ def test_remove_drops_lockfile_trust_and_plugin_home(
     assert "github-pr-ops" not in Lockfile(paths["lockfile"]).read()
     assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
     assert not (paths["plugin_home_root"] / "github-pr-ops").exists()
+
+
+def test_install_failure_preserves_existing_plugin_home(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed reinstall MUST leave the previously-installed plugin home
+    intact (no data loss). Per Q00/ouroboros-plugins#9 atomic-install lock.
+    """
+    plugin_dir_v1 = tmp_path / "src_v1"
+    plugin_dir_v1.mkdir()
+    (plugin_dir_v1 / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    (plugin_dir_v1 / "marker.txt").write_text("v1-marker")
+    paths = _common_paths(tmp_path)
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir_v1),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    installed_home = paths["plugin_home_root"] / "github-pr-ops"
+    assert (installed_home / "marker.txt").read_text() == "v1-marker"
+
+    plugin_dir_v2 = tmp_path / "src_v2"
+    plugin_dir_v2.mkdir()
+    payload_v2 = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (plugin_dir_v2 / "ouroboros.plugin.json").write_text(json.dumps(payload_v2))
+    (plugin_dir_v2 / "marker.txt").write_text("v2-marker")
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("simulated disk full during copytree")
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin.shutil.copytree", _boom
+    )
+    bad = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir_v2),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert bad.exit_code != 0
+    assert (installed_home / "marker.txt").read_text() == "v1-marker"
+    siblings = list(paths["plugin_home_root"].iterdir())
+    assert {p.name for p in siblings} == {"github-pr-ops"}, siblings
+    assert Lockfile(paths["lockfile"]).read()["github-pr-ops"].version == "0.1.0"
+
+
+def test_install_version_bump_invalidates_trust(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Reinstalling at a different version MUST clear prior trust grants.
+
+    Per Q00/ouroboros-plugins#9 Q4 lock — the user must re-consent against
+    the new version, regardless of how the upgrade arrived.
+    """
+    paths = _common_paths(tmp_path)
+    plugin_dir_v1 = tmp_path / "src_v1"
+    plugin_dir_v1.mkdir()
+    (plugin_dir_v1 / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir_v1),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert record is not None
+    assert record.version == "0.1.0"
+    assert any(g.scope == "github:read" for g in record.granted_scopes)
+
+    plugin_dir_v2 = tmp_path / "src_v2"
+    plugin_dir_v2.mkdir()
+    payload_v2 = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (plugin_dir_v2 / "ouroboros.plugin.json").write_text(json.dumps(payload_v2))
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir_v2),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    after = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert after is not None
+    assert after.version == "0.2.0"
+    assert after.granted_scopes == ()
+    listed = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--json",
+        ],
+    )
+    assert listed.exit_code == 0, listed.output
+    rows = json.loads(listed.stdout)
+    assert rows[0]["trust_state"] == "installed"
+    assert rows[0]["granted_scopes"] == []
+
+
+def test_add_version_bump_invalidates_trust(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Same as the install variant, driven through `ooo plugin add`."""
+    paths = _common_paths(tmp_path)
+
+    repo_root = tmp_path / "repo"
+    _make_repo_layout(repo_root, [REFERENCE_MANIFEST])
+    runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+
+    bumped = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (repo_root / "plugins" / "github-pr-ops" / "ouroboros.plugin.json").write_text(
+        json.dumps(bumped)
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    after = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert after is not None
+    assert after.version == "0.2.0"
+    assert after.granted_scopes == ()
+
+
+def test_disable_honors_trust_root_override(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`disable --trust-root <custom>` MUST remove the trust file under
+    that root — not silently target the default `~/.ouroboros/plugins`.
+    """
+    paths = _common_paths(tmp_path)
+    plugin_dir = tmp_path / "src"
+    plugin_dir.mkdir()
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    TrustStore(root=paths["trust_root"]).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    assert (paths["trust_root"] / "github-pr-ops" / "trust.json").is_file()
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert not (paths["trust_root"] / "github-pr-ops" / "trust.json").exists()
+    assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
 
 
 def test_remove_uninstalled_errors(runner: CliRunner, tmp_path: Path) -> None:

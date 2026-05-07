@@ -16,7 +16,6 @@ from ouroboros.cli.commands.plugin import app as plugin_app
 from ouroboros.plugin.lockfile import LockEntry, Lockfile
 from ouroboros.plugin.trust_store import TrustStore
 
-
 REFERENCE_MANIFEST: dict = {
     "schema_version": "0.1",
     "name": "github-pr-ops",

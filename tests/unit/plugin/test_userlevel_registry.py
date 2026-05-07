@@ -9,7 +9,6 @@ import pytest
 
 from ouroboros.plugin.manifest import load_manifest
 from ouroboros.plugin.userlevel_registry import (
-    LookupResult,
     RegisteredProgram,
     RegistryError,
     UserLevelProgramRegistry,
@@ -17,7 +16,6 @@ from ouroboros.plugin.userlevel_registry import (
     lookup_command,
     reset_userlevel_registry,
 )
-
 
 REFERENCE_MANIFEST: dict = {
     "schema_version": "0.1",
@@ -58,7 +56,7 @@ def _write_manifest(tmp_path: Path, payload: dict) -> Path:
     return target
 
 
-def _load_ref(tmp_path: Path, **overrides) -> "RegisteredProgram":
+def _load_ref(tmp_path: Path, **overrides) -> RegisteredProgram:
     payload = json.loads(json.dumps(REFERENCE_MANIFEST))
     payload.update(overrides)
     return load_manifest(_write_manifest(tmp_path, payload))

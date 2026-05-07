@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-import pytest
+import subprocess
 
 from ouroboros.plugin.firewall import (
-    InvocationResult,
     invoke_plugin,
 )
 from ouroboros.plugin.manifest import load_manifest
@@ -19,7 +14,6 @@ from ouroboros.plugin.trust_store import TrustStore
 from ouroboros.plugin.userlevel_registry import (
     UserLevelProgramRegistry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -352,6 +346,47 @@ def test_first_party_skips_trust_check(tmp_path: Path) -> None:
     assert types == ["plugin.invoked", "plugin.completed"]
     # trust_state field reports "first_party"
     assert all(e["trust_state"] == "first_party" for e in events)
+
+
+def test_stale_trust_record_after_version_bump_blocks(tmp_path: Path) -> None:
+    """A trust record whose version no longer matches the manifest must NOT
+    grant access at runtime — even if scopes are present.
+
+    Per Q00/ouroboros-plugins#9 Q4 lock, a version bump invalidates prior
+    grants. The firewall enforces this defensively: even if `add`/`install`
+    failed to call `reset_for_version_bump`, an invocation with a stale
+    record must be blocked.
+    """
+    # Pre-existing trust grant under v0.1.0.
+    granted = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    # User upgrades to v0.2.0 — manifest changes but stale record persists
+    # (simulating a missed reset_for_version_bump).
+    bumped_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bumped_payload["version"] = "0.2.0"
+    bumped = _make_program(tmp_path / "v2", bumped_payload)
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        bumped,
+        command_name="review",
+        argv=["url"],
+        trust_record=granted,  # version='0.1.0' but manifest is now '0.2.0'
+        event_sink=events.append,
+        correlation_id="corr-stale",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    assert result.status == "blocked"
+    assert "github:read" in result.message
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert "plugin.invoked" not in types
+    # trust_state must NOT report "trusted" for a stale record.
+    assert events[0]["trust_state"] == "installed"
 
 
 def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
