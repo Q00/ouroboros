@@ -115,10 +115,15 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 ### 7. UserLevel Programs Layer
 
-**User-installable workflows built on top of core primitives** (introduced
-in [#725](https://github.com/Q00/ouroboros/issues/725); long-form RFC in
-flight in PR [#743](https://github.com/Q00/ouroboros/pull/743), which will
-land at `docs/rfc/userlevel-plugins.md`).
+**Workflows composed on top of core primitives via a declared manifest
+contract** — both first-party programs that ship today (`ooo auto`, `ooo run`,
+`ooo pm`) and a planned third-party plugin surface (introduced in
+[#725](https://github.com/Q00/ouroboros/issues/725); long-form RFC in flight
+in PR [#743](https://github.com/Q00/ouroboros/pull/743), which will land at
+`docs/rfc/userlevel-plugins.md`). The third-party install surface
+(`ooo plugin add ...`) is not yet implemented on `main`; this section
+documents the architectural target so PRs can be discussed in consistent
+terms.
 
 This layer is distinct from the in-process Skills & Agents Registry
 (Section 1):
@@ -126,24 +131,28 @@ This layer is distinct from the in-process Skills & Agents Registry
 - **Skills & Agents Registry** = in-process subsystem of bundled
   skills/agents that ship with core. Discovered via `/ouroboros:` magic
   prefix. Used by `ooo interview`, `ooo qa`, etc.
-- **UserLevel Programs Layer** = user-installable plugins composed on top
-  of core primitives via a declared manifest contract. Distributed via
-  `ooo plugin add <repo-url>`. Examples: `github-pr-ops`, `merge-assistant`,
-  `jira-sync`. First-party programs (`ooo auto`, `ooo run`, `ooo pm`) live
-  in this layer too — they share the manifest format with installable
-  plugins.
+- **UserLevel Programs Layer** = workflows composed on top of core
+  primitives via a declared manifest contract. First-party programs
+  shipped today: `ooo auto`, `ooo run`, `ooo pm`. Installable third-party
+  plugins (e.g. `github-pr-ops`, `merge-assistant`, `jira-sync`) are
+  **planned**: the manifest schema is being prototyped at
+  [Q00/ouroboros-plugins/schemas/0.1/](https://github.com/Q00/ouroboros-plugins/tree/main/schemas/0.1)
+  and the `ooo plugin add <repo-url>` install surface is tracked under
+  [#725](https://github.com/Q00/ouroboros/issues/725); it does not exist
+  on `main` yet. First-party and installable programs will share the
+  same manifest format.
 
 ```text
-+--------------------------------------------------------------+
-| UserLevel Programs Layer                                     |
-|                                                              |
-|   Installable: github-pr-ops  jira-sync  release-coordinator |
-|   First-party: ooo auto       ooo run    ooo pm             |
-+----------------------+---------------------------------------+
-                       | declared manifest contract
-                       v
-                  Ouroboros core
-                  (Sections 1–6 above)
++----------------------------------------------------------------------+
+| UserLevel Programs Layer                                             |
+|                                                                      |
+|   Shipped (first-party):     ooo auto   ooo run   ooo pm             |
+|   Planned (third-party):     github-pr-ops  jira-sync  ...  (#725)   |
++--------------------------+-------------------------------------------+
+                           | declared manifest contract
+                           v
+                      Ouroboros core
+                      (Sections 1–6 above)
 ```
 
 **Why a separate layer?** To keep `ooo auto` coherent (`goal → interview
