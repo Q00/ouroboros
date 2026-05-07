@@ -165,6 +165,25 @@ class SeedDraftLedger:
 
     sections: dict[str, LedgerSection] = field(default_factory=dict)
     question_history: list[dict[str, str]] = field(default_factory=list)
+    # Recorded reason whenever the auto pipeline takes the direct
+    # operational path instead of running an interview (#689 PR-B).
+    # ``None`` for legacy ledgers and for sessions that took the
+    # interview-first route.
+    direct_path_reason: str | None = None
+
+    def record_direct_path_reason(self, reason: str) -> None:
+        """Persist why the auto pipeline skipped interview for this session.
+
+        The reason is the human-readable string from
+        ``GoalClassification.reason``; storing it on the ledger keeps the
+        explanation alongside the other Seed draft facts and survives
+        resume.  Pure assignment with empty-string guard — no IO.
+        """
+        cleaned = reason.strip() if isinstance(reason, str) else ""
+        if not cleaned:
+            msg = "direct_path_reason must be a non-empty string"
+            raise ValueError(msg)
+        self.direct_path_reason = cleaned
 
     @classmethod
     def from_goal(cls, goal: str) -> SeedDraftLedger:
@@ -320,6 +339,7 @@ class SeedDraftLedger:
         return {
             "sections": {name: section.to_dict() for name, section in self.sections.items()},
             "question_history": list(self.question_history),
+            "direct_path_reason": self.direct_path_reason,
         }
 
     @classmethod
@@ -358,7 +378,17 @@ class SeedDraftLedger:
                 msg = "ledger question_history question and answer must be strings"
                 raise ValueError(msg)
 
-        ledger = cls(sections=sections, question_history=[dict(item) for item in question_history])
+        direct_path_reason = data.get("direct_path_reason")
+        if direct_path_reason is not None:
+            if not isinstance(direct_path_reason, str) or not direct_path_reason.strip():
+                msg = "ledger direct_path_reason must be a non-empty string or null"
+                raise ValueError(msg)
+
+        ledger = cls(
+            sections=sections,
+            question_history=[dict(item) for item in question_history],
+            direct_path_reason=direct_path_reason,
+        )
         for required in REQUIRED_SECTIONS:
             ledger.sections.setdefault(required, LedgerSection(required))
         return ledger

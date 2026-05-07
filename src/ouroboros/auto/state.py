@@ -93,6 +93,12 @@ class AutoPipelineState:
     max_repair_rounds: int = 5
     interview_session_id: str | None = None
     interview_completed: bool = False
+    # Goal classification (#689) -- populated when the classifier has been
+    # consulted for this session.  ``None`` for legacy records and for any
+    # pipeline that has not yet wired classification.  Persistence-only in
+    # PR-B; PR-C reads this field to route around interview.
+    classification: dict[str, Any] | None = None
+    direct_path_reason: str | None = None
     seed_id: str | None = None
     seed_path: str | None = None
     seed_artifact: dict[str, Any] = field(default_factory=dict)
@@ -138,6 +144,27 @@ class AutoPipelineState:
         self.updated_at = now
         self.last_progress_message = message
         self.last_error = error
+
+    def record_classification(self, classification: object) -> None:
+        """Persist a ``GoalClassification`` on the state record (#689 PR-B).
+
+        Accepts a ``GoalClassification`` instance directly to avoid forcing
+        callers to import the dataclass when they only care about
+        recording the verdict.  The classification is normalized to its
+        dict form so the state remains JSON-serializable for resume.
+        """
+        from ouroboros.auto.goal_classifier import GoalClassification
+
+        if not isinstance(classification, GoalClassification):
+            msg = (
+                "record_classification expects a GoalClassification, got "
+                f"{type(classification).__name__}"
+            )
+            raise TypeError(msg)
+        self.classification = classification.to_dict()
+        self.direct_path_reason = (
+            classification.reason if classification.direct_run_allowed else None
+        )
 
     def mark_progress(self, message: str, *, tool_name: str | None = None) -> None:
         """Record non-terminal progress within the current phase."""
@@ -194,6 +221,8 @@ class AutoPipelineState:
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
+        payload.setdefault("classification", None)
+        payload.setdefault("direct_path_reason", None)
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -285,6 +314,17 @@ class AutoPipelineState:
             except Exception as exc:
                 msg = "ledger must be a valid Seed Draft Ledger"
                 raise ValueError(msg) from exc
+        if self.classification is not None:
+            if not isinstance(self.classification, dict):
+                msg = "classification must be an object or null"
+                raise ValueError(msg)
+            try:
+                from ouroboros.auto.goal_classifier import GoalClassification
+
+                GoalClassification.from_dict(self.classification)
+            except Exception as exc:
+                msg = "classification must be a valid GoalClassification record"
+                raise ValueError(msg) from exc
         optional_string_fields = (
             "runtime_backend",
             "opencode_mode",
@@ -300,6 +340,7 @@ class AutoPipelineState:
             "pending_question",
             "last_tool_name",
             "last_error",
+            "direct_path_reason",
         )
         for field_name in optional_string_fields:
             value = getattr(self, field_name)
