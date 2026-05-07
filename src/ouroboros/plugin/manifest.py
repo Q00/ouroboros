@@ -25,8 +25,9 @@ runtime side effects.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib import resources
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
@@ -42,7 +43,12 @@ except ImportError as exc:  # pragma: no cover
 # below the latest is unsupported.
 SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1",)
 
-_SCHEMAS_ROOT = Path(__file__).resolve().parent / "schemas"
+# Source types whose `path` must be a sandboxed relative slug — no absolute
+# paths and no parent-directory traversal. `local_path` resolves relative to
+# the manifest's directory; `plugin_home` resolves relative to the user's
+# plugin home. Either one becoming an absolute or escaping path is a real
+# trust-boundary leak, not a cosmetic issue.
+_PATH_SANDBOXED_SOURCE_TYPES: frozenset[str] = frozenset({"local_path", "plugin_home"})
 
 
 class PluginManifestError(Exception):
@@ -163,30 +169,48 @@ class PluginManifest:
 def _load_schema(schema_version: str, *, manifest_path: str | Path) -> dict[str, Any]:
     """Load the vendored schema for `schema_version`.
 
-    Reuses `manifest_path` as the `path` field on any raised error so the
-    caller's structured-error contract still points back at the manifest
-    that triggered the lookup, not at an internal vendored file the user
-    cannot fix.
+    Resolved via `importlib.resources` so the lookup works whether the
+    package is installed as a wheel, an editable install, or a zipapp —
+    the same pattern `ouroboros.opencode.plugin` uses for its bridge
+    assets. Reuses `manifest_path` as the `path` field on any raised
+    error so the caller's structured-error contract still points back at
+    the manifest that triggered the lookup, not at an internal vendored
+    file the user cannot fix.
     """
-    schema_path = _SCHEMAS_ROOT / schema_version / "plugin.schema.json"
-    if not schema_path.is_file():
+    try:
+        schema_resource = (
+            resources.files("ouroboros.plugin.schemas")
+            .joinpath(schema_version)
+            .joinpath("plugin.schema.json")
+        )
+        if not schema_resource.is_file():
+            raise PluginManifestError(
+                f"vendored schema for version {schema_version!r} not found",
+                path=str(manifest_path),
+                json_pointer="/schema_version",
+                expected=f"one of {list(SUPPORTED_SCHEMA_VERSIONS)}",
+                got=f"{schema_version!r} (no vendored schema in installed package)",
+            )
+        raw = schema_resource.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        # Raised by importlib.resources when the package itself is missing
+        # the asset directory entirely (e.g. wheel built without
+        # force-include). This is exactly the failure mode the bot's
+        # follow-up flagged.
         raise PluginManifestError(
-            f"vendored schema for version {schema_version!r} not found",
+            f"vendored schema directory missing from installed package: {exc}",
             path=str(manifest_path),
             json_pointer="/schema_version",
-            expected=f"one of {list(SUPPORTED_SCHEMA_VERSIONS)}",
-            got=f"{schema_version!r} (no vendored schema)",
-        )
-    try:
-        with schema_path.open(encoding="utf-8") as handle:
-            return json.load(handle)
+            expected="schema directory packaged with ouroboros.plugin",
+            got=f"FileNotFoundError on ouroboros.plugin.schemas/{schema_version}",
+        ) from exc
     except OSError as exc:
         raise PluginManifestError(
             f"vendored schema is unreadable: {exc.strerror or exc}",
             path=str(manifest_path),
             json_pointer="/schema_version",
             expected="readable vendored schema file",
-            got=f"{type(exc).__name__} on {schema_path}",
+            got=f"{type(exc).__name__}: {exc.strerror or exc}",
         ) from exc
     except UnicodeDecodeError as exc:
         raise PluginManifestError(
@@ -194,8 +218,10 @@ def _load_schema(schema_version: str, *, manifest_path: str | Path) -> dict[str,
             path=str(manifest_path),
             json_pointer="/schema_version",
             expected="UTF-8 encoded JSON file",
-            got=f"UnicodeDecodeError on {schema_path}",
+            got=f"UnicodeDecodeError: {exc.reason}",
         ) from exc
+    try:
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise PluginManifestError(
             f"vendored schema is not valid JSON: {exc.msg}",
@@ -204,6 +230,37 @@ def _load_schema(schema_version: str, *, manifest_path: str | Path) -> dict[str,
             expected="valid JSON object",
             got=f"JSON decode error at line {exc.lineno}, col {exc.colno}",
         ) from exc
+
+
+def _validate_sandboxed_path(raw_path: str, *, source_type: str, manifest_path: str | Path) -> None:
+    """Reject absolute paths and parent-directory traversal in `path`.
+
+    The locked spec says `local_path` resolves relative to the manifest's
+    directory and `plugin_home` resolves relative to the user's plugin
+    home. Either one accepting `/etc/passwd` or `../../foo` would let a
+    plugin escape its sandbox the moment a downstream consumer joined the
+    path naively. Catch it at load time, with the same JSON-pointer
+    contract the rest of the loader uses.
+    """
+    pointer = "/source/path"
+    posix = PurePosixPath(raw_path)
+    if posix.is_absolute() or raw_path.startswith(("/", "\\")):
+        raise PluginManifestError(
+            f"source.path for {source_type!r} must be relative, not absolute",
+            path=str(manifest_path),
+            json_pointer=pointer,
+            expected="relative path under the source root",
+            got=raw_path,
+        )
+    # Reject any `..` segment, including ones embedded mid-path like `a/../b`.
+    if any(part == ".." for part in posix.parts):
+        raise PluginManifestError(
+            f"source.path for {source_type!r} must not contain '..' segments",
+            path=str(manifest_path),
+            json_pointer=pointer,
+            expected="path with no parent-directory traversal",
+            got=raw_path,
+        )
 
 
 def _build_command(raw: dict[str, Any]) -> CommandSpec:
@@ -329,9 +386,13 @@ def load_manifest(path: str | Path) -> PluginManifest:
         )
 
     source_raw = raw["source"]
+    source_type = source_raw["type"]
+    source_path = source_raw.get("path")
+    if source_type in _PATH_SANDBOXED_SOURCE_TYPES and isinstance(source_path, str):
+        _validate_sandboxed_path(source_path, source_type=source_type, manifest_path=manifest_path)
     source = SourceSpec(
-        type=source_raw["type"],
-        path=source_raw.get("path"),
+        type=source_type,
+        path=source_path,
         repository=source_raw.get("repository"),
     )
 

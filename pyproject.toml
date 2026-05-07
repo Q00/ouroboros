@@ -65,6 +65,7 @@ packages = ["src/ouroboros"]
 # the same wheel via this same config.
 exclude = [
     "src/ouroboros/opencode/plugin/**",
+    "src/ouroboros/plugin/schemas/**",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
@@ -73,6 +74,11 @@ exclude = [
 # reliably finds ouroboros-bridge.ts / package.json / tsconfig.json in the
 # installed wheel, independent of hatchling's implicit asset handling.
 "src/ouroboros/opencode/plugin" = "ouroboros/opencode/plugin"
+# Same pattern for the vendored UserLevel plugin schemas — `_load_schema`
+# in `ouroboros.plugin.manifest` resolves them via `importlib.resources`,
+# so they must reach the installed wheel as package data, not just the
+# source tree.
+"src/ouroboros/plugin/schemas" = "ouroboros/plugin/schemas"
 
 [dependency-groups]
 dev = [

@@ -258,6 +258,66 @@ def test_non_utf8_manifest_reports_structured_error(tmp_path: Path) -> None:
     assert excinfo.value.path == str(target)
 
 
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        "/etc/passwd",
+        "/absolute/install",
+        "../escape",
+        "a/../escape",
+        "nested/../../escape",
+    ],
+)
+@pytest.mark.parametrize("source_type", ["local_path", "plugin_home"])
+def test_sandboxed_source_path_rejects_traversal(
+    tmp_path: Path, source_type: str, bad_path: str
+) -> None:
+    """Path-bearing source types must reject absolute paths and `..` segments.
+
+    Without this, a `plugin_home` manifest could declare
+    `source.path = "/etc/passwd"` or `"../foo"` and the loader would
+    happily return it — turning a naive downstream `os.path.join` into a
+    sandbox escape. The schema's `minLength: 1` only stopped empty strings.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": source_type, "path": bad_path}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    err = excinfo.value
+    assert err.json_pointer == "/source/path"
+    assert err.got == bad_path
+
+
+def test_plugin_home_with_relative_path_loads(tmp_path: Path) -> None:
+    """Positive control: a sandboxed relative `plugin_home` path loads."""
+    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
+    fp["source"] = {"type": "plugin_home", "path": "vendor/ooo-pr-ops"}
+    manifest = load_manifest(_write(tmp_path, fp))
+    assert manifest.source.type == "plugin_home"
+    assert manifest.source.path == "vendor/ooo-pr-ops"
+
+
+def test_vendored_schemas_are_packaged_resources() -> None:
+    """The vendored schema must be reachable through `importlib.resources`,
+    not via a filesystem-relative read.
+
+    A wheel built without explicit `force-include` may silently drop the
+    `schemas/` directory, and `_load_schema()` would then raise
+    `vendored schema directory missing from installed package` for every
+    manifest load. Asserting the resource is reachable here gives that
+    failure mode a unit-test guard alongside the hatch packaging config.
+    """
+    from importlib import resources
+
+    schema_pkg = resources.files("ouroboros.plugin.schemas")
+    for version in SUPPORTED_SCHEMA_VERSIONS:
+        plugin_schema = schema_pkg.joinpath(version).joinpath("plugin.schema.json")
+        assert plugin_schema.is_file(), f"plugin.schema.json missing for v{version}"
+        # And it must be parseable JSON, not an empty placeholder.
+        body = plugin_schema.read_text(encoding="utf-8")
+        assert json.loads(body)["title"].startswith("Ouroboros Plugin Manifest")
+
+
 @pytest.mark.skipif(
     sys.platform.startswith("win"),
     reason="POSIX permission semantics; Windows handles read perms differently.",
