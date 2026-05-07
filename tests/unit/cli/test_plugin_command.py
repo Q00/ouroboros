@@ -800,3 +800,114 @@ def test_list_survives_doubly_corrupt_row(runner: CliRunner, tmp_path: Path) -> 
     # the same invariant `list_json_zeroes_stale_grants...` enforces.
     assert row["granted_scopes"] == []
     assert row["trust_version_stale"] is False
+
+
+FIRST_PARTY_REQUIRED_MANIFEST: dict = {
+    **REFERENCE_MANIFEST,
+    "name": "ouroboros-builtin",
+    "source": {"type": "first_party"},
+    # Schema still permits first-party manifests to declare permissions;
+    # the firewall just bypasses the trust gate for them.
+    "permissions": [
+        {"scope": "fs:read", "risk": "read_only", "required": True},
+        {"scope": "ledger:write", "risk": "write", "required": True},
+    ],
+}
+
+
+def test_discover_first_party_marks_required_scopes_advisory(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`discover` must not tell operators that first-party plugins
+    need their `required: true` scopes "trusted before invocation" —
+    the firewall skips trust checks for `source.type == "first_party"`,
+    so the CLI's instruction would directly contradict the gate.
+    """
+    plugin_dir = tmp_path / "ob-builtin"
+    _write_manifest(plugin_dir, FIRST_PARTY_REQUIRED_MANIFEST)
+    result = runner.invoke(plugin_app, ["discover", str(plugin_dir)])
+    assert result.exit_code == 0, result.output
+    # Both scopes still surface so operators can see what the plugin
+    # *declares*, but they are explicitly labeled advisory.
+    assert "fs:read" in result.output
+    assert "ledger:write" in result.output
+    assert "advisory" in result.output
+    assert "first-party" in result.output
+    assert "must be trusted before invocation" not in result.output
+
+
+def test_inspect_first_party_does_not_report_missing_scopes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`inspect` for first-party plugins must not flag required scopes
+    as "missing" — the firewall bypasses trust for them, so reporting
+    a blocked invocation contradicts the actual enforcement path."""
+    plugin_home = tmp_path / "ph"
+    _write_manifest(plugin_home, FIRST_PARTY_REQUIRED_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="ouroboros-builtin",
+            version="0.1.0",
+            source_kind="first_party",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "ouroboros-builtin",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(tmp_path / "trust"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "trust_state:    first_party" in result.output
+    assert "missing scopes" not in result.output
+
+
+def test_list_first_party_json_has_no_missing_required_scopes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`list --json` must mirror inspect: first-party rows surface
+    `missing_required_scopes: []`, not the manifest's declared set."""
+    plugin_home = tmp_path / "ph"
+    _write_manifest(plugin_home, FIRST_PARTY_REQUIRED_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="ouroboros-builtin",
+            version="0.1.0",
+            source_kind="first_party",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--json",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(tmp_path / "trust"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 1
+    row = data[0]
+    assert row["trust_state"] == "first_party"
+    assert row["missing_required_scopes"] == []
+    assert row["granted_scopes"] == []

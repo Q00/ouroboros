@@ -138,11 +138,26 @@ def _missing_required(
 ) -> list[str]:
     """Required scopes that are not currently satisfied.
 
-    Mirrors `ouroboros.plugin.firewall._missing_required` so the CLI's
-    trust-state report cannot drift away from the firewall's actual
-    invocation gate. A version-bumped trust file is treated as if no
-    scopes were granted (locked Q4: version bump invalidates trust).
+    Mirrors `ouroboros.plugin.firewall._missing_required` (and its
+    first-party bypass at `invoke_plugin`) so the CLI's trust-state
+    report cannot drift away from the firewall's actual invocation
+    gate.
+
+    First-party plugins ship inside the binary; the firewall
+    explicitly skips the trust gate for `source.type == "first_party"`
+    (`invoke_plugin` only calls `_missing_required` when the source is
+    not first-party). The schema still permits first-party manifests
+    to declare `required: true` permissions, but those declarations
+    are advisory only — invocation will not be blocked. Reporting
+    them here as "missing" would lie to operators about what the
+    firewall would accept and contradict the design notes for the
+    first-party shortcut.
+
+    A version-bumped trust file is treated as if no scopes were
+    granted (locked Q4: version bump invalidates trust).
     """
+    if manifest.source.type == "first_party":
+        return []
     required = _required_scopes(manifest)
     if not required:
         return []
@@ -208,7 +223,18 @@ def discover_command(
     console.print(f"  permissions:    {len(manifest.permissions)}")
     required_perms = [p for p in manifest.permissions if p.required]
     if required_perms:
-        console.print("  required scopes (must be trusted before invocation):")
+        # First-party plugins ship inside the binary and the firewall
+        # explicitly bypasses trust for them (see
+        # `firewall._missing_required`). Telling operators that
+        # required scopes "must be trusted before invocation" for
+        # first-party plugins would contradict that gate. Surface the
+        # declarations, but be honest that they are advisory.
+        if manifest.source.type == "first_party":
+            console.print(
+                "  declared required scopes (advisory; first-party plugins bypass the trust gate):"
+            )
+        else:
+            console.print("  required scopes (must be trusted before invocation):")
         for perm in required_perms:
             console.print(f"    - {perm.scope} ({perm.risk})")
 
