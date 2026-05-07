@@ -1104,7 +1104,11 @@ class InterviewHandler:
             # Plugin mode: persist state server-side WITHOUT creating an LLM adapter.
             # Only state I/O is needed here — the subagent handles all LLM work.
             # This avoids importing litellm (optional dep) on plugin-only installs.
-            state_dir = self.data_dir or _DATA_DIR
+            # Route through ``resolved_state_dir`` so an injected
+            # ``InterviewEngine`` with a custom ``state_dir`` keeps plugin
+            # writes and the collision check on the same directory
+            # (Q00/ouroboros#723 review).
+            state_dir = self.resolved_state_dir()
             state_dir.mkdir(parents=True, exist_ok=True)
 
             transcript = ""

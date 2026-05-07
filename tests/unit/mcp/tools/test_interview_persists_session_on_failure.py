@@ -263,3 +263,51 @@ def test_handler_persistence_probe_routes_through_engine_state_dir(tmp_path: Pat
 
     assert backend.is_session_persisted(sid) is True
     assert backend.is_session_persisted("interview_aaaaaaaaaaaaaaaa") is False
+
+
+@pytest.mark.asyncio
+async def test_plugin_path_writes_state_into_engine_state_dir(tmp_path: Path, monkeypatch) -> None:
+    """Plugin path must persist into the engine's state_dir, not handler.data_dir.
+
+    Regression for the Q00/ouroboros#723 bot review: the plugin path used to
+    read/write via ``self.data_dir or _DATA_DIR`` while the collision check
+    consulted ``engine.state_dir``.  After routing through
+    ``resolved_state_dir`` both sides agree, so a custom-state_dir
+    deployment can resume the interview it just started.
+    """
+    import ouroboros.mcp.tools.authoring_handlers as ah
+
+    engine_dir = tmp_path / "engine"
+    handler_data_dir = tmp_path / "handler"
+    engine_dir.mkdir()
+    handler_data_dir.mkdir()
+
+    saved_paths: list[Path] = []
+
+    async def _capturing_save(state_dir, state):  # type: ignore[no-untyped-def]
+        path = state_dir / f"interview_{state.interview_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        saved_paths.append(path)
+        return Result.ok(path)
+
+    monkeypatch.setattr(ah, "_plugin_save_state", _capturing_save)
+
+    engine = _FakeInterviewEngine(state_dir=engine_dir)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        data_dir=handler_data_dir,
+    )
+
+    outcome = await handler.handle(
+        {"initial_context": "Build a CLI", "cwd": str(tmp_path)},
+    )
+
+    assert outcome.is_ok
+    assert saved_paths, "plugin path must invoke _plugin_save_state"
+    saved = saved_paths[0]
+    assert saved.parent == engine_dir, (
+        f"plugin save must land in engine.state_dir; saw {saved.parent}"
+    )
