@@ -2243,3 +2243,177 @@ async def test_pipeline_rejects_attach_without_unknown_handoff(tmp_path) -> None
     assert result.status == "blocked"
     assert "unknown run handoff" in (result.blocker or "")
     assert state.execution_id is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_records_unsupported_reconciliation_without_restart(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+        raise AssertionError("reconcile-only resume must not start another run")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.run_start_attempted = True
+    state.run_handoff_status = "unknown_timeout"
+    state.mark_blocked("run start timed out", tool_name="run_starter")
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        reconcile_run=True,
+        reconcile_source="generic",
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.run_handoff_status == "unknown_timeout"
+    assert result.run_reconciliation_status == "unsupported"
+    assert result.run_reconciliation_source == "generic"
+    assert result.run_reconciled_at is not None
+    assert "No duplicate run was started" in (result.run_handoff_guidance or "")
+    assert state.execution_id is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_reports_attached_reconciliation_without_restart(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.run_start_attempted = True
+    state.run_handoff_status = "attached"
+    state.execution_id = "exec_existing"
+    state.attached_run_handle = "exec_existing"
+    state.attached_run_source = "operator"
+    state.attached_at = "2026-05-07T00:00:00+00:00"
+    state.transition(AutoPhase.COMPLETE, "attached existing execution handle")
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver, generate_seed, run_starter=None, store=AutoStore(tmp_path), reconcile_run=True
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_reconciliation_status == "attached"
+    assert result.run_reconciliation_source == "attached_run"
+    assert result.run_reconciled_at is not None
+    assert result.execution_id == "exec_existing"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marks_reconcile_invalid_context_separately(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=None,
+        store=AutoStore(tmp_path),
+        reconcile_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.run_reconciliation_status == "invalid_context"
+    assert result.run_reconciliation_source == "generic"
+    assert result.run_reconciled_at is not None
+    assert "unknown run handoff" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_complete_session_invalid_reconcile_reports_blocked_result(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume should not regenerate seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "already complete without run handoff")
+
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=None,
+        store=AutoStore(tmp_path),
+        reconcile_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert state.phase == AutoPhase.COMPLETE
+    assert result.phase == "complete"
+    assert result.status == "blocked"
+    assert result.run_reconciliation_status == "invalid_context"
+    assert result.run_reconciliation_source == "generic"
+    assert "unknown run handoff" in (result.blocker or "")

@@ -45,6 +45,9 @@ class AutoPipelineResult:
     attached_run_handle: str | None = None
     attached_run_source: str | None = None
     attached_at: str | None = None
+    run_reconciliation_status: str | None = None
+    run_reconciliation_source: str | None = None
+    run_reconciled_at: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -68,6 +71,8 @@ class AutoPipeline:
     attach_job_id: str | None = None
     attach_run_session_id: str | None = None
     attach_source: str | None = None
+    reconcile_run: bool = False
+    reconcile_source: str | None = None
     seed_timeout_seconds: float = 120.0
     run_start_timeout_seconds: float = 60.0
 
@@ -90,6 +95,18 @@ class AutoPipeline:
                 return self._result(state, ledger, blocker=state.last_error)
         self._save(state)
 
+        if self.reconcile_run and state.phase == AutoPhase.COMPLETE:
+            reconciled = self._reconcile_run_if_requested(state)
+            if reconciled is not None:
+                self._save(state)
+                blocker = state.last_error if reconciled is False else None
+                status_override = "blocked" if reconciled is False else None
+                return self._result(
+                    state,
+                    ledger,
+                    blocker=blocker,
+                    status_override=status_override,
+                )
         if state.phase == AutoPhase.COMPLETE:
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
@@ -268,6 +285,10 @@ class AutoPipeline:
             if attached is not None:
                 self._save(state)
                 return self._result(state, ledger, review=review)
+            reconciled = self._reconcile_run_if_requested(state)
+            if reconciled is not None:
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = "started"
                 state.run_handoff_guidance = None
@@ -394,9 +415,10 @@ class AutoPipeline:
         review: SeedReview | None = None,
         blocker: str | None = None,
         run_subagent: dict[str, Any] | None = None,
+        status_override: str | None = None,
     ) -> AutoPipelineResult:
         return AutoPipelineResult(
-            status=state.phase.value,
+            status=status_override or state.phase.value,
             auto_session_id=state.auto_session_id,
             phase=state.phase.value,
             grade=review.grade_result.grade.value if review else state.last_grade,
@@ -416,6 +438,9 @@ class AutoPipeline:
             attached_run_handle=state.attached_run_handle,
             attached_run_source=state.attached_run_source,
             attached_at=state.attached_at,
+            run_reconciliation_status=state.run_reconciliation_status,
+            run_reconciliation_source=state.run_reconciliation_source,
+            run_reconciled_at=state.run_reconciled_at,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
@@ -450,6 +475,58 @@ class AutoPipeline:
         )
         state.transition(AutoPhase.COMPLETE, "attached existing execution handle")
         return True
+
+    def _reconcile_run_if_requested(self, state: AutoPipelineState) -> bool | None:
+        if not self.reconcile_run:
+            return None
+        if state.run_handoff_status == "attached" and state.attached_run_handle:
+            state.run_reconciliation_status = "attached"
+            state.run_reconciliation_source = _optional_str(self.reconcile_source) or "attached_run"
+            state.run_reconciled_at = utc_now_iso()
+            state.run_handoff_guidance = (
+                "Reconciliation confirmed the session already has an attached run handle; "
+                "resume will not start a duplicate run."
+            )
+            if state.phase == AutoPhase.COMPLETE:
+                state.mark_progress(
+                    "reconciled existing attached execution handle",
+                    tool_name="run_starter",
+                )
+            else:
+                state.transition(
+                    AutoPhase.COMPLETE, "reconciled existing attached execution handle"
+                )
+            return True
+        if not state.run_start_attempted or state.run_handoff_status not in {
+            "unknown_no_handle",
+            "unknown_timeout",
+        }:
+            msg = (
+                "--reconcile-run requires an auto session with unknown run handoff "
+                "status after a prior run start attempt"
+            )
+            state.run_reconciliation_status = "invalid_context"
+            state.run_reconciliation_source = _optional_str(self.reconcile_source) or "generic"
+            state.run_reconciled_at = utc_now_iso()
+            state.run_handoff_guidance = msg
+            if state.phase == AutoPhase.COMPLETE:
+                state.last_tool_name = "run_starter"
+                state.last_error = msg
+                state.mark_progress(msg, tool_name="run_starter")
+            else:
+                state.mark_blocked(msg, tool_name="run_starter")
+            return False
+        state.run_reconciliation_status = "unsupported"
+        state.run_reconciliation_source = _optional_str(self.reconcile_source) or "generic"
+        state.run_reconciled_at = utc_now_iso()
+        state.run_handoff_guidance = (
+            "Generic reconciliation has no runtime-specific discovery adapter for this "
+            "unknown handoff. No duplicate run was started. Attach a verified handle with "
+            "--attach-execution/--attach-job/--attach-session, or add a runtime-specific "
+            "reconciler that returns attached, not_found, ambiguous, or unsupported."
+        )
+        state.mark_blocked(state.run_handoff_guidance, tool_name="run_starter")
+        return False
 
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:

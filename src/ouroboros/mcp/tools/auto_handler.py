@@ -110,6 +110,19 @@ class AutoHandler:
                     "Source label for an attached run handle",
                     required=False,
                 ),
+                MCPToolParameter(
+                    "reconcile_run",
+                    ToolInputType.BOOLEAN,
+                    "Try to reconcile an unknown run handoff without starting a duplicate run",
+                    required=False,
+                    default=False,
+                ),
+                MCPToolParameter(
+                    "reconcile_source",
+                    ToolInputType.STRING,
+                    "Source label for run handoff reconciliation",
+                    required=False,
+                ),
             ),
         )
 
@@ -141,9 +154,13 @@ class AutoHandler:
         attach_job = _optional_text_arg(arguments, "attach_job")
         attach_session = _optional_text_arg(arguments, "attach_session")
         attach_source = _optional_text_arg(arguments, "attach_source")
+        reconcile_run = bool(arguments.get("reconcile_run", False))
+        reconcile_source = _optional_text_arg(arguments, "reconcile_source")
         attach_requested = any((attach_execution, attach_job, attach_session))
         if attach_requested and not (isinstance(resume, str) and resume):
             raise ValueError("attach_* arguments require resume")
+        if reconcile_run and not (isinstance(resume, str) and resume):
+            raise ValueError("reconcile_run requires resume")
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -214,6 +231,8 @@ class AutoHandler:
             attach_job_id=attach_job,
             attach_run_session_id=attach_session,
             attach_source=attach_source,
+            reconcile_run=reconcile_run,
+            reconcile_source=reconcile_source,
         )
         return await pipeline.run(state)
 
@@ -247,6 +266,10 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["attached_run_handle"] = result.attached_run_handle
         meta["attached_run_source"] = result.attached_run_source
         meta["attached_at"] = result.attached_at
+    if result.run_reconciliation_status:
+        meta["run_reconciliation_status"] = result.run_reconciliation_status
+        meta["run_reconciliation_source"] = result.run_reconciliation_source
+        meta["run_reconciled_at"] = result.run_reconciled_at
     return meta
 
 
@@ -437,6 +460,10 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Attached run handle: {result.attached_run_handle}")
         lines.append(f"Attached run source: {result.attached_run_source}")
         lines.append(f"Attached at: {result.attached_at}")
+    if result.run_reconciliation_status:
+        lines.append(f"Run reconciliation status: {result.run_reconciliation_status}")
+        lines.append(f"Run reconciliation source: {result.run_reconciliation_source}")
+        lines.append(f"Run reconciled at: {result.run_reconciled_at}")
     if result.assumptions:
         lines.append("Assumptions:")
         lines.extend(f"- {item}" for item in result.assumptions)

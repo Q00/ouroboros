@@ -108,6 +108,17 @@ def auto_command(
         str | None,
         typer.Option("--attach-source", help="Source label for an attached run handle."),
     ] = None,
+    reconcile_run: Annotated[
+        bool,
+        typer.Option(
+            "--reconcile-run",
+            help="Try to reconcile an unknown run handoff without starting a duplicate run.",
+        ),
+    ] = False,
+    reconcile_source: Annotated[
+        str | None,
+        typer.Option("--reconcile-source", help="Source label for run handoff reconciliation."),
+    ] = None,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -141,6 +152,8 @@ def auto_command(
                 attach_job=attach_job,
                 attach_session=attach_session,
                 attach_source=attach_source,
+                reconcile_run=reconcile_run,
+                reconcile_source=reconcile_source,
             )
         )
     except Exception as exc:
@@ -179,6 +192,8 @@ async def _run_auto(
     attach_job: str | None = None,
     attach_session: str | None = None,
     attach_source: str | None = None,
+    reconcile_run: bool = False,
+    reconcile_source: str | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
     attach_requested = any(
@@ -187,6 +202,8 @@ async def _run_auto(
     )
     if attach_requested and not resume:
         raise ValueError("--attach-execution/--attach-job/--attach-session require --resume")
+    if reconcile_run and not resume:
+        raise ValueError("--reconcile-run requires --resume")
     if resume:
         state = store.load(resume)
         persisted_runtime = state.runtime_backend
@@ -279,6 +296,8 @@ async def _run_auto(
         attach_job_id=attach_job,
         attach_run_session_id=attach_session,
         attach_source=attach_source,
+        reconcile_run=reconcile_run,
+        reconcile_source=reconcile_source,
     )
     result = await pipeline.run(state)
     return result
@@ -316,6 +335,10 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Attached run handle: {state.attached_run_handle}")
         console.print(f"Attached run source: {state.attached_run_source}")
         console.print(f"Attached at: {state.attached_at}")
+    if state.run_reconciliation_status:
+        console.print(f"Run reconciliation status: {state.run_reconciliation_status}")
+        console.print(f"Run reconciliation source: {state.run_reconciliation_source}")
+        console.print(f"Run reconciled at: {state.run_reconciled_at}")
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
     console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
@@ -349,6 +372,10 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"Attached run handle: {result.attached_run_handle}")
         console.print(f"Attached run source: {result.attached_run_source}")
         console.print(f"Attached at: {result.attached_at}")
+    if result.run_reconciliation_status:
+        console.print(f"Run reconciliation status: {result.run_reconciliation_status}")
+        console.print(f"Run reconciliation source: {result.run_reconciliation_source}")
+        console.print(f"Run reconciled at: {result.run_reconciled_at}")
     if show_ledger:
         if result.assumptions:
             console.print("Assumptions:")
