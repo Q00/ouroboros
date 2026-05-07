@@ -137,3 +137,22 @@ class TestResolveSeedContent:
         assert result.is_err
         assert "Working directory does not exist" in str(result.error)
         assert getattr(result.error, "tool_name", None) == "ouroboros_start_execute_seed"
+
+    async def test_execute_seed_rejects_missing_cwd_before_execution(
+        self, tmp_path: Path
+    ) -> None:
+        missing_cwd = tmp_path / "missing-project"
+        handler = ExecuteSeedHandler()
+
+        result = await handler.handle(
+            {
+                "cwd": str(missing_cwd),
+                "seed_content": "goal: no execution\nacceptance_criteria:\n  - do not run\n",
+                "max_iterations": 1,
+                "skip_qa": True,
+            }
+        )
+
+        assert result.is_err
+        assert "Working directory does not exist" in str(result.error)
+        assert getattr(result.error, "tool_name", None) == "ouroboros_execute_seed"
