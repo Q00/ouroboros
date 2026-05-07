@@ -111,6 +111,15 @@ class UserLevelProgramRegistry:
                     f"refusing to register {manifest.name!r}"
                 )
 
+            # On replace, release the previous namespace mapping if the new
+            # manifest moved to a different namespace under the same plugin
+            # name. Otherwise the old namespace stays permanently owned by
+            # this plugin: lookup_command(old_ns) still resolves to the new
+            # program (wrong target), and other plugins are blocked from
+            # claiming that namespace forever.
+            if existing is not None and existing.namespace != namespace:
+                self._namespace_owner.pop(existing.namespace, None)
+
             program = RegisteredProgram(manifest=manifest)
             self._by_name[manifest.name] = program
             self._namespace_owner[namespace] = manifest.name

@@ -367,6 +367,94 @@ def test_inspect_stale_version_reports_installed(runner: CliRunner, tmp_path: Pa
     assert "github:read" in result.output
 
 
+def test_inspect_malformed_lockfile_reports_friendly_error(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: a malformed plugins.lock must produce a friendly
+    error and exit code 1, NOT a raw TOMLDecodeError traceback."""
+    lock_path = tmp_path / "plugins.lock"
+    lock_path.write_text("this = is = not valid TOML\n")  # parser bait
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(tmp_path / "trust"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "lockfile is unreadable" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_list_malformed_lockfile_reports_friendly_error(runner: CliRunner, tmp_path: Path) -> None:
+    """Same as above for `list`, which also reads the lockfile."""
+    lock_path = tmp_path / "plugins.lock"
+    # Wrong schema_version triggers Lockfile.read's ValueError path —
+    # a separate failure mode from raw TOML decode errors.
+    lock_path.write_text('schema_version = "9.9"\n')
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(tmp_path / "trust"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "lockfile is unreadable" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_inspect_malformed_trust_file_reports_friendly_error(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: a corrupt trust.json must surface a friendly error,
+    not a JSONDecodeError traceback. `inspect` is meant to diagnose
+    plugin state, so the diagnostic itself can't crash on bad state."""
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    # Write a malformed trust.json under the trust root.
+    trust_dir = trust_root / "github-pr-ops"
+    trust_dir.mkdir(parents=True)
+    (trust_dir / "trust.json").write_text("{not valid json")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "trust file" in result.output
+    assert "unreadable" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_list_json_partial_trust_reports_installed_not_trusted(
     runner: CliRunner, tmp_path: Path
 ) -> None:

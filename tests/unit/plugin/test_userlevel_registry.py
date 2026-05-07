@@ -158,6 +158,49 @@ def test_global_singleton_persists_within_session(tmp_path: Path) -> None:
     assert a is b
 
 
+def test_replace_releases_old_namespace(tmp_path: Path) -> None:
+    """Regression: register(replace=True) with a different namespace must
+    free the old namespace so other plugins can claim it AND so
+    `get_by_namespace(old_ns)` no longer returns the new program.
+
+    Previously the old namespace mapping persisted, leaving the
+    registry in an inconsistent state where the old namespace was
+    permanently owned by a plugin whose commands no longer used it.
+    """
+    registry = UserLevelProgramRegistry()
+
+    # Initial registration owns "github-pr".
+    initial = _load_ref(tmp_path / "v0")
+    registry.register(initial)
+    assert registry.get_by_namespace("github-pr") is not None
+
+    # Same plugin name, but the new manifest moved to "github-issue".
+    moved = json.loads(json.dumps(REFERENCE_MANIFEST))
+    moved["version"] = "0.2.0"
+    moved["commands"][0]["namespace"] = "github-issue"
+    moved_manifest = load_manifest(_write_manifest(tmp_path / "v1", moved))
+    registry.register(moved_manifest, replace=True)
+
+    # The old namespace is now free.
+    assert registry.get_by_namespace("github-pr") is None, (
+        "old namespace must be released so lookups don't resolve to a "
+        "plugin that no longer claims it"
+    )
+    # The new namespace resolves to the replaced program.
+    moved_program = registry.get_by_namespace("github-issue")
+    assert moved_program is not None
+    assert moved_program.manifest.version == "0.2.0"
+
+    # And another plugin can now legitimately claim the old namespace.
+    other = json.loads(json.dumps(REFERENCE_MANIFEST))
+    other["name"] = "other-plugin"
+    other["commands"][0]["namespace"] = "github-pr"
+    other_manifest = load_manifest(_write_manifest(tmp_path / "other", other))
+    registry.register(other_manifest)  # MUST NOT raise
+    assert registry.get_by_namespace("github-pr") is not None
+    assert registry.get_by_namespace("github-pr").name == "other-plugin"
+
+
 def test_skill_registry_unaffected(tmp_path: Path) -> None:
     """Test 10: existing skill registry tests still work — no state shared.
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import tomllib
 from typing import Annotated
 
 import typer
@@ -65,6 +66,45 @@ def _load_with_friendly_error(target: str) -> PluginManifest:
         loc = exc.json_pointer if exc.json_pointer else "(root)"
         print_error(
             f"manifest invalid:\n  path: {exc.path}\n  at: {loc}\n  expected: {exc.expected}\n  got: {exc.got}"
+        )
+        raise typer.Exit(code=1) from exc
+
+
+_STATE_FILE_ERRORS: tuple[type[Exception], ...] = (
+    ValueError,  # schema_version mismatch raised by Lockfile.read / TrustStore.read
+    tomllib.TOMLDecodeError,
+    json.JSONDecodeError,
+    OSError,  # permission/IO errors on the state files themselves
+)
+
+
+def _read_lockfile_or_exit(lock: Lockfile) -> dict:
+    """Read the lockfile, surfacing a friendly error if it's malformed.
+
+    `inspect` and `list` are diagnostic commands — if the very state
+    file they introspect is broken, they should print a useful error
+    and exit cleanly rather than dump a raw traceback to the operator.
+    """
+    try:
+        return lock.read()
+    except _STATE_FILE_ERRORS as exc:
+        print_error(
+            f"plugins lockfile is unreadable: {lock.path}: {exc}\n"
+            f"  Inspect the file by hand or restore from backup; "
+            f"`ooo plugin` cannot proceed until it parses cleanly."
+        )
+        raise typer.Exit(code=1) from exc
+
+
+def _read_trust_or_exit(trust: TrustStore, plugin: str) -> TrustRecord | None:
+    """Read a trust record, surfacing a friendly error if it's malformed."""
+    try:
+        return trust.read(plugin)
+    except _STATE_FILE_ERRORS as exc:
+        print_error(
+            f"trust file for {plugin!r} is unreadable: {exc}\n"
+            f"  Inspect or remove ~/.ouroboros/plugins/{plugin}/trust.json; "
+            f"`ooo plugin` cannot proceed until it parses cleanly."
         )
         raise typer.Exit(code=1) from exc
 
@@ -178,7 +218,7 @@ def inspect_command(
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
-    entries = lock.read()
+    entries = _read_lockfile_or_exit(lock)
     entry = entries.get(name)
     if entry is None:
         print_error(f"{name!r} is not installed (no entry in {lock.path})")
@@ -194,7 +234,7 @@ def inspect_command(
         )
         raise typer.Exit(code=1) from exc
 
-    record = trust.read(name)
+    record = _read_trust_or_exit(trust, name)
     granted = [g.scope for g in record.granted_scopes] if record else []
 
     print_info(f"{manifest.name} {manifest.version} ({entry.source_kind})")
@@ -244,7 +284,7 @@ def list_command(
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
-    entries = lock.read()
+    entries = _read_lockfile_or_exit(lock)
     if not entries:
         if json_output:
             # Plain stdout (no Rich highlighting) so consumers can pipe to jq.
@@ -255,7 +295,7 @@ def list_command(
 
     rows = []
     for entry in sorted(entries.values(), key=lambda e: e.name):
-        record = trust.read(entry.name)
+        record = _read_trust_or_exit(trust, entry.name)
         scopes = [g.scope for g in record.granted_scopes] if record else []
         # Re-load the manifest so trust_state reflects the same gate the
         # firewall enforces (required-scope set + version match), not

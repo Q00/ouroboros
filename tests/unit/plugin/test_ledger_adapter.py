@@ -194,3 +194,83 @@ def test_no_raw_token_fields_in_envelope() -> None:
     serialized = json.dumps(env).lower()
     for forbidden in ("ghp_", "bearer ", "x-api-key"):
         assert forbidden.lower() not in serialized
+
+
+def test_envelope_to_base_event_round_trips_through_real_event_store() -> None:
+    """Regression: the bridge from a wrapped envelope to a `BaseEvent`
+    that `EventStore.append` accepts is real, not aspirational.
+
+    The previous adapter docstring claimed `make_event_sink` could be
+    wired to `EventStore.append` directly, but that method is async
+    and rejects non-`BaseEvent` payloads. The new
+    `envelope_to_base_event` + `append_envelope_to_event_store`
+    helpers actually bridge the contract. This test exercises the
+    full path against an in-memory EventStore and asserts the
+    persisted row reproduces the original audit event.
+    """
+    pytest.importorskip("aiosqlite")  # safety on slim CI images
+
+    import asyncio
+
+    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.plugin.ledger_adapter import (
+        append_envelope_to_event_store,
+        envelope_to_base_event,
+    )
+
+    audit = _audit_event("plugin.completed")
+    envelope = wrap_plugin_event(audit, correlation_id="corr-bridge", envelope_id="env-bridge")
+
+    base_event = envelope_to_base_event(envelope)
+    # The bridge speaks BaseEvent's contract: aggregate_type pinned,
+    # event_type matches the audit payload, payload preserved verbatim.
+    assert base_event.aggregate_type == "plugin"
+    assert base_event.aggregate_id == "corr-bridge"
+    assert base_event.type == "plugin.completed"
+    assert base_event.data["event_type"] == "plugin.completed"
+    assert base_event.data["plugin"]["name"] == "github-pr-ops"
+
+    async def _persist_and_replay() -> list:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        # The async bridge is what production code is expected to use.
+        await append_envelope_to_event_store(envelope, store=store)
+        return await store.replay("plugin", "corr-bridge")
+
+    rows = asyncio.run(_persist_and_replay())
+    assert len(rows) == 1
+    persisted = rows[0]
+    assert persisted.type == "plugin.completed"
+    assert persisted.aggregate_type == "plugin"
+    assert persisted.aggregate_id == "corr-bridge"
+    # The original audit event survives a full round-trip — `unwrap_plugin_event`
+    # reconstructs the schema-valid form from the persisted row's data.
+    rebuilt_envelope = {
+        "id": persisted.id,
+        "aggregate_type": persisted.aggregate_type,
+        "aggregate_id": persisted.aggregate_id,
+        "event_type": persisted.type,
+        "payload": persisted.data,
+        "timestamp": persisted.timestamp,
+    }
+    rebuilt_audit = unwrap_plugin_event(rebuilt_envelope)
+    assert rebuilt_audit["event_type"] == audit["event_type"]
+    assert rebuilt_audit["plugin"] == audit["plugin"]
+    assert rebuilt_audit["command"] == audit["command"]
+
+
+def test_envelope_to_base_event_rejects_non_plugin_envelope() -> None:
+    """The bridge refuses envelopes for other aggregates, so a misrouted
+    payload cannot end up persisted under aggregate_type='plugin'."""
+    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
+
+    bogus = {
+        "id": "x",
+        "aggregate_type": "session",
+        "aggregate_id": "y",
+        "event_type": "plugin.completed",
+        "payload": {"event_type": "plugin.completed", "occurred_at": "2026-05-07T12:00:00Z"},
+        "timestamp": "2026-05-07T12:00:00Z",
+    }
+    with pytest.raises(ValueError, match="not a plugin envelope"):
+        envelope_to_base_event(bogus)

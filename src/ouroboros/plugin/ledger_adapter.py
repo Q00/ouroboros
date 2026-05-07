@@ -20,20 +20,44 @@ This adapter:
 
   - `make_event_sink(append_fn, *, correlation_id, ...) -> EventSink`
     factory that produces a `firewall.EventSink` callable wired to a
-    given append function (signature `append(envelope: dict) -> None`).
-    Production wires it to `EventStore.append`; tests can wire it to a
-    list.
+    sync `append_fn` whose signature is `(envelope: dict) -> None`.
+    Tests pass `list.append`. Production callers compose this with the
+    bridge helpers below — `EventStore.append` is async and rejects
+    anything that is not a `BaseEvent`, so it MUST NOT be passed to
+    `make_event_sink` directly. The bridge from the dict-shaped
+    envelope to a real EventStore lives in `envelope_to_base_event`
+    and `append_envelope_to_event_store` (the async helper).
+
+  - `envelope_to_base_event(envelope) -> BaseEvent`
+    pure converter from the envelope dict produced by
+    `wrap_plugin_event` to a `BaseEvent` instance the core ledger
+    accepts. Lazy-imports `BaseEvent` so this module stays cheap to
+    import in non-persistence contexts (tests, schema validation).
+
+  - `async append_envelope_to_event_store(envelope, *, store) -> None`
+    awaits `store.append(...)` after converting the envelope. This is
+    the canonical async bridge; firewall integrations running on an
+    asyncio loop should call it directly. For sync stacks (the
+    firewall is sync) the integration layer must hop to the loop —
+    e.g. `asyncio.run_coroutine_threadsafe(...)` — and pass the
+    resulting `Callable[[dict], None]` to `make_event_sink`.
 
 This module deliberately does NOT import `persistence/event_store.py`
-or its async machinery. It speaks the envelope shape, not the store.
-The CLI (#731) is the integration point that takes a real EventStore
-async session and bridges to `append_fn`.
+or its async machinery at module scope. It speaks the envelope shape,
+not the store. The bridge helpers above lazily pull in `BaseEvent` and
+`EventStore` only when they are actually invoked, so callers that
+never persist (tests, schema validators) keep the import surface small.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 import uuid
+
+if TYPE_CHECKING:  # pragma: no cover — typing-only import to avoid cycles
+    from ouroboros.events.base import BaseEvent
+    from ouroboros.persistence.event_store import EventStore
 
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
@@ -130,9 +154,16 @@ def make_event_sink(
     """Build a firewall-compatible `EventSink` that wraps and appends.
 
     Args:
-        append_fn: Where to append the wrapped envelope. In production,
-            wire to an EventStore.append wrapper. In tests, pass
-            `list.append`.
+        append_fn: A SYNC callable accepting the wrapped envelope dict.
+            Tests pass `list.append`. Production callers MUST NOT pass
+            `EventStore.append` directly — that method is async and
+            rejects non-`BaseEvent` payloads. Compose with the bridge
+            helpers in this module: convert to a `BaseEvent` via
+            `envelope_to_base_event` and persist via
+            `append_envelope_to_event_store`, then schedule the
+            coroutine onto the running loop (e.g. with
+            `asyncio.run_coroutine_threadsafe`) to obtain the sync
+            callable this parameter expects.
         correlation_id: Default aggregate id and forwarded to wrap.
         aggregate_id: Override.
         envelope_id_factory: Override for envelope id generation
@@ -154,9 +185,113 @@ def make_event_sink(
     return _sink
 
 
+# ---------------------------------------------------------------------------
+# Bridge to the core EventStore. Lazy imports keep this module cheap.
+# ---------------------------------------------------------------------------
+
+
+# Audit-event types that are still authoritative as `BaseEvent.type` strings
+# for plugin events when persisted in the core ledger. Mirrors the
+# audit-event schema's `event_type` enum.
+def envelope_to_base_event(
+    envelope: dict,
+    *,
+    event_class: type[BaseEvent] | None = None,
+) -> BaseEvent:
+    """Convert a wrapped plugin envelope into a `BaseEvent`.
+
+    Bridges the dict-shaped contract this module speaks into the
+    `BaseEvent` shape `EventStore.append` requires. The audit event
+    payload (the inner schema-validated dict) is preserved verbatim
+    under `data` so consumers can still round-trip it back to
+    schema-valid form via `unwrap_plugin_event`.
+
+    Args:
+        envelope: Output of `wrap_plugin_event`.
+        event_class: Optional `BaseEvent` subclass override. Defaults
+            to a minimal in-module subclass that pins
+            `aggregate_type='plugin'` and uses the envelope's
+            `event_type` as `BaseEvent.type`.
+
+    Returns:
+        A frozen `BaseEvent` instance ready for `EventStore.append`.
+
+    Raises:
+        ValueError: if the envelope is not a plugin envelope produced
+            by `wrap_plugin_event`.
+    """
+    if envelope.get("aggregate_type") != PLUGIN_AGGREGATE_TYPE:
+        raise ValueError(
+            f"envelope is not a plugin envelope (aggregate_type="
+            f"{envelope.get('aggregate_type')!r}); expected "
+            f"{PLUGIN_AGGREGATE_TYPE!r}"
+        )
+
+    cls = event_class or _default_plugin_event_class()
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("envelope payload is missing or not a dict")
+
+    return cls(
+        id=envelope["id"],
+        type=envelope["event_type"],
+        aggregate_type=PLUGIN_AGGREGATE_TYPE,
+        aggregate_id=envelope["aggregate_id"],
+        data=dict(payload),  # frozen BaseEvent: defensive shallow copy
+    )
+
+
+async def append_envelope_to_event_store(
+    envelope: dict,
+    *,
+    store: EventStore,
+    event_class: type[BaseEvent] | None = None,
+) -> None:
+    """Persist a wrapped plugin envelope to the core EventStore.
+
+    The canonical async bridge from this module's dict-shaped contract
+    to the live ledger. Convert with `envelope_to_base_event`, then
+    `await store.append(...)`. Use directly from async code; for the
+    sync firewall, schedule onto the running loop and wrap the result
+    in `make_event_sink`'s `append_fn`.
+    """
+    event = envelope_to_base_event(envelope, event_class=event_class)
+    await store.append(event)
+
+
+def _default_plugin_event_class() -> type[BaseEvent]:
+    """Lazy-construct the default `BaseEvent` subclass for plugin events.
+
+    Defined as a function so importing this module never pulls in
+    `events.base` (which transitively touches Pydantic) for callers
+    that only need the dict-shaped helpers.
+    """
+    global _DEFAULT_PLUGIN_EVENT_CLASS
+    if _DEFAULT_PLUGIN_EVENT_CLASS is not None:
+        return _DEFAULT_PLUGIN_EVENT_CLASS
+
+    from ouroboros.events.base import BaseEvent as _BaseEvent
+
+    class PluginAuditEvent(_BaseEvent):
+        """Generic plugin audit event for the core ledger.
+
+        Concrete subclasses can override `event_version` / type if a
+        firewall feature needs richer typing; the default is intended
+        for v0 dict-shaped persistence.
+        """
+
+    _DEFAULT_PLUGIN_EVENT_CLASS = PluginAuditEvent
+    return PluginAuditEvent
+
+
+_DEFAULT_PLUGIN_EVENT_CLASS: type[Any] | None = None
+
+
 __all__ = [
     "AUDIT_EVENT_TYPES",
     "PLUGIN_AGGREGATE_TYPE",
+    "append_envelope_to_event_store",
+    "envelope_to_base_event",
     "make_event_sink",
     "unwrap_plugin_event",
     "wrap_plugin_event",
