@@ -519,7 +519,7 @@ def test_resume_capability_seed_generator_seed_path_only_returns_partial() -> No
     assert state.resume_capability() is AutoResumeCapability.PARTIAL_RESUME
 
 
-def test_resume_capability_seed_generator_no_artifact_with_session_returns_resume() -> None:
+def test_resume_capability_seed_generator_no_artifact_with_session_returns_retry() -> None:
     state = _state()
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.interview_session_id = "interview_1"
@@ -528,7 +528,9 @@ def test_resume_capability_seed_generator_no_artifact_with_session_returns_resum
 
     assert not state.seed_artifact
     assert state.seed_path is None
-    assert state.resume_capability() is AutoResumeCapability.RESUME
+    # Interview session carries forward, but seed generation itself re-runs
+    # from scratch — RETRY semantics, not RESUME.
+    assert state.resume_capability() is AutoResumeCapability.RETRY
 
 
 def test_resume_capability_seed_generator_no_artifact_no_session_returns_none() -> None:

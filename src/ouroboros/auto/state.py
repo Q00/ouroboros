@@ -428,7 +428,10 @@ class AutoPipelineState:
             if self.seed_path:
                 return AutoResumeCapability.PARTIAL_RESUME
             if self.interview_session_id:
-                return AutoResumeCapability.RESUME
+                # Interview context carries forward, but seed generation
+                # itself re-runs from scratch — no prior generation work
+                # is reused. That matches the RETRY semantics, not RESUME.
+                return AutoResumeCapability.RETRY
             return AutoResumeCapability.NONE
 
         # Review phase tools (seed_saver / grade_gate / seed_loader).
