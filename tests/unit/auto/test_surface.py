@@ -1225,3 +1225,76 @@ async def test_auto_handler_rejects_zero_loop_bounds() -> None:
         assert result.is_err
         assert field_name in str(result.error)
         assert ">= 1" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_passes_state_interview_timeout_to_driver(monkeypatch, tmp_path) -> None:
+    """Regression for #686: MCP entrypoint must wire state interview timeout into driver."""
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003, ARG002
+            captured["driver_timeout_seconds"] = driver.timeout_seconds
+
+        async def run(self, run_state):  # noqa: ANN001
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI", "cwd": str(tmp_path)})
+
+    assert result.is_ok
+    assert captured["driver_timeout_seconds"] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_resume_honours_persisted_interview_timeout(
+    monkeypatch, tmp_path
+) -> None:
+    """Resumed sessions must keep the persisted interview-phase timeout."""
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    store = AutoStore(store_root)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = 240
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked(
+        "auto interview reached max rounds with unresolved gaps: actors",
+        tool_name="interview_driver",
+    )
+    store.save(state)
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003, ARG002
+            captured["driver_timeout_seconds"] = driver.timeout_seconds
+
+        async def run(self, run_state):  # noqa: ANN001
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: store)
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+
+    result = await AutoHandler().handle({"resume": state.auto_session_id})
+
+    assert result.is_ok
+    assert captured["driver_timeout_seconds"] == 240.0

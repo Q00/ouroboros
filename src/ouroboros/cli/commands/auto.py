@@ -20,7 +20,7 @@ from ouroboros.auto.adapters import (
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
@@ -142,6 +142,20 @@ def _safe_default_cwd() -> Path:
 
 _DEFAULT_MAX_INTERVIEW_ROUNDS = 12
 _DEFAULT_MAX_REPAIR_ROUNDS = 5
+_DEFAULT_INTERVIEW_TIMEOUT_SECONDS = 60.0
+
+
+def _interview_timeout_seconds(state: AutoPipelineState) -> float:
+    """Resolve interview-phase timeout from persisted state policy.
+
+    state validation already enforces a positive int for the interview phase,
+    but fall back defensively if older callers ever pass a state with the key
+    missing or an unusable type.
+    """
+    raw = state.timeout_seconds_by_phase.get(AutoPhase.INTERVIEW.value)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return _DEFAULT_INTERVIEW_TIMEOUT_SECONDS
+    return float(raw)
 
 
 async def _run_auto(
@@ -232,6 +246,7 @@ async def _run_auto(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
         max_rounds=max_interview_rounds,
+        timeout_seconds=_interview_timeout_seconds(state),
     )
     pipeline = AutoPipeline(
         driver,
