@@ -445,6 +445,7 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Interview session: {result.interview_session_id}")
     if result.seed_path:
         lines.append(f"Seed: {result.seed_path}")
+    lines.append(f"Seed origin: {result.seed_origin}")
     if result.job_id or result.execution_id or result.run_session_id:
         lines.extend(
             [

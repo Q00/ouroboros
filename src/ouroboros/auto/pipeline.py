@@ -100,6 +100,13 @@ class AutoPipeline:
                 _mark_invalid_seed_artifact(state, f"persisted Seed artifact is invalid: {exc}")
                 self._save(state)
                 return self._result(state, ledger, blocker=state.last_error)
+            # Backfill legacy resumed sessions: pre-PR auto pipelines were the
+            # only writer of state.seed_artifact, so a valid persisted Seed
+            # paired with seed_origin=none can only have come from this
+            # pipeline. Inferring it once on resume keeps the new contract
+            # accurate for sessions created before this field existed.
+            if state.seed_origin is SeedOrigin.NONE:
+                state.seed_origin = SeedOrigin.AUTO_PIPELINE
         self._save(state)
 
         if self.reconcile_run and state.phase == AutoPhase.COMPLETE:
