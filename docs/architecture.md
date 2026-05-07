@@ -16,7 +16,7 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 ├─────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                                     │
 │  ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐                 │
-│  │      PLUGIN LAYER    │     │      CORE LAYER     │     │      PRESENTATION    │                 │
+│  │   SKILLS REGISTRY    │     │      CORE LAYER     │     │      PRESENTATION    │                 │
 │  │                     │     │                     │     │      LAYER           │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
 │  │  │   Skills      │──┼─────┼─▶│   Seed Spec    │──┼─────┼─▶│   TUI Dashboard │  │                 │
@@ -51,12 +51,20 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 ## Core Components Overview
 
-### 1. Plugin Layer
-**Auto-discovery of skills and agents through the plugin system**
+### 1. Skills & Agents Registry
+**Auto-discovery of bundled skills and agents that ship with Ouroboros core**
 - Skills: 14 core workflow skills (interview, seed, run, evaluate, evolve, cancel, unstuck, update, help, setup, ralph, tutorial, welcome, status)
 - Agents: 9 specialized agents for different thinking modes
 - Hot-reload capabilities without restart
 - Magic prefix detection (`/ouroboros:`)
+
+> **Note**: This layer is the in-process registry of bundled skills and agents
+> that ship with core. It is **not** the user-installable UserLevel plugin
+> layer (introduced in #725). User-installable plugins live one layer above
+> this — see [`Section 7: UserLevel Programs Layer`](#7-userlevel-programs-layer)
+> below and the canonical RFC at
+> [`docs/rfc/userlevel-plugins.md`](./rfc/userlevel-plugins.md). Do not
+> conflate the two in PRs.
 
 ### 2. Core Layer
 **Immutable data models and specifications**
@@ -94,6 +102,50 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 - Agent activity monitor
 - Cost tracking and drift visualization
 - Interactive debugging capabilities
+
+### 7. UserLevel Programs Layer
+
+**User-installable workflows built on top of core primitives** (introduced
+in #725; canonical reference: [`docs/rfc/userlevel-plugins.md`](./rfc/userlevel-plugins.md)).
+
+This layer is distinct from the in-process Skills & Agents Registry
+(Section 1):
+
+- **Skills & Agents Registry** = in-process subsystem of bundled
+  skills/agents that ship with core. Discovered via `/ouroboros:` magic
+  prefix. Used by `ooo interview`, `ooo qa`, etc.
+- **UserLevel Programs Layer** = user-installable plugins composed on top
+  of core primitives via a declared manifest contract. Distributed via
+  `ooo plugin add <repo-url>`. Examples: `github-pr-ops`, `merge-assistant`,
+  `jira-sync`. First-party programs (`ooo auto`, `ooo run`, `ooo pm`) live
+  in this layer too — they share the manifest format with installable
+  plugins.
+
+```text
++--------------------------------------------------------------+
+| UserLevel Programs Layer                                     |
+|                                                              |
+|   Installable: github-pr-ops  jira-sync  release-coordinator |
+|   First-party: ooo auto       ooo run    ooo pm             |
++----------------------+---------------------------------------+
+                       | declared manifest contract
+                       v
+                  Ouroboros core
+                  (Sections 1–6 above)
+```
+
+**Why a separate layer?** To keep `ooo auto` coherent (`goal → interview
+→ Seed → handoff` only), keep core small, and route domain-specific
+operational workflows (GitHub PR ops, Jira triage, Slack incident
+response) into pluggable packages rather than into core or `ooo auto`.
+
+**Manifest contract**: see [Q00/ouroboros-plugins/schemas/0.1/](https://github.com/Q00/ouroboros-plugins/tree/main/schemas/0.1).
+
+> **Terminology guard**: in this codebase, "plugin" by itself can refer to
+> either the in-process Skills/Agents Registry or the UserLevel Programs
+> Layer. When writing PRs or docs, qualify the term — e.g.
+> "skill plugin" (Section 1) vs "UserLevel plugin" (Section 7). When in
+> doubt, link the relevant section.
 
 ## Philosophy
 
