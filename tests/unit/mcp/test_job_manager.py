@@ -1246,6 +1246,51 @@ class TestJobManager:
         assert "No new job-level events during this wait window." in result.value.text_content
         assert result.value.text_content != "unchanged cursor=12"
 
+    async def test_job_wait_meta_includes_polling_links_for_clients(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_links",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=21,
+            links=JobLinks(
+                session_id="orch_wait_links",
+                execution_id="exec_wait_links",
+                lineage_id="lin_wait_links",
+            ),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                return snapshot, True
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        await store.initialize()
+        try:
+            result = await handler.handle(
+                {"job_id": "job_wait_links", "cursor": 0, "timeout_seconds": 0}
+            )
+        finally:
+            await store.close()
+
+        assert result.is_ok
+        assert result.value.meta["job_id"] == "job_wait_links"
+        assert result.value.meta["status"] == "running"
+        assert result.value.meta["cursor"] == 21
+        assert result.value.meta["session_id"] == "orch_wait_links"
+        assert result.value.meta["execution_id"] == "exec_wait_links"
+        assert result.value.meta["lineage_id"] == "lin_wait_links"
+
     async def test_job_wait_summary_view_returns_compact_unchanged_line(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         snapshot = JobSnapshot(

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 
 
 async def _resolve(
@@ -118,3 +118,22 @@ class TestResolveSeedContent:
         )
         assert result.is_ok
         assert result.value == "goal: inline\n"
+
+    async def test_start_execute_seed_rejects_missing_cwd_before_job_creation(
+        self, tmp_path: Path
+    ) -> None:
+        missing_cwd = tmp_path / "missing-project"
+        handler = StartExecuteSeedHandler()
+
+        result = await handler.handle(
+            {
+                "cwd": str(missing_cwd),
+                "seed_content": "goal: no job\nacceptance_criteria:\n  - do not start\n",
+                "max_iterations": 1,
+                "skip_qa": True,
+            }
+        )
+
+        assert result.is_err
+        assert "Working directory does not exist" in str(result.error)
+        assert getattr(result.error, "tool_name", None) == "ouroboros_start_execute_seed"

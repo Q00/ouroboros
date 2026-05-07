@@ -232,7 +232,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         Returns:
             Result containing execution result or error.
         """
-        resolved_cwd = self._resolve_dispatch_cwd(arguments.get("cwd"))
+        cwd_result = self._resolve_dispatch_cwd_result(
+            arguments.get("cwd"), tool_name="ouroboros_execute_seed"
+        )
+        if cwd_result.is_err:
+            return cwd_result
+        resolved_cwd = cwd_result.value
         seed_result = await self._resolve_seed_content(
             arguments=arguments,
             resolved_cwd=resolved_cwd,
@@ -704,6 +709,36 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         return Path.cwd()
 
     @staticmethod
+    def _resolve_dispatch_cwd_result(
+        raw_cwd: Any,
+        *,
+        tool_name: str,
+    ) -> Result[Path, MCPServerError]:
+        """Resolve and validate the dispatch cwd before launching work.
+
+        Background seed runs should fail closed before creating a job when the
+        requested cwd is missing or is not a directory.  Otherwise the actual
+        execution fails later inside the runtime with a less actionable
+        ``FileNotFoundError``.
+        """
+        resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(raw_cwd)
+        if not resolved_cwd.exists():
+            return Result.err(
+                MCPToolError(
+                    f"Working directory does not exist: {resolved_cwd}",
+                    tool_name=tool_name,
+                )
+            )
+        if not resolved_cwd.is_dir():
+            return Result.err(
+                MCPToolError(
+                    f"Working directory is not a directory: {resolved_cwd}",
+                    tool_name=tool_name,
+                )
+            )
+        return Result.ok(resolved_cwd)
+
+    @staticmethod
     async def _resolve_seed_content(
         *,
         arguments: dict[str, Any],
@@ -890,7 +925,12 @@ class StartExecuteSeedHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(arguments.get("cwd"))
+        cwd_result = ExecuteSeedHandler._resolve_dispatch_cwd_result(
+            arguments.get("cwd"), tool_name="ouroboros_start_execute_seed"
+        )
+        if cwd_result.is_err:
+            return cwd_result
+        resolved_cwd = cwd_result.value
         seed_result = await ExecuteSeedHandler._resolve_seed_content(
             arguments=arguments,
             resolved_cwd=resolved_cwd,
