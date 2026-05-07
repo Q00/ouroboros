@@ -125,6 +125,10 @@ class AutoPipelineState:
             AutoPhase.RUN.value: 60,
         }
     )
+    # Operational-task classification recorded at session creation by the CLI.
+    # Pipeline path-selection consults this to decide direct-run vs interview.
+    # Empty dict for legacy/general goals (back-compat).
+    classification: dict[str, Any] = field(default_factory=dict)
 
     def transition(self, next_phase: AutoPhase, message: str, *, error: str | None = None) -> None:
         """Move to ``next_phase`` after validating the phase state machine."""
@@ -194,6 +198,7 @@ class AutoPipelineState:
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
+        payload.setdefault("classification", {})
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -277,6 +282,56 @@ class AutoPipelineState:
         if not isinstance(self.run_subagent, dict):
             msg = "run_subagent must be an object"
             raise ValueError(msg)
+        # ``classification`` is the operational-task classifier output; an
+        # empty dict means "no classification persisted yet" (legacy/general
+        # goals). When present, it MUST be an object so ``--status``
+        # rendering and pipeline path-selection can use ``.get(...)`` without
+        # crashing on a list/string masquerading as classification.
+        # (Bot-flagged in #721 review.)
+        if not isinstance(self.classification, dict):
+            msg = "classification must be an object"
+            raise ValueError(msg)
+        if self.classification:
+            from ouroboros.auto.operational_task import (
+                GENERAL,
+                ISSUE_URL,
+                MERGE_INTENT,
+                PR_URL,
+                REVIEW_INTENT,
+                RISK_DESTRUCTIVE_CLOSE,
+                RISK_DESTRUCTIVE_MERGE,
+                RISK_LOW,
+                RISK_NONE,
+            )
+
+            valid_kinds = {GENERAL, PR_URL, ISSUE_URL, MERGE_INTENT, REVIEW_INTENT}
+            valid_risks = {
+                RISK_NONE,
+                RISK_LOW,
+                RISK_DESTRUCTIVE_MERGE,
+                RISK_DESTRUCTIVE_CLOSE,
+            }
+            kind = self.classification.get("kind")
+            if not isinstance(kind, str) or kind not in valid_kinds:
+                msg = "classification.kind must be a known classifier kind"
+                raise ValueError(msg)
+            risk = self.classification.get("side_effect_risk")
+            if not isinstance(risk, str) or risk not in valid_risks:
+                msg = "classification.side_effect_risk must be a known risk label"
+                raise ValueError(msg)
+            for bool_field in (
+                "interview_required",
+                "direct_run_allowed",
+                "requires_confirmation",
+            ):
+                if type(self.classification.get(bool_field)) is not bool:
+                    msg = f"classification.{bool_field} must be a boolean"
+                    raise ValueError(msg)
+            for list_field in ("targets", "reasons"):
+                value = self.classification.get(list_field)
+                if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                    msg = f"classification.{list_field} must be a list of strings"
+                    raise ValueError(msg)
         if self.ledger:
             try:
                 from ouroboros.auto.ledger import SeedDraftLedger

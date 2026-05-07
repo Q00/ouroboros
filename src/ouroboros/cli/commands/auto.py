@@ -18,6 +18,10 @@ from ouroboros.auto.adapters import (
     save_seed,
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.operational_task import (
+    classification_to_state_dict,
+    classify_operational_task,
+)
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPipelineState, AutoStore
@@ -204,6 +208,7 @@ async def _run_auto(
         state = AutoPipelineState(goal=goal.strip(), cwd=str(_safe_default_cwd()))
         state.runtime_backend = runtime
         state.skip_run = skip_run
+        state.classification = classification_to_state_dict(classify_operational_task(state.goal))
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
 
@@ -275,6 +280,12 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Run handoff status: [bold]{state.run_handoff_status}[/]")
     if state.run_handoff_guidance:
         console.print(f"Run handoff guidance: [yellow]{state.run_handoff_guidance}[/]")
+    if state.classification:
+        kind = state.classification.get("kind", "general")
+        risk = state.classification.get("side_effect_risk", "none")
+        console.print(f"Goal classification: [bold]{kind}[/] (risk={risk})")
+        if state.classification.get("requires_confirmation"):
+            console.print("  [yellow]requires explicit confirmation before destructive action[/]")
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
     console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")

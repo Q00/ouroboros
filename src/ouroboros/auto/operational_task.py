@@ -329,10 +329,68 @@ def classify_operational_task(goal: str) -> OperationalTaskClassification:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class MergeGuardrailInputs:
+    """Snapshot of the boolean checks that gate a destructive merge action.
+
+    The pipeline collects these from the runtime (GitHub API, repo policy,
+    user confirmation) and feeds them into :func:`evaluate_merge_guardrails`.
+    No defaults — every check is mandatory at the call site so an accidentally
+    omitted field cannot silently allow a merge.
+    """
+
+    target_branch_protected_ok: bool
+    ci_passing: bool
+    mergeable: bool
+    permitted: bool
+    explicit_confirmation: bool
+
+
+def evaluate_merge_guardrails(inputs: MergeGuardrailInputs) -> tuple[str, ...]:
+    """Return a tuple of human-readable blockers — empty when the merge is OK.
+
+    Fail-closed: any unmet check produces a blocker string and the pipeline
+    must NOT proceed with the merge. The function is pure and deterministic
+    so it doubles as the spec for the destructive-action review.
+    """
+    blockers: list[str] = []
+    if not inputs.target_branch_protected_ok:
+        blockers.append("target branch protection requirements are not satisfied")
+    if not inputs.ci_passing:
+        blockers.append("CI is not green on the head ref")
+    if not inputs.mergeable:
+        blockers.append("PR is not mergeable (conflicts or stale)")
+    if not inputs.permitted:
+        blockers.append("the executing identity lacks permission to merge")
+    if not inputs.explicit_confirmation:
+        blockers.append("explicit human or policy confirmation is missing")
+    return tuple(blockers)
+
+
+def classification_to_state_dict(
+    classification: OperationalTaskClassification,
+) -> dict[str, object]:
+    """Project a classification into a JSON-safe dict for state storage.
+
+    Tuples become lists so the result round-trips through JSON and matches
+    what ``AutoPipelineState.classification`` exposes on resume.
+    """
+    return {
+        "kind": classification.kind,
+        "interview_required": classification.interview_required,
+        "direct_run_allowed": classification.direct_run_allowed,
+        "side_effect_risk": classification.side_effect_risk,
+        "requires_confirmation": classification.requires_confirmation,
+        "targets": list(classification.targets),
+        "reasons": list(classification.reasons),
+    }
+
+
 __all__ = [
     "GENERAL",
     "ISSUE_URL",
     "MERGE_INTENT",
+    "MergeGuardrailInputs",
     "OperationalTaskClassification",
     "PR_URL",
     "REVIEW_INTENT",
@@ -340,5 +398,7 @@ __all__ = [
     "RISK_DESTRUCTIVE_MERGE",
     "RISK_LOW",
     "RISK_NONE",
+    "classification_to_state_dict",
     "classify_operational_task",
+    "evaluate_merge_guardrails",
 ]

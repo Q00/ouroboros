@@ -330,3 +330,147 @@ def test_repo_with_digits_or_dashes_recognized() -> None:
     result = classify_operational_task("fix failing tests in shaun0927/ouroboros-ai")
     assert "shaun0927/ouroboros-ai" in result.targets
     assert result.interview_required is False
+
+
+# ---------------------------------------------------------------------------
+# Merge guardrail matrix (#689 part 2)
+# ---------------------------------------------------------------------------
+
+from dataclasses import replace
+
+from ouroboros.auto.operational_task import (
+    MergeGuardrailInputs,
+    classification_to_state_dict,
+    evaluate_merge_guardrails,
+)
+from ouroboros.auto.state import AutoPipelineState, AutoStore
+
+
+def _all_ok() -> MergeGuardrailInputs:
+    return MergeGuardrailInputs(
+        target_branch_protected_ok=True,
+        ci_passing=True,
+        mergeable=True,
+        permitted=True,
+        explicit_confirmation=True,
+    )
+
+
+def test_evaluate_merge_guardrails_all_ok_returns_no_blockers() -> None:
+    assert evaluate_merge_guardrails(_all_ok()) == ()
+
+
+@pytest.mark.parametrize(
+    "field,expected_substring",
+    [
+        ("target_branch_protected_ok", "target branch protection"),
+        ("ci_passing", "CI is not green"),
+        ("mergeable", "not mergeable"),
+        ("permitted", "lacks permission"),
+        ("explicit_confirmation", "explicit human or policy confirmation"),
+    ],
+)
+def test_evaluate_merge_guardrails_each_failure_blocks(field: str, expected_substring: str) -> None:
+    inputs = replace(_all_ok(), **{field: False})
+    blockers = evaluate_merge_guardrails(inputs)
+    assert any(expected_substring in b for b in blockers), blockers
+
+
+def test_evaluate_merge_guardrails_collects_all_failures() -> None:
+    inputs = MergeGuardrailInputs(
+        target_branch_protected_ok=False,
+        ci_passing=False,
+        mergeable=False,
+        permitted=False,
+        explicit_confirmation=False,
+    )
+    blockers = evaluate_merge_guardrails(inputs)
+    assert len(blockers) == 5
+
+
+def test_classification_to_state_dict_is_json_safe() -> None:
+    cls = classify_operational_task("merge https://github.com/o/r/pull/1 once CI is green")
+    out = classification_to_state_dict(cls)
+    import json
+
+    json.dumps(out)  # must not raise
+    assert out["kind"] == MERGE_INTENT
+    assert out["targets"] == ["https://github.com/o/r/pull/1"]
+
+
+def test_state_persists_classification_through_roundtrip(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="merge https://github.com/o/r/pull/1", cwd="/repo")
+    state.classification = classification_to_state_dict(classify_operational_task(state.goal))
+    store.save(state)
+    loaded = store.load(state.auto_session_id)
+    assert loaded.classification["kind"] == MERGE_INTENT
+    assert loaded.classification["requires_confirmation"] is True
+
+
+def test_state_treats_missing_classification_as_empty(tmp_path) -> None:
+    state = AutoPipelineState(goal="general task", cwd="/repo")
+    raw = state.to_dict()
+    del raw["classification"]
+    revived = AutoPipelineState.from_dict(raw)
+    assert revived.classification == {}
+
+
+def test_state_rejects_classification_of_wrong_type() -> None:
+    """A malformed durable state file with ``classification`` as a list or
+    string MUST be rejected at load time so ``ooo auto --status`` does not
+    crash later when calling ``state.classification.get(...)``.
+    (Bot-flagged in #721 review.)"""
+    state = AutoPipelineState(goal="x", cwd="/repo")
+    raw = state.to_dict()
+    raw["classification"] = ["not", "a", "dict"]
+    with pytest.raises(ValueError, match="classification must be an object"):
+        AutoPipelineState.from_dict(raw)
+
+
+def test_state_rejects_classification_with_unknown_kind() -> None:
+    state = AutoPipelineState(goal="x", cwd="/repo")
+    raw = state.to_dict()
+    raw["classification"] = {
+        "kind": "totally-fake",
+        "interview_required": True,
+        "direct_run_allowed": False,
+        "side_effect_risk": "none",
+        "requires_confirmation": False,
+        "targets": [],
+        "reasons": [],
+    }
+    with pytest.raises(ValueError, match="classification.kind"):
+        AutoPipelineState.from_dict(raw)
+
+
+def test_state_rejects_classification_with_non_bool_flag() -> None:
+    state = AutoPipelineState(goal="x", cwd="/repo")
+    raw = state.to_dict()
+    raw["classification"] = {
+        "kind": "general",
+        "interview_required": "yes",  # bug: should be bool
+        "direct_run_allowed": False,
+        "side_effect_risk": "none",
+        "requires_confirmation": False,
+        "targets": [],
+        "reasons": [],
+    }
+    with pytest.raises(ValueError, match="interview_required must be a boolean"):
+        AutoPipelineState.from_dict(raw)
+
+
+def test_state_rejects_classification_with_non_string_targets() -> None:
+    state = AutoPipelineState(goal="x", cwd="/repo")
+    raw = state.to_dict()
+    raw["classification"] = {
+        "kind": "general",
+        "interview_required": True,
+        "direct_run_allowed": False,
+        "side_effect_risk": "none",
+        "requires_confirmation": False,
+        "targets": [123, 456],  # bug: must be strings
+        "reasons": [],
+    }
+    with pytest.raises(ValueError, match="classification.targets"):
+        AutoPipelineState.from_dict(raw)
