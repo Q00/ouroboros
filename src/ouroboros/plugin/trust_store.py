@@ -198,24 +198,37 @@ class TrustStore:
             self._write_atomic(plugin, payload)
 
     def remove(self, plugin: str) -> bool:
-        """Remove the trust file for `plugin`. Returns True if removed."""
+        """Remove the trust file for `plugin`. Returns True if removed.
+
+        Bracketed by the same per-plugin lock as `grant()` /
+        `reset_for_version_bump()`. Without the lock, a concurrent
+        `grant()` could win a race against `remove()` and recreate
+        `trust.json` after this method reported success — leaving a
+        supposedly-removed plugin still trusted, or non-deterministically
+        dropping grants. The lock makes the unlink/prune sequence
+        observable as a single critical section.
+        """
         path = self._path(plugin)
-        if not path.is_file():
-            return False
-        path.unlink()
-        # The grant lock-file lives next to trust.json; clear it too so
-        # the per-plugin directory can collapse cleanly.
-        lock_path = path.with_suffix(path.suffix + ".lock")
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
-        # Best-effort: remove the empty plugin dir if it's empty afterwards.
-        try:
-            path.parent.rmdir()
-        except OSError:
-            pass
-        return True
+        with self._grant_lock(plugin):
+            if not path.is_file():
+                return False
+            path.unlink()
+            # The grant lock-file lives next to trust.json; clear it too so
+            # the per-plugin directory can collapse cleanly. Note: the
+            # lock fd is still held above us by `_grant_lock`'s context
+            # manager, so the unlink only removes the dirent — fcntl
+            # mutual exclusion is unaffected.
+            lock_path = path.with_suffix(path.suffix + ".lock")
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            # Best-effort: remove the empty plugin dir if it's empty afterwards.
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+            return True
 
 
 __all__ = [

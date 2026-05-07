@@ -367,6 +367,111 @@ def test_inspect_stale_version_reports_installed(runner: CliRunner, tmp_path: Pa
     assert "github:read" in result.output
 
 
+def test_inspect_first_party_ignores_corrupt_trust_file(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression: a leftover/corrupt `trust.json` for a first-party
+    plugin must NOT make `inspect` fail. The firewall ignores the
+    trust store for `source.type == 'first_party'` by design, so the
+    CLI's read-only commands need to do the same instead of treating
+    that file as authoritative."""
+    plugin_home = tmp_path / "plugin_home"
+    fp_manifest = {
+        **REFERENCE_MANIFEST,
+        "name": "ooo-builtin",
+        "source": {"type": "first_party"},
+        "permissions": [],
+    }
+    _write_manifest(plugin_home, fp_manifest)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="ooo-builtin",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    # Plant a corrupt trust file for the same plugin name. A pre-fix
+    # build would crash on `_read_trust_or_exit`; the new path skips
+    # the read entirely for first_party.
+    trust_dir = trust_root / "ooo-builtin"
+    trust_dir.mkdir(parents=True)
+    (trust_dir / "trust.json").write_text("{garbage")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "ooo-builtin",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "first_party" in result.output
+
+
+def test_list_json_zeroes_stale_grants_and_flags_version_drift(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the `list --json` reporting suggestion: a trust
+    file recorded against an older plugin version must NOT echo its
+    grants in the JSON view, because those grants are no longer
+    effective. The row also exposes `trust_version_stale: true` so
+    consumers can branch deterministically."""
+    plugin_home = tmp_path / "ph"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)  # version 0.1.0
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    # Trust granted against an older version of the same plugin.
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.0.9",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--json",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 1
+    row = data[0]
+    assert row["trust_state"] == "installed"
+    assert row["trust_version_stale"] is True
+    # No effective grants remain — don't lie to JSON consumers about
+    # what the firewall would actually accept.
+    assert row["granted_scopes"] == []
+    # Required scope still surfaces as missing.
+    assert row["missing_required_scopes"] == ["github:read"]
+
+
 def test_discover_unreadable_manifest_reports_friendly_error(
     runner: CliRunner, tmp_path: Path
 ) -> None:

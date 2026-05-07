@@ -263,7 +263,15 @@ def inspect_command(
         )
         raise typer.Exit(code=1) from exc
 
-    record = _read_trust_or_exit(trust, name)
+    # First-party plugins ship inside the binary and the firewall
+    # ignores their trust file by design (Q00/ouroboros-plugins#8). A
+    # leftover/corrupt `trust.json` for such a plugin must not make
+    # `inspect` fail — the correct authoritative state for first-party
+    # is "first_party with no scopes", read straight from the manifest.
+    if manifest.source.type == "first_party":
+        record = None
+    else:
+        record = _read_trust_or_exit(trust, name)
     granted = [g.scope for g in record.granted_scopes] if record else []
 
     print_info(f"{manifest.name} {manifest.version} ({entry.source_kind})")
@@ -324,14 +332,52 @@ def list_command(
 
     rows = []
     for entry in sorted(entries.values(), key=lambda e: e.name):
-        record = _read_trust_or_exit(trust, entry.name)
-        scopes = [g.scope for g in record.granted_scopes] if record else []
         # Re-load the manifest so trust_state reflects the same gate the
         # firewall enforces (required-scope set + version match), not
-        # just "did the user grant any scope at all".
+        # just "did the user grant any scope at all". Reading the
+        # manifest first also lets us skip the trust.json read for
+        # first-party plugins, which the firewall ignores by design —
+        # a leftover trust file there must not make `list` fail.
         manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
+        manifest: PluginManifest | None
         try:
             manifest = load_manifest(manifest_path)
+        except (PluginManifestError, OSError):
+            manifest = None
+
+        if manifest is not None and manifest.source.type == "first_party":
+            record = None
+        elif manifest is not None:
+            record = _read_trust_or_exit(trust, entry.name)
+        else:
+            # Manifest unreadable — fall through to the
+            # safe-default branch below; reading trust here would still
+            # require an exit_or path, but we don't yet know the
+            # source.type, so skip and report stale-but-known state.
+            record = _read_trust_or_exit(trust, entry.name)
+
+        # Stale-version trust files: the firewall treats them as
+        # invalidated, so the JSON view should not echo grants that
+        # are no longer effective. Mirror the `inspect` warning by
+        # zero-ing out scopes when the record's version no longer
+        # matches the manifest, and surface a `trust_version_stale`
+        # flag so consumers can branch deterministically.
+        stale_version = bool(
+            manifest is not None and record is not None and record.version != manifest.version
+        )
+        if stale_version:
+            scopes: list[str] = []
+        else:
+            scopes = [g.scope for g in record.granted_scopes] if record else []
+        try:
+            if manifest is None:
+                raise PluginManifestError(
+                    "manifest unreadable",
+                    path=str(manifest_path),
+                    json_pointer=None,
+                    expected="readable",
+                    got="missing",
+                )
             trust_state = _trust_state_label(manifest, record)
             missing = _missing_required(manifest, record)
         except (PluginManifestError, OSError):
@@ -350,6 +396,10 @@ def list_command(
                 "trust_state": trust_state,
                 "granted_scopes": scopes,
                 "missing_required_scopes": missing,
+                # Explicit signal so JSON consumers don't have to compare
+                # versions themselves to know the grants in `trust.json`
+                # were already invalidated by a version bump.
+                "trust_version_stale": stale_version,
             }
         )
 
