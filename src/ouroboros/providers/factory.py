@@ -11,6 +11,7 @@ import structlog
 from ouroboros.config import (
     get_codex_cli_path,
     get_gemini_cli_path,
+    get_hermes_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
     get_runtime_profile,
@@ -20,6 +21,7 @@ from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
+from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
 if TYPE_CHECKING:
@@ -31,6 +33,7 @@ _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
 _COPILOT_BACKENDS = {"copilot", "copilot_cli"}
 _GEMINI_BACKENDS = {"gemini", "gemini_cli"}
+_HERMES_BACKENDS = {"hermes", "hermes_cli"}
 _KIRO_BACKENDS = {"kiro", "kiro_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _LITELLM_BACKENDS = {"litellm", "openai", "openrouter"}
@@ -79,6 +82,8 @@ def resolve_llm_backend(backend: str | None = None) -> str:
         return "copilot"
     if candidate in _GEMINI_BACKENDS:
         return "gemini"
+    if candidate in _HERMES_BACKENDS:
+        return "hermes"
     if candidate in _KIRO_BACKENDS:
         return "kiro"
     if candidate in _OPENCODE_BACKENDS:
@@ -110,6 +115,7 @@ def resolve_llm_permission_mode(
         "codex",
         "copilot",
         "gemini",
+        "hermes",
         "opencode",
     ):
         # Interview uses LLM to generate questions — no file writes, but
@@ -211,6 +217,12 @@ def create_llm_adapter(
             timeout=timeout,
             max_retries=max_retries,
             allowed_tools=allowed_tools,
+        )
+    if resolved_backend == "hermes":
+        return HermesCliLLMAdapter(
+            cli_path=cli_path or get_hermes_cli_path(),
+            cwd=cwd,
+            timeout=timeout,
         )
     if resolved_backend == "opencode":
         return OpenCodeLLMAdapter(

@@ -317,7 +317,10 @@ _SUPPORT_STOPWORDS = frozenset(
     {
         "and",
         "are",
+        "by",
         "for",
+        "package",
+        "managed",
         "the",
         "use",
         "with",
@@ -333,7 +336,7 @@ def _driver_text_supports_entry(driver_text: str, scaffold_value: str) -> bool:
     if not scaffold_tokens:
         return False
     driver_tokens = _support_tokens(driver_text)
-    return bool(scaffold_tokens & driver_tokens)
+    return scaffold_tokens <= driver_tokens
 
 
 def _support_tokens(value: str) -> set[str]:

@@ -35,6 +35,18 @@ class RaisingAdapter:
         raise RuntimeError("backend crashed")
 
 
+class ErrorAdapter:
+    async def complete(self, messages, config):  # noqa: ANN001, ARG002
+        from ouroboros.core.errors import ProviderError
+
+        return Result.err(
+            ProviderError(
+                "Hermes CLI not found at hermes. Install Hermes or configure OUROBOROS_HERMES_CLI_PATH.",
+                provider="hermes_cli",
+            )
+        )
+
+
 def test_classifies_blocker_questions_as_risky() -> None:
     ledger = SeedDraftLedger.from_goal("Deploy a service")
     answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=FakeAdapter())
@@ -159,6 +171,27 @@ async def test_driver_answerer_keeps_unsupported_scaffold_contract_open() -> Non
 
 
 @pytest.mark.asyncio
+async def test_driver_answerer_rejects_partial_overlap_runtime_contradiction() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    context = AutoAnswerContext(
+        repo_facts={"runtime_context": "Python package managed by uv"},
+        evidence={"runtime_context": ["pyproject.toml"]},
+    )
+    adapter = FakeAdapter("Use Python with Poetry for dependency management.")
+    answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
+
+    answer = await answerer.answer("Which runtime and framework should be used?", ledger, context)
+
+    runtime_updates = [
+        entry for section, entry in answer.ledger_updates if section == "runtime_context"
+    ]
+    assert runtime_updates
+    assert all(entry.status is LedgerStatus.WEAK for entry in runtime_updates)
+    assert any("Poetry" in entry.value for entry in runtime_updates)
+    assert all("uv" not in entry.value for entry in runtime_updates)
+
+
+@pytest.mark.asyncio
 async def test_driver_answerer_constructs_adapter_with_session_cwd(monkeypatch, tmp_path) -> None:
     from ouroboros.auto import driver_answerer as module
 
@@ -213,6 +246,23 @@ async def test_driver_answerer_complete_exception_becomes_blocker() -> None:
     assert answer.blocker is not None
     assert "selected driver codex failed to answer" in answer.blocker.reason
     assert "RuntimeError" in answer.blocker.reason
+
+
+@pytest.mark.asyncio
+async def test_driver_answerer_missing_hermes_becomes_recoverable_blocker() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    answerer = DriverAutoAnswerer(
+        backend="hermes",
+        brake=AutoBrakeMode.OFF,
+        adapter=ErrorAdapter(),  # type: ignore[arg-type]
+    )
+
+    answer = await answerer.answer("Which runtime should be used?", ledger)
+
+    assert answer.source == AutoAnswerSource.BLOCKER
+    assert answer.blocker is not None
+    assert "selected driver hermes failed to answer" in answer.blocker.reason
+    assert "Install Hermes" in answer.blocker.reason
 
 
 @pytest.mark.asyncio

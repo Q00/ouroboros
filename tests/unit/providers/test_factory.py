@@ -15,6 +15,7 @@ from ouroboros.providers.factory import (
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
+from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
@@ -63,10 +64,10 @@ class TestResolveLLMBackend:
         with pytest.raises(ValueError, match="Unsupported LLM backend"):
             resolve_llm_backend("invalid")
 
-    def test_rejects_hermes_backend(self) -> None:
-        """Hermes is runtime-only until an LLM adapter exists."""
-        with pytest.raises(ValueError, match="Unsupported LLM backend"):
-            resolve_llm_backend("hermes")
+    def test_resolves_hermes_aliases(self) -> None:
+        """Hermes aliases normalize to hermes."""
+        assert resolve_llm_backend("hermes") == "hermes"
+        assert resolve_llm_backend("hermes_cli") == "hermes"
 
 
 class TestCreateLLMAdapter:
@@ -93,6 +94,12 @@ class TestCreateLLMAdapter:
         """LiteLLM backend returns LiteLLMAdapter."""
         adapter = create_llm_adapter(backend="litellm")
         assert isinstance(adapter, LiteLLMAdapter)
+
+    def test_creates_hermes_adapter(self) -> None:
+        """Hermes backend returns HermesCliLLMAdapter."""
+        adapter = create_llm_adapter(backend="hermes", cli_path="/missing/hermes")
+        assert isinstance(adapter, HermesCliLLMAdapter)
+        assert adapter._cli_path == "/missing/hermes"
 
     def test_forwards_io_recorder_to_litellm_adapter(self) -> None:
         """LiteLLM factory path preserves explicit recorder wiring."""

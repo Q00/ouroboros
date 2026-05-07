@@ -70,7 +70,7 @@ def auto_command(
         str | None,
         typer.Option(
             "--driver",
-            help="Interview answer driver selected from llm.backend candidates (codex, opencode, claude_code, gemini, kiro, copilot, litellm, etc.).",
+            help="Interview answer driver selected from llm.backend candidates (codex, opencode, claude_code, gemini, hermes, kiro, copilot, litellm, etc.).",
         ),
     ] = None,
     brake: Annotated[
