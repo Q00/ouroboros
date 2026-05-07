@@ -1,0 +1,52 @@
+{
+  "schema_version": "0.1",
+  "name": "github-pr-ops",
+  "version": "0.1.0",
+  "description": "Reference skeleton for GitHub PR operational workflows.",
+  "source": {
+    "type": "local_path",
+    "path": "plugins/github-pr-ops"
+  },
+  "commands": [
+    {
+      "namespace": "github-pr",
+      "name": "review",
+      "summary": "Review a pull request and summarize readiness without mutating it.",
+      "usage": "ooo github-pr review <pull-request-url>",
+      "risk": "read_only",
+      "requires_confirmation": false,
+      "arguments": [
+        {
+          "name": "pull_request_url",
+          "type": "url",
+          "required": true,
+          "description": "GitHub pull request URL to inspect."
+        }
+      ]
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "ledger",
+      "access": "write",
+      "reason": "Record review evidence and decisions."
+    },
+    {
+      "name": "provenance",
+      "access": "write",
+      "reason": "Record plugin invocation context."
+    }
+  ],
+  "permissions": [
+    {
+      "scope": "github:read",
+      "risk": "read_only",
+      "required": true,
+      "reason": "Read PR status, checks, reviews, and branch metadata."
+    }
+  ],
+  "entrypoint": {
+    "type": "command",
+    "command": "python -m github_pr_ops"
+  }
+}
