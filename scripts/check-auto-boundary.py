@@ -36,18 +36,24 @@ Coverage strategy:
     cannot silently strip enforcement coverage.
 
 Pattern strategy:
-    Forbidden patterns are matched as case-insensitive *substrings*,
-    not word-boundaried regex. This catches realistic identifier forms
-    (`GitHubClient`, `github_client`, `JiraIssue`, `SlackNotifier`)
-    that a word-boundary regex would miss. Patterns are deliberately
-    chosen with low false-positive risk on the actual `ooo auto`
-    surface (verified against current main).
+    Forbidden patterns are Python regexes scoped with inline
+    case-insensitivity flags (``(?i:...)``) so each pattern can mix
+    case-insensitive and case-sensitive sub-matches as needed. This
+    catches realistic identifier forms (`GitHubClient`,
+    `github_client`, `PullRequestHandler`, `pullRequestId`,
+    `LinearClient`) without false-positiving on benign code such as
+    ``linear_time``, ``linearize``, or "linear pipeline" -- the
+    Linear-the-product pattern requires either the URL form, a
+    PascalCase composition (lowercase ``linear`` + an explicit
+    uppercase letter), or one of an enumerated set of integration
+    suffixes.
 """
 
 from __future__ import annotations
 
 import io
 from pathlib import Path
+import re
 import sys
 import tokenize
 
@@ -82,29 +88,43 @@ SCAN_DIRS: tuple[str, ...] = ("src/ouroboros/auto",)
 SCAN_EXTRA_FILES: tuple[str, ...] = ("src/ouroboros/cli/commands/auto.py",)
 
 
-# Forbidden domain keywords (case-insensitive substrings). Word
-# boundaries are deliberately NOT used: a contributor can otherwise
-# bypass the guard by writing `GitHubClient` or `github_client` and
-# having the regex skip identifier-embedded forms (the gap flagged by
-# the bot review of the original guard).
+# Forbidden domain keywords expressed as Python regexes. Patterns are
+# intentionally precise: a guard whose patterns false-positive on
+# benign code (e.g. ``linear_time``, ``linearize``, "linear pipeline")
+# turns into a CI-noise generator and gets allowlisted into
+# uselessness. ``(?i:...)`` is used for case-insensitive sub-matches;
+# bracket character classes such as ``[A-Z]`` outside that scope stay
+# case-sensitive, which is the exact discrimination needed for
+# PascalCase-composition forms.
 FORBIDDEN_PATTERNS: tuple[str, ...] = (
-    "github",
-    # Both forms are needed: lowercased lines preserve underscores, so
-    # `pull_request` (snake_case) and `pullrequest` (camelCase compressed
-    # form, e.g. PullRequestHandler/pullRequestId) are distinct
-    # substrings.
-    "pull_request",
-    "pullrequest",
-    "/pulls/",
-    "/pull/",
-    "jira",
-    "slack",
-    # `linear` (rather than `linear.app`) is required to catch identifier
-    # forms such as `LinearClient` / `LinearAdapter`. The substring also
-    # subsumes the original URL match `linear.app`. Verified zero false
-    # positives on the actual scan target (current main).
-    "linear",
+    r"(?i:github)",
+    r"(?i:pull_request)",
+    # Compressed camelCase form ``PullRequestHandler`` / ``pullRequestId``
+    # that the snake-case pattern above misses (the underscore prevents
+    # the substrings from sharing).
+    r"(?i:pullrequest)",
+    r"(?i:/pulls?/)",
+    r"(?i:jira)",
+    r"(?i:slack)",
+    # Linear (the issue tracker / SaaS) -- tightened to:
+    #   * the URL form ``linear.app`` / ``linear.com``, or
+    #   * a PascalCase composition (`LinearClient`, `LinearAdapter`,
+    #     `LinearAuth`, ...): "(?i:linear)" is case-insensitive but the
+    #     trailing ``[A-Z]`` is case-sensitive, so this distinguishes
+    #     ``LinearClient`` from benign ``linearize`` / ``linear_time``,
+    #   * an explicit integration suffix in snake_case
+    #     (`linear_client`, `linear_webhook`, ...).
+    # Plain "linear pipeline" / "linear scan" / "linear_time" do NOT
+    # match.
+    (
+        r"(?i:linear\.(?:app|com))"
+        r"|(?i:linear)[A-Z]"
+        r"|(?i:linear_(?:client|adapter|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
+    ),
 )
+
+
+_COMPILED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in FORBIDDEN_PATTERNS)
 
 
 # Marker comment that allowlists a single line.
@@ -185,9 +205,8 @@ def _scan_file(path: Path) -> list[tuple[int, str, str]]:
     for lineno, line in enumerate(text.splitlines(), start=1):
         if lineno in allowed_lines:
             continue
-        lowered = line.lower()
-        for pattern in FORBIDDEN_PATTERNS:
-            if pattern in lowered:
+        for pattern, compiled in zip(FORBIDDEN_PATTERNS, _COMPILED_PATTERNS, strict=True):
+            if compiled.search(line):
                 findings.append((lineno, line.rstrip(), pattern))
                 break
     return findings

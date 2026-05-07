@@ -145,28 +145,38 @@ def test_each_forbidden_pattern_independently_caught(
     """
     module = _load_module()
 
-    samples = {
-        "github": "host = 'github.com'",
-        "pull_request": "if 'pull_request' in payload: ...",
-        "pullrequest": "handler = PullRequestHandler()",
-        "/pulls/": "uri = '/pulls/42'",
-        "/pull/": "uri = '/pull/42'",
-        "jira": "issue = 'JIRA-1'",
-        "slack": "channel = '#xchan'  # slack",
-        "linear": "client = LinearClient()",
-    }
+    # Map each declared FORBIDDEN_PATTERNS entry to a single-pattern
+    # sample. The samples are chosen so they match exactly one regex,
+    # surviving the first-match-wins ordering of ``_scan_file``.
+    samples_by_index = [
+        "host = 'github.com'",  # github
+        "if 'pull_request' in payload: ...",  # pull_request (snake)
+        "handler = PullRequestHandler()",  # pullrequest (compressed)
+        "uri = '/pulls/42'",  # /pulls?/
+        "issue = 'JIRA-1'",  # jira
+        "channel = '#xchan'  # slack",  # slack (only in trailing real-Python comment)
+        "client = LinearClient()",  # linear (PascalCase composition)
+    ]
+
+    assert len(samples_by_index) == len(module.FORBIDDEN_PATTERNS), (
+        "samples_by_index must align 1:1 with FORBIDDEN_PATTERNS; "
+        f"got {len(samples_by_index)} samples for "
+        f"{len(module.FORBIDDEN_PATTERNS)} patterns"
+    )
+
     import re as _re
 
-    for i, pattern in enumerate(module.FORBIDDEN_PATTERNS):
-        assert pattern in samples, f"add a sample for {pattern!r}"
-        safe = _re.sub(r"[^a-zA-Z0-9]", "_", pattern).strip("_")
+    for i, (pattern, sample) in enumerate(
+        zip(module.FORBIDDEN_PATTERNS, samples_by_index, strict=True)
+    ):
+        safe = _re.sub(r"[^a-zA-Z0-9]", "_", pattern)[:40].strip("_") or f"p{i}"
         fake_repo = tmp_path / f"case-{i}-{safe}"
         watched_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
         watched_dir.mkdir(parents=True)
-        (watched_dir / "auto.py").write_text(samples[pattern] + "\n")
+        (watched_dir / "auto.py").write_text(sample + "\n")
         _isolate(module, monkeypatch, fake_repo)
         rc = module.main()
-        assert rc == 1, f"pattern {pattern!r} not caught for sample"
+        assert rc == 1, f"pattern {pattern!r} not caught for sample {sample!r}"
 
 
 @pytest.mark.parametrize(
@@ -366,6 +376,76 @@ def test_allowlist_marker_split_string_and_comment(
     _isolate(module, monkeypatch, fake_repo)
     rc = module.main()
     assert rc == 1
+
+
+@pytest.mark.parametrize(
+    "snippet,reason",
+    [
+        ("def linear_time_search(): pass", "linear_time identifier"),
+        ("# linear pipeline scan", "'linear pipeline' docstring fragment"),
+        ("def linearize(matrix): pass", "linearize identifier"),
+        ("STEP_LINEAR = 1", "SCREAMING_SNAKE LINEAR_ ... only"),
+        ("complexity = 'linear'", "string literal 'linear'"),
+        ("# perform a linear search across the timeline", "linear search comment"),
+    ],
+)
+def test_linear_word_is_not_a_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snippet: str,
+    reason: str,
+) -> None:
+    """The bare English word ``linear`` must NOT trigger the guard.
+
+    Bot review on iteration 3 flagged that a naive substring ``linear``
+    rejected legitimate identifiers (``linear_time``, ``linearize``)
+    and docstrings (``"linear pipeline"``). The tightened pattern only
+    matches Linear-the-SaaS forms (URL, PascalCase, integration suffix).
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    watched_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    watched_dir.mkdir(parents=True)
+    (watched_dir / "auto.py").write_text(snippet + "\n")
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 0, f"{reason}: {snippet!r} should NOT have been flagged"
+
+
+@pytest.mark.parametrize(
+    "snippet,reason",
+    [
+        ("client = LinearClient()", "PascalCase composition"),
+        ("adapter = LinearAdapter()", "PascalCase composition (Adapter)"),
+        ("auth = LinearAuth()", "PascalCase composition (Auth)"),
+        ("url = 'https://linear.app/team/x'", "linear.app URL"),
+        ("url = 'https://linear.com/...'", "linear.com URL (case-insensitive)"),
+        ("url = 'https://Linear.App/...'", "Linear.App URL (case-insensitive)"),
+        ("from x import linear_client", "snake_case integration suffix (client)"),
+        ("from x import linear_webhook", "snake_case integration suffix (webhook)"),
+        ("hook = linear_notifier()", "snake_case integration suffix (notifier)"),
+    ],
+)
+def test_linear_saas_forms_are_caught(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snippet: str,
+    reason: str,
+) -> None:
+    """Linear-the-SaaS identifier and URL forms must be caught.
+
+    Counterpart to ``test_linear_word_is_not_a_false_positive``: ensures
+    the tightened regex still catches what we want, not just rejects
+    what we don't.
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    watched_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    watched_dir.mkdir(parents=True)
+    (watched_dir / "auto.py").write_text(snippet + "\n")
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 1, f"{reason}: {snippet!r} should have been flagged"
 
 
 def test_scan_extra_files_are_scanned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
