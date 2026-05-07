@@ -233,7 +233,7 @@ def _ledger_updates_for(
             LedgerEntry(
                 key=entry.key,
                 value=entry.value,
-                source=LedgerSource.INFERENCE,
+                source=entry.source,
                 confidence=min(entry.confidence, 0.72),
                 status=entry.status,
                 reversible=entry.reversible,
