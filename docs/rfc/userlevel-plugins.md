@@ -134,17 +134,24 @@ that are not first-party never receive this treatment regardless of
 
 The manifest schema versions per
 [Q00/ouroboros-plugins#11](https://github.com/Q00/ouroboros-plugins/issues/11):
-SemVer-style `MAJOR.MINOR`, current MAJOR + previous MAJOR support window,
-archived per-major directories (`schemas/<major>/`).
+SemVer-style `MAJOR.MINOR`. Each released `MAJOR.MINOR` lives in its own
+directory under upstream `schemas/<MAJOR.MINOR>/` (e.g. `schemas/0.1/`,
+`schemas/0.2/`, `schemas/1.0/`). The support window is *current MAJOR +
+previous MAJOR*; older MAJORs may be retained for archival reading but are
+out-of-window for compatibility guarantees.
 
 ### Vendoring strategy in core (resolves #736)
 
 Ouroboros core vendors the schemas at
-`src/ouroboros/plugin/schemas/<major>/` with a `_source.json` recording the
-upstream git SHA. A `scripts/sync-plugin-schemas.sh` script keeps the
-vendored copies in sync. CI may surface drift as a warning until the schemas
-stabilize at v1; this is intentionally less strict than a hard error to keep
-bring-up smooth.
+`src/ouroboros/plugin/schemas/<MAJOR.MINOR>/`, **mirroring the upstream
+directory layout one-for-one** (so the URL `schemas/0.1/plugin.schema.json`
+maps to vendored `src/ouroboros/plugin/schemas/0.1/plugin.schema.json`).
+Each vendored directory contains a `_source.json` recording the upstream
+git SHA at the time of the copy. The `scripts/sync-plugin-schemas.sh`
+script copies all in-window MAJOR.MINOR directories from a pinned upstream
+SHA. CI may surface drift as a warning until the schemas stabilize at v1;
+this is intentionally less strict than a hard error to keep bring-up
+smooth.
 
 ## Invocation Contract
 
@@ -197,9 +204,13 @@ plugin populates inside `plugin.invoked` / `plugin.permission_used` /
 contractual obligation to keep secrets out of argv is on the **caller**
 (`ooo` CLI invocations and first-party programs that shell out to a
 plugin); plugins MUST refuse to accept secrets via argv and MUST document
-the secure path (env, file, OS keychain) instead. Provenance is
-string-only per `docs/audit.md`. Raw stdout/stderr is **not** copied into
-the ledger; only a sha256 hash is recorded for forensic comparison.
+the secure path (env, file, OS keychain) instead. Provenance fields in
+audit events are string-only per the
+[`audit-event.schema.json`](https://github.com/Q00/ouroboros-plugins/blob/main/schemas/0.1/audit-event.schema.json)
+constraint set (the schema is the canonical source; this RFC does not
+introduce a separate `docs/audit.md` contract). Raw stdout/stderr is
+**not** copied into the ledger; only a sha256 hash is recorded for
+forensic comparison.
 
 ## UX
 
@@ -274,14 +285,15 @@ need. Adding any of them speculatively violates the
   per-repo policy file is possible but not designed.
 - **MCP-tool publication via plugins.** Partly resolved by the firewall
   (#729); remaining MCP-specific concerns to file separately if surfaced.
-- **Plugin-update flow (`ooo plugin update`).** "Lifecycle" here refers
-  narrowly to **state-transition commands** (the verbs that move a plugin
-  between `discovered → installed → trusted → disabled → removed`); the
-  read-only verbs `add`, `discover`, and `list` from the v0 CLI in #731
-  remain shipped, they simply do not transition state. The deferred verb
-  is the `update` transition specifically; v0 ships
-  install/inspect/trust/disable/remove and adds `update` when a real
-  in-place upgrade need surfaces.
+- **Plugin-update flow (`ooo plugin update`).** v0 ships the eight plugin
+  commands locked in #731, split as follows:
+  - **State-mutating** (write the trust store / lockfile / installed set):
+    `add`, `install`, `trust`, `disable`, `remove`.
+  - **Read-only** (no persistent state change): `discover`, `inspect`,
+    `list`.
+  The single deferred verb is the `update` *transition* — a separate
+  in-place upgrade command. It lands when a real upgrade need surfaces;
+  until then, `remove` + `add` is the documented upgrade path.
 - **Automated migration scripts** for MAJOR-version manifest schema bumps.
   v0 → v1 (whenever it happens) ships with a manual migration guide.
 - **Hosted catalog / index server.** Permanent non-goal: marketplace as a
