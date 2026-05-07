@@ -72,6 +72,7 @@ def test_cli_auto_status_prints_persisted_session(monkeypatch, tmp_path) -> None
     assert "Current interview round:" in output
     assert "Which runtime should be used?" in output
     assert "Seed grade:" in output
+    assert "Seed origin: none" in output
     assert "Resume:" in output
 
 
@@ -440,6 +441,7 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "resume_command": "ooo auto --resume auto_test",
         "blocker": "waiting for interview answer",
         "seed_path": "/tmp/seed.yaml",
+        "seed_origin": "none",
         "grade": "B",
         "last_grade": "B",
         "interview_session_id": "interview_1",
@@ -1376,3 +1378,169 @@ async def test_auto_handler_resume_honours_persisted_interview_timeout(
 
     assert result.is_ok
     assert captured["driver_timeout_seconds"] == 240.0
+
+
+def test_auto_state_default_seed_origin_is_none() -> None:
+    from ouroboros.auto.state import AutoPipelineState, SeedOrigin
+
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo")
+
+    assert state.seed_origin is SeedOrigin.NONE
+
+
+def test_auto_state_persists_seed_origin_round_trip() -> None:
+    from ouroboros.auto.state import AutoPipelineState, SeedOrigin
+
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo")
+    state.seed_origin = SeedOrigin.AUTO_PIPELINE
+
+    payload = state.to_dict()
+    assert payload["seed_origin"] == "auto_pipeline"
+
+    restored = AutoPipelineState.from_dict(payload)
+    assert restored.seed_origin is SeedOrigin.AUTO_PIPELINE
+
+
+def test_auto_state_loads_legacy_session_with_default_seed_origin() -> None:
+    from ouroboros.auto.state import AutoPipelineState, SeedOrigin
+
+    payload = AutoPipelineState(goal="Build a CLI", cwd="/repo").to_dict()
+    payload.pop("seed_origin")
+
+    restored = AutoPipelineState.from_dict(payload)
+
+    assert restored.seed_origin is SeedOrigin.NONE
+
+
+def test_auto_state_rejects_unknown_seed_origin() -> None:
+    from ouroboros.auto.state import AutoPipelineState
+
+    payload = AutoPipelineState(goal="Build a CLI", cwd="/repo").to_dict()
+    payload["seed_origin"] = "manual"
+
+    with pytest.raises(ValueError, match="seed_origin must be one of"):
+        AutoPipelineState.from_dict(payload)
+
+
+def test_auto_pipeline_result_default_seed_origin_is_none_string() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+
+    result = AutoPipelineResult(
+        status="created",
+        auto_session_id="auto_test",
+        phase="created",
+    )
+
+    assert result.seed_origin == "none"
+
+
+def test_cli_auto_status_renders_seed_origin(monkeypatch, tmp_path) -> None:
+    from ouroboros.auto.state import (
+        AutoPhase,
+        AutoPipelineState,
+        AutoStore,
+        SeedOrigin,
+    )
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "asking interview round 1/12")
+    state.seed_path = "/tmp/seed.yaml"
+    state.seed_origin = SeedOrigin.AUTO_PIPELINE
+    store.save(state)
+
+    monkeypatch.setattr("ouroboros.cli.commands.auto.AutoStore", lambda: store)
+
+    cli_result = CliRunner().invoke(
+        app, ["auto", "--resume", state.auto_session_id, "--status"]
+    )
+    output = re.sub(r"\x1b\[[0-9;]*m", "", cli_result.output)
+
+    assert cli_result.exit_code == 0
+    assert "Seed origin: auto_pipeline" in output
+
+
+@pytest.mark.asyncio
+async def test_auto_pipeline_marks_seed_origin_after_seed_generation(tmp_path) -> None:
+    from ouroboros.auto.ledger import SeedDraftLedger
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.auto.state import (
+        AutoPhase,
+        AutoPipelineState,
+        AutoStore,
+        SeedOrigin,
+    )
+    from ouroboros.core.seed import (
+        EvaluationPrinciple,
+        ExitCondition,
+        OntologyField,
+        OntologySchema,
+        Seed,
+        SeedMetadata,
+    )
+
+    class _StubInterviewDriver:
+        async def run(self, _state, _ledger):  # noqa: ARG002
+            raise AssertionError("interview driver should not be invoked at SEED_GENERATION")
+
+    seed = Seed(
+        goal="Build a CLI",
+        constraints=("Use existing project patterns",),
+        acceptance_criteria=("Command prints stable output",),
+        ontology_schema=OntologySchema(
+            name="CliTask",
+            description="CLI task ontology",
+            fields=(
+                OntologyField(
+                    name="command",
+                    field_type="string",
+                    description="Command",
+                ),
+            ),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(
+                name="testability",
+                description="Observable behavior",
+                weight=1.0,
+            ),
+        ),
+        exit_conditions=(
+            ExitCondition(
+                name="verified",
+                description="Checks pass",
+                evaluation_criteria="All acceptance criteria pass",
+            ),
+        ),
+        metadata=SeedMetadata(ambiguity_score=0.12),
+    )
+
+    async def fake_seed_generator(session_id: str) -> Seed:  # noqa: ARG001
+        return seed
+
+    def fake_seed_saver(_seed: Seed) -> str:
+        return str(tmp_path / "seed.yaml")
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    state.ledger = ledger.to_dict()
+    state.interview_session_id = "interview_xyz"
+    state.interview_completed = True
+    state.transition(AutoPhase.INTERVIEW, "primed for resume")
+    state.transition(AutoPhase.SEED_GENERATION, "ready for seed generation")
+    state.skip_run = True
+    store.save(state)
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        fake_seed_generator,
+        store=store,
+        seed_saver=fake_seed_saver,
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert state.seed_origin is SeedOrigin.AUTO_PIPELINE
+    assert result.seed_origin == "auto_pipeline"

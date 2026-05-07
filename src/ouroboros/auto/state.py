@@ -32,6 +32,20 @@ class AutoPolicy(StrEnum):
     BALANCED = "balanced"
 
 
+class SeedOrigin(StrEnum):
+    """Provenance of the persisted Seed for an auto session.
+
+    Distinguishes Seeds produced by the auto pipeline itself from those that
+    arrived through a side-channel authoring call (e.g. a manual
+    ``ouroboros_generate_seed`` invocation outside the pipeline). ``none``
+    means no Seed has been persisted yet for this session.
+    """
+
+    NONE = "none"
+    AUTO_PIPELINE = "auto_pipeline"
+    EXTERNAL_AUTHORING = "external_authoring"
+
+
 DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.INTERVIEW.value: 120,
     AutoPhase.SEED_GENERATION.value: 120,
@@ -190,6 +204,7 @@ class AutoPipelineState:
     interview_completed: bool = False
     seed_id: str | None = None
     seed_path: str | None = None
+    seed_origin: SeedOrigin = SeedOrigin.NONE
     seed_artifact: dict[str, Any] = field(default_factory=dict)
     execution_id: str | None = None
     job_id: str | None = None
@@ -294,6 +309,7 @@ class AutoPipelineState:
         data = asdict(self)
         data["phase"] = self.phase.value
         data["policy"] = self.policy.value
+        data["seed_origin"] = self.seed_origin.value
         return data
 
     @classmethod
@@ -315,6 +331,7 @@ class AutoPipelineState:
         payload.setdefault("run_reconciled_at", None)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
+        payload.setdefault("seed_origin", SeedOrigin.NONE.value)
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -322,6 +339,11 @@ class AutoPipelineState:
             raise ValueError(msg)
         payload["phase"] = AutoPhase(payload["phase"])
         payload["policy"] = AutoPolicy(payload["policy"])
+        try:
+            payload["seed_origin"] = SeedOrigin(payload["seed_origin"])
+        except ValueError as exc:
+            msg = f"seed_origin must be one of {[item.value for item in SeedOrigin]}"
+            raise ValueError(msg) from exc
         state = cls(**payload)
         state._validate_loaded()
         return state

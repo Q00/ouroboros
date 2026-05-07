@@ -250,6 +250,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "resume_command": f"ooo auto --resume {result.auto_session_id}",
         "blocker": result.blocker,
         "seed_path": result.seed_path,
+        "seed_origin": result.seed_origin,
         "grade": result.grade,
         "last_grade": result.last_grade,
         "interview_session_id": result.interview_session_id,

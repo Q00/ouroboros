@@ -333,6 +333,7 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Pending question: {question}")
     if state.seed_path:
         console.print(f"Seed: {state.seed_path}")
+    console.print(f"Seed origin: {state.seed_origin.value}")
     if state.last_grade:
         console.print(f"Seed grade: [bold]{state.last_grade}[/]")
     if state.job_id or state.execution_id or state.run_session_id:
@@ -388,6 +389,7 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"Interview session: {result.interview_session_id}")
     if result.seed_path:
         console.print(f"Seed: {result.seed_path}")
+    console.print(f"Seed origin: {result.seed_origin}")
     if result.job_id or result.execution_id or result.run_session_id:
         console.print("Execution started:")
         console.print(f"  Job ID: {result.job_id}")

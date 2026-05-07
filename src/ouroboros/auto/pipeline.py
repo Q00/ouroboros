@@ -12,7 +12,13 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore, utc_now_iso
+from ouroboros.auto.state import (
+    AutoPhase,
+    AutoPipelineState,
+    AutoStore,
+    SeedOrigin,
+    utc_now_iso,
+)
 from ouroboros.core.seed import Seed
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
@@ -30,6 +36,7 @@ class AutoPipelineResult:
     phase: str
     grade: str | None = None
     seed_path: str | None = None
+    seed_origin: str = SeedOrigin.NONE.value
     interview_session_id: str | None = None
     execution_id: str | None = None
     job_id: str | None = None
@@ -194,6 +201,7 @@ class AutoPipeline:
                         raise TypeError(msg)
                     state.seed_id = seed.metadata.seed_id
                     state.seed_artifact = seed.to_dict()
+                    state.seed_origin = SeedOrigin.AUTO_PIPELINE
                 except TimeoutError as exc:
                     state.mark_blocked(
                         f"seed generation timed out after {self.seed_timeout_seconds:.0f}s",
@@ -427,6 +435,7 @@ class AutoPipeline:
             phase=state.phase.value,
             grade=review.grade_result.grade.value if review else state.last_grade,
             seed_path=state.seed_path,
+            seed_origin=state.seed_origin.value,
             interview_session_id=state.interview_session_id,
             execution_id=state.execution_id,
             job_id=state.job_id,
