@@ -150,3 +150,45 @@ def test_missing_returns_required_in_input_order(tmp_path: Path) -> None:
     # `github:read` is granted; the others are missing.
     missing = record.missing(["github:pull_request:write", "github:read", "shell:execute"])
     assert missing == ["github:pull_request:write", "shell:execute"]
+
+
+def test_concurrent_grants_do_not_lose_scopes(tmp_path: Path) -> None:
+    """Regression: `TrustStore.grant()` was an unlocked
+    read-modify-write. Two concurrent grants for different scopes
+    on the same plugin could both observe the same prior file and
+    each overwrite it with a one-scope payload, so the last writer
+    silently deleted the other grant — real trust-state data loss.
+
+    The store now brackets the cycle in a per-plugin POSIX file lock.
+    This test fans out enough concurrent grants for distinct scopes
+    that the prior racy implementation would lose at least one with
+    high probability; under the new lock all scopes must survive.
+    """
+    import threading
+
+    store = TrustStore(root=tmp_path)
+    scopes = [f"scope:{i}" for i in range(20)]
+    barrier = threading.Barrier(len(scopes))
+
+    def _grant(scope: str) -> None:
+        # Hit the lock at roughly the same instant from every thread.
+        barrier.wait()
+        store.grant(
+            plugin="concurrent-plugin",
+            version="0.1.0",
+            scope=scope,
+            granted_by="user:test",
+        )
+
+    threads = [threading.Thread(target=_grant, args=(s,)) for s in scopes]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    record = store.read("concurrent-plugin")
+    assert record is not None
+    persisted = {g.scope for g in record.granted_scopes}
+    assert persisted == set(scopes), (
+        f"trust store lost {set(scopes) - persisted} under concurrent grants"
+    )

@@ -391,6 +391,17 @@ def test_source_first_party_path_optional(tmp_path: Path) -> None:
     assert manifest.source.path is None
 
 
+def test_first_party_source_path_stays_none(tmp_path: Path) -> None:
+    """First-party plugins still produce `source.path is None`."""
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["name"] = "ooo-builtin"
+    payload["source"] = {"type": "first_party"}
+    payload["permissions"] = []
+    manifest = load_manifest(_write(tmp_path, payload))
+    assert manifest.source.type == "first_party"
+    assert manifest.source.path is None
+
+
 def test_capabilities_and_permissions_preserve_manifest_order(tmp_path: Path) -> None:
     """Regression: `capabilities` and `permissions` used to be
     `frozenset`s, so iteration order varied across hash seeds and
