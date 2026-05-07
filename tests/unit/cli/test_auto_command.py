@@ -8,6 +8,8 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from ouroboros.auto.pipeline import AutoPipelineResult
+from ouroboros.auto.state import AutoPhase, AutoPipelineState
+from ouroboros.cli.commands.auto import _print_result, _print_status
 from ouroboros.cli.main import app
 
 runner = CliRunner()
@@ -426,3 +428,156 @@ def test_run_auto_demotes_plugin_to_subprocess_in_state(tmp_path) -> None:
 
     assert captured["runtime"] == "opencode"
     assert captured["mode"] == "subprocess"
+
+
+# ---------------------------------------------------------------------------
+# _print_status / _print_result — capability-aware resume hint rendering (#688)
+# ---------------------------------------------------------------------------
+
+
+def _capture_status(state: AutoPipelineState) -> str:
+    """Capture the bare-text rendering of :func:`_print_status` for assertions."""
+    from ouroboros.cli.formatters import console
+
+    with console.capture() as capture:
+        _print_status(state)
+    return _plain(capture.get())
+
+
+def _capture_result(result: AutoPipelineResult) -> str:
+    """Capture the bare-text rendering of :func:`_print_result` for assertions."""
+    from ouroboros.cli.formatters import console
+
+    with console.capture() as capture:
+        _print_result(result, show_ledger=False)
+    return _plain(capture.get())
+
+
+def _state_in_phase(phase: AutoPhase) -> AutoPipelineState:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.auto_session_id = "auto_render"
+    if phase is AutoPhase.CREATED:
+        return state
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    if phase is AutoPhase.INTERVIEW:
+        return state
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    if phase is AutoPhase.SEED_GENERATION:
+        return state
+    state.transition(AutoPhase.REVIEW, "review")
+    if phase is AutoPhase.REVIEW:
+        return state
+    state.transition(AutoPhase.RUN, "run")
+    return state
+
+
+def test_print_status_resume_capability_resume() -> None:
+    state = _state_in_phase(AutoPhase.INTERVIEW)
+    output = _capture_status(state)
+
+    assert "Resume: ooo auto --resume auto_render" in output
+    assert "Resume (partial)" not in output
+    assert "Retry:" not in output
+    assert "Start fresh" not in output
+
+
+def test_print_status_resume_capability_partial() -> None:
+    state = _state_in_phase(AutoPhase.INTERVIEW)
+    state.interview_session_id = "interview_1"
+    state.mark_blocked("interview.answer timed out", tool_name="interview.answer")
+
+    output = _capture_status(state)
+
+    assert "Resume (partial): ooo auto --resume auto_render" in output
+    assert "some progress preserved but the exact pick-up point may be approximate" in output
+
+
+def test_print_status_resume_capability_retry() -> None:
+    state = _state_in_phase(AutoPhase.INTERVIEW)
+    state.mark_blocked("interview.start timed out", tool_name="interview.start")
+
+    output = _capture_status(state)
+
+    assert "Retry: ooo auto --resume auto_render" in output
+    assert "no prior session context" in output
+    assert "re-runs the failed step from scratch" in output
+
+
+def test_print_status_resume_capability_none_blocked_emits_start_fresh() -> None:
+    state = _state_in_phase(AutoPhase.INTERVIEW)
+    state.mark_blocked("internal guard fired", tool_name="auto_pipeline")
+
+    output = _capture_status(state)
+
+    assert 'Start fresh: ooo auto "Build a CLI"' in output
+    assert "Resume:" not in output
+    assert "Retry:" not in output
+
+
+def test_print_status_resume_capability_none_complete_emits_no_resume_line() -> None:
+    """Critic fix C5: COMPLETE produces no resume/retry/start-fresh hint."""
+    state = _state_in_phase(AutoPhase.REVIEW)
+    state.transition(AutoPhase.COMPLETE, "done")
+
+    output = _capture_status(state)
+
+    assert "Resume:" not in output
+    assert "Retry:" not in output
+    assert "Start fresh" not in output
+
+
+def test_print_result_resume_capability_resume() -> None:
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_r1",
+        phase="complete",
+        resume_capability="resume",
+    )
+
+    output = _capture_result(result)
+
+    assert "Resume: ooo auto --resume auto_r1" in output
+
+
+def test_print_result_resume_capability_partial() -> None:
+    result = AutoPipelineResult(
+        status="blocked",
+        auto_session_id="auto_r2",
+        phase="blocked",
+        resume_capability="partial_resume",
+    )
+
+    output = _capture_result(result)
+
+    assert "Resume (partial): ooo auto --resume auto_r2" in output
+    assert "some progress preserved" in output
+
+
+def test_print_result_resume_capability_retry() -> None:
+    result = AutoPipelineResult(
+        status="blocked",
+        auto_session_id="auto_r3",
+        phase="blocked",
+        resume_capability="retry",
+    )
+
+    output = _capture_result(result)
+
+    assert "Retry: ooo auto --resume auto_r3" in output
+    assert "re-runs the failed step from scratch" in output
+
+
+def test_print_result_resume_capability_none_emits_no_resume_line() -> None:
+    """``_print_result`` cannot reach ``state.goal``, so NONE prints nothing."""
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_r4",
+        phase="complete",
+        resume_capability="none",
+    )
+
+    output = _capture_result(result)
+
+    assert "Resume:" not in output
+    assert "Retry:" not in output
+    assert "Start fresh" not in output
