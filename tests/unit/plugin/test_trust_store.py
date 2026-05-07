@@ -11,6 +11,7 @@ from ouroboros.plugin.trust_store import (
     TRUST_SCHEMA_VERSION,
     TrustRecord,
     TrustStore,
+    TrustStoreError,
 )
 
 
@@ -38,8 +39,8 @@ def test_grant_then_read(tmp_path: Path) -> None:
 def test_grant_is_idempotent(tmp_path: Path) -> None:
     """Test 2: granting the same scope twice does not duplicate."""
     store = TrustStore(root=tmp_path)
-    store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
-    record = store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
+    store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
+    record = store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
     assert len(record.granted_scopes) == 1
 
 
@@ -50,7 +51,7 @@ def test_exact_scope_only(tmp_path: Path) -> None:
     """
     store = TrustStore(root=tmp_path)
     record = store.grant(
-        plugin="X",
+        plugin="test-plugin",
         version="0.1.0",
         scope="github:pull_request",
         granted_by="u",
@@ -64,11 +65,11 @@ def test_version_bump_invalidates_trust(tmp_path: Path) -> None:
     """Test 4: granting against a new version drops the previous grants
     (Q00/ouroboros-plugins#9 Q4 lock)."""
     store = TrustStore(root=tmp_path)
-    store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
-    store.grant(plugin="X", version="0.1.0", scope="github:repo:read", granted_by="u")
+    store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
+    store.grant(plugin="test-plugin", version="0.1.0", scope="github:repo:read", granted_by="u")
 
     # Now bump to 0.2.0 and grant a different scope.
-    record = store.grant(plugin="X", version="0.2.0", scope="github:read", granted_by="u")
+    record = store.grant(plugin="test-plugin", version="0.2.0", scope="github:read", granted_by="u")
     assert record.version == "0.2.0"
     # Previous github:repo:read grant is invalidated.
     assert not record.has_scope("github:repo:read")
@@ -79,10 +80,10 @@ def test_version_bump_invalidates_trust(tmp_path: Path) -> None:
 def test_reset_for_version_bump(tmp_path: Path) -> None:
     """Test 5: explicit version-bump reset writes an empty grant list."""
     store = TrustStore(root=tmp_path)
-    store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
-    store.reset_for_version_bump("X", new_version="0.2.0")
+    store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
+    store.reset_for_version_bump("test-plugin", new_version="0.2.0")
 
-    record = store.read("X")
+    record = store.read("test-plugin")
     assert isinstance(record, TrustRecord)
     assert record.version == "0.2.0"
     assert record.granted_scopes == ()
@@ -98,27 +99,27 @@ def test_remove_drops_trust_file(tmp_path: Path) -> None:
     trust record itself is gone.
     """
     store = TrustStore(root=tmp_path)
-    store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
-    file_path = tmp_path / "X" / "trust.json"
+    store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
+    file_path = tmp_path / "test-plugin" / "trust.json"
     assert file_path.is_file()
-    assert store.remove("X") is True
+    assert store.remove("test-plugin") is True
     assert not file_path.exists()
     # Removing again is a no-op (file already gone).
-    assert store.remove("X") is False
+    assert store.remove("test-plugin") is False
     # Lock file is retained on purpose to keep cross-process flock
     # synchronization sound.
-    assert (tmp_path / "X" / "trust.json.lock").exists()
+    assert (tmp_path / "test-plugin" / "trust.json.lock").exists()
 
 
 def test_unsupported_schema_version_rejected(tmp_path: Path) -> None:
     """Test 7: a trust file with the wrong schema_version raises on read."""
-    plugin_dir = tmp_path / "X"
+    plugin_dir = tmp_path / "test-plugin"
     plugin_dir.mkdir()
     (plugin_dir / "trust.json").write_text(
         json.dumps(
             {
                 "schema_version": "99.0",
-                "plugin": "X",
+                "plugin": "test-plugin",
                 "version": "0.1.0",
                 "granted_scopes": [],
             }
@@ -126,7 +127,7 @@ def test_unsupported_schema_version_rejected(tmp_path: Path) -> None:
     )
     store = TrustStore(root=tmp_path)
     with pytest.raises(ValueError, match="unsupported trust file schema_version"):
-        store.read("X")
+        store.read("test-plugin")
 
 
 def test_no_raw_token_in_persisted_file(tmp_path: Path) -> None:
@@ -135,12 +136,12 @@ def test_no_raw_token_in_persisted_file(tmp_path: Path) -> None:
     check that future contributors don't add one without notice."""
     store = TrustStore(root=tmp_path)
     store.grant(
-        plugin="X",
+        plugin="test-plugin",
         version="0.1.0",
         scope="github:read",
         granted_by="user:shaun0927",
     )
-    raw = (tmp_path / "X" / "trust.json").read_text()
+    raw = (tmp_path / "test-plugin" / "trust.json").read_text()
     # Keys present
     assert '"scope"' in raw
     assert '"granted_by"' in raw
@@ -175,7 +176,7 @@ def test_concurrent_grants_do_not_lose_data(tmp_path: Path) -> None:
         try:
             barrier.wait(timeout=5)
             store.grant(
-                plugin="X",
+                plugin="test-plugin",
                 version="0.1.0",
                 scope=scope,
                 granted_by="user:test",
@@ -191,7 +192,7 @@ def test_concurrent_grants_do_not_lose_data(tmp_path: Path) -> None:
 
     assert not errors, f"worker errors: {errors!r}"
 
-    final = store.read("X")
+    final = store.read("test-plugin")
     assert final is not None
     persisted = {g.scope for g in final.granted_scopes}
     assert persisted == set(scopes), (
@@ -200,11 +201,48 @@ def test_concurrent_grants_do_not_lose_data(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "evil_name",
+    [
+        "../../../etc/passwd",
+        "..",
+        "./relative",
+        "subdir/leak",
+        "absolute\\path",
+        "X",  # uppercase, schema-rejected
+        "",  # empty
+        "name with spaces",
+    ],
+)
+def test_path_traversal_in_plugin_name_is_rejected(tmp_path: Path, evil_name: str) -> None:
+    """Plugin identifiers used as filesystem path segments must not be
+    able to escape the configured trust root.
+
+    Pre-fix `TrustStore` interpolated `plugin` directly into the
+    `<root>/<plugin>/trust.json` path, so a value containing path
+    separators or `..` segments could read, write, or delete arbitrary
+    files reachable by the process. The store now validates the
+    identifier against the manifest-name pattern at every public
+    boundary.
+    """
+    store = TrustStore(root=tmp_path)
+    with pytest.raises(TrustStoreError):
+        store.grant(plugin=evil_name, version="0.1.0", scope="x:read", granted_by="u")
+    with pytest.raises(TrustStoreError):
+        store.read(evil_name)
+    with pytest.raises(TrustStoreError):
+        store.remove(evil_name)
+    with pytest.raises(TrustStoreError):
+        store.reset_for_version_bump(evil_name, new_version="0.2.0")
+    # Filesystem must be untouched: nothing escaped the tmp_path tree.
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_missing_returns_required_in_input_order(tmp_path: Path) -> None:
     """Test 9: TrustRecord.missing() returns missing required scopes in
     the input iteration order — useful for predictable error messages."""
     store = TrustStore(root=tmp_path)
-    record = store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
+    record = store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
     # `github:read` is granted; the others are missing.
     missing = record.missing(["github:pull_request:write", "github:read", "shell:execute"])
     assert missing == ["github:pull_request:write", "shell:execute"]

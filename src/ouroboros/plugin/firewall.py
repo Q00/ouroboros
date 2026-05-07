@@ -315,6 +315,31 @@ def invoke_plugin(
     # 5. Run entrypoint out-of-process.
     cmd_template = manifest.entrypoint.command
     cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
+    # Defense-in-depth: `load_manifest` already rejects empty / blank
+    # entrypoint commands, but the firewall is the last chokepoint
+    # before launch — guard explicitly so a hand-crafted manifest or a
+    # future loader regression cannot cause `subprocess.run([])` to
+    # raise `IndexError` AFTER `plugin.invoked` has been emitted.
+    if not cmd_argv or not cmd_argv[0]:
+        message = "entrypoint command resolves to empty argv"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={"correlation_id": correlation_id},
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=126,
+            message=message,
+            events=tuple(emitted),
+        )
     runner = subprocess_runner or subprocess.run
     try:
         completed = runner(

@@ -308,6 +308,23 @@ def test_audit_events_may_extend_required_set(tmp_path: Path) -> None:
     assert "plugin.trusted" in manifest.audit.events
 
 
+def test_blank_entrypoint_command_rejected(tmp_path: Path) -> None:
+    """`entrypoint.command` must shlex.split to at least one token.
+
+    Pre-fix the JSON Schema only enforced `minLength: 1`, so a manifest
+    with `"   "` would pass shape validation but `shlex.split` returned
+    `[]` at invocation time. The firewall would then call
+    `subprocess.run([])` which raises `IndexError` AFTER `plugin.invoked`
+    had been emitted, leaving an incomplete audit trail.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["entrypoint"]["command"] = "   "
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/entrypoint/command"
+    assert "non-empty" in excinfo.value.expected.lower()
+
+
 def test_invalid_json_decodes_to_useful_error(tmp_path: Path) -> None:
     """Bonus: garbage JSON is reported with a useful message."""
     target = tmp_path / "ouroboros.plugin.json"

@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import shlex
 from typing import Any
 
 try:
@@ -368,9 +369,34 @@ def load_manifest(path: str | Path) -> PluginManifest:
                 got=f"second occurrence of {perm.scope!r}",
             )
         seen_scopes.add(perm.scope)
+    entrypoint_command = raw["entrypoint"]["command"]
+    # The JSON Schema only enforces `minLength: 1`, so a manifest with
+    # `"   "` (or any whitespace string) would pass shape validation but
+    # `shlex.split()` returns `[]` at invocation time. The firewall
+    # would then call `subprocess.run([])` which raises `IndexError`
+    # AFTER `plugin.invoked` has been emitted, leaving an incomplete
+    # audit trail. Reject blank or shlex-empty commands at load.
+    try:
+        _entrypoint_argv = shlex.split(entrypoint_command)
+    except ValueError as exc:
+        raise PluginManifestError(
+            f"entrypoint.command is not a valid shell-like token sequence: {exc}",
+            path=str(manifest_path),
+            json_pointer="/entrypoint/command",
+            expected="non-empty shell-tokenizable command",
+            got=repr(entrypoint_command)[:200],
+        ) from exc
+    if not _entrypoint_argv:
+        raise PluginManifestError(
+            "entrypoint.command must be a non-empty command",
+            path=str(manifest_path),
+            json_pointer="/entrypoint/command",
+            expected="non-empty command (at least one shlex token)",
+            got=repr(entrypoint_command)[:200],
+        )
     entrypoint = Entrypoint(
         type=raw["entrypoint"]["type"],
-        command=raw["entrypoint"]["command"],
+        command=entrypoint_command,
     )
 
     audit_raw = raw.get("audit")

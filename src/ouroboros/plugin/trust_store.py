@@ -28,12 +28,42 @@ from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 TRUST_SCHEMA_VERSION = "0.1"
 
 # Default location root. Each plugin gets a subdirectory here.
 DEFAULT_TRUST_ROOT = Path.home() / ".ouroboros" / "plugins"
+
+# Plugin names that the trust store will accept. Mirrors the manifest
+# schema's `name` pattern (`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`). The
+# pattern matters because we use the name as a filesystem path segment:
+# no path separators, no parent traversal, no leading dots.
+_PLUGIN_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
+
+
+class TrustStoreError(ValueError):
+    """Raised when an unsafe plugin identifier is rejected."""
+
+
+def _validate_plugin_name(plugin: str) -> None:
+    """Reject plugin identifiers that could escape the trust root.
+
+    `TrustStore` builds filesystem paths as `root / plugin / "trust.json"`,
+    so a value containing path separators or `..` segments would let
+    callers read, write, or delete files outside the configured trust
+    root. The manifest loader already enforces this pattern at parse
+    time, but the trust store is a public API that may be invoked with
+    untrusted strings (e.g. via CLI arguments), so re-validate here.
+    """
+    if not isinstance(plugin, str) or not plugin:
+        raise TrustStoreError(f"invalid plugin name: {plugin!r}")
+    if not _PLUGIN_NAME_PATTERN.fullmatch(plugin):
+        raise TrustStoreError(
+            f"plugin name {plugin!r} is not a safe identifier; "
+            "expected pattern ^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+        )
 
 
 @dataclass(frozen=True)
@@ -67,9 +97,11 @@ class TrustStore:
         self.root = root or DEFAULT_TRUST_ROOT
 
     def _path(self, plugin: str) -> Path:
+        _validate_plugin_name(plugin)
         return self.root / plugin / "trust.json"
 
     def _lock_path(self, plugin: str) -> Path:
+        _validate_plugin_name(plugin)
         return self.root / plugin / "trust.json.lock"
 
     @contextmanager
@@ -220,4 +252,5 @@ __all__ = [
     "GrantedScope",
     "TrustRecord",
     "TrustStore",
+    "TrustStoreError",
 ]
