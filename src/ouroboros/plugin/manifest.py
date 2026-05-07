@@ -160,18 +160,52 @@ class PluginManifest:
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
 
 
-def _load_schema(schema_version: str) -> dict[str, Any]:
+def _load_schema(
+    schema_version: str, *, manifest_path: str | Path
+) -> dict[str, Any]:
+    """Load the vendored schema for `schema_version`.
+
+    Reuses `manifest_path` as the `path` field on any raised error so the
+    caller's structured-error contract still points back at the manifest
+    that triggered the lookup, not at an internal vendored file the user
+    cannot fix.
+    """
     schema_path = _SCHEMAS_ROOT / schema_version / "plugin.schema.json"
     if not schema_path.is_file():
         raise PluginManifestError(
             f"vendored schema for version {schema_version!r} not found",
-            path=str(schema_path),
+            path=str(manifest_path),
             json_pointer="/schema_version",
             expected=f"one of {list(SUPPORTED_SCHEMA_VERSIONS)}",
             got=f"{schema_version!r} (no vendored schema)",
         )
-    with schema_path.open(encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with schema_path.open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except OSError as exc:
+        raise PluginManifestError(
+            f"vendored schema is unreadable: {exc.strerror or exc}",
+            path=str(manifest_path),
+            json_pointer="/schema_version",
+            expected="readable vendored schema file",
+            got=f"{type(exc).__name__} on {schema_path}",
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise PluginManifestError(
+            "vendored schema is not valid UTF-8",
+            path=str(manifest_path),
+            json_pointer="/schema_version",
+            expected="UTF-8 encoded JSON file",
+            got=f"UnicodeDecodeError on {schema_path}",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise PluginManifestError(
+            f"vendored schema is not valid JSON: {exc.msg}",
+            path=str(manifest_path),
+            json_pointer="/schema_version",
+            expected="valid JSON object",
+            got=f"JSON decode error at line {exc.lineno}, col {exc.colno}",
+        ) from exc
 
 
 def _build_command(raw: dict[str, Any]) -> CommandSpec:
@@ -205,8 +239,11 @@ def load_manifest(path: str | Path) -> PluginManifest:
         A frozen, validated `PluginManifest`.
 
     Raises:
-        PluginManifestError: on JSON decode failure, schema violation, or
-            unsupported `schema_version`.
+        PluginManifestError: on missing file, unreadable file (permission
+            denied, non-UTF-8 bytes), JSON decode failure, schema
+            violation, or unsupported `schema_version`. All structured
+            failures surface through this single exception type so callers
+            never need to catch raw `OSError`/`UnicodeDecodeError`.
     """
     manifest_path = Path(path)
     if not manifest_path.is_file():
@@ -228,6 +265,24 @@ def load_manifest(path: str | Path) -> PluginManifest:
             json_pointer=None,
             expected="valid JSON object",
             got=f"JSON decode error at line {exc.lineno}, col {exc.colno}",
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise PluginManifestError(
+            "manifest is not valid UTF-8",
+            path=str(manifest_path),
+            json_pointer=None,
+            expected="UTF-8 encoded JSON file",
+            got=f"{exc.reason} at byte {exc.start}",
+        ) from exc
+    except OSError as exc:
+        # Reaches here on permission denied, transient filesystem errors,
+        # or a TOCTOU between the is_file() check and the open() call.
+        raise PluginManifestError(
+            f"manifest is unreadable: {exc.strerror or exc}",
+            path=str(manifest_path),
+            json_pointer=None,
+            expected="readable file",
+            got=f"{type(exc).__name__}: {exc.strerror or exc}",
         ) from exc
 
     if not isinstance(raw, dict):
@@ -258,7 +313,7 @@ def load_manifest(path: str | Path) -> PluginManifest:
             got=schema_version,
         )
 
-    schema = _load_schema(schema_version)
+    schema = _load_schema(schema_version, manifest_path=manifest_path)
     validator = Draft202012Validator(schema)
     errors = sorted(
         validator.iter_errors(raw),

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -243,3 +245,35 @@ def test_missing_file_reports_clean_error(tmp_path: Path) -> None:
     with pytest.raises(PluginManifestError) as excinfo:
         load_manifest(tmp_path / "does-not-exist.json")
     assert "not found" in excinfo.value.args[0]
+
+
+def test_non_utf8_manifest_reports_structured_error(tmp_path: Path) -> None:
+    """Non-UTF-8 manifest bytes must surface as PluginManifestError, not
+    a raw UnicodeDecodeError (structured-error contract)."""
+    target = tmp_path / "ouroboros.plugin.json"
+    target.write_bytes(b"\xff\xfe\x00not utf-8")
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(target)
+    assert "UTF-8" in excinfo.value.args[0] or "utf-8" in excinfo.value.args[0]
+    assert excinfo.value.path == str(target)
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="POSIX permission semantics; Windows handles read perms differently.",
+)
+def test_unreadable_manifest_reports_structured_error(tmp_path: Path) -> None:
+    """Permission-denied reads must surface as PluginManifestError, not
+    a raw OSError (structured-error contract)."""
+    target = _write(tmp_path, REFERENCE_MANIFEST)
+    target.chmod(0o000)
+    try:
+        # Skip if running as root, where chmod 0o000 cannot deny reads.
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses POSIX read permissions")
+        with pytest.raises(PluginManifestError) as excinfo:
+            load_manifest(target)
+        assert "unreadable" in excinfo.value.args[0]
+        assert excinfo.value.path == str(target)
+    finally:
+        target.chmod(0o644)
