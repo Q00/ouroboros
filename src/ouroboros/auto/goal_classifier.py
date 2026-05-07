@@ -30,6 +30,19 @@ class SideEffectRisk(StrEnum):
     HIGH = "high"
 
 
+class _AnchorRequirement(StrEnum):
+    """Which anchor type a verb is meaningful against.
+
+    PR mutations (merge, rebase, close, …) are only well defined against
+    a Pull Request URL: an Issue URL describing a related bug is *not*
+    a sufficient anchor for those verbs even though the URL parses.
+    Read-only verbs (review, analyze, summarize) work with either anchor.
+    """
+
+    PR_ONLY = "pr_only"
+    ANY = "any"
+
+
 _RISK_RANK: dict[SideEffectRisk, int] = {
     SideEffectRisk.NONE: 0,
     SideEffectRisk.LOW: 1,
@@ -94,7 +107,10 @@ class GoalClassification:
         """Deserialize from a JSON-compatible dictionary.
 
         Rejects malformed records eagerly so persisted state cannot smuggle
-        unexpected types past the auto pipeline.
+        unexpected types past the auto pipeline.  In particular, the
+        invariant ``interview_required != direct_run_allowed`` is enforced
+        here: contradictory records (both True or both False) are
+        rejected so downstream routing code can safely read either flag.
         """
         if not isinstance(data, dict):
             msg = "goal classification must be an object"
@@ -108,10 +124,7 @@ class GoalClassification:
         }
         missing = sorted(required - data.keys())
         if missing:
-            msg = (
-                "goal classification is missing required fields: "
-                f"{', '.join(missing)}"
-            )
+            msg = "goal classification is missing required fields: " + ", ".join(missing)
             raise ValueError(msg)
         for bool_field in (
             "interview_required",
@@ -139,6 +152,12 @@ class GoalClassification:
             isinstance(item, str) for item in signals_raw
         ):
             msg = "goal classification matched_signals must be a list of strings"
+            raise ValueError(msg)
+        if data["interview_required"] == data["direct_run_allowed"]:
+            msg = (
+                "goal classification interview_required and direct_run_allowed "
+                "must be opposite booleans; refused contradictory record"
+            )
             raise ValueError(msg)
         if data["requires_confirmation"] is False and risk is SideEffectRisk.HIGH:
             msg = (
@@ -176,33 +195,45 @@ _GITHUB_ISSUE_URL = re.compile(
 )
 
 
-# Operational verbs map to a risk tier.  English and Korean variants are
-# both included because ``ooo auto`` is invoked from Korean shells in the
-# observed incident (auto_78c98678de5d).
-_OPERATIONAL_VERBS: tuple[tuple[re.Pattern[str], SideEffectRisk], ...] = (
-    # High-risk: destructive or hard-to-reverse mutations.
-    (re.compile(r"\bmerge\b", re.IGNORECASE), SideEffectRisk.HIGH),
-    (re.compile(r"\bsquash\b", re.IGNORECASE), SideEffectRisk.HIGH),
-    (re.compile(r"\bforce[-\s]?push\b", re.IGNORECASE), SideEffectRisk.HIGH),
-    (re.compile(r"\bdelete[\s-]+branch\b", re.IGNORECASE), SideEffectRisk.HIGH),
-    (re.compile(r"머지", re.IGNORECASE), SideEffectRisk.HIGH),
-    (re.compile(r"머지\s*가능", re.IGNORECASE), SideEffectRisk.HIGH),
-    (re.compile(r"merge 가능", re.IGNORECASE), SideEffectRisk.HIGH),
+# Operational verbs map to a risk tier and an anchor requirement.  PR-only
+# verbs need an unambiguous PR URL; an Issue URL alone is *not* a valid
+# anchor for them.  Read-only verbs (``ANY``) work with either anchor.
+# English and Korean variants are both included because ``ooo auto`` is
+# invoked from Korean shells in the observed incident (auto_78c98678de5d).
+_OPERATIONAL_VERBS: tuple[tuple[re.Pattern[str], SideEffectRisk, _AnchorRequirement], ...] = (
+    # High-risk: destructive or hard-to-reverse mutations.  All PR-only.
+    (re.compile(r"\bmerge\b", re.IGNORECASE), SideEffectRisk.HIGH, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"\bsquash\b", re.IGNORECASE), SideEffectRisk.HIGH, _AnchorRequirement.PR_ONLY),
+    (
+        re.compile(r"\bforce[-\s]?push\b", re.IGNORECASE),
+        SideEffectRisk.HIGH,
+        _AnchorRequirement.PR_ONLY,
+    ),
+    (
+        re.compile(r"\bdelete[\s-]+branch\b", re.IGNORECASE),
+        SideEffectRisk.HIGH,
+        _AnchorRequirement.PR_ONLY,
+    ),
+    (re.compile(r"머지", re.IGNORECASE), SideEffectRisk.HIGH, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"머지\s*가능", re.IGNORECASE), SideEffectRisk.HIGH, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"merge 가능", re.IGNORECASE), SideEffectRisk.HIGH, _AnchorRequirement.PR_ONLY),
     # Medium-risk: writes to the PR but reversible (closing a PR can be
     # reopened; rebasing rewrites history that has not yet been merged).
-    (re.compile(r"\bclose\b", re.IGNORECASE), SideEffectRisk.MEDIUM),
-    (re.compile(r"\breopen\b", re.IGNORECASE), SideEffectRisk.MEDIUM),
-    (re.compile(r"\brebase\b", re.IGNORECASE), SideEffectRisk.MEDIUM),
-    (re.compile(r"\bfix\b", re.IGNORECASE), SideEffectRisk.MEDIUM),
-    (re.compile(r"수정", re.IGNORECASE), SideEffectRisk.MEDIUM),
-    # Low-risk: read-only or comment-only operations.
-    (re.compile(r"\breview\b", re.IGNORECASE), SideEffectRisk.LOW),
-    (re.compile(r"\bcomment\b", re.IGNORECASE), SideEffectRisk.LOW),
-    (re.compile(r"\banalyz[ei]\b", re.IGNORECASE), SideEffectRisk.LOW),
-    (re.compile(r"\bsummariz[ei]\b", re.IGNORECASE), SideEffectRisk.LOW),
-    (re.compile(r"리뷰", re.IGNORECASE), SideEffectRisk.LOW),
-    (re.compile(r"분석", re.IGNORECASE), SideEffectRisk.LOW),
-    (re.compile(r"개선", re.IGNORECASE), SideEffectRisk.MEDIUM),
+    # All require a PR anchor; an Issue URL is the wrong target type.
+    (re.compile(r"\bclose\b", re.IGNORECASE), SideEffectRisk.MEDIUM, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"\breopen\b", re.IGNORECASE), SideEffectRisk.MEDIUM, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"\brebase\b", re.IGNORECASE), SideEffectRisk.MEDIUM, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"\bfix\b", re.IGNORECASE), SideEffectRisk.MEDIUM, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"수정", re.IGNORECASE), SideEffectRisk.MEDIUM, _AnchorRequirement.PR_ONLY),
+    (re.compile(r"개선", re.IGNORECASE), SideEffectRisk.MEDIUM, _AnchorRequirement.PR_ONLY),
+    # Low-risk: read-only or comment-only operations.  Allowed against
+    # either an Issue URL ("review #42 design") or a PR URL.
+    (re.compile(r"\breview\b", re.IGNORECASE), SideEffectRisk.LOW, _AnchorRequirement.ANY),
+    (re.compile(r"\bcomment\b", re.IGNORECASE), SideEffectRisk.LOW, _AnchorRequirement.ANY),
+    (re.compile(r"\banalyz[ei]\b", re.IGNORECASE), SideEffectRisk.LOW, _AnchorRequirement.ANY),
+    (re.compile(r"\bsummariz[ei]\b", re.IGNORECASE), SideEffectRisk.LOW, _AnchorRequirement.ANY),
+    (re.compile(r"리뷰", re.IGNORECASE), SideEffectRisk.LOW, _AnchorRequirement.ANY),
+    (re.compile(r"분석", re.IGNORECASE), SideEffectRisk.LOW, _AnchorRequirement.ANY),
 )
 
 
@@ -238,22 +269,28 @@ def classify_goal(goal: str) -> GoalClassification:
         )
 
     signals: list[str] = []
-    pr_match = _GITHUB_PR_URL.search(text)
-    issue_match = _GITHUB_ISSUE_URL.search(text)
+    pr_matches = list(_GITHUB_PR_URL.finditer(text))
+    issue_matches = list(_GITHUB_ISSUE_URL.finditer(text))
     pr_list_match = _GITHUB_PR_LIST_URL.search(text)
-    if pr_match:
-        signals.append(f"pr_url:{pr_match.group(0)}")
-    if issue_match:
-        signals.append(f"issue_url:{issue_match.group(0)}")
-    if pr_list_match and not pr_match:
+    for match in pr_matches:
+        signals.append(f"pr_url:{match.group(0)}")
+    for match in issue_matches:
+        signals.append(f"issue_url:{match.group(0)}")
+    if pr_list_match and not pr_matches:
         signals.append(f"pr_list_url:{pr_list_match.group(0)}")
 
     verb_risk = SideEffectRisk.NONE
-    for pattern, risk in _OPERATIONAL_VERBS:
+    requires_pr_anchor = False
+    has_read_only_verb = False
+    for pattern, risk, anchor_req in _OPERATIONAL_VERBS:
         match = pattern.search(text)
         if match:
             signals.append(f"verb:{match.group(0).lower()}={risk.value}")
             verb_risk = _max_risk(verb_risk, risk)
+            if anchor_req is _AnchorRequirement.PR_ONLY:
+                requires_pr_anchor = True
+            else:
+                has_read_only_verb = True
 
     ambiguous_signals: list[str] = []
     for pattern in _AMBIGUOUS_INTENT:
@@ -261,7 +298,9 @@ def classify_goal(goal: str) -> GoalClassification:
         if match:
             ambiguous_signals.append(f"ambiguous:{match.group(0).lower()}")
 
-    has_concrete_anchor = bool(pr_match or issue_match)
+    has_pr_anchor = bool(pr_matches)
+    has_issue_anchor = bool(issue_matches)
+    has_concrete_anchor = has_pr_anchor or has_issue_anchor
     has_operational_verb = verb_risk is not SideEffectRisk.NONE
 
     if ambiguous_signals:
@@ -277,16 +316,43 @@ def classify_goal(goal: str) -> GoalClassification:
             matched_signals=tuple(signals),
         )
 
+    # Multiple PR or issue URLs make the mutation target ambiguous even
+    # when one verb is present.  "compare PR/1 and PR/2 then merge the
+    # better one" must not silently route to the wrong PR.
+    if len(pr_matches) > 1 or len(issue_matches) > 1:
+        return GoalClassification(
+            interview_required=True,
+            direct_run_allowed=False,
+            side_effect_risk=verb_risk,
+            requires_confirmation=verb_risk is SideEffectRisk.HIGH,
+            reason="goal references multiple PR/issue URLs; mutation target is ambiguous",
+            matched_signals=tuple(signals),
+        )
+
+    # PR-only verbs paired with only an Issue URL would target the wrong
+    # artifact type ("merge issue #42").  Force interview.
+    if requires_pr_anchor and not has_pr_anchor:
+        return GoalClassification(
+            interview_required=True,
+            direct_run_allowed=False,
+            side_effect_risk=verb_risk,
+            requires_confirmation=verb_risk is SideEffectRisk.HIGH,
+            reason=(
+                "operational verb requires a PR URL anchor; goal has only an issue URL "
+                "or no PR anchor"
+            ),
+            matched_signals=tuple(signals),
+        )
+
     if has_concrete_anchor and has_operational_verb:
+        # Single PR or single issue URL paired with a verb whose anchor
+        # requirement is satisfied above.
         return GoalClassification(
             interview_required=False,
             direct_run_allowed=True,
             side_effect_risk=verb_risk,
             requires_confirmation=verb_risk is SideEffectRisk.HIGH,
-            reason=(
-                "concrete PR/issue URL paired with operational verb "
-                f"({verb_risk.value} risk)"
-            ),
+            reason=(f"concrete PR/issue URL paired with operational verb ({verb_risk.value} risk)"),
             matched_signals=tuple(signals),
         )
 
@@ -294,7 +360,7 @@ def classify_goal(goal: str) -> GoalClassification:
         # ``/pulls`` is a list page, not a single PR.  Allow direct path
         # only if the verb is read-only (review, analyze).  Anything that
         # mutates needs the interview to narrow the target.
-        if verb_risk in {SideEffectRisk.LOW, SideEffectRisk.NONE}:
+        if not requires_pr_anchor and has_read_only_verb:
             return GoalClassification(
                 interview_required=False,
                 direct_run_allowed=True,
