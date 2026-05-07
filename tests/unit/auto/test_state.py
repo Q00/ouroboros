@@ -8,6 +8,7 @@ from ouroboros.auto.state import (
     DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
     AutoPhase,
     AutoPipelineState,
+    AutoResumeCapability,
     AutoStore,
 )
 
@@ -394,3 +395,229 @@ def test_recover_uses_transition_table_from_failed_state() -> None:
 
     assert state.phase is AutoPhase.REVIEW
     assert state.last_error is None
+
+
+# ---------------------------------------------------------------------------
+# resume_capability matrix (#688)
+# ---------------------------------------------------------------------------
+
+
+def _state(**overrides: object) -> AutoPipelineState:
+    """Build an :class:`AutoPipelineState` with sensible defaults for matrix tests."""
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    for key, value in overrides.items():
+        setattr(state, key, value)
+    return state
+
+
+def test_resume_capability_complete_returns_none() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.COMPLETE, "done")
+
+    assert state.resume_capability() is AutoResumeCapability.NONE
+
+
+def test_resume_capability_non_terminal_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_repair_phase_returns_resume() -> None:
+    """Critic fix C2: REPAIR is non-terminal — resume transitions back to REVIEW."""
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.REPAIR, "repair")
+
+    assert state.phase is AutoPhase.REPAIR
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_blocked_unmapped_tool_returns_none() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("internal guard fired", tool_name="auto_pipeline")
+
+    assert state.resume_capability() is AutoResumeCapability.NONE
+
+
+def test_resume_capability_interview_start_timeout_no_session_returns_retry() -> None:
+    """The #688 case: interview.start blew up before persisting a session id."""
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("interview.start timed out", tool_name="interview.start")
+
+    assert state.interview_session_id is None
+    assert state.resume_capability() is AutoResumeCapability.RETRY
+
+
+def test_resume_capability_interview_start_with_session_returns_partial() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.mark_blocked("interview.start blocked late", tool_name="interview.start")
+
+    assert state.resume_capability() is AutoResumeCapability.PARTIAL_RESUME
+
+
+def test_resume_capability_interview_resume_with_pending_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.pending_question = "What is the deadline?"
+    state.mark_blocked("interview.resume timed out", tool_name="interview.resume")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_interview_answer_no_pending_returns_partial() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.pending_question = None
+    state.mark_blocked("interview.answer timed out", tool_name="interview.answer")
+
+    assert state.resume_capability() is AutoResumeCapability.PARTIAL_RESUME
+
+
+def test_resume_capability_auto_answerer_with_pending_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.pending_question = "What is the deadline?"
+    state.mark_blocked("auto_answerer timed out", tool_name="auto_answerer")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_seed_generator_with_artifact_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.seed_artifact = {"id": "seed_1"}
+    state.mark_blocked("seed_generator timed out", tool_name="seed_generator")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_seed_generator_seed_path_only_returns_partial() -> None:
+    """Critic fix C3: ``seed_path``-only must return PARTIAL_RESUME."""
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.seed_path = "/tmp/seed.yaml"
+    state.mark_blocked("seed_generator timed out", tool_name="seed_generator")
+
+    assert not state.seed_artifact
+    assert state.seed_path
+    assert state.resume_capability() is AutoResumeCapability.PARTIAL_RESUME
+
+
+def test_resume_capability_seed_generator_no_artifact_with_session_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_1"
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.mark_blocked("seed_generator timed out", tool_name="seed_generator")
+
+    assert not state.seed_artifact
+    assert state.seed_path is None
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_seed_generator_no_artifact_no_session_returns_none() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.mark_blocked("seed_generator timed out", tool_name="seed_generator")
+
+    assert state.interview_session_id is None
+    assert state.resume_capability() is AutoResumeCapability.NONE
+
+
+def test_resume_capability_grade_gate_with_artifact_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.seed_artifact = {"id": "seed_1"}
+    state.mark_blocked("Seed did not reach A-grade", tool_name="grade_gate")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_grade_gate_with_seed_path_returns_partial() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.seed_path = "/tmp/seed.yaml"
+    state.mark_blocked("seed_loader could not read seed", tool_name="seed_loader")
+
+    assert state.resume_capability() is AutoResumeCapability.PARTIAL_RESUME
+
+
+def test_resume_capability_grade_gate_nothing_returns_none() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.mark_blocked("seed_saver could not persist seed", tool_name="seed_saver")
+
+    assert state.resume_capability() is AutoResumeCapability.NONE
+
+
+def test_resume_capability_run_starter_with_handles_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.job_id = "job_42"
+    state.mark_blocked("run start timed out", tool_name="run_starter")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_run_starter_with_artifact_returns_resume() -> None:
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.seed_artifact = {"id": "seed_1"}
+    state.mark_blocked("run start timed out", tool_name="run_starter")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_run_starter_seed_path_only_returns_partial() -> None:
+    """Critic fix C4: ``run_starter`` + ``seed_path`` only → PARTIAL_RESUME."""
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.seed_path = "/tmp/seed.yaml"
+    state.mark_blocked("run start timed out", tool_name="run_starter")
+
+    assert not state.seed_artifact
+    assert not any((state.job_id, state.execution_id, state.run_session_id))
+    assert state.resume_capability() is AutoResumeCapability.PARTIAL_RESUME
+
+
+def test_resume_capability_failed_mirrors_blocked() -> None:
+    """FAILED states classify identically to BLOCKED for the same signals."""
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_failed("interview.start timed out", tool_name="interview.start")
+
+    assert state.phase is AutoPhase.FAILED
+    assert state.interview_session_id is None
+    assert state.resume_capability() is AutoResumeCapability.RETRY

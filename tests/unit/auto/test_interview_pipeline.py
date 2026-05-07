@@ -2558,3 +2558,30 @@ async def test_invalid_reconcile_on_complete_does_not_poison_future_resume(tmp_p
     assert plain_result.status == "complete"
     assert plain_result.blocker is None
     assert state.last_error is None
+
+
+def test_interview_start_timeout_state_routes_to_interview_on_resume_with_retry_capability() -> (
+    None
+):
+    """An ``interview.start`` timeout is a recoverable resume path but classifies as RETRY.
+
+    The #688 invariant: ``_recoverable_phase_for_tool('interview.start')`` returns
+    :class:`AutoPhase.INTERVIEW` (so :meth:`AutoPipeline.run` routes the resume
+    back into the interview phase), *and* :meth:`AutoPipelineState.resume_capability`
+    classifies the post-timeout state as :class:`AutoResumeCapability.RETRY`
+    because no ``interview_session_id`` was persisted — there is no prior
+    progress to recover.
+    """
+    from ouroboros.auto.pipeline import _recoverable_phase_for_tool
+    from ouroboros.auto.state import AutoResumeCapability
+
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("interview.start timed out", tool_name="interview.start")
+
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "interview.start"
+    assert state.interview_session_id is None
+    assert state.pending_question is None
+    assert _recoverable_phase_for_tool("interview.start") is AutoPhase.INTERVIEW
+    assert state.resume_capability() is AutoResumeCapability.RETRY
