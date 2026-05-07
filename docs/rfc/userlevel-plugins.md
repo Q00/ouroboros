@@ -219,6 +219,15 @@ URL is the unit of distribution; the catalog inside the repository is the
 unit of selection. Full UX details:
 [Q00/ouroboros-plugins/docs/lifecycle.md](https://github.com/Q00/ouroboros-plugins/blob/main/docs/lifecycle.md).
 
+**`add` vs `install`.** `add` is the **interactive entry point** intended
+for humans: it accepts a repo URL, fetches the catalog, presents the
+selection prompt, and then internally invokes `install` for each selected
+plugin. `install` is the **non-interactive primitive** addressed by
+plugin name (e.g. `ooo plugin install github-pr-ops`), used when the
+repository is already known to the system or when scripts/CI need to
+bypass the prompt. The two commands are layered, not redundant: `add`
+calls `install`; `install` never calls `add`.
+
 ```bash
 $ ooo plugin add https://github.com/Q00/ouroboros-plugins
 Repository: Q00/ouroboros-plugins (b3a91f2)
@@ -263,13 +272,20 @@ goal → clarification/interview → Seed → validation → execution handoff
 ```
 
 Domain-specific operational workflows do not live here. They live in
-plugins. As of this RFC's merge, `grep -nE 'github|pull_request' src/ouroboros/cli/commands/auto.py src/ouroboros/auto/pipeline.py` returns empty — the
-boundary is intact today. The closed status of the #689 PR stack
-(`#697`, `#707`, `#712`, `#715`, `#721`) confirms the project's de facto
-position; this RFC makes it the de jure position.
+plugins.
 
-#735 adds a CI lint guard preventing future PRs from re-introducing
-domain-specific keywords into `ooo auto`'s code path.
+**Historical rationale (not an evergreen claim).** When this RFC was
+drafted, `grep -nE 'github|pull_request' src/ouroboros/cli/commands/auto.py src/ouroboros/auto/pipeline.py`
+returned empty, and the closed status of the #689 PR stack
+(`#697`, `#707`, `#712`, `#715`, `#721`) showed the project had already
+been rejecting domain-specific intrusions into `ooo auto` on a per-PR
+basis. This RFC promotes that de facto rejection to a de jure boundary.
+
+The **enforcement** of the boundary going forward is mechanical, not
+documentary: #735 adds a CI lint guard that fails any future PR
+re-introducing domain-specific keywords into the `ooo auto` code path.
+That guard — not the snapshot above — is the evergreen control. If the
+guard is ever removed or weakened, this RFC must be revisited.
 
 ## Deferred Decisions
 
