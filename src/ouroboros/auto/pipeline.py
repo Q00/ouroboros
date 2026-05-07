@@ -332,6 +332,7 @@ class AutoPipeline:
                 review = reviewer.review(seed, ledger=ledger)
                 state.last_grade = review.grade_result.grade.value
                 state.findings = [asdict(finding) for finding in review.findings]
+                self._maybe_emit_grade(state)
                 self._save(state)
             if not review.may_run:
                 state.mark_blocked(
