@@ -135,14 +135,32 @@ class DriverAutoAnswerer:
                     scaffold=scaffold,
                 ),
             )
+        answer_risk = classify_driver_answer_text_risk(text)
+        if answer_risk and self.brake == AutoBrakeMode.ON:
+            reason = f"brake on: risky selected-driver response requires approval ({answer_risk})"
+            return AutoAnswer(
+                text=f"Cannot send selected-driver answer automatically without approval: {answer_risk}",
+                source=AutoAnswerSource.BLOCKER,
+                confidence=1.0,
+                blocker=AutoBlocker(reason=reason, question=question),
+                metadata=_answer_metadata(
+                    backend=self.backend or "driver",
+                    brake=self.brake,
+                    risk=_combined_risk(risk, answer_risk),
+                    confidence=1.0,
+                    scaffold=scaffold,
+                    answer_risk=answer_risk,
+                ),
+            )
 
         assumptions = list(scaffold.assumptions)
         confidence = min(scaffold.confidence, 0.82)
-        if risk:
-            assumptions.append(f"brake off auto-sent risky driver answer: {risk}")
+        final_risk = _combined_risk(risk, answer_risk)
+        if final_risk:
+            assumptions.append(f"brake off auto-sent risky driver answer: {final_risk}")
             confidence = min(confidence, 0.62)
         tagged_text = _tag_driver_text(
-            text, backend=self.backend or "driver", brake=self.brake, risk=risk
+            text, backend=self.backend or "driver", brake=self.brake, risk=final_risk
         )
         return AutoAnswer(
             text=tagged_text,
@@ -151,17 +169,19 @@ class DriverAutoAnswerer:
             ledger_updates=_ledger_updates_for(
                 scaffold,
                 driver_text=tagged_text,
-                risk=risk,
+                risk=final_risk,
                 backend=self.backend or "driver",
+                answer_risk=answer_risk,
             ),
             assumptions=assumptions,
             non_goals=list(scaffold.non_goals),
             metadata=_answer_metadata(
                 backend=self.backend or "driver",
                 brake=self.brake,
-                risk=risk,
+                risk=final_risk,
                 confidence=confidence,
                 scaffold=scaffold,
+                answer_risk=answer_risk,
             ),
         )
 
@@ -199,6 +219,64 @@ def classify_interview_answer_risk(question: str, scaffold: AutoAnswer | None = 
     if scaffold is not None and scaffold.confidence < 0.65:
         return "low-confidence high-impact answer"
     return None
+
+
+def classify_driver_answer_text_risk(text: str) -> str | None:
+    """Return a risk label for risky selected-driver output text."""
+    lowered = text.lower()
+    if _contains_real_secret(text):
+        return "actual answer contains secret or credential"
+    if re.search(
+        r"\b(password|passphrase|api[_ -]?key|access[_ -]?token|token|secret|credential)s?\b"
+        r"\s*(=|:)\s*['\"]?[^\s'\"<>]{12,}",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "actual answer contains secret or credential"
+    if re.search(
+        r"\b[A-Z][A-Z0-9_]*(?:API[_]?KEY|ACCESS[_]?KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\b"
+        r"\s*=\s*['\"]?[^\s'\"<>]{12,}",
+        text,
+    ):
+        return "actual answer contains secret or credential"
+    if re.search(
+        r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]{8,}@[^\s]+",
+        text,
+    ):
+        return "actual answer contains secret or credential"
+    if re.search(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}={0,2}\b", text):
+        return "actual answer contains secret or credential"
+    if re.search(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", text):
+        return "actual answer contains secret or credential"
+    destructive_action = (
+        r"\b(delete|destroy|drop|truncate|wipe|erase|purge|deprovision|terminate)\b"
+    )
+    production_target = r"\b(production|prod|live|billing|database|db|credentials?)\b"
+    if re.search(destructive_action, lowered) and re.search(production_target, lowered):
+        return "actual answer recommends destructive production action"
+    if re.search(r"\brm\s+-rf\s+/(?:\s|$)", text) or re.search(
+        r"\b(drop|truncate)\s+(database|table)\b", lowered
+    ):
+        return "actual answer recommends destructive production action"
+    return None
+
+
+def _contains_real_secret(text: str) -> bool:
+    secret_patterns = (
+        r"\bAKIA[0-9A-Z]{16}\b",
+        r"\bASIA[0-9A-Z]{16}\b",
+        r"\bgh[pousr]_[A-Za-z0-9_]{30,}\b",
+        r"\bgithub_pat_[A-Za-z0-9_]{40,}\b",
+        r"\bsk-[A-Za-z0-9_-]{20,}\b",
+        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
+    )
+    return any(re.search(pattern, text) for pattern in secret_patterns)
+
+
+def _combined_risk(pre_response_risk: str | None, answer_risk: str | None) -> str | None:
+    if pre_response_risk and answer_risk:
+        return f"{pre_response_risk}; {answer_risk}"
+    return pre_response_risk or answer_risk
 
 
 def _driver_prompt(
@@ -260,21 +338,30 @@ def _answer_metadata(
     risk: str | None,
     confidence: float,
     scaffold: AutoAnswer,
+    answer_risk: str | None = None,
 ) -> AutoAnswerMetadata:
     """Build structured selected-driver provenance for downstream audit surfaces."""
+    provenance = [
+        f"driver:{backend}",
+        f"brake:{brake.value}",
+        f"scaffold_source:{scaffold.source.value}",
+    ]
+    if answer_risk:
+        provenance.append(f"answer_risk:{answer_risk}")
     return AutoAnswerMetadata(
         risk=risk,
         confidence=max(0.0, min(1.0, float(confidence))),
-        provenance=(
-            f"driver:{backend}",
-            f"brake:{brake.value}",
-            f"scaffold_source:{scaffold.source.value}",
-        ),
+        provenance=tuple(provenance),
     )
 
 
 def _ledger_updates_for(
-    scaffold: AutoAnswer, *, driver_text: str, risk: str | None, backend: str
+    scaffold: AutoAnswer,
+    *,
+    driver_text: str,
+    risk: str | None,
+    backend: str,
+    answer_risk: str | None = None,
 ) -> list[tuple[str, LedgerEntry]]:
     updates = [
         (
@@ -307,6 +394,11 @@ def _ledger_updates_for(
                     confidence=0.6,
                     status=LedgerStatus.INFERRED,
                     rationale="Risk was preserved as provenance for Seed-ready and A-grade review gates.",
+                    evidence=(
+                        [f"driver:{backend}", f"answer_risk:{answer_risk}"]
+                        if answer_risk
+                        else [f"driver:{backend}"]
+                    ),
                 ),
             )
         )
