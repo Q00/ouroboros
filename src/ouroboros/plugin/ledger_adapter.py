@@ -52,6 +52,7 @@ never persist (tests, schema validators) keep the import surface small.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 import uuid
 
@@ -232,13 +233,55 @@ def envelope_to_base_event(
     if not isinstance(payload, dict):
         raise ValueError("envelope payload is missing or not a dict")
 
+    # Carry the original audit time through to BaseEvent.timestamp so
+    # the persisted row reflects when the firewall observed the event,
+    # not when the bridge ran. Without this the EventStore's "now"
+    # default silently rewrites event ordering and recency for plugin
+    # rows. Prefer the envelope's `timestamp` (set by `wrap_plugin_event`
+    # from `audit_event.occurred_at`); fall back to the payload's
+    # `occurred_at` defensively in case a third-party builder skipped
+    # the envelope helper.
+    timestamp_str = envelope.get("timestamp") or payload.get("occurred_at")
+    if not isinstance(timestamp_str, str):
+        raise ValueError(
+            "envelope is missing a string 'timestamp' / payload.occurred_at; "
+            "cannot bridge to BaseEvent without preserving audit time"
+        )
+    timestamp = _parse_audit_timestamp(timestamp_str)
+
     return cls(
         id=envelope["id"],
         type=envelope["event_type"],
+        timestamp=timestamp,
         aggregate_type=PLUGIN_AGGREGATE_TYPE,
         aggregate_id=envelope["aggregate_id"],
         data=dict(payload),  # frozen BaseEvent: defensive shallow copy
     )
+
+
+def _parse_audit_timestamp(value: str) -> datetime:
+    """Parse a firewall audit timestamp into a tz-aware UTC datetime.
+
+    The audit-event schema fixes the wire format at
+    `"%Y-%m-%dT%H:%M:%SZ"` (RFC 3339, second precision, explicit Z).
+    `datetime.fromisoformat` accepts the trailing `Z` from Python 3.11
+    onward, but we normalize defensively for older callers and to
+    surface a clean ValueError with the offending string.
+    """
+    candidate = value.strip()
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(
+            f"audit timestamp {value!r} is not RFC 3339; expected 'YYYY-MM-DDTHH:MM:SSZ'"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    else:
+        parsed = parsed.astimezone(UTC)
+    return parsed
 
 
 async def append_envelope_to_event_store(

@@ -259,6 +259,90 @@ def test_envelope_to_base_event_round_trips_through_real_event_store() -> None:
     assert rebuilt_audit["command"] == audit["command"]
 
 
+def test_envelope_to_base_event_preserves_audit_timestamp() -> None:
+    """Regression: the bridge MUST carry the original audit time over to
+    `BaseEvent.timestamp`. Without that, persisted rows inherit
+    `BaseEvent`'s "now" default and the events_table.timestamp column
+    no longer reflects when the firewall observed the event — silently
+    breaking ordering, recency, and replay for plugin events.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
+
+    # An audit event from clearly in the past: any "now"-default would
+    # be wrong by a wide enough margin that the assert can't false-pass
+    # on a slow test machine.
+    audit = _audit_event("plugin.invoked", occurred_at="2020-01-15T08:30:45Z")
+    envelope = wrap_plugin_event(audit, correlation_id="corr-time")
+
+    before = datetime.now(UTC)
+    base_event = envelope_to_base_event(envelope)
+    after = datetime.now(UTC)
+
+    expected = datetime(2020, 1, 15, 8, 30, 45, tzinfo=UTC)
+    assert base_event.timestamp == expected
+    # Sanity: the persisted timestamp is the audit time, not anything
+    # close to "now". Any drift wider than a year proves we did not
+    # accidentally fall through to the default factory.
+    assert before - base_event.timestamp > timedelta(days=365)
+    assert after - base_event.timestamp > timedelta(days=365)
+
+
+def test_envelope_to_base_event_round_trips_timestamp_through_real_store() -> None:
+    """End-to-end check: persist, replay, and confirm the timestamp on
+    the row coming out of EventStore matches the audit's occurred_at
+    rather than wall-clock-now."""
+    pytest.importorskip("aiosqlite")
+
+    import asyncio
+    from datetime import UTC, datetime
+
+    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.plugin.ledger_adapter import append_envelope_to_event_store
+
+    audit = _audit_event("plugin.completed", occurred_at="2024-12-31T23:59:59Z")
+    envelope = wrap_plugin_event(
+        audit, correlation_id="corr-roundtrip", envelope_id="env-roundtrip"
+    )
+    expected = datetime(2024, 12, 31, 23, 59, 59, tzinfo=UTC)
+
+    async def _persist_and_replay() -> list:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        await append_envelope_to_event_store(envelope, store=store)
+        return await store.replay("plugin", "corr-roundtrip")
+
+    rows = asyncio.run(_persist_and_replay())
+    assert len(rows) == 1
+    persisted = rows[0]
+    persisted_ts = persisted.timestamp
+    if persisted_ts.tzinfo is None:
+        # Some SQLAlchemy/sqlite combinations strip tzinfo on read; the
+        # timestamp value itself must still be UTC-equivalent.
+        persisted_ts = persisted_ts.replace(tzinfo=UTC)
+    assert persisted_ts == expected, (
+        f"persisted timestamp {persisted_ts!r} drifted from audit occurred_at {expected!r}"
+    )
+
+
+def test_envelope_to_base_event_rejects_missing_timestamp() -> None:
+    """If neither the envelope nor the payload exposes a timestamp the
+    bridge MUST refuse rather than silently default to "now"."""
+    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
+
+    bogus = {
+        "id": "x",
+        "aggregate_type": "plugin",
+        "aggregate_id": "y",
+        "event_type": "plugin.completed",
+        "payload": {"event_type": "plugin.completed"},  # no occurred_at
+        # no top-level timestamp
+    }
+    with pytest.raises(ValueError, match="timestamp"):
+        envelope_to_base_event(bogus)
+
+
 def test_envelope_to_base_event_rejects_non_plugin_envelope() -> None:
     """The bridge refuses envelopes for other aggregates, so a misrouted
     payload cannot end up persisted under aggregate_type='plugin'."""
