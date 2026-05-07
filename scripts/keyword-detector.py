@@ -59,6 +59,8 @@ KEYWORD_MAP = [
     {"patterns": ["ooo cancel", "ooo abort"], "skill": "/ouroboros:cancel"},
     {"patterns": ["ooo update", "ooo upgrade"], "skill": "/ouroboros:update"},
     {"patterns": ["ooo brownfield"], "skill": "/ouroboros:brownfield"},
+    {"patterns": ["ooo publish"], "skill": "/ouroboros:publish"},
+    {"patterns": ["ooo resume-session", "ooo resume"], "skill": "/ouroboros:resume-session"},
     # Natural language triggers
     # PM triggers must precede generic interview to avoid "pm interview" being shadowed
     {

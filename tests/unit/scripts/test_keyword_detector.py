@@ -108,6 +108,26 @@ class TestDetectKeywords:
             "bare 'autopilot' should not route to ooo auto"
         )
 
+    def test_ooo_publish_detected(self):
+        result = detect_keywords("ooo publish")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:publish"
+
+    def test_ooo_publish_with_args(self):
+        result = detect_keywords("ooo publish --dry-run")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:publish"
+
+    def test_ooo_resume_session_detected(self):
+        result = detect_keywords("ooo resume-session")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:resume-session"
+
+    def test_ooo_resume_short_alias(self):
+        result = detect_keywords("ooo resume")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:resume-session"
+
 
 class TestSetupBypass:
     """qa skill has a no-MCP fallback, so it must bypass the setup gate."""
