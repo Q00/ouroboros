@@ -23,13 +23,17 @@ def _state(runtime: str | None, opencode_mode: str | None = None) -> AutoPipelin
         ("hermes", None, "in-process (hermes)"),
         ("gemini", None, "in-process (gemini)"),
         ("kiro", None, "in-process (kiro)"),
+        ("copilot", None, "in-process (copilot)"),
         ("opencode", "subprocess", "in-process (opencode)"),
         ("opencode", None, "in-process (opencode)"),
         ("opencode", "", "in-process (opencode)"),
         (None, None, "in-process (unspecified)"),
-        ("opencode", "plugin", "dispatched (opencode bridge plugin)"),
-        ("opencode_cli", "plugin", "dispatched (opencode bridge plugin)"),
-        ("OpenCode", "PLUGIN", "dispatched (opencode bridge plugin)"),
+        # Persisted plugin in state must still report in-process: both
+        # auto entry points demote plugin → subprocess for authoring
+        # handlers before constructing them, so the label must reflect
+        # the effective handler config, not the raw persisted mode.
+        ("opencode", "plugin", "in-process (opencode)"),
+        ("opencode_cli", "plugin", "in-process (opencode_cli)"),
     ],
 )
 def test_authoring_backend_label_truth_table(
@@ -61,7 +65,16 @@ def test_label_blocker_handles_none_message() -> None:
     assert "in-process (codex)" in out
 
 
-def test_label_blocker_marks_dispatched_for_opencode_plugin() -> None:
+def test_label_blocker_reports_in_process_even_for_persisted_opencode_plugin() -> None:
+    """Persisted plugin in state must still print in-process for the auto label.
+
+    Regression guard for #690 review feedback: both auto entry points
+    demote plugin → subprocess for authoring handlers, so the blocker
+    suffix must reflect the effective handler config (in-process), not
+    the raw persisted opencode_mode. Otherwise the very incidents this
+    suffix is meant to diagnose would carry a wrong attribution.
+    """
     state = _state("opencode", "plugin")
     out = label_blocker(state, "interview.start timed out", phase="interview.start")
-    assert "dispatched (opencode bridge plugin)" in out
+    assert "in-process (opencode)" in out
+    assert "dispatched" not in out

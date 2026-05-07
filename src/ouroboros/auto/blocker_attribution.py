@@ -18,23 +18,22 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ouroboros.auto.state import AutoPipelineState
 
-_OPENCODE_RUNTIMES = frozenset({"opencode", "opencode_cli"})
-
-
 def authoring_backend_label(state: AutoPipelineState) -> str:
-    """Return the human-readable authoring path for a state.
+    """Return the human-readable authoring path for an auto-mode state.
 
-    OpenCode + ``plugin`` mode is the only combination where the
-    in-process authoring handler short-circuits to a ``_subagent``
-    envelope. Every other runtime/mode pair runs the authoring step
-    in-process inside the Ouroboros MCP server. The label mirrors
-    ``ouroboros.mcp.tools.subagent.should_dispatch_via_plugin`` so the
-    blocker text cannot drift from the actual handler dispatch.
+    In ``ooo auto`` flow, both auto entry points (``cli/commands/auto.py``
+    and ``mcp/tools/auto_handler.py``) demote a persisted
+    ``opencode_mode == "plugin"`` to ``"subprocess"`` for the authoring
+    handlers, because a ``_subagent`` envelope would have no receiver
+    outside an active OpenCode bridge plugin session. Authoring is
+    therefore always reported as in-process here — anything else would
+    misrepresent what the handlers actually got and mislabel the very
+    incidents this attribution helper is meant to clarify.
+
+    The MCP-handler ``_subagent`` dispatch path still exists, but it is
+    only reachable when callers invoke the handlers directly from inside
+    an active OpenCode bridge plugin session (not from ``ooo auto``).
     """
-    backend = (state.runtime_backend or "").strip().lower()
-    mode = (state.opencode_mode or "").strip().lower()
-    if backend in _OPENCODE_RUNTIMES and mode == "plugin":
-        return "dispatched (opencode bridge plugin)"
     backend_name = state.runtime_backend or "unspecified"
     return f"in-process ({backend_name})"
 
