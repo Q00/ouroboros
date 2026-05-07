@@ -41,6 +41,7 @@ SETUP_BYPASS_SKILLS = [
 # "ooo <cmd>" prefix always works; natural language keywords also supported
 KEYWORD_MAP = [
     # ooo prefix shortcuts (checked first for priority)
+    {"patterns": ["ooo auto"], "skill": "/ouroboros:auto"},
     {"patterns": ["ooo interview", "ooo socratic"], "skill": "/ouroboros:interview"},
     {"patterns": ["ooo seed", "ooo crystallize"], "skill": "/ouroboros:seed"},
     {"patterns": ["ooo run", "ooo execute"], "skill": "/ouroboros:run"},
