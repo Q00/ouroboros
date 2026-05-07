@@ -144,6 +144,13 @@ class AutoInterviewDriver:
             self.answerer.apply(answer, ledger, question=turn.question)
             state.ledger = ledger.to_dict()
             state.pending_question = None
+            _record_auto_answer(
+                state,
+                round_number=round_number,
+                source=answer.source.value,
+                question=turn.question,
+                answer=answer.text,
+            )
             state.mark_progress(
                 f"answered round {round_number}/{self.max_rounds} from {answer.source.value}",
                 tool_name="auto_answerer",
@@ -312,6 +319,44 @@ def _gap_prompt(gap: Gap) -> str:
         "runtime_context": "Which runtime stack, repo, and project patterns should be used?",
     }
     return prompts.get(gap.section, gap.message)
+
+
+_AUTO_ANSWER_LOG_LIMIT = 25
+_AUTO_ANSWER_LOG_TEXT_LIMIT = 200
+
+
+def _record_auto_answer(
+    state: AutoPipelineState,
+    *,
+    round_number: int,
+    source: str,
+    question: str,
+    answer: str,
+) -> None:
+    """Append a source-tagged auto answer entry to ``state.auto_answer_log``.
+
+    The log is bounded to the last :data:`_AUTO_ANSWER_LOG_LIMIT` entries so the
+    persisted state file stays compact across long sessions.
+    """
+    state.auto_answer_log.append(
+        {
+            "round": round_number,
+            "source": source,
+            "question": _truncate(question, _AUTO_ANSWER_LOG_TEXT_LIMIT),
+            "answer": _truncate(answer, _AUTO_ANSWER_LOG_TEXT_LIMIT),
+        }
+    )
+    if len(state.auto_answer_log) > _AUTO_ANSWER_LOG_LIMIT:
+        del state.auto_answer_log[: len(state.auto_answer_log) - _AUTO_ANSWER_LOG_LIMIT]
+
+
+def _truncate(text: str, limit: int) -> str:
+    if not isinstance(text, str):
+        text = str(text)
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return f"{flat[: limit - 3]}..."
 
 
 def _validate_turn(value: object) -> InterviewTurn:

@@ -207,6 +207,7 @@ class AutoPipelineState:
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
+    auto_answer_log: list[dict[str, Any]] = field(default_factory=list)
     repair_round: int = 0
     current_round: int = 0
     pending_question: str | None = None
@@ -313,6 +314,7 @@ class AutoPipelineState:
         payload.setdefault("run_reconciliation_source", None)
         payload.setdefault("run_reconciled_at", None)
         payload.setdefault("provenance", None)
+        payload.setdefault("auto_answer_log", [])
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -448,7 +450,7 @@ class AutoPipelineState:
             if type(getattr(self, field_name)) is not bool:
                 msg = f"{field_name} must be a boolean"
                 raise ValueError(msg)
-        for field_name in ("findings",):
+        for field_name in ("findings", "auto_answer_log"):
             value = getattr(self, field_name)
             if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
                 msg = f"{field_name} must be a list of objects"
