@@ -262,6 +262,52 @@ def test_duplicate_capability_name_rejected(tmp_path: Path) -> None:
     assert "ledger" in excinfo.value.args[0]
 
 
+def test_audit_events_must_include_firewall_events(tmp_path: Path) -> None:
+    """A manifest that drops any firewall-emitted event from
+    `audit.events` must be rejected at load time.
+
+    Pre-fix, `load_manifest` accepted any subset (the JSON Schema
+    permits one-of-seven enum values), but the firewall unconditionally
+    emits the four standard events. A manifest declaring just
+    `[plugin.invoked]` would validate while the runtime still emitted
+    `plugin.permission_used` / `plugin.completed` / `plugin.failed` —
+    breaking any consumer that treats the manifest as authoritative.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    # Drop `plugin.permission_used` from the audit set.
+    bad["audit"] = {
+        "events": [
+            "plugin.invoked",
+            "plugin.completed",
+            "plugin.failed",
+        ]
+    }
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/audit/events"
+    assert "plugin.permission_used" in excinfo.value.args[0]
+
+
+def test_audit_events_may_extend_required_set(tmp_path: Path) -> None:
+    """A manifest may declare extra lifecycle events beyond the four
+    firewall-mandatory ones (e.g. `plugin.installed`, `plugin.trusted`)
+    that other components emit. Those declarations are allowed."""
+    extended = json.loads(json.dumps(REFERENCE_MANIFEST))
+    extended["audit"] = {
+        "events": [
+            "plugin.invoked",
+            "plugin.permission_used",
+            "plugin.completed",
+            "plugin.failed",
+            "plugin.installed",
+            "plugin.trusted",
+        ]
+    }
+    manifest = load_manifest(_write(tmp_path, extended))
+    assert "plugin.installed" in manifest.audit.events
+    assert "plugin.trusted" in manifest.audit.events
+
+
 def test_invalid_json_decodes_to_useful_error(tmp_path: Path) -> None:
     """Bonus: garbage JSON is reported with a useful message."""
     target = tmp_path / "ouroboros.plugin.json"

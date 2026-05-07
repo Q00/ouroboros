@@ -139,6 +139,21 @@ class AuditSpec:
         )
 
 
+# Events the invocation firewall may emit during a single call. A manifest
+# whose `audit.events` omits any of these is asserting a contract the
+# runtime cannot honor — `invoke_plugin` would still emit them. The
+# loader enforces that all four are present so the manifest's declared
+# contract matches the firewall's actual behavior.
+FIREWALL_REQUIRED_EVENTS: frozenset[str] = frozenset(
+    {
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.completed",
+        "plugin.failed",
+    }
+)
+
+
 @dataclass(frozen=True)
 class PluginManifest:
     """Frozen representation of a validated plugin manifest.
@@ -363,6 +378,23 @@ def load_manifest(path: str | Path) -> PluginManifest:
         audit = AuditSpec.standard_four_events()
     else:
         audit = AuditSpec(events=tuple(audit_raw["events"]))
+        # Enforce that the manifest's declared `audit.events` include every
+        # event the firewall may emit. Otherwise a manifest could opt out
+        # of (e.g.) `plugin.permission_used` while the runtime still emits
+        # it, breaking any consumer that treats the manifest as
+        # authoritative for the event set.
+        declared = frozenset(audit.events)
+        missing = sorted(FIREWALL_REQUIRED_EVENTS - declared)
+        if missing:
+            raise PluginManifestError(
+                f"audit.events must include the firewall-emitted events; missing: {missing}",
+                path=str(manifest_path),
+                json_pointer="/audit/events",
+                expected=(
+                    f"array containing all firewall events {sorted(FIREWALL_REQUIRED_EVENTS)}"
+                ),
+                got=f"declared: {sorted(declared)}",
+            )
 
     return PluginManifest(
         schema_version=schema_version,
@@ -379,15 +411,16 @@ def load_manifest(path: str | Path) -> PluginManifest:
 
 
 __all__ = [
+    "AuditSpec",
     "Capability",
     "CommandArgument",
     "CommandSpec",
     "Entrypoint",
+    "FIREWALL_REQUIRED_EVENTS",
     "Permission",
     "PluginManifest",
     "PluginManifestError",
-    "SourceSpec",
-    "AuditSpec",
-    "load_manifest",
     "SUPPORTED_SCHEMA_VERSIONS",
+    "SourceSpec",
+    "load_manifest",
 ]
