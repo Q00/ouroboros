@@ -236,11 +236,14 @@ def _ledger_updates_for(
 
     The deterministic scaffold provides the structural keys (so downstream
     seed-generation stays section-aware), but each entry's value is replaced
-    with the driver's freeform answer and marked CONFLICTING with reduced
-    confidence so the grading/Seed-ready gates treat the entry as needing
-    verification rather than as a confirmed scaffold choice. This prevents
-    the transcript (driver answer) and the persisted ledger (scaffold value)
-    from diverging silently into two competing sources of truth.
+    with the driver's freeform answer so the persisted ledger and the
+    interview transcript carry the same content. The entry is marked
+    ``INFERRED`` with reduced confidence and an ``auto_interview_transcript``
+    evidence marker, so grading/A-grade gates can downgrade or re-verify the
+    answer without the interview loop treating the section as an open gap
+    (``CONFLICTING`` would block ``is_seed_ready`` and prevent convergence).
+    The original scaffold value is preserved verbatim in the rationale and
+    evidence as audit context.
     """
     updates = [
         (
@@ -250,17 +253,23 @@ def _ledger_updates_for(
                 value=f"driver:{backend} answer (verbatim): {driver_text}",
                 source=entry.source,
                 confidence=min(entry.confidence, 0.4),
-                status=LedgerStatus.CONFLICTING,
+                status=LedgerStatus.INFERRED,
                 reversible=entry.reversible,
                 rationale=(
                     "Selected-driver freeform answer is the canonical source; the "
                     "scaffold's structural key is kept so Seed generation stays "
-                    "section-aware, but the value is the driver answer verbatim and "
-                    "the entry is marked CONFLICTING so grading and the Seed-ready "
-                    "gate flag it for verification before A-grade. Original "
-                    f"scaffold value (kept only as evidence): {entry.value}"
+                    "section-aware. The entry is marked INFERRED with low confidence "
+                    "and an auto_interview_transcript evidence marker so grading and "
+                    "the A-grade gate can flag it for verification while the interview "
+                    "loop still converges. Original scaffold value (kept only as "
+                    f"evidence): {entry.value}"
                 ),
-                evidence=[*entry.evidence, f"driver:{backend}", "auto_interview_transcript"],
+                evidence=[
+                    *entry.evidence,
+                    f"driver:{backend}",
+                    "auto_interview_transcript",
+                    f"scaffold_value:{entry.value}",
+                ],
             ),
         )
         for section, entry in scaffold.ledger_updates

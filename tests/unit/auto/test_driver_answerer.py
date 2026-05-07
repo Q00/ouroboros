@@ -83,11 +83,15 @@ async def test_driver_answerer_brake_off_answers_risky_question() -> None:
 
 
 @pytest.mark.asyncio
-async def test_driver_answerer_ledger_values_reflect_driver_answer_and_flag_conflict() -> None:
-    """Driver mode must not silently leave the persisted ledger reflecting the
-    deterministic scaffold while the transcript carries the driver's freeform
-    answer. The values must be the driver answer, status CONFLICTING, and the
-    original scaffold value preserved as evidence.
+async def test_driver_answerer_ledger_values_reflect_driver_answer_without_blocking_loop() -> None:
+    """Driver mode must not let the persisted ledger and the interview
+    transcript diverge: the ledger entry value must contain the driver's
+    freeform answer verbatim. At the same time the entry status must NOT
+    block the interview loop's Seed-ready check (CONFLICTING/MISSING/
+    WEAK/BLOCKED count as open gaps), so we mark the entry INFERRED with
+    low confidence and an ``auto_interview_transcript`` evidence marker for
+    grading/A-grade gates to consume. The original scaffold value is
+    preserved as audit evidence so divergence is never silently lost.
     """
     from ouroboros.auto.ledger import LedgerStatus
 
@@ -111,19 +115,78 @@ async def test_driver_answerer_ledger_values_reflect_driver_answer_and_flag_conf
     assert [(section, entry.key, entry.source) for section, entry in structural_updates] == [
         (section, entry.key, entry.source) for section, entry in scaffold.ledger_updates
     ]
-    # But the values are now the driver answer (verbatim), not the scaffold's.
+    blocking_statuses = {
+        LedgerStatus.MISSING,
+        LedgerStatus.WEAK,
+        LedgerStatus.CONFLICTING,
+        LedgerStatus.BLOCKED,
+    }
     for _section, entry in structural_updates:
+        # Persisted ledger value carries the driver answer verbatim → no
+        # divergence between ledger and interview transcript.
         assert driver_text in entry.value
-        assert entry.status == LedgerStatus.CONFLICTING
+        # Status must not block ``is_seed_ready`` (otherwise the interview
+        # loop would never converge for a selected-driver session).
+        assert entry.status == LedgerStatus.INFERRED
+        assert entry.status not in blocking_statuses
+        # Provenance signals for downstream grading / A-grade verification.
         assert entry.confidence <= 0.4
         assert "driver:codex" in entry.evidence
         assert "auto_interview_transcript" in entry.evidence
-    # Original scaffold values are preserved in rationale as evidence so
-    # divergence between transcript and ledger is not silently lost.
+    # Original scaffold values are preserved as audit evidence (rationale
+    # and a ``scaffold_value:...`` evidence tag) so divergence between
+    # transcript and ledger is never silently lost.
     scaffold_values = {entry.value for _section, entry in scaffold.ledger_updates if entry.value}
     if scaffold_values:
         rationale_text = " ".join(entry.rationale or "" for _section, entry in structural_updates)
+        evidence_tags = {tag for _section, entry in structural_updates for tag in entry.evidence}
         assert any(value in rationale_text for value in scaffold_values)
+        assert any(f"scaffold_value:{value}" in evidence_tags for value in scaffold_values)
+
+
+@pytest.mark.asyncio
+async def test_driver_answerer_ledger_does_not_block_seed_ready_convergence() -> None:
+    """Regression: applying the driver answerer's ledger updates must keep
+    the interview loop's ``is_seed_ready`` reachable. Marking entries
+    CONFLICTING (an earlier attempt at this fix) treats the section as an
+    open gap, so a selected-driver session would never converge to seed
+    generation. INFERRED is the correct status for "answered with a
+    driver-derived value that grading should later verify".
+    """
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    driver_text = "Use Typer + pytest, target Python 3.12, document via README."
+    adapter = FakeAdapter(driver_text)
+    answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
+
+    for question in (
+        "Which runtime and framework should be used?",
+        "What user actions must work?",
+        "How will success be measured?",
+        "What should be out of scope?",
+    ):
+        answer = await answerer.answer(question, ledger)
+        answerer.apply(answer, ledger, question=question)
+
+    # The driver-only answers must not leave the ledger in a state the
+    # interview loop treats as blocked. Any remaining gaps must be due to
+    # genuinely missing required sections, not the driver mode itself.
+    blocking_statuses = {
+        # Mirror SeedDraftLedger.open_gaps's blocking set.
+        "missing",
+        "weak",
+        "conflicting",
+        "blocked",
+    }
+    section_statuses = ledger.section_statuses()
+    driver_blocked = [
+        name for name, status in section_statuses.items() if status.value in blocking_statuses
+    ]
+    # All sections the driver populated must have advanced past blocking
+    # statuses; this is the contract that broke under the CONFLICTING
+    # variant of the fix.
+    assert "scope" not in driver_blocked
+    assert "non_goals" not in driver_blocked
+    assert "constraints" not in driver_blocked
 
 
 @pytest.mark.asyncio
