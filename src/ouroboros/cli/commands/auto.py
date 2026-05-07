@@ -54,7 +54,18 @@ def auto_command(
     ] = None,
     runtime: Annotated[
         AgentRuntimeBackend | None,
-        typer.Option("--runtime", help="Execution runtime backend.", case_sensitive=False),
+        typer.Option(
+            "--runtime",
+            help=(
+                "Runtime backend used by ooo auto. The same flag is applied to "
+                "BOTH (a) interview/Seed authoring (in-process via the matching "
+                "MCP authoring handler) AND (b) the run-handoff that dispatches "
+                "the executor. The first interview question is generated "
+                "in-process even when --runtime is set to a heavyweight backend "
+                "like codex; see docs/auto-runtime-semantics.md."
+            ),
+            case_sensitive=False,
+        ),
     ] = None,
     max_interview_rounds: Annotated[
         int | None,
