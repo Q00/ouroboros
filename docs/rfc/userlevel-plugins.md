@@ -9,6 +9,49 @@ contract decisions locked in [Q00/ouroboros-plugins](https://github.com/Q00/ouro
 issues #5–#11. Future debates about "should this go in core?" or "should we
 add this to `ooo auto`?" should be answered against this document.
 
+### Implementation Status
+
+"Accepted" means the **design** is locked; it does **not** mean every
+artifact named below already exists in the repository. This RFC is the
+**target contract** — implementer-facing prose throughout this document
+uses present tense for that contract, and readers SHOULD interpret
+unbuilt artifacts as RFC-2119 **MUST** (the implementation must conform
+when it lands), not as a description of `main` today.
+
+The matrix below tracks where each artifact stands at the moment this RFC
+is merged. Concrete paths and commands referenced later in the document
+(`src/ouroboros/plugin/firewall.py:invoke_plugin`, `scripts/sync-plugin-schemas.sh`,
+`ooo plugin add`, etc.) are **target paths**, not current paths, unless
+this matrix marks them as shipped.
+
+| Artifact | Tracking issue | Status at RFC merge |
+|---|---|---|
+| Plugin manifest schemas under upstream `schemas/0.1/` (incl. `audit-event.schema.json`) | upstream Q00/ouroboros-plugins #6, #11 | **Shipped upstream** |
+| Vendored copy at `src/ouroboros/plugin/schemas/0.1/` + `_source.json` | #736 | Not yet present in core |
+| `scripts/sync-plugin-schemas.sh` | #736 | Not yet present |
+| `src/ouroboros/plugin/manifest.py` (loader) | #728 | Not yet present |
+| `src/ouroboros/plugin/firewall.py:invoke_plugin` (invocation contract) | #729 | Not yet present |
+| `ooo plugin {add,install,trust,disable,remove}` (state-mutating CLI) | #731 | Not yet present |
+| `ooo plugin {discover,inspect,list}` (read-only CLI) | #731 | Not yet present |
+| `~/.ouroboros/plugins.lock` + trust store | #732 | Not yet present |
+| `ooo auto` domain-keyword CI lint guard | #735 | Not yet present |
+| `github-pr-ops` E2E contract proof | #733 | Not yet present |
+
+Two consequences flow from this matrix that other sections of this
+document refer back to:
+
+1. **Boundary enforcement is currently documentary, not mechanical.** The
+   "ooo auto Boundary" section describes #735 as the durable, evergreen
+   control. That control activates only when #735 lands. Until then, the
+   boundary is held by review discipline plus the historical evidence
+   captured in that section. The clause "this RFC must be revisited if
+   the guard is ever removed or weakened" therefore takes effect from the
+   moment #735 ships, not from the moment this RFC merges.
+2. **Implementation PRs that build the unbuilt rows above MUST conform to
+   this RFC.** Drift between this contract and what those PRs ship is a
+   bug in the PR, not a license to amend the RFC silently — amendments
+   require a follow-up RFC change against this document.
+
 ## Motivation
 
 Ouroboros core risks expanding indefinitely as new operational workflows are
@@ -281,11 +324,14 @@ returned empty, and the closed status of the #689 PR stack
 been rejecting domain-specific intrusions into `ooo auto` on a per-PR
 basis. This RFC promotes that de facto rejection to a de jure boundary.
 
-The **enforcement** of the boundary going forward is mechanical, not
-documentary: #735 adds a CI lint guard that fails any future PR
+The **future enforcement** of the boundary is mechanical, not
+documentary: #735 will add a CI lint guard that fails any PR
 re-introducing domain-specific keywords into the `ooo auto` code path.
-That guard — not the snapshot above — is the evergreen control. If the
-guard is ever removed or weakened, this RFC must be revisited.
+Once that guard ships (status tracked in the Implementation Status
+matrix), it — not the historical snapshot above — becomes the evergreen
+control, and the "must be revisited if weakened" clause takes effect from
+that point. Until #735 lands, the boundary is held by review discipline
+plus the evidence captured here.
 
 ## Deferred Decisions
 
