@@ -60,9 +60,9 @@ def _spy_handler_constructions(monkeypatch: pytest.MonkeyPatch) -> dict[str, lis
     # The CLI also wraps each handler in HandlerInterviewBackend / HandlerSeedGenerator /
     # HandlerRunStarter; replace those with no-ops so AutoPipeline construction does not
     # trip over the stubs.
-    monkeypatch.setattr(auto_cli, "HandlerInterviewBackend", lambda *a, **kw: object())
-    monkeypatch.setattr(auto_cli, "HandlerSeedGenerator", lambda *a, **kw: object())
-    monkeypatch.setattr(auto_cli, "HandlerRunStarter", lambda *a, **kw: object())
+    monkeypatch.setattr(auto_cli, "HandlerInterviewBackend", lambda *_a, **_kw: object())
+    monkeypatch.setattr(auto_cli, "HandlerSeedGenerator", lambda *_a, **_kw: object())
+    monkeypatch.setattr(auto_cli, "HandlerRunStarter", lambda *_a, **_kw: object())
 
     # Short-circuit the pipeline so no real backend runs. AutoPipelineResult only
     # needs ``status`` / ``auto_session_id`` / ``phase`` for the CLI rendering path,
