@@ -19,6 +19,10 @@ Three call sites consume this helper:
 
 from __future__ import annotations
 
+import shlex
+
+from rich.markup import escape as rich_escape
+
 from ouroboros.auto.state import AutoResumeCapability
 
 
@@ -49,6 +53,10 @@ def render_resume_lines(
     """
 
     def cmd(text: str) -> str:
+        # Markup-mode renders the command in Rich [bold]; the surrounding
+        # surface (CLI ``console.print``) will interpret markup tokens, so
+        # text that may contain Rich tags must already be escaped before it
+        # gets here. Non-markup mode is plain text and needs no escaping.
         return f"[bold]{text}[/]" if use_markup else text
 
     if capability is AutoResumeCapability.RESUME:
@@ -65,7 +73,14 @@ def render_resume_lines(
         ]
     # AutoResumeCapability.NONE
     if goal is not None and goal.strip():
-        return [f"Start fresh: {cmd(f'ooo auto "{goal}"')}"]
+        # Shell-quote the goal so the rendered suggestion is safe to copy
+        # into a shell even when the goal contains quotes, ``$``, ``\\`` or
+        # other meta-characters. When markup is enabled the goal must also
+        # be Rich-escaped so brackets are not interpreted as markup tokens.
+        quoted = shlex.quote(goal)
+        if use_markup:
+            quoted = rich_escape(quoted)
+        return [f"Start fresh: {cmd(f'ooo auto {quoted}')}"]
     return []
 
 
