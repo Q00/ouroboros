@@ -308,10 +308,16 @@ class AutoPipelineState:
             return AutoResumeCapability.NONE
 
         # Run phase. Persisted run handles let us short-circuit to
-        # COMPLETE; otherwise we need a Seed (artifact > path).
+        # COMPLETE; otherwise we need a Seed (artifact > path). When the
+        # pipeline already attempted to start a run but produced no durable
+        # handle, ``AutoPipeline.run()`` immediately re-blocks at
+        # ``run_starter`` to refuse a duplicate execution — so ``--resume``
+        # cannot make progress and the capability must be ``NONE``.
         if recoverable == AutoPhase.RUN:
             if any((self.job_id, self.execution_id, self.run_session_id)):
                 return AutoResumeCapability.RESUME
+            if self.run_start_attempted:
+                return AutoResumeCapability.NONE
             if self.seed_artifact:
                 return AutoResumeCapability.RESUME
             if self.seed_path:
