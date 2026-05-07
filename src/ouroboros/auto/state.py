@@ -33,6 +33,60 @@ class AutoPolicy(StrEnum):
 
 
 TERMINAL_PHASES = {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}
+
+
+class ResumeCapability(StrEnum):
+    """How truthful is ``ooo auto --resume`` for the current state.
+
+    The CLI used to suggest the same ``Resume:`` hint regardless of whether
+    the persisted state actually carries enough handle to continue. For
+    example, an ``interview.start`` timeout with ``interview_session_id=None``
+    means ``--resume`` will *retry* the start call from scratch, not continue
+    a half-completed interview. This enum lets the CLI distinguish the cases.
+    """
+
+    RESUME = "resume"  # has a continuation handle
+    RETRY = "retry"  # blocked but no handle — re-attempt the same step
+    UNAVAILABLE = "unavailable"  # complete or unrecoverable
+
+
+_RETRY_TOOL_NAMES = {
+    "interview.start",
+    "interview.prepare",
+    "auto_pipeline",
+}
+
+
+def resume_capability_for_state(state: AutoPipelineState) -> ResumeCapability:
+    """Classify how ``ooo auto --resume`` will behave for ``state``.
+
+    The capability is derived only from durable state so the CLI hint stays
+    consistent between ``--status`` and a freshly-finished run. Rules:
+
+    * ``COMPLETE`` → ``UNAVAILABLE`` — nothing to resume.
+    * Any persisted continuation handle (``interview_session_id``,
+      ``pending_question``, ``seed_artifact``/``seed_path``, ``execution_id``,
+      ``job_id``, ``run_session_id``) → ``RESUME``.
+    * Otherwise, blocked/failed (or in-progress without a handle) → ``RETRY``.
+    """
+    if state.phase == AutoPhase.COMPLETE:
+        return ResumeCapability.UNAVAILABLE
+    if (
+        state.interview_session_id
+        or state.pending_question
+        or state.seed_artifact
+        or state.seed_path
+        or state.execution_id
+        or state.job_id
+        or state.run_session_id
+    ):
+        return ResumeCapability.RESUME
+    if state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
+        if state.last_tool_name in _RETRY_TOOL_NAMES or state.last_tool_name is None:
+            return ResumeCapability.RETRY
+    return ResumeCapability.RETRY
+
+
 _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.CREATED: {AutoPhase.INTERVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
     AutoPhase.INTERVIEW: {

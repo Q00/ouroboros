@@ -20,7 +20,13 @@ from ouroboros.auto.adapters import (
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import (
+    AutoPhase,
+    AutoPipelineState,
+    AutoStore,
+    ResumeCapability,
+    resume_capability_for_state,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
@@ -277,7 +283,25 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Run handoff guidance: [yellow]{state.run_handoff_guidance}[/]")
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
-    console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
+    _print_resume_hint(state)
+
+
+def _print_resume_hint(state: AutoPipelineState) -> None:
+    capability = resume_capability_for_state(state)
+    if capability is ResumeCapability.UNAVAILABLE:
+        return
+    label = "Resume" if capability is ResumeCapability.RESUME else "Retry"
+    note = (
+        ""
+        if capability is ResumeCapability.RESUME
+        else (
+            " (no persisted interview/run handle yet — this re-attempts "
+            f"{state.last_tool_name or 'the last step'} from scratch)"
+        )
+    )
+    console.print(
+        f"{label}: [bold]ooo auto --resume {state.auto_session_id}[/]{note}"
+    )
 
 
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
@@ -315,6 +339,34 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
                 console.print(f"  - {item}")
     if result.blocker:
         console.print(f"Blocker: [yellow]{result.blocker}[/]")
+    _print_resume_hint_for_result(result)
+
+
+def _print_resume_hint_for_result(result: AutoPipelineResult) -> None:
+    if result.status == "complete":
+        return
+    has_handle = any(
+        (
+            result.interview_session_id,
+            result.pending_question,
+            result.seed_path,
+            result.execution_id,
+            result.job_id,
+            result.run_session_id,
+        )
+    )
+    if has_handle:
+        console.print(
+            f"Resume: [bold]ooo auto --resume {result.auto_session_id}[/]"
+        )
+        return
+    if result.status in {"blocked", "failed"}:
+        console.print(
+            f"Retry: [bold]ooo auto --resume {result.auto_session_id}[/]"
+            " (no persisted interview/run handle yet — this re-attempts "
+            "the last step from scratch)"
+        )
+        return
     console.print(f"Resume: [bold]ooo auto --resume {result.auto_session_id}[/]")
 
 

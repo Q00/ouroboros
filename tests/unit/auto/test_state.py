@@ -4,7 +4,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from pathlib import Path
+
+from ouroboros.auto.state import (
+    AutoPhase,
+    AutoPipelineState,
+    AutoStore,
+    ResumeCapability,
+    resume_capability_for_state,
+)
 
 
 def test_state_transition_and_stale_detection() -> None:
@@ -354,3 +362,69 @@ def test_recover_uses_transition_table_from_failed_state() -> None:
 
     assert state.phase is AutoPhase.REVIEW
     assert state.last_error is None
+
+
+def _interview_start_timeout_state() -> AutoPipelineState:
+    state = AutoPipelineState(goal="Analyze PRs", cwd="/repo")
+    state.transition(AutoPhase.INTERVIEW, "starting auto interview")
+    state.mark_blocked(
+        "interview.start timed out after 60s for auto_x", tool_name="interview.start"
+    )
+    return state
+
+
+def test_resume_capability_blocked_before_handle_is_retry() -> None:
+    state = _interview_start_timeout_state()
+    assert state.interview_session_id is None
+    assert resume_capability_for_state(state) is ResumeCapability.RETRY
+
+
+def test_resume_capability_with_persisted_interview_id_is_resume() -> None:
+    state = _interview_start_timeout_state()
+    state.interview_session_id = "interview_persisted"
+    assert resume_capability_for_state(state) is ResumeCapability.RESUME
+
+
+def test_resume_capability_with_pending_question_is_resume() -> None:
+    state = _interview_start_timeout_state()
+    state.pending_question = "Which acceptance criterion verifies success?"
+    assert resume_capability_for_state(state) is ResumeCapability.RESUME
+
+
+def test_resume_capability_complete_is_unavailable() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo")
+    state.transition(AutoPhase.INTERVIEW, "go")
+    state.transition(AutoPhase.SEED_GENERATION, "g")
+    state.transition(AutoPhase.REVIEW, "r")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "done")
+    assert resume_capability_for_state(state) is ResumeCapability.UNAVAILABLE
+
+
+def test_resume_capability_with_run_handle_is_resume() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/repo")
+    state.transition(AutoPhase.INTERVIEW, "i")
+    state.execution_id = "exec-1"
+    state.mark_blocked("something else", tool_name="run_starter")
+    assert resume_capability_for_state(state) is ResumeCapability.RESUME
+
+
+def test_resume_capability_loads_blocked_session_fixture() -> None:
+    """Sanitized fixture from the auto_78c98678de5d incident: blocked at
+    interview.start with no interview_session_id. The CLI must classify this
+    as RETRY, not RESUME, so users are not misled by the hint."""
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "auto"
+        / "auto_blocked_session.json"
+    )
+    assert fixture.exists()
+    import json
+
+    raw = json.loads(fixture.read_text(encoding="utf-8"))
+    state = AutoPipelineState.from_dict(raw)
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "interview.start"
+    assert state.interview_session_id is None
+    assert resume_capability_for_state(state) is ResumeCapability.RETRY
