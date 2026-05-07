@@ -20,6 +20,7 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.provenance import resolve_provenance
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
@@ -208,6 +209,7 @@ async def _run_auto(
     reconcile_source: str | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
+    incoming_provenance = resolve_provenance()
     attach_requested = any(
         isinstance(item, str) and item.strip()
         for item in (attach_execution, attach_job, attach_session)
@@ -278,6 +280,20 @@ async def _run_auto(
     state.runtime_backend = runtime
     state.opencode_mode = opencode_mode
     state.skip_run = skip_run
+    if incoming_provenance is not None:
+        if resume and state.provenance is None:
+            msg = (
+                "cannot attach provenance on resume of a session originally "
+                "invoked without provenance; re-attribution would mislead audit"
+            )
+            raise ValueError(msg)
+        if state.provenance is not None and state.provenance != incoming_provenance:
+            msg = (
+                "provenance conflict on resume: persisted state recorded "
+                f"{state.provenance} but caller supplied {incoming_provenance}"
+            )
+            raise ValueError(msg)
+        state.provenance = incoming_provenance
 
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     interview = InterviewHandler(
