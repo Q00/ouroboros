@@ -39,9 +39,7 @@ def test_grant_is_idempotent(tmp_path: Path) -> None:
     """Test 2: granting the same scope twice does not duplicate."""
     store = TrustStore(root=tmp_path)
     store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
-    record = store.grant(
-        plugin="X", version="0.1.0", scope="github:read", granted_by="u"
-    )
+    record = store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
     assert len(record.granted_scopes) == 1
 
 
@@ -70,9 +68,7 @@ def test_version_bump_invalidates_trust(tmp_path: Path) -> None:
     store.grant(plugin="X", version="0.1.0", scope="github:repo:read", granted_by="u")
 
     # Now bump to 0.2.0 and grant a different scope.
-    record = store.grant(
-        plugin="X", version="0.2.0", scope="github:read", granted_by="u"
-    )
+    record = store.grant(plugin="X", version="0.2.0", scope="github:read", granted_by="u")
     assert record.version == "0.2.0"
     # Previous github:repo:read grant is invalidated.
     assert not record.has_scope("github:repo:read")
@@ -150,9 +146,7 @@ def test_missing_returns_required_in_input_order(tmp_path: Path) -> None:
     """Test 9: TrustRecord.missing() returns missing required scopes in
     the input iteration order — useful for predictable error messages."""
     store = TrustStore(root=tmp_path)
-    record = store.grant(
-        plugin="X", version="0.1.0", scope="github:read", granted_by="u"
-    )
+    record = store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
     # `github:read` is granted; the others are missing.
     missing = record.missing(["github:pull_request:write", "github:read", "shell:execute"])
     assert missing == ["github:pull_request:write", "shell:execute"]
