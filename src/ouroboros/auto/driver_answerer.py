@@ -66,7 +66,7 @@ class DriverAutoAnswerer:
                 source=AutoAnswerSource.BLOCKER,
                 confidence=1.0,
                 blocker=AutoBlocker(reason=reason, question=question),
-        )
+            )
 
         if self.adapter is None:
             allowed_tools: list[str] | None = None if self.backend == "hermes" else []
@@ -156,7 +156,12 @@ def classify_interview_answer_risk(question: str, scaffold: AutoAnswer | None = 
             "destructive or financial/production choice",
         ),
         (
-            r"\b(add|expand|new acceptance|scope|trade[- ]?off|pricing|business|product decision)\b",
+            (
+                r"\b(?:expand|new acceptance|scope|trade[- ]?off|pricing|business|product decision)\b"
+                r"|\badd(?:ing)?\s+(?:(?:a|an|the)\s+)?"
+                r"(?:features?|capabilit(?:y|ies)|support|requirements?"
+                r"|epic|story(?:\s+points?)?|product\s+area|scope)\b"
+            ),
             "scope or product/business tradeoff",
         ),
         (
