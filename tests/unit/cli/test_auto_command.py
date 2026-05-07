@@ -349,9 +349,41 @@ def test_print_status_resume_capability_none_blocked_emits_start_fresh() -> None
 
     output = _capture_status(state)
 
-    assert 'Start fresh: ooo auto "Build a CLI"' in output
+    assert "Start fresh: ooo auto 'Build a CLI'" in output
     assert "Resume:" not in output
     assert "Retry:" not in output
+
+
+def test_print_status_start_fresh_shell_quotes_goal_with_metacharacters() -> None:
+    """Security: a goal with shell meta-characters must be safely quoted."""
+    state = AutoPipelineState(goal='evil"; rm -rf /; echo "', cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("internal guard fired", tool_name="auto_pipeline")
+
+    output = _capture_status(state)
+
+    # The rendered command, when tokenised by ``shlex.split``, must recover
+    # the original goal exactly — i.e. the payload cannot break out of the
+    # shell quoting and become its own argument.
+    import shlex
+
+    rendered = next(line for line in output.splitlines() if "Start fresh" in line)
+    cmd = rendered.split("Start fresh:", 1)[1].strip()
+    tokens = shlex.split(cmd)
+    assert tokens == ["ooo", "auto", 'evil"; rm -rf /; echo "']
+
+
+def test_print_status_start_fresh_escapes_rich_markup_in_goal() -> None:
+    """Security: a goal with Rich markup tokens must not render as styled."""
+    state = AutoPipelineState(goal="[red]ALERT[/]", cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("internal guard fired", tool_name="auto_pipeline")
+
+    output = _capture_status(state)
+
+    # The literal markup must survive into the rendered output (since it was
+    # escaped before Rich could interpret it).
+    assert "[red]ALERT[/]" in output
 
 
 def test_print_status_resume_capability_none_complete_emits_no_resume_line() -> None:
