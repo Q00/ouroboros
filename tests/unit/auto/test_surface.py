@@ -225,6 +225,25 @@ async def test_handler_interview_backend_rejects_mcp_error_payloads() -> None:
         await HandlerInterviewBackend(_FakeErrorInterviewHandler(), cwd=".").start("goal", cwd=".")
 
 
+@pytest.mark.asyncio
+async def test_handler_interview_backend_does_not_fabricate_partial_evidence() -> None:
+    """When the handler does NOT include ``meta.session_id`` we must NOT raise
+    ``PartialInterviewStartError`` even if the caller pre-allocated an id.
+
+    Regression for the Q00/ouroboros#723 review: synthesising persistence
+    evidence from caller input lets auto state record an id the handler
+    never confirmed it wrote to disk.
+    """
+    from ouroboros.auto.adapters import HandlerError, PartialInterviewStartError
+
+    backend = HandlerInterviewBackend(_FakeErrorInterviewHandler(), cwd=".")
+    with pytest.raises(HandlerError) as excinfo:
+        await backend.start("goal", cwd=".", interview_id="interview_caller_supplied")
+    assert not isinstance(excinfo.value, PartialInterviewStartError), (
+        "adapter must require explicit meta.session_id, not synthesise from interview_id"
+    )
+
+
 def test_auto_handler_uses_synchronous_authoring_mode_for_opencode_plugin() -> None:
     handler = AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
 

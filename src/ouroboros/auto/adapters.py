@@ -60,14 +60,16 @@ class HandlerInterviewBackend(InterviewBackend):
             arguments["interview_id"] = interview_id
         outcome = await self.handler.handle(arguments)
         # Recoverable error path: handler persisted state but failed to
-        # produce the first question.  Surface the session_id so the auto
-        # driver can save it on the AutoPipelineState before reporting
-        # blocked.
+        # produce the first question.  ONLY trust an explicit
+        # ``meta.session_id`` from the handler — never fall back to the
+        # caller-supplied ``interview_id``, otherwise auto state would
+        # record persistence evidence that the handler never produced
+        # (Q00/ouroboros#723 review).
         if not outcome.is_err:
             value = outcome.value
             if value.is_error:
                 meta = value.meta or {}
-                session_id = _optional_str(meta.get("session_id")) or interview_id
+                session_id = _optional_str(meta.get("session_id"))
                 if session_id:
                     text = (
                         value.content[0].text
