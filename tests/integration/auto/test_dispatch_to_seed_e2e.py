@@ -49,7 +49,6 @@ from ouroboros.core.seed import (
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -78,9 +77,7 @@ def _build_a_grade_seed(goal: str) -> Seed:
     return Seed(
         goal=goal,
         constraints=("Use the Python standard library only",),
-        acceptance_criteria=(
-            "`hello` prints exactly `hello\\n` to stdout and exits 0",
-        ),
+        acceptance_criteria=("`hello` prints exactly `hello\\n` to stdout and exits 0",),
         ontology_schema=OntologySchema(
             name="HelloCli",
             description="Tiny hello CLI ontology",
@@ -227,9 +224,7 @@ async def test_pre_supplied_goal_reaches_seed_without_answerer(tmp_path: Path) -
         )
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
-        raise AssertionError(
-            "fully specified goal should not require any auto answerer turns"
-        )
+        raise AssertionError("fully specified goal should not require any auto answerer turns")
 
     seed_generator_calls: list[str] = []
 
@@ -399,9 +394,7 @@ async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: 
     cwd.mkdir()
 
     dispatcher = AsyncMock(
-        side_effect=LookupError(
-            "No local handler registered for tool: ouroboros_auto"
-        )
+        side_effect=LookupError("No local handler registered for tool: ouroboros_auto")
     )
     runtime = CodexCliRuntime(
         cli_path="codex",
@@ -416,10 +409,7 @@ async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: 
             "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
         ) as mock_exec,
     ):
-        messages = [
-            message
-            async for message in runtime.execute_task("ooo auto Build a hello CLI")
-        ]
+        messages = [message async for message in runtime.execute_task("ooo auto Build a hello CLI")]
 
     dispatcher.assert_awaited_once()
     # fail-closed unavailable dispatch must not spawn the codex subprocess
@@ -442,6 +432,5 @@ async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: 
     # No auto session state must be created on this fail-closed path.
     after = sorted(auto_store_root.glob("auto_*.json"))
     assert after == [], (
-        f"unavailable-dispatch must not create persisted auto session state; "
-        f"found: {after!r}"
+        f"unavailable-dispatch must not create persisted auto session state; found: {after!r}"
     )
