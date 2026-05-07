@@ -1633,6 +1633,47 @@ async def test_auto_pipeline_does_not_overwrite_explicit_seed_origin_on_resume(t
 
 
 @pytest.mark.asyncio
+async def test_auto_pipeline_resets_seed_origin_when_invalid_artifact_is_wiped(tmp_path) -> None:
+    """A discarded malformed seed_artifact must reset seed_origin to ``none``.
+
+    Otherwise the public CLI/MCP surfaces would still report the prior
+    provenance (e.g. ``auto_pipeline``) for a session that no longer
+    holds any Seed at all, leaking incorrect status metadata.
+    """
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.auto.state import AutoPipelineState, SeedOrigin
+
+    class _StubInterviewDriver:
+        async def run(self, _state, _ledger):  # noqa: ARG002
+            raise AssertionError("interview driver must not run on the malformed-artifact path")
+
+    async def fake_seed_generator(_session_id: str):  # noqa: ARG001
+        raise AssertionError("seed generator must not run on the malformed-artifact path")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    # Simulate a corrupt persisted Seed: ``Seed.from_dict`` will reject
+    # this payload at the start of ``run``. The store is left ``None``
+    # so the pipeline does not try to persist the malformed value back
+    # through ``AutoStore.save``'s strict validator.
+    state.seed_artifact = {"not": "a real seed"}
+    state.seed_origin = SeedOrigin.AUTO_PIPELINE
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        fake_seed_generator,
+        store=None,
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert state.seed_artifact == {}
+    assert state.seed_origin is SeedOrigin.NONE
+    assert result.seed_origin == "none"
+    assert result.status in {"failed", "blocked"}
+
+
+@pytest.mark.asyncio
 async def test_auto_pipeline_marks_seed_origin_after_seed_generation(tmp_path) -> None:
     from ouroboros.auto.ledger import SeedDraftLedger
     from ouroboros.auto.pipeline import AutoPipeline

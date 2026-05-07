@@ -579,6 +579,11 @@ class AutoPipeline:
 
 def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:
     state.seed_artifact = {}
+    # Keep seed_origin consistent with the now-empty seed_artifact: the
+    # session no longer has a persisted Seed of any provenance, so the
+    # publicly surfaced "auto_pipeline" / "external_authoring" claim
+    # would otherwise become a misleading orphan attribution.
+    state.seed_origin = SeedOrigin.NONE
     if state.phase in {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}:
         now = utc_now_iso()
         state.phase = AutoPhase.FAILED
