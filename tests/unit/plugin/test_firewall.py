@@ -144,6 +144,88 @@ def test_happy_path_emits_invoked_then_permission_then_completed(tmp_path: Path)
     assert "stdout_sha256" in events[-1]["provenance"]
 
 
+def test_subprocess_runs_in_resolved_plugin_cwd(tmp_path: Path) -> None:
+    """The subprocess runs with cwd=resolved manifest.source.path so
+    relative entrypoints (`./run.sh`, `python -m foo`) work.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    7197380: previously `invoke_plugin()` ran the entrypoint in the
+    current process cwd, so a `local_path` / `plugin_home` plugin with
+    a relative entrypoint would emit `plugin.invoked` and then fail
+    `entrypoint not found` even when correctly installed. The firewall
+    now passes `cwd=` derived from `manifest.source.path` (with `~`
+    expansion); first-party plugins still inherit the parent cwd.
+    """
+    plugin_dir = tmp_path / "plugins" / "github-pr-ops"
+    plugin_dir.mkdir(parents=True)
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["source"]["path"] = str(plugin_dir)
+    program = _make_program(tmp_path / "manifest", payload)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    captured: dict[str, object] = {}
+
+    def _capturing_runner(argv, *args, **kwargs):
+        captured["argv"] = argv
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="ok", stderr="")
+
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=[].append,
+        correlation_id="corr-cwd",
+        subprocess_runner=_capturing_runner,
+    )
+    assert result.status == "success"
+    # The cwd argument must point to the manifest's resolved source
+    # path — exactly what the bot's reproducer cared about.
+    assert captured["cwd"] == str(plugin_dir.resolve())
+
+
+def test_first_party_subprocess_has_no_cwd_override(tmp_path: Path) -> None:
+    """First-party plugins keep cwd=None (parent ouroboros runtime cwd)."""
+    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
+    fp["name"] = "ooo-auto"
+    fp["source"] = {"type": "first_party"}
+    fp["permissions"] = []
+    fp["commands"] = [
+        {
+            "namespace": "auto",
+            "name": "run",
+            "summary": "first-party command",
+            "usage": "ooo auto",
+            "risk": "write",
+        }
+    ]
+    program = _make_program(tmp_path / "fp-manifest", fp)
+
+    captured: dict[str, object] = {}
+
+    def _capturing_runner(argv, *args, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="ok", stderr="")
+
+    result = invoke_plugin(
+        program,
+        command_name="run",
+        argv=[],
+        trust_record=None,  # first-party skips trust check
+        event_sink=[].append,
+        correlation_id="corr-fp-cwd",
+        subprocess_runner=_capturing_runner,
+    )
+    assert result.status == "success"
+    assert captured["cwd"] is None
+
+
 def test_default_confirm_fails_closed_for_destructive_command(tmp_path: Path) -> None:
     """The default `confirm` parameter denies, so a caller that forgot to
     wire a prompt cannot silently execute a destructive command.

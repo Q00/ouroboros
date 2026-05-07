@@ -160,6 +160,31 @@ def _scope_risk_index(manifest: PluginManifest) -> dict[str, str]:
     return {p.scope: p.risk for p in manifest.permissions}
 
 
+def _resolve_plugin_cwd(manifest: PluginManifest) -> str | None:
+    """Compute the working directory the entrypoint subprocess should run in.
+
+    For `local_path` and `plugin_home` sources, the manifest is now
+    required to declare `source.path` (per the schema's conditional
+    required block) — entrypoints typically reference their own
+    installation tree (`./run.sh`, `python -m foo`), so the firewall
+    runs the subprocess with cwd set to the resolved plugin directory.
+    `~`-style expansion is handled here so a manifest like
+    `{"path": "~/.ouroboros/plugins/x"}` works even when the calling
+    process didn't pre-expand it. First-party plugins keep cwd=None
+    (current process cwd) because they are launched from the parent
+    ouroboros runtime and have no installation tree of their own.
+    """
+    if manifest.source.type == "first_party":
+        return None
+    raw = manifest.source.path
+    if not raw:  # pragma: no cover — schema now rejects this at load time
+        return None
+    from os.path import expanduser
+    from pathlib import Path
+
+    return str(Path(expanduser(raw)).resolve())
+
+
 def _deny_confirmation(_msg: str) -> bool:
     """Fail-closed default for `invoke_plugin(confirm=...)`.
 
@@ -351,6 +376,13 @@ def invoke_plugin(
     # 5. Run entrypoint out-of-process.
     cmd_template = manifest.entrypoint.command
     cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
+    # Run from the plugin's installation directory so relative
+    # entrypoints (e.g. "./run.sh") resolve against the source path
+    # the manifest declares. The schema now requires `path` for the
+    # non-first-party source types, so this is well-defined for them;
+    # first-party plugins keep the current process cwd because they
+    # are launched from the parent ouroboros runtime.
+    cwd = _resolve_plugin_cwd(manifest)
     runner = subprocess_runner or subprocess.run
     try:
         completed = runner(
@@ -358,6 +390,7 @@ def invoke_plugin(
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd,
         )
     except OSError as exc:
         # Cover the full launch-failure surface (FileNotFoundError,
