@@ -359,9 +359,25 @@ aliasing: a plugin named `github-pr-ops` is invoked as
 `ooo github-pr-ops <command> [args...]`, where `<command>` is one of
 the entries declared in the manifest's `commands` array (each `commands`
 entry's own `name` is the subcommand). Aliases and short names are
-explicitly out of scope for v0; if two installed plugins declare the
-same `name`, `ooo plugin install` MUST refuse the second one with a
-collision error.
+explicitly out of scope for v0.
+
+`ooo plugin install` MUST refuse a new install whose manifest `name`
+collides with **any** name already occupying the top-level `ooo`
+command namespace, not just other installed third-party plugins. The
+reserved set at the moment of the check is the union of:
+
+- every first-party UserLevel program currently registered at boot
+  (`auto`, `run`, `pm`, `plugin` itself, and any other first-party
+  program shipped in the same release artifact);
+- every built-in `ooo` subcommand or top-level option that is not a
+  first-party program (e.g. `help`, `version`, `--version`); and
+- every other third-party plugin currently installed.
+
+A name collision MUST produce an explicit error naming the conflicting
+occupant — never silently shadow it. This prevents a third-party plugin
+from hijacking dispatch for a name like `auto` or `run`. Renaming on
+the plugin side (manifest `name` change ⇒ new `artifact_digest` ⇒ fresh
+trust subject) is the only path to install such a plugin.
 
 **Trust identity is NOT the manifest `name`.** Manifest `name` controls
 the CLI namespace and the install-time uniqueness check; it does **not**
@@ -390,9 +406,9 @@ covers all executable bytes the plugin will run:
 
 | `source.type` | `artifact_digest` input | Re-verification rule |
 |---|---|---|
-| `plugin_home` | sha256 of the canonical-ordered tarball (`tar --sort=name --owner=0 --group=0 --mtime=@0 --format=ustar`) of the installed plugin subtree, including manifest, entrypoint, and any in-bundle assets | Recomputed only at `install` / `add` time. The installed copy in `~/.ouroboros/plugins/<...>/` is treated as the trusted snapshot; subsequent invocations re-verify the snapshot against the recorded digest |
-| `local_path` | the same canonical-ordered subtree hash, computed against the path on disk **at every invocation** | Because the path is mutable in place, the firewall MUST recompute the digest before each invocation. If the recomputed digest does not match the trusted record, the firewall MUST emit `plugin.failed` with `result.status="trust_subject_changed"` and refuse to run; the user must re-issue `ooo plugin trust ...` to re-confirm the new artifact |
-| `first_party` | sha256 of the entrypoint file (or the canonical subtree if the program ships as a directory) at boot | Rolls with each core release; restart picks up the new digest and the boot-time grant attaches to the new triple |
+| `plugin_home` | sha256 of the canonical-ordered tarball (`tar --sort=name --owner=0 --group=0 --mtime=@0 --format=ustar`) of the installed plugin subtree under `~/.ouroboros/plugins/<...>/`, including manifest, entrypoint, and any in-bundle assets | Recorded at `install` / `add` time AND **recomputed before every invocation** against the on-disk subtree. If the recomputed digest does not match the trusted record (e.g. a user or another process edited the installed bytes), the firewall MUST emit `plugin.failed` with `result.status="trust_subject_changed"` and refuse to run; the user must re-issue `ooo plugin trust ...` to re-confirm the new artifact. There is no "recompute only at install" shortcut |
+| `local_path` | the same canonical-ordered subtree hash, computed against the absolute path on disk | Same per-invocation re-verification rule as `plugin_home`. The path is mutable in place, so the firewall MUST recompute the digest before each invocation and fail closed on drift, as above |
+| `first_party` | sha256 of the entrypoint file (or the canonical subtree if the program ships as a directory) at boot | Rolls with each core release; restart picks up the new digest and the boot-time grant attaches to the new triple. Per-invocation re-verification is not required because the core release artifact is the unit of trust here — tampering with it is out of scope for the plugin firewall |
 
 Manifest-only binding is **insufficient** and explicitly rejected: an
 attacker (or a careless edit) that swaps the entrypoint while leaving
