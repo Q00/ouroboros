@@ -741,6 +741,30 @@ _PRODUCT_SEMANTICS_REGULATED_VERBS_RE = re.compile(
     r"view|views|viewing|viewed|"
     r"access|accesses|accessing|accessed)\b"
 )
+# Compliance-policy verbs in *active* form only (base / -s / -ing).
+# Past-participle forms (``stored``, ``encrypted``, ``retained``, …) are
+# deliberately excluded because they routinely act as adjectives modifying a
+# regulated noun (``view stored PII``, ``display encrypted HIPAA files``) — the
+# main verb of those sentences is the product-semantics one, not a request for
+# a compliance-policy decision.
+#
+# When an active-form compliance verb appears, the question is asking the
+# pipeline to decide regulated-data handling (``How should the system store …?``,
+# ``Should we retain and export PII records?``) and must remain blocked even if
+# the same sentence also mentions a product-semantics verb.
+_COMPLIANCE_POLICY_ACTIVE_VERBS_RE = re.compile(
+    r"\b(store|stores|storing|"
+    r"handle|handles|handling|"
+    r"retain|retains|retaining|"
+    r"collect|collects|collecting|"
+    r"encrypt|encrypts|encrypting|"
+    r"process|processes|processing|"
+    r"transmit|transmits|transmitting|"
+    r"disclose|discloses|disclosing|"
+    r"share|shares|sharing|"
+    r"manage|manages|managing|"
+    r"govern|governs|governing)\b"
+)
 # Broad product-question indicator: contains a modal/question word.  Looser than
 # ``_is_product_behavior_question`` so that phrasings like "Should users be able
 # to download …" are captured even when ``download`` is not in that helper's verb list.
@@ -759,24 +783,27 @@ def _is_safe_product_regulated_question(lowered: str) -> bool:
     Strategy: pass through when the question
       1. mentions a regulated noun (PII/GDPR/HIPAA/SOX/PCI-DSS),
       2. contains a product-question modal (should/can/will/must/do/does/is/are),
-      3. uses a product-semantics verb (export, download, display, show, view …).
+      3. does NOT use an *active*-form compliance-policy verb (``store``,
+         ``stores``, ``storing``, ``handle``, ``encrypt``, ``share``, …) — those
+         signal a regulated-data handling decision and must stay blocked even
+         when mixed with product-semantics verbs (``How should the system store
+         and display HIPAA files?``, ``Should we retain and export PII
+         records?``),
+      4. uses a product-semantics verb (export, download, display, show, view …).
 
-    Compliance-policy phrasings (``How should the system handle GDPR data
-    retention?``, ``What PII should the system collect?``) do not contain a
-    product-semantics verb, so they fail (3) and remain blocked.
-
-    The previous implementation also rejected any sentence containing a
-    compliance-policy verb anywhere in the text. That over-blocked legitimate
-    product-behavior questions where the compliance verb appeared as a
-    past-participle adjective (``view stored PII fields``, ``display encrypted
-    HIPAA files``). The product-semantics verb is the main action of the
-    sentence; compliance verbs in adjectival position do not turn the question
-    into a compliance-policy decision. Filtering by the presence of a
-    product-semantics verb is sufficient and avoids that false-positive.
+    Past-participle compliance forms (``stored``, ``encrypted``, ``retained``,
+    …) are intentionally NOT in the negative list: in product-behavior questions
+    they routinely act as adjectives modifying a regulated noun (``view stored
+    PII``, ``display encrypted HIPAA files``), and the sentence's main action is
+    the product-semantics verb. Pure-compliance phrasings using past-participle
+    forms (``Should PII be stored …?``) lack a product-semantics verb and are
+    rejected by step (4) instead.
     """
     if not _REGULATED_NOUNS_RE.search(lowered):
         return False
     if not _PRODUCT_QUESTION_MODAL_RE.search(lowered):
+        return False
+    if _COMPLIANCE_POLICY_ACTIVE_VERBS_RE.search(lowered):
         return False
     return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))
 

@@ -1253,6 +1253,47 @@ def test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs
         assert answer.source != AutoAnswerSource.BLOCKER, question
 
 
+def test_auto_answerer_blocks_mixed_intent_regulated_questions() -> None:
+    """Mixed-intent questions with both product-semantics and active-form
+    compliance verbs must remain blocked.
+
+    Active-form compliance verbs (``store`` / ``stores`` / ``storing``,
+    ``retain`` / ``retains`` / ``retaining``, ``encrypt``, ``handle``, …)
+    indicate that the question is asking the pipeline to decide regulated-data
+    handling, even when it also mentions a product-semantics verb. The
+    allowlist must not unblock those.
+
+    Past-participle forms (``stored``, ``encrypted``) acting as adjectives are
+    a different case and remain allowed (covered by
+    ``test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs``).
+
+    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:750``.
+    """
+    answerer = AutoAnswerer()
+    blocked_questions = (
+        ("How should the system store and display HIPAA files?", "regulated data handling"),
+        ("Should we retain and export PII records?", "regulated personal data handling"),
+        (
+            "Should the platform encrypt and render GDPR exports?",
+            "regulated data handling",
+        ),
+        (
+            "Can the system share and display SOX audit data with auditors?",
+            "regulated data handling",
+        ),
+        (
+            "Should we collect and show new PII fields on the dashboard?",
+            "regulated personal data handling",
+        ),
+    )
+
+    for question, reason in blocked_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
+        assert answer.source == AutoAnswerSource.BLOCKER, question
+        assert answer.blocker is not None, question
+        assert answer.blocker.reason == reason, question
+
+
 def test_auto_answerer_still_blocks_compliance_policy_regulated_questions() -> None:
     """Compliance-policy questions must still be blocked after the product-semantics allowlist.
 
