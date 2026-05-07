@@ -106,8 +106,11 @@ def test_auto_skill_frontmatter_dispatches_to_mcp_tool() -> None:
     assert 'goal: "$goal"' in content
     assert 'resume: "$resume"' in content
     assert 'skip_run: "$skip_run"' in content
+    assert 'driver: "$driver"' in content
+    assert 'brake: "$brake"' in content
     assert 'max_interview_rounds: "$max_interview_rounds"' in content
     assert "ooo auto --resume" in content
+    assert "--driver hermes --brake on" in content
     assert "--show-ledger" in content
 
 

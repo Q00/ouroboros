@@ -155,6 +155,36 @@ def test_answer_text_risk_detects_env_var_and_dsn_secret_shapes() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How should users add a task?",
+        "What should the add command do on duplicate input?",
+        "Should the form let admins add a row?",
+        "How do we add an item to the cart?",
+    ],
+)
+def test_routine_crud_add_questions_are_not_scope_risky(question: str) -> None:
+    assert classify_interview_answer_risk(question, scaffold=None) is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Should we add a feature for offline mode?",
+        "Do we add capability for keyboard shortcuts?",
+        "Is it worth adding an epic for an undo workflow?",
+        "Should we add support for legacy clients?",
+        "Should we add features for power users?",
+    ],
+)
+def test_scope_add_questions_are_still_risky(question: str) -> None:
+    assert (
+        classify_interview_answer_risk(question, scaffold=None)
+        == "scope or product/business tradeoff"
+    )
+
+
 @pytest.mark.asyncio
 async def test_driver_answerer_brake_off_answers_risky_question() -> None:
     ledger = SeedDraftLedger.from_goal("Deploy a service")
@@ -183,16 +213,35 @@ async def test_driver_answerer_brake_off_answers_risky_question() -> None:
 @pytest.mark.asyncio
 async def test_driver_answerer_preserves_scaffold_ledger_values() -> None:
     ledger = SeedDraftLedger.from_goal("Build a CLI")
+    question = "Which runtime and framework should be used?"
     adapter = FakeAdapter("Use Typer and verify with pytest.")
     answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
+    scaffold = answerer.baseline.answer(question, ledger)
 
-    answer = await answerer.answer("Which runtime and framework should be used?", ledger)
+    answer = await answerer.answer(question, ledger)
 
     assert answer.ledger_updates
     assert all(entry.value != answer.text for _section, entry in answer.ledger_updates)
-    assert {entry.source.value for _section, entry in answer.ledger_updates} == {"inference"}
+    assert [(section, entry.key, entry.source) for section, entry in answer.ledger_updates] == [
+        (section, entry.key, entry.source) for section, entry in scaffold.ledger_updates
+    ]
     assert any("driver:codex" in entry.evidence for _section, entry in answer.ledger_updates)
     assert any("Driver answer was:" in entry.rationale for _section, entry in answer.ledger_updates)
+
+
+@pytest.mark.asyncio
+async def test_driver_answerer_preserves_scaffold_ledger_source_categories() -> None:
+    from ouroboros.auto.ledger import LedgerSource
+
+    ledger = SeedDraftLedger.from_goal("Build a local CLI")
+    adapter = FakeAdapter("Keep the MVP local-only.")
+    answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
+
+    answer = await answerer.answer("What should be out of scope?", ledger)
+
+    non_goals = [entry for section, entry in answer.ledger_updates if section == "non_goals"]
+    assert non_goals
+    assert non_goals[0].source == LedgerSource.NON_GOAL
 
 
 @pytest.mark.asyncio

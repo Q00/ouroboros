@@ -205,7 +205,12 @@ def classify_interview_answer_risk(question: str, scaffold: AutoAnswer | None = 
             "destructive or financial/production choice",
         ),
         (
-            r"\b(add|expand|new acceptance|scope|trade[- ]?off|pricing|business|product decision)\b",
+            (
+                r"\b(?:expand|new acceptance|scope|trade[- ]?off|pricing|business|product decision)\b"
+                r"|\badd(?:ing)?\s+(?:(?:a|an|the)\s+)?"
+                r"(?:features?|capabilit(?:y|ies)|support|requirements?"
+                r"|epic|story(?:\s+points?)?|product\s+area|scope)\b"
+            ),
             "scope or product/business tradeoff",
         ),
         (
@@ -367,7 +372,7 @@ def _ledger_updates_for(
             LedgerEntry(
                 key=entry.key,
                 value=entry.value,
-                source=LedgerSource.INFERENCE,
+                source=entry.source,
                 confidence=min(entry.confidence, 0.72),
                 status=entry.status,
                 reversible=entry.reversible,

@@ -9,6 +9,8 @@ mcp_args:
   max_interview_rounds: "$max_interview_rounds"
   max_repair_rounds: "$max_repair_rounds"
   skip_run: "$skip_run"
+  driver: "$driver"
+  brake: "$brake"
 ---
 
 # /ouroboros:auto
@@ -30,6 +32,7 @@ is unavailable. A manual fallback is not an `ooo auto` run.
 ooo auto "Build a local-first habit tracker CLI"
 ooo auto --resume auto_abc123
 ooo auto "Build a local-first habit tracker CLI" --skip-run
+ooo auto "Build a local-first habit tracker CLI" --driver hermes --brake on
 /ouroboros:auto "Build a local-first habit tracker CLI"
 ```
 
@@ -42,3 +45,10 @@ ooo auto "Build a local-first habit tracker CLI" --skip-run
 5. Starts execution only after A-grade.
 
 The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.
+
+When invoked through the interactive CLI without `--driver` or a configured
+default driver, `ooo auto` asks whether to use a selected interview driver if
+one of the supported driver CLIs is installed. Declining that prompt, or having
+no installed driver CLI, keeps the deterministic auto answerer. Use
+`--driver <backend>` to select a driver explicitly; use `--brake on|off` to
+control whether risky driver answers block for approval.
