@@ -1,14 +1,23 @@
-"""Decorate auto-pipeline blocker messages with phase + backend attribution.
+"""Capture authoring-backend attribution for auto-pipeline blockers.
 
 Issue #690 surfaced a class of incidents where a goal like
 "open and merge a PR" hit ``interview.start timed out after 60s`` and
 the user could not tell whether the timeout came from the in-process
 authoring path or from the runtime adapter behind ``--runtime <X>``.
 
-This helper appends a single
-``[phase=<step>, authoring_backend=<resolved>]`` suffix to a blocker
-message. It does not change timeout values, retry counts, or resume
-semantics — those belong to the dedicated tickets (#686, #688).
+This module records the resolved authoring backend on
+``AutoPipelineState`` as **structured metadata**, leaving the
+user-facing blocker message text unchanged. Surfaces (CLI ``--status``,
+MCP responses, log sinks) that want to render the attribution can read
+``state.last_authoring_backend`` and format it appropriately for their
+audience. This module deliberately does not append bracketed tokens to
+the blocker message itself — that exposes internal execution topology
+to users who only need to know *which phase failed and what to try
+next*.
+
+The phase/tool dimension is already captured by
+``state.last_tool_name`` (set by ``mark_blocked``/``mark_failed``); this
+module only adds the backend dimension.
 """
 
 from __future__ import annotations
@@ -29,7 +38,7 @@ def authoring_backend_label(state: AutoPipelineState) -> str:
     outside an active OpenCode bridge plugin session. Authoring is
     therefore always reported as in-process here — anything else would
     misrepresent what the handlers actually got and mislabel the very
-    incidents this attribution helper is meant to clarify.
+    incidents this attribution module is meant to clarify.
 
     The MCP-handler ``_subagent`` dispatch path still exists, but it is
     only reachable when callers invoke the handlers directly from inside
@@ -39,18 +48,15 @@ def authoring_backend_label(state: AutoPipelineState) -> str:
     return f"in-process ({backend_name})"
 
 
-def label_blocker(state: AutoPipelineState, message: str | None, *, phase: str) -> str:
-    """Return ``message`` with a phase + authoring-backend suffix.
+def record_authoring_backend(state: AutoPipelineState) -> None:
+    """Persist the resolved authoring backend on ``state`` as metadata.
 
-    Appends at most once: if the message already contains ``[phase=``
-    the original is returned unchanged so nested call sites do not
-    double-stamp the suffix.
+    Call this *before* ``mark_blocked`` / ``mark_failed`` at every
+    authoring-side blocker site. The recorded value lives in
+    ``state.last_authoring_backend`` and is intended to be read by
+    diagnostic surfaces, not concatenated into user-visible messages.
     """
-    text = message or ""
-    if "[phase=" in text:
-        return text
-    suffix = f" [phase={phase}, authoring_backend={authoring_backend_label(state)}]"
-    return text + suffix
+    state.last_authoring_backend = authoring_backend_label(state)
 
 
-__all__ = ["authoring_backend_label", "label_blocker"]
+__all__ = ["authoring_backend_label", "record_authoring_backend"]

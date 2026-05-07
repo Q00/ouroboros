@@ -1,10 +1,13 @@
-"""Tests for the auto-pipeline blocker attribution helper (#690)."""
+"""Tests for the auto-pipeline authoring-backend attribution module (#690)."""
 
 from __future__ import annotations
 
 import pytest
 
-from ouroboros.auto.blocker_attribution import authoring_backend_label, label_blocker
+from ouroboros.auto.blocker_attribution import (
+    authoring_backend_label,
+    record_authoring_backend,
+)
 from ouroboros.auto.state import AutoPipelineState
 
 
@@ -42,39 +45,73 @@ def test_authoring_backend_label_truth_table(
     assert authoring_backend_label(_state(runtime, mode)) == expected
 
 
-def test_label_blocker_appends_phase_and_backend() -> None:
+def test_record_authoring_backend_persists_label_on_state() -> None:
+    """Helper writes the resolved backend label onto the state field."""
     state = _state("codex")
-    out = label_blocker(state, "interview.start timed out after 60s", phase="interview.start")
-    assert out == (
-        "interview.start timed out after 60s "
-        "[phase=interview.start, authoring_backend=in-process (codex)]"
-    )
+    assert state.last_authoring_backend is None
+
+    record_authoring_backend(state)
+
+    assert state.last_authoring_backend == "in-process (codex)"
 
 
-def test_label_blocker_is_idempotent() -> None:
+def test_record_authoring_backend_does_not_touch_other_fields() -> None:
+    """Helper only sets last_authoring_backend — never the message text."""
     state = _state("codex")
-    once = label_blocker(state, "boom", phase="interview.start")
-    twice = label_blocker(state, once, phase="interview.start")
-    assert once == twice
+    state.last_error = "interview.start timed out after 60s for auto_xxx"
+    state.last_tool_name = "interview.start"
+
+    record_authoring_backend(state)
+
+    assert state.last_error == "interview.start timed out after 60s for auto_xxx"
+    assert state.last_tool_name == "interview.start"
+    assert state.last_authoring_backend == "in-process (codex)"
 
 
-def test_label_blocker_handles_none_message() -> None:
-    state = _state("codex")
-    out = label_blocker(state, None, phase="seed_generator")
-    assert out.startswith(" [phase=seed_generator")
-    assert "in-process (codex)" in out
-
-
-def test_label_blocker_reports_in_process_even_for_persisted_opencode_plugin() -> None:
-    """Persisted plugin in state must still print in-process for the auto label.
+def test_record_authoring_backend_marks_persisted_opencode_plugin_as_in_process() -> None:
+    """Persisted plugin in state must still record in-process for authoring.
 
     Regression guard for #690 review feedback: both auto entry points
-    demote plugin → subprocess for authoring handlers, so the blocker
-    suffix must reflect the effective handler config (in-process), not
-    the raw persisted opencode_mode. Otherwise the very incidents this
-    suffix is meant to diagnose would carry a wrong attribution.
+    demote plugin → subprocess for authoring handlers, so the recorded
+    metadata must reflect the effective handler config (in-process),
+    not the raw persisted opencode_mode.
     """
     state = _state("opencode", "plugin")
-    out = label_blocker(state, "interview.start timed out", phase="interview.start")
-    assert "in-process (opencode)" in out
-    assert "dispatched" not in out
+    record_authoring_backend(state)
+    assert state.last_authoring_backend == "in-process (opencode)"
+    assert "dispatched" not in state.last_authoring_backend
+
+
+def test_authoring_backend_state_field_round_trips_through_persistence(tmp_path) -> None:
+    """The new metadata field survives ``AutoStore`` save/load."""
+    from ouroboros.auto.state import AutoStore
+
+    state = AutoPipelineState(goal="round trip", cwd=str(tmp_path))
+    state.runtime_backend = "codex"
+    record_authoring_backend(state)
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    reloaded = store.load(state.auto_session_id)
+    assert reloaded.last_authoring_backend == "in-process (codex)"
+
+
+def test_legacy_persisted_state_loads_with_default_attribution(tmp_path) -> None:
+    """Older auto sessions saved before this field exists must still load."""
+    import json
+
+    from ouroboros.auto.state import AutoStore
+
+    state = AutoPipelineState(goal="legacy", cwd=str(tmp_path))
+    state.runtime_backend = "codex"
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    # Simulate an older persisted file by stripping the new field.
+    session_path = tmp_path / f"{state.auto_session_id}.json"
+    payload = json.loads(session_path.read_text())
+    payload.pop("last_authoring_backend", None)
+    session_path.write_text(json.dumps(payload))
+
+    reloaded = store.load(state.auto_session_id)
+    assert reloaded.last_authoring_backend is None
