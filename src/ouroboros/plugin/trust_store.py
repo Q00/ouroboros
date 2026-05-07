@@ -213,17 +213,21 @@ class TrustStore:
             if not path.is_file():
                 return False
             path.unlink()
-            # The grant lock-file lives next to trust.json; clear it too so
-            # the per-plugin directory can collapse cleanly. Note: the
-            # lock fd is still held above us by `_grant_lock`'s context
-            # manager, so the unlink only removes the dirent — fcntl
-            # mutual exclusion is unaffected.
-            lock_path = path.with_suffix(path.suffix + ".lock")
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            # Best-effort: remove the empty plugin dir if it's empty afterwards.
+            # Deliberately do NOT unlink `trust.json.lock` here. POSIX
+            # `flock` is attached to the inode behind the lock-file
+            # path, so unlinking the lock-file (while we still hold
+            # the lock above us) only removes the dirent: a concurrent
+            # `grant()` would `open(lock_path, "w")` against a brand-
+            # new inode, `flock` *that* exclusively, and run in
+            # parallel with this `remove()`. By the time we release
+            # our `flock` on the now-orphan inode, the concurrent
+            # writer has already recreated `trust.json` — reopening
+            # the very race the per-plugin lock was added to close.
+            # The lock-file is a synchronization primitive, not
+            # operation-scoped state; leaving it on disk is correct.
+            # Best-effort dir cleanup still tolerates the leftover
+            # because `rmdir` raises `OSError(ENOTEMPTY)` and we swallow
+            # it below.
             try:
                 path.parent.rmdir()
             except OSError:

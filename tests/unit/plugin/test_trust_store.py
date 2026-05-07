@@ -89,17 +89,42 @@ def test_reset_for_version_bump(tmp_path: Path) -> None:
 
 
 def test_remove_drops_trust_file(tmp_path: Path) -> None:
-    """Test 6: remove() deletes the trust file and prunes the empty dir."""
+    """remove() deletes the trust file. The per-plugin `*.lock` file
+    is intentionally preserved (see `test_remove_keeps_lock_file_to_avoid_inode_race`),
+    so the directory is only pruned when the lock file isn't there
+    (e.g. on platforms without flock support)."""
     store = TrustStore(root=tmp_path)
     store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
     file_path = tmp_path / "X" / "trust.json"
     assert file_path.is_file()
     assert store.remove("X") is True
     assert not file_path.exists()
-    # Directory pruned.
-    assert not file_path.parent.exists()
     # Removing again is a no-op.
     assert store.remove("X") is False
+
+
+def test_remove_keeps_lock_file_to_avoid_inode_race(tmp_path: Path) -> None:
+    """Regression: `remove()` used to also unlink `trust.json.lock`
+    inside its critical section, but POSIX `flock` is attached to
+    the inode behind the lock-file path. Removing the lock-file
+    while still holding the flock orphans the inode: a concurrent
+    `grant()` would `open(lock_path, "w")` against a brand-new
+    inode, `flock` *that* exclusively, and run in parallel with
+    the still-active `remove()` — reopening the very race the
+    per-plugin lock was added to close. The lock-file is a
+    synchronization primitive that must outlive individual
+    operations, so `remove()` now leaves it in place.
+    """
+    store = TrustStore(root=tmp_path)
+    store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
+    lock_path = tmp_path / "X" / "trust.json.lock"
+    assert lock_path.exists(), "fixture sanity: lock file must have been created"
+    assert store.remove("X") is True
+    # The trust.json itself is gone, but the lock file is preserved
+    # so subsequent grant/remove operations on the same plugin name
+    # share the same inode-stable synchronization primitive.
+    assert not (tmp_path / "X" / "trust.json").exists()
+    assert lock_path.exists(), "lock file must persist across remove() to keep flock semantics safe"
 
 
 def test_unsupported_schema_version_rejected(tmp_path: Path) -> None:

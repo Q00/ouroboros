@@ -548,6 +548,102 @@ def test_subprocess_inherits_cwd_for_first_party_manifest(tmp_path: Path) -> Non
     )
 
 
+def test_missing_plugin_cwd_does_not_inherit_callers_cwd(tmp_path: Path) -> None:
+    """Regression: when a `local_path` / `plugin_home` plugin's
+    `source.path` does not exist on disk, the firewall must NOT
+    fall back to `cwd=None` (which silently inherits the operator's
+    current working directory). With a relative entrypoint like
+    `./run.sh` or any command that reads plugin-local files, that
+    fallback can execute the wrong program or the wrong inputs.
+
+    The firewall now passes the (non-existent) candidate path to
+    `subprocess.run`, where the kernel's `chdir` call raises
+    `OSError(ENOENT)`. `invoke_plugin` already wraps that into a
+    terminal `plugin.failed` event with exit 126 and the missing-dir
+    reason in the message, which is the correct surface for this
+    failure mode.
+    """
+    from ouroboros.plugin.manifest import (
+        Capability,
+        CommandSpec,
+        Entrypoint,
+        Permission,
+        PluginManifest,
+        SourceSpec,
+    )
+    from ouroboros.plugin.userlevel_registry import UserLevelProgramRegistry
+
+    # Construct the manifest with a guaranteed-missing absolute path.
+    # We build it in-memory rather than going through `load_manifest`
+    # because the sandbox check rejects absolute paths from on-disk
+    # manifests; here we're testing the firewall's own behavior when
+    # the resolved path no longer exists at launch time.
+    missing_dir = tmp_path / "vanished_plugin_home"
+    assert not missing_dir.exists()
+    manifest = PluginManifest(
+        schema_version="0.1",
+        name="github-pr-ops",
+        version="0.1.0",
+        source=SourceSpec(type="local_path", path=str(missing_dir)),
+        commands=(
+            CommandSpec(
+                namespace="github-pr",
+                name="review",
+                summary="x",
+                usage="x",
+                risk="read_only",
+                requires_confirmation=False,
+                arguments=(),
+            ),
+        ),
+        capabilities=(Capability(name="ledger", access="write", reason="x"),),
+        permissions=(Permission(scope="github:read", risk="read_only", required=True),),
+        entrypoint=Entrypoint(type="command", command="python -m github_pr_ops"),
+        description="",
+    )
+    registry = UserLevelProgramRegistry()
+    program = registry.register(manifest)
+
+    captured: dict = {}
+
+    def _runner(argv, *args, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        # Real `subprocess.run` raises FileNotFoundError when cwd
+        # doesn't exist; emulate that so the firewall's OSError
+        # branch runs and we observe the documented `plugin.failed`.
+        raise FileNotFoundError(2, "No such file or directory", str(kwargs.get("cwd")))
+
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-missing",
+        subprocess_runner=_runner,
+    )
+
+    # The firewall pinned `cwd` to the resolved (non-existent) path,
+    # NOT to None — this is what made the kernel raise ENOENT.
+    assert captured["cwd"] is not None, (
+        "missing-dir must not fall back to caller's cwd; the firewall "
+        "should pass the non-existent path so subprocess.run raises ENOENT"
+    )
+    assert Path(captured["cwd"]).resolve() == missing_dir.resolve()
+    # And the failure surfaces as a terminal plugin.failed (the
+    # OSError-wrapping path established in round 7).
+    assert result.status == "failed"
+    types = [e["event_type"] for e in events]
+    assert types[-1] == "plugin.failed"
+
+
 def test_whitespace_entrypoint_emits_failed_not_crash(tmp_path: Path) -> None:
     """Regression: an entrypoint command that's only whitespace passed
     `minLength: 1` schema validation in earlier revisions and made

@@ -172,6 +172,16 @@ def _resolve_plugin_cwd(manifest: PluginManifest) -> str | None:
     first-party plugins (which ship inside the binary) and any source
     type without a usable path, returns None and the subprocess
     inherits the caller's cwd.
+
+    A missing `source.path` directory does NOT fall back to the
+    caller's cwd — that fallback would silently execute a relative
+    entrypoint like `./run.sh` against whatever directory the
+    operator happened to start `ooo` in, potentially running the
+    wrong program or reading unrelated files. The firewall instead
+    returns the (non-existent) candidate path so `subprocess.run`
+    raises `OSError(ENOENT)`, which `invoke_plugin` already converts
+    into a clean terminal `plugin.failed` event with the missing-dir
+    reason in the message.
     """
     src = manifest.source
     if src.type not in {"local_path", "plugin_home"}:
@@ -179,15 +189,8 @@ def _resolve_plugin_cwd(manifest: PluginManifest) -> str | None:
     if not src.path:
         return None
     candidate = Path(src.path).expanduser()
-    # Only anchor when the directory actually exists. The firewall
-    # already converts spawn-time OSError to `plugin.failed`, so a
-    # missing dir would surface there with a clean message; we just
-    # don't want subprocess.run to raise FileNotFoundError before we
-    # even get to record the launch event.
-    if not candidate.is_dir():
-        return None
     try:
-        return str(candidate.resolve())
+        return str(candidate.resolve(strict=False))
     except OSError:  # pragma: no cover — unresolvable symlink on weird FS
         return str(candidate)
 
