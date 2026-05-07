@@ -21,7 +21,7 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
@@ -398,9 +398,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
                 console.print(f"  - {item}")
     if result.blocker:
         console.print(f"Blocker: [yellow]{result.blocker}[/]")
-    capability = AutoResumeCapability(result.resume_capability)
     for line in render_resume_lines(
-        capability,
+        result.resume_capability,
         result.auto_session_id,
         goal=None,
         use_markup=True,

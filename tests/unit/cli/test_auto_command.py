@@ -8,7 +8,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from ouroboros.auto.pipeline import AutoPipelineResult
-from ouroboros.auto.state import AutoPhase, AutoPipelineState
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability
 from ouroboros.cli.commands.auto import _print_result, _print_status
 from ouroboros.cli.main import app
 
@@ -403,7 +403,7 @@ def test_print_result_resume_capability_resume() -> None:
         status="complete",
         auto_session_id="auto_r1",
         phase="complete",
-        resume_capability="resume",
+        resume_capability=AutoResumeCapability.RESUME,
     )
 
     output = _capture_result(result)
@@ -416,7 +416,7 @@ def test_print_result_resume_capability_partial() -> None:
         status="blocked",
         auto_session_id="auto_r2",
         phase="blocked",
-        resume_capability="partial_resume",
+        resume_capability=AutoResumeCapability.PARTIAL_RESUME,
     )
 
     output = _capture_result(result)
@@ -430,7 +430,7 @@ def test_print_result_resume_capability_retry() -> None:
         status="blocked",
         auto_session_id="auto_r3",
         phase="blocked",
-        resume_capability="retry",
+        resume_capability=AutoResumeCapability.RETRY,
     )
 
     output = _capture_result(result)
@@ -445,7 +445,7 @@ def test_print_result_resume_capability_none_emits_no_resume_line() -> None:
         status="complete",
         auto_session_id="auto_r4",
         phase="complete",
-        resume_capability="none",
+        resume_capability=AutoResumeCapability.NONE,
     )
 
     output = _capture_result(result)

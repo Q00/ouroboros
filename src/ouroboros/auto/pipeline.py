@@ -12,7 +12,13 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore, utc_now_iso
+from ouroboros.auto.state import (
+    AutoPhase,
+    AutoPipelineState,
+    AutoResumeCapability,
+    AutoStore,
+    utc_now_iso,
+)
 from ouroboros.core.seed import Seed
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
@@ -51,7 +57,7 @@ class AutoPipelineResult:
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
-    resume_capability: str = "resume"
+    resume_capability: AutoResumeCapability = AutoResumeCapability.RESUME
     """String form of :class:`AutoResumeCapability`. Defaults to ``"resume"``
     so existing test constructions of ``AutoPipelineResult(...)`` keep their
     historical behavior. ``AutoPipeline._result()`` overrides it from the
@@ -453,7 +459,7 @@ class AutoPipeline:
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
-            resume_capability=state.resume_capability().value,
+            resume_capability=state.resume_capability(),
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:

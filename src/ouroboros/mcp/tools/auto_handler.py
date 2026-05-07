@@ -248,7 +248,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "current_round": result.current_round,
         "last_progress_message": result.last_progress_message,
         "last_progress_at": result.last_progress_at,
-        "resume_capability": result.resume_capability,
+        "resume_capability": result.resume_capability.value,
         "blocker": result.blocker,
         "seed_path": result.seed_path,
         "grade": result.grade,
@@ -264,7 +264,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     # otherwise clients keying off ``meta.resume_command`` would push users
     # into a guaranteed-failing ``--resume`` path even though the
     # human-readable text intentionally omits the hint.
-    if result.resume_capability != "none":
+    if result.resume_capability is not AutoResumeCapability.NONE:
         meta["resume_command"] = f"ooo auto --resume {result.auto_session_id}"
     if result.pending_question:
         meta["pending_question"] = result.pending_question
@@ -482,7 +482,7 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.extend(f"- {item}" for item in result.non_goals)
     if result.blocker:
         lines.append(f"Blocker: {result.blocker}")
-    capability = AutoResumeCapability(result.resume_capability)
+    capability = result.resume_capability
     lines.extend(
         render_resume_lines(
             capability,
