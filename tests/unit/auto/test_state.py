@@ -614,6 +614,44 @@ def test_resume_capability_run_starter_seed_path_only_returns_partial() -> None:
     assert state.resume_capability() is AutoResumeCapability.PARTIAL_RESUME
 
 
+def test_resume_capability_run_starter_attempted_without_handle_returns_none() -> None:
+    """Bot finding (#724): a run_starter attempt that left no durable handle is
+    NOT recoverable. ``AutoPipeline.run()`` short-circuits at
+    ``state.run_start_attempted`` to refuse a duplicate execution, so
+    ``--resume`` cannot make progress and capability must be NONE.
+    """
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.seed_artifact = {"id": "seed_1"}  # would otherwise classify as RESUME
+    state.run_start_attempted = True
+    state.mark_blocked("run start timed out", tool_name="run_starter")
+
+    assert state.run_start_attempted is True
+    assert not any((state.job_id, state.execution_id, state.run_session_id))
+    # Despite seed_artifact being present, the duplicate-execution guard means
+    # --resume will immediately re-block. Classify as NONE.
+    assert state.resume_capability() is AutoResumeCapability.NONE
+
+
+def test_resume_capability_run_starter_attempted_seed_path_only_returns_none() -> None:
+    """Same guard applies even when only seed_path is available."""
+    state = _state()
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.seed_path = "/tmp/seed.yaml"
+    state.run_start_attempted = True
+    state.mark_blocked("run start timed out", tool_name="run_starter")
+
+    assert state.run_start_attempted is True
+    assert not state.seed_artifact
+    assert state.resume_capability() is AutoResumeCapability.NONE
+
+
 def test_resume_capability_failed_mirrors_blocked() -> None:
     """FAILED states classify identically to BLOCKED for the same signals."""
     state = _state()
