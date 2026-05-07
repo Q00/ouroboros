@@ -129,6 +129,10 @@ def test_auto_handler_schema_contains_hang_safe_options() -> None:
         "brake",
     } <= names
     params = {param.name: param for param in definition.parameters}
+    assert params["max_interview_rounds"].default is None
+    assert params["max_repair_rounds"].default is None
+    assert "persisted bound" in params["max_interview_rounds"].description
+    assert "persisted bound" in params["max_repair_rounds"].description
     assert params["brake"].default is None
 
 
@@ -1207,6 +1211,98 @@ async def test_auto_handler_resume_uses_persisted_cwd_without_revalidating_serve
     assert captured["cwd"] == str(tmp_path / "project")
     assert captured["driver_rounds"] == 2
     assert captured["repair_rounds"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "expected_interview_rounds", "expected_repair_rounds"),
+    [
+        ({}, 4, 6),
+        ({"max_interview_rounds": 4, "max_repair_rounds": 6}, 4, 6),
+        ({"max_interview_rounds": 7, "max_repair_rounds": 8}, 7, 8),
+        ({"max_interview_rounds": 7}, 7, 6),
+        ({"max_repair_rounds": 8}, 4, 8),
+    ],
+)
+async def test_auto_handler_resume_resolves_effective_loop_bounds(
+    monkeypatch,
+    tmp_path,
+    arguments,
+    expected_interview_rounds,
+    expected_repair_rounds,
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path / "project"))
+    state.runtime_backend = "codex"
+    state.max_interview_rounds = 4
+    state.max_repair_rounds = 6
+    store.save(state)
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            captured["driver_rounds"] = args[0].max_rounds
+            captured["repair_rounds"] = kwargs["repairer"].max_repair_rounds
+
+        async def run(self, run_state):  # noqa: ANN001
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+                max_interview_rounds=run_state.max_interview_rounds,
+                max_repair_rounds=run_state.max_repair_rounds,
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+
+    result = await AutoHandler(store=store).handle({"resume": state.auto_session_id, **arguments})
+
+    assert result.is_ok
+    assert captured["driver_rounds"] == expected_interview_rounds
+    assert captured["repair_rounds"] == expected_repair_rounds
+    assert result.value.meta["max_interview_rounds"] == expected_interview_rounds
+    assert result.value.meta["max_repair_rounds"] == expected_repair_rounds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "lower_value"),
+    [("max_interview_rounds", 3), ("max_repair_rounds", 5)],
+)
+async def test_auto_handler_resume_rejects_lower_loop_bounds_without_persisting(
+    tmp_path, field_name, lower_value
+) -> None:
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path / "project"))
+    state.runtime_backend = "codex"
+    state.max_interview_rounds = 4
+    state.max_repair_rounds = 6
+    store.save(state)
+
+    result = await AutoHandler(store=store).handle(
+        {"resume": state.auto_session_id, field_name: lower_value}
+    )
+
+    restored = store.load(state.auto_session_id)
+    assert result.is_err
+    assert field_name in str(result.error)
+    assert "lower than the persisted bound" in str(result.error)
+    assert restored.max_interview_rounds == 4
+    assert restored.max_repair_rounds == 6
 
 
 @pytest.mark.asyncio

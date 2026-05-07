@@ -42,6 +42,8 @@ class AutoPipelineResult:
     last_grade: str | None = None
     run_handoff_status: str | None = None
     run_handoff_guidance: str | None = None
+    max_interview_rounds: int | None = None
+    max_repair_rounds: int | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -402,6 +404,8 @@ class AutoPipeline:
             last_grade=state.last_grade,
             run_handoff_status=state.run_handoff_status,
             run_handoff_guidance=state.run_handoff_guidance,
+            max_interview_rounds=state.max_interview_rounds,
+            max_repair_rounds=state.max_repair_rounds,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,

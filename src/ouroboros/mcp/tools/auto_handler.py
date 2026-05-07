@@ -72,16 +72,14 @@ class AutoHandler:
                 MCPToolParameter(
                     "max_interview_rounds",
                     ToolInputType.INTEGER,
-                    "Max interview rounds",
+                    "Max interview rounds; omit on resume to keep the persisted bound",
                     required=False,
-                    default=12,
                 ),
                 MCPToolParameter(
                     "max_repair_rounds",
                     ToolInputType.INTEGER,
-                    "Max repair rounds",
+                    "Max repair rounds; omit on resume to keep the persisted bound",
                     required=False,
-                    default=5,
                 ),
                 MCPToolParameter(
                     "skip_run",
@@ -153,12 +151,24 @@ class AutoHandler:
             opencode_mode = _resolved_opencode_mode(
                 runtime_backend, state.opencode_mode or self.opencode_mode
             )
-            max_interview_rounds = state.max_interview_rounds
-            max_repair_rounds = state.max_repair_rounds
-            skip_run = requested_skip_run or state.skip_run
-            persisted_driver = _normalize_persisted_driver_backend(
-                state.interview_driver_backend
+            requested_max_interview_rounds = _optional_positive_int_arg(
+                arguments, "max_interview_rounds"
             )
+            requested_max_repair_rounds = _optional_positive_int_arg(arguments, "max_repair_rounds")
+            max_interview_rounds = _effective_resume_bound(
+                "max_interview_rounds",
+                requested_max_interview_rounds,
+                state.max_interview_rounds,
+            )
+            max_repair_rounds = _effective_resume_bound(
+                "max_repair_rounds",
+                requested_max_repair_rounds,
+                state.max_repair_rounds,
+            )
+            state.max_interview_rounds = max_interview_rounds
+            state.max_repair_rounds = max_repair_rounds
+            skip_run = requested_skip_run or state.skip_run
+            persisted_driver = _normalize_persisted_driver_backend(state.interview_driver_backend)
             if requested_driver is not None and persisted_driver not in {
                 None,
                 requested_driver,
@@ -267,6 +277,10 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["run_handoff_status"] = result.run_handoff_status
     if result.run_handoff_guidance:
         meta["run_handoff_guidance"] = result.run_handoff_guidance
+    if result.max_interview_rounds is not None:
+        meta["max_interview_rounds"] = result.max_interview_rounds
+    if result.max_repair_rounds is not None:
+        meta["max_repair_rounds"] = result.max_repair_rounds
     return meta
 
 
@@ -287,6 +301,33 @@ def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int
         msg = f"{name} must be >= 1"
         raise ValueError(msg)
     return value
+
+
+def _optional_positive_int_arg(arguments: dict[str, Any], name: str) -> int | None:
+    if name not in arguments:
+        return None
+    value = arguments.get(name)
+    if value in {None, ""}:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{name} must be a positive integer"
+        raise ValueError(msg)
+    if value <= 0:
+        msg = f"{name} must be >= 1"
+        raise ValueError(msg)
+    return value
+
+
+def _effective_resume_bound(name: str, requested: int | None, persisted: int) -> int:
+    if requested is None:
+        return persisted
+    if requested < persisted:
+        msg = (
+            f"{name} {requested} is lower than the persisted bound ({persisted}); "
+            "refuse to tighten a bound on resume"
+        )
+        raise ValueError(msg)
+    return requested
 
 
 def _safe_default_cwd() -> Path:
