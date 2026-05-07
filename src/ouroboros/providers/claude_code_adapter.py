@@ -669,11 +669,12 @@ class ClaudeCodeAdapter:
             #
             # ``ClaudeAgentOptions`` does not expose ``strict_mcp_config``
             # as a typed field across the supported SDK pin range
-            # (``claude-agent-sdk>=0.1.0,<1.0.0``), so we forward it via
-            # ``extra_args`` (the canonical CLI-flag passthrough) when
-            # available.  If neither surface exists on this SDK build, we
-            # log and skip the flag rather than raise ``TypeError`` from
-            # ``ClaudeAgentOptions(**options_kwargs)``.
+            # (``claude-agent-sdk>=0.1.0,<1.0.0``); current releases accept
+            # the flag only via ``extra_args`` (CLI passthrough).  When a
+            # caller asked for strict isolation we MUST honor it — silently
+            # degrading would re-open the recursion path the caller is
+            # trying to close.  Raise a clear, actionable upgrade error
+            # instead of best-effort no-op.
             field_names = _claude_options_field_names()
             if "strict_mcp_config" in field_names:
                 options_kwargs["strict_mcp_config"] = True
@@ -682,13 +683,26 @@ class ClaudeCodeAdapter:
                 extra_args.setdefault("strict-mcp-config", None)
                 options_kwargs["extra_args"] = extra_args
             else:
-                log.warning(
+                msg = (
+                    "Nested-MCP isolation was requested but the installed "
+                    "claude-agent-sdk exposes neither ``strict_mcp_config`` "
+                    "nor ``extra_args``. Upgrade claude-agent-sdk to a "
+                    "release that supports CLI-flag passthrough (any "
+                    "version with the ``extra_args`` field on "
+                    "``ClaudeAgentOptions``) so ``--strict-mcp-config`` "
+                    "can be applied."
+                )
+                log.error(
                     "claude_code_adapter.strict_mcp_config_unsupported",
-                    hint=(
-                        "Installed claude-agent-sdk has no surface for "
-                        "--strict-mcp-config; nested-MCP isolation skipped. "
-                        "Upgrade claude-agent-sdk to enable the protection."
-                    ),
+                    hint=msg,
+                )
+                raise ProviderError(
+                    message=msg,
+                    details={
+                        "error_type": "ConfigurationError",
+                        "supported_options_fields": sorted(field_names),
+                        "required_options_field": "extra_args or strict_mcp_config",
+                    },
                 )
 
         # Pass model from CompletionConfig if specified

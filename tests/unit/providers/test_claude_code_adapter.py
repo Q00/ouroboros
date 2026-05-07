@@ -794,11 +794,17 @@ class TestJsonSchemaHandling:
         assert "strict-mcp-config" not in (options_call_kwargs.get("extra_args") or {})
 
     @pytest.mark.asyncio
-    async def test_strict_mcp_config_skipped_when_sdk_lacks_surface(
+    async def test_strict_mcp_config_fails_fast_when_sdk_lacks_surface(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If the SDK exposes neither surface, opt-in degrades silently
-        instead of crashing ``ClaudeAgentOptions(**options_kwargs)``."""
+        """If the SDK exposes neither surface, the opt-in MUST fail fast.
+
+        Silently dropping the flag would re-open the very recursion path
+        ``InterviewHandler.handle()`` is trying to close.  The error must
+        be actionable (telling operators to upgrade ``claude-agent-sdk``)
+        rather than a generic ``TypeError`` from
+        ``ClaudeAgentOptions(**options_kwargs)``.
+        """
         from ouroboros.providers import claude_code_adapter as adapter_mod
 
         monkeypatch.setattr(
@@ -822,18 +828,24 @@ class TestJsonSchemaHandling:
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "claude_agent_sdk": sdk_module,
-                "claude_agent_sdk._errors": sdk_module._errors,
-            },
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "claude_agent_sdk": sdk_module,
+                    "claude_agent_sdk._errors": sdk_module._errors,
+                },
+            ),
+            pytest.raises(ProviderError) as excinfo,
         ):
             await adapter._execute_single_request("test prompt", config)
 
-        options_call_kwargs = mock_options_cls.call_args.kwargs
-        assert "strict_mcp_config" not in options_call_kwargs
-        assert "extra_args" not in options_call_kwargs
+        assert "strict-mcp-config" in str(excinfo.value).lower() or (
+            "strict_mcp_config" in str(excinfo.value).lower()
+        )
+        assert excinfo.value.details.get("error_type") == "ConfigurationError"
+        # Options must NEVER be constructed when isolation cannot be honored.
+        mock_options_cls.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_default_tool_policy_does_not_set_strict_mcp_config(self) -> None:
