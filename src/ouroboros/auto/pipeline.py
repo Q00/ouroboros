@@ -65,6 +65,11 @@ class AutoPipelineResult:
     invoked_by: str = "direct"
     provenance: dict[str, Any] | None = None
     last_authoring_backend: str | None = None
+    resume_capability: str = "resume"
+    """String form of :class:`AutoResumeCapability`. Defaults to ``"resume"``
+    so existing test constructions of ``AutoPipelineResult(...)`` keep their
+    historical behavior. ``AutoPipeline._result()`` overrides it from the
+    persisted state's :meth:`AutoPipelineState.resume_capability`."""
 
 
 @dataclass(slots=True)
@@ -505,6 +510,7 @@ class AutoPipeline:
             invoked_by=state.invoked_by(),
             provenance=dict(state.provenance) if state.provenance else None,
             last_authoring_backend=state.last_authoring_backend,
+            resume_capability=state.resume_capability().value,
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:

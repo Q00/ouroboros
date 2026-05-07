@@ -22,8 +22,9 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.provenance import resolve_provenance
+from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability, AutoStore
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
@@ -466,7 +467,16 @@ def _print_status(state: AutoPipelineState) -> None:
             answer = _rich_escape(str(entry.get("answer", "")))
             console.print(f"  round {round_value} \\[{source}] Q: {question}")
             console.print(f"    A: {answer}")
-    console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
+    # Only emit a "Start fresh" hint for terminal-but-recoverable signals
+    # (BLOCKED/FAILED). COMPLETE is terminal *and* successful — no hint.
+    goal_for_hint = state.goal if state.phase is not AutoPhase.COMPLETE else None
+    for line in render_resume_lines(
+        state.resume_capability(),
+        state.auto_session_id,
+        goal=goal_for_hint,
+        use_markup=True,
+    ):
+        console.print(line)
 
 
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
@@ -519,7 +529,14 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
                 console.print(f"  - {item}")
     if result.blocker:
         console.print(f"Blocker: [yellow]{result.blocker}[/]")
-    console.print(f"Resume: [bold]ooo auto --resume {result.auto_session_id}[/]")
+    capability = AutoResumeCapability(result.resume_capability)
+    for line in render_resume_lines(
+        capability,
+        result.auto_session_id,
+        goal=None,
+        use_markup=True,
+    ):
+        console.print(line)
 
 
 __all__ = ["app"]

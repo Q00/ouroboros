@@ -17,8 +17,9 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability, AutoStore
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -475,5 +476,13 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.extend(f"- {item}" for item in result.non_goals)
     if result.blocker:
         lines.append(f"Blocker: {result.blocker}")
-    lines.append(f"Resume: ooo auto --resume {result.auto_session_id}")
+    capability = AutoResumeCapability(result.resume_capability)
+    lines.extend(
+        render_resume_lines(
+            capability,
+            result.auto_session_id,
+            goal=None,
+            use_markup=False,
+        )
+    )
     return "\n".join(lines)
