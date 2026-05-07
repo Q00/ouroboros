@@ -83,12 +83,21 @@ SCAN_EXTRA_FILES: tuple[str, ...] = ("src/ouroboros/cli/commands/auto.py",)
 # the bot review of the original guard).
 FORBIDDEN_PATTERNS: tuple[str, ...] = (
     "github",
+    # Both forms are needed: lowercased lines preserve underscores, so
+    # `pull_request` (snake_case) and `pullrequest` (camelCase compressed
+    # form, e.g. PullRequestHandler/pullRequestId) are distinct
+    # substrings.
     "pull_request",
+    "pullrequest",
     "/pulls/",
     "/pull/",
     "jira",
     "slack",
-    "linear.app",
+    # `linear` (rather than `linear.app`) is required to catch identifier
+    # forms such as `LinearClient` / `LinearAdapter`. The substring also
+    # subsumes the original URL match `linear.app`. Verified zero false
+    # positives on the actual scan target (current main).
+    "linear",
 )
 
 

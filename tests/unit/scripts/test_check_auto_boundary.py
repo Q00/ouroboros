@@ -148,11 +148,12 @@ def test_each_forbidden_pattern_independently_caught(
     samples = {
         "github": "host = 'github.com'",
         "pull_request": "if 'pull_request' in payload: ...",
+        "pullrequest": "handler = PullRequestHandler()",
         "/pulls/": "uri = '/pulls/42'",
         "/pull/": "uri = '/pull/42'",
         "jira": "issue = 'JIRA-1'",
         "slack": "channel = '#xchan'  # slack",
-        "linear.app": "url = 'https://linear.app/...'",
+        "linear": "client = LinearClient()",
     }
     import re as _re
 
@@ -178,6 +179,14 @@ def test_each_forbidden_pattern_independently_caught(
         ("def notify_slack_user(): pass", "slack snake_case"),
         ("notifier = SlackNotifier()", "Slack PascalCase"),
         ("FOO_GITHUB_BASE = 'x'", "SCREAMING_SNAKE_CASE"),
+        # Compressed camelCase / no-underscore forms that the original
+        # ``pull_request`` / ``linear.app`` substrings missed.
+        ("handler = PullRequestHandler()", "PullRequest PascalCase"),
+        ("event_id = pullRequestId", "pullRequest camelCase"),
+        ("class PRHandler(PullRequestBase): ...", "PullRequest base class"),
+        ("client = LinearClient()", "Linear PascalCase"),
+        ("adapter = LinearAdapter()", "Linear adapter PascalCase"),
+        ("from foo import linear_client", "linear snake_case"),
     ],
 )
 def test_identifier_forms_are_caught(
