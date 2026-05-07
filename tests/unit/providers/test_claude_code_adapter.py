@@ -687,6 +687,78 @@ class TestJsonSchemaHandling:
         assert "ToolSearch" not in options_call_kwargs["tools"]
         assert "AskUserQuestion" not in options_call_kwargs["tools"]
         assert "Write" in options_call_kwargs["disallowed_tools"]
+        # Generic explicit envelopes must not silently drop plugin/project
+        # MCP servers — only opt-in callers (e.g. the interview policy
+        # path) should set strict_mcp_config. Otherwise envelopes that
+        # include MCP names like ``mcp__ouroboros__qa`` would lose access
+        # to those tools at runtime.
+        assert "strict_mcp_config" not in options_call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_strict_mcp_config_opt_in_forwards_to_sdk(self) -> None:
+        """Opt-in strict_mcp_config flag flows through to the SDK options."""
+        allowed_tools = ["Read", "Grep"]
+        adapter = ClaudeCodeAdapter(
+            allowed_tools=allowed_tools,
+            strict_mcp_config=True,
+        )
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert options_call_kwargs["allowed_tools"] == allowed_tools
+        assert options_call_kwargs["tools"] == allowed_tools
+        assert options_call_kwargs.get("strict_mcp_config") is True
+
+    @pytest.mark.asyncio
+    async def test_default_tool_policy_does_not_set_strict_mcp_config(self) -> None:
+        """Default callers (no allowed_tools, no opt-in) keep plugin MCP servers."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert "strict_mcp_config" not in options_call_kwargs
 
 
 class TestErrorDiagnostics:

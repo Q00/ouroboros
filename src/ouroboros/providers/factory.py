@@ -162,6 +162,12 @@ def create_llm_adapter(
             max_turns=max_turns,
             on_message=on_message,
             timeout=timeout,
+            # Interview is the only path that must avoid recursing into the
+            # ouroboros MCP server when launched from inside Claude Code's
+            # MCP context. Other callers keep plugin/project MCP servers
+            # reachable so explicit envelopes (e.g. ``mcp__ouroboros__qa``)
+            # remain functional.
+            strict_mcp_config=use_case == "interview",
         )
     if resolved_backend == "codex":
         return CodexCliLLMAdapter(

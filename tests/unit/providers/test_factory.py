@@ -90,6 +90,28 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, ClaudeCodeAdapter)
         assert adapter._cwd == "/tmp/project"
 
+    def test_claude_code_interview_use_case_enables_strict_mcp_config(self) -> None:
+        """Interview is the only path that must avoid recursing into the
+        ouroboros MCP server, so the factory opts into ``strict_mcp_config``
+        for the Claude adapter exclusively on ``use_case="interview"``."""
+        adapter = create_llm_adapter(
+            backend="claude_code",
+            use_case="interview",
+            allowed_tools=["Read"],
+        )
+        assert isinstance(adapter, ClaudeCodeAdapter)
+        assert adapter._strict_mcp_config is True
+
+    def test_claude_code_default_use_case_keeps_plugin_mcp_servers(self) -> None:
+        """Default callers (non-interview) must keep plugin/project MCP
+        servers reachable, even when an explicit envelope is supplied."""
+        adapter = create_llm_adapter(
+            backend="claude_code",
+            allowed_tools=["Read", "mcp__ouroboros__qa"],
+        )
+        assert isinstance(adapter, ClaudeCodeAdapter)
+        assert adapter._strict_mcp_config is False
+
     def test_creates_litellm_adapter(self) -> None:
         """LiteLLM backend returns LiteLLMAdapter."""
         adapter = create_llm_adapter(backend="litellm")

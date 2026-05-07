@@ -102,6 +102,7 @@ class ClaudeCodeAdapter:
         max_turns: int = 1,
         on_message: Callable[[str, str], None] | None = None,
         timeout: float | None = None,
+        strict_mcp_config: bool = False,
     ) -> None:
         """Initialize Claude Code adapter.
 
@@ -124,6 +125,12 @@ class ClaudeCodeAdapter:
             timeout: Optional application-level timeout in seconds for a
                 single completion request. When set, aborts before outer
                 transport timeouts and returns a ProviderError.
+            strict_mcp_config: When ``True``, forwards ``strict_mcp_config=True``
+                to the SDK so the spawned subprocess ignores plugin-provided
+                MCP servers and inherited project ``.mcp.json`` entries. Used
+                exclusively by callers that must avoid recursion into the
+                ouroboros MCP server (notably the interview policy path);
+                generic ``allowed_tools`` envelopes keep MCP-tool access intact.
         """
         self._permission_mode: str = permission_mode
         self._cli_path: Path | None = self._resolve_cli_path(cli_path)
@@ -134,6 +141,7 @@ class ClaudeCodeAdapter:
         self._max_turns: int = max_turns
         self._on_message: Callable[[str, str], None] | None = on_message
         self._timeout: float | None = timeout if timeout and timeout > 0 else None
+        self._strict_mcp_config: bool = bool(strict_mcp_config)
         log.info(
             "claude_code_adapter.initialized",
             permission_mode=permission_mode,
@@ -628,10 +636,14 @@ class ClaudeCodeAdapter:
             # default built-ins like AskUserQuestion/ToolSearch.
             options_kwargs["allowed_tools"] = list(self._allowed_tools)
             options_kwargs["tools"] = list(self._allowed_tools)
-            # When the caller pinned an explicit read-only envelope, also
-            # ignore plugin-provided MCP servers so the subprocess cannot
-            # reach mcp__plugin_* tools (notably ouroboros itself, which
-            # would recurse on ouroboros_interview).
+
+        if self._strict_mcp_config:
+            # Opt-in MCP isolation: prevents the spawned subprocess from
+            # discovering plugin-provided servers (notably ouroboros itself,
+            # which would recurse on ouroboros_interview when invoked from
+            # inside Claude Code's MCP context). Scoped to callers that
+            # explicitly request the policy — generic explicit envelopes
+            # keep MCP-tool access intact.
             options_kwargs["strict_mcp_config"] = True
 
         # Pass model from CompletionConfig if specified
