@@ -706,7 +706,22 @@ class TestJsonSchemaHandling:
         swap that drops the field fails fast at test time, well before
         the adapter's defense-in-depth fail-fast path could fire in
         production.
+
+        Skipped when ``claude-agent-sdk`` is not installed — the SDK is
+        an optional extra (``ouroboros-ai[claude]``) and the rest of
+        this file mocks ``sys.modules['claude_agent_sdk']`` so it does
+        not require the real package.  This particular invariant only
+        matters when the real package IS installed; otherwise there is
+        no ``ClaudeAgentOptions`` to introspect.
         """
+        pytest.importorskip(
+            "claude_agent_sdk",
+            reason=(
+                "claude-agent-sdk is an optional extra; the live-SDK "
+                "invariant only applies when it is installed."
+            ),
+        )
+
         from ouroboros.providers.claude_code_adapter import (
             _claude_options_field_names,
         )
