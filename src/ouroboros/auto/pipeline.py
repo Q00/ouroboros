@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+import os
 from typing import Any
 
+from ouroboros.auto.goal_classifier import GoalClassification, classify_goal
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
@@ -14,6 +16,20 @@ from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore, utc_now_iso
 from ouroboros.core.seed import Seed
+
+# Master gate for the direct operational path (#689 PR-C).  Even when
+# the classifier authorizes a direct run and the user did not pick
+# ``--interview-strategy=never``, the pipeline still consults this env
+# flag before bypassing interview, because the operational executor is
+# wired in subsequent PRs.  Removing this gate is intentionally a
+# follow-up commit so the rollout is reversible.
+_OPERATIONAL_ENV_VAR = "OUROBOROS_AUTO_OPERATIONAL"
+_OPERATIONAL_PENDING_GUIDANCE = (
+    "Direct operational path is wired but the operational executor and "
+    "merge-policy gate land in subsequent PRs (#689 PR-D/E). "
+    "Re-run with --interview-strategy=always to use the interview-first "
+    "path until those land."
+)
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
 RunStarter = Callable[[Seed], Awaitable[dict[str, Any]]]
@@ -63,6 +79,9 @@ class AutoPipeline:
     skip_run: bool = False
     seed_timeout_seconds: float = 120.0
     run_start_timeout_seconds: float = 60.0
+    # Override of the env-var gate for tests.  When None (default), the
+    # pipeline reads the live ``OUROBOROS_AUTO_OPERATIONAL`` env var.
+    operational_env_override: bool | None = None
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
@@ -82,6 +101,14 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, blocker=state.last_error)
         self._save(state)
+
+        if state.phase == AutoPhase.CREATED:
+            classification = self._ensure_classification(state, ledger)
+            routing = self._evaluate_routing(state, classification)
+            if routing is not None:
+                state.mark_blocked(routing, tool_name="goal_classifier")
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase == AutoPhase.COMPLETE:
             return self._result(state, ledger, blocker=state.last_error)
@@ -354,6 +381,61 @@ class AutoPipeline:
         )
         self._save(state)
         return self._result(state, ledger, review=review, run_subagent=run_subagent)
+
+    def _ensure_classification(
+        self, state: AutoPipelineState, ledger: SeedDraftLedger
+    ) -> GoalClassification:
+        """Return a classification for ``state.goal``, persisting on first call.
+
+        The classification is deterministic and cheap, so we recompute on
+        resume only when the persisted classification is missing.  When
+        the persisted record exists we trust it: re-classifying would let
+        a goal-string mutation silently change the routing decision after
+        the user has already committed to a strategy.
+        """
+        if state.classification is not None:
+            return GoalClassification.from_dict(state.classification)
+        classification = classify_goal(state.goal)
+        state.record_classification(classification)
+        if classification.direct_run_allowed:
+            ledger.record_direct_path_reason(classification.reason)
+            state.ledger = ledger.to_dict()
+        self._save(state)
+        return classification
+
+    def _evaluate_routing(
+        self, state: AutoPipelineState, classification: GoalClassification
+    ) -> str | None:
+        """Decide whether to bypass the interview phase.
+
+        Returns a blocker message when the auto pipeline must stop (the
+        operational executor is pending in PR-D/E, or the user requested
+        ``--interview-strategy=never`` for a goal that does not meet the
+        classifier's bar).  Returns ``None`` when the existing
+        interview-first flow should run unchanged.
+        """
+        strategy = state.interview_strategy
+        env_enabled = (
+            self.operational_env_override
+            if self.operational_env_override is not None
+            else os.environ.get(_OPERATIONAL_ENV_VAR) == "1"
+        )
+        eligible = classification.direct_run_allowed
+
+        if strategy == "always":
+            return None
+        if strategy == "never":
+            if not eligible:
+                return (
+                    "Interview is disabled (--interview-strategy=never) but the "
+                    f"goal does not authorize a direct path: {classification.reason}. "
+                    "Re-run with --interview-strategy=auto to use the interview-first path."
+                )
+            return _OPERATIONAL_PENDING_GUIDANCE
+        # strategy == "auto"
+        if eligible and env_enabled:
+            return _OPERATIONAL_PENDING_GUIDANCE
+        return None
 
     def _load_seed(self, state: AutoPipelineState, seed_path: str) -> Seed | None:
         if self.seed_loader is None:

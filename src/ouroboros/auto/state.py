@@ -99,6 +99,13 @@ class AutoPipelineState:
     # PR-B; PR-C reads this field to route around interview.
     classification: dict[str, Any] | None = None
     direct_path_reason: str | None = None
+    # User-controlled interview routing (#689 PR-C).  Mirrors the
+    # ``--interview-strategy`` CLI flag.  ``auto`` defers to the
+    # classifier + ``OUROBOROS_AUTO_OPERATIONAL`` env gate.  ``always``
+    # forces interview-first.  ``never`` skips interview when the
+    # classifier authorizes a direct path; otherwise blocks with an
+    # actionable message.
+    interview_strategy: str = "auto"
     seed_id: str | None = None
     seed_path: str | None = None
     seed_artifact: dict[str, Any] = field(default_factory=dict)
@@ -223,6 +230,7 @@ class AutoPipelineState:
         payload.setdefault("run_handoff_guidance", None)
         payload.setdefault("classification", None)
         payload.setdefault("direct_path_reason", None)
+        payload.setdefault("interview_strategy", "auto")
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -314,6 +322,9 @@ class AutoPipelineState:
             except Exception as exc:
                 msg = "ledger must be a valid Seed Draft Ledger"
                 raise ValueError(msg) from exc
+        if self.interview_strategy not in {"auto", "always", "never"}:
+            msg = "interview_strategy must be one of auto, always, never"
+            raise ValueError(msg)
         if self.classification is not None:
             if not isinstance(self.classification, dict):
                 msg = "classification must be an object or null"
