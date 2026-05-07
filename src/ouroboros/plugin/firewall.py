@@ -34,6 +34,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
+import logging
 import shlex
 import subprocess
 from typing import Literal
@@ -41,6 +42,8 @@ from typing import Literal
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "0.1"
 
@@ -221,7 +224,28 @@ def invoke_plugin(
     emitted: list[dict] = []
 
     def _emit(event: dict) -> None:
-        event_sink(event)
+        # The firewall is the documented chokepoint, so a sink (ledger)
+        # outage MUST NOT turn into an uncaught exception that obscures
+        # the actual invocation outcome. This is most damaging on the
+        # terminal `plugin.completed` / `plugin.failed` emissions: by
+        # then the subprocess has already run, and propagating a sink
+        # exception would leave the caller with no `InvocationResult`
+        # even though the plugin command did execute. We catch broadly,
+        # log, and continue: the result still records the actual exit
+        # state and the events that were successfully observed locally.
+        try:
+            event_sink(event)
+        except Exception as exc:  # noqa: BLE001 — chokepoint isolation
+            logger.warning(
+                "plugin.firewall.event_sink_failed",
+                extra={
+                    "plugin": manifest.name,
+                    "version": manifest.version,
+                    "event_type": event.get("event_type"),
+                    "correlation_id": correlation_id,
+                    "error": repr(exc),
+                },
+            )
         emitted.append(event)
 
     # 1. Pre-invocation trust check (locked Q1).

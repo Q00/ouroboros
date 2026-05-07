@@ -11,6 +11,7 @@ import pytest
 from ouroboros.plugin.ledger_adapter import (
     AUDIT_EVENT_TYPES,
     PLUGIN_AGGREGATE_TYPE,
+    envelope_to_base_event,
     make_event_sink,
     unwrap_plugin_event,
     wrap_plugin_event,
@@ -194,3 +195,51 @@ def test_no_raw_token_fields_in_envelope() -> None:
     serialized = json.dumps(env).lower()
     for forbidden in ("ghp_", "bearer ", "x-api-key"):
         assert forbidden.lower() not in serialized
+
+
+def test_envelope_to_base_event_matches_event_store_db_dict() -> None:
+    """The BaseEvent bridge produces a `to_db_dict()` that lines up with
+    the `events_table` columns the core EventStore inserts.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    be5e480: `make_event_sink()` advertised wiring to `EventStore.append`
+    but only emitted plain dict envelopes, while `EventStore.append`
+    accepts a typed `BaseEvent`. The adapter now exposes
+    `envelope_to_base_event` so the integration layer can do the
+    translation; this test pins the round-trip from envelope to
+    `to_db_dict()` so a future BaseEvent shape change cannot silently
+    break the integration path again.
+    """
+    audit = _audit_event(
+        "plugin.completed",
+        provenance={"correlation_id": "corr-bridge", "stdout_sha256": "deadbeef"},
+    )
+    envelope = wrap_plugin_event(
+        audit, correlation_id="corr-bridge", envelope_id="00000000-0000-4000-8000-000000000001"
+    )
+    event = envelope_to_base_event(envelope)
+    db_dict = event.to_db_dict()
+
+    # Column-by-column alignment with the events_table writes performed
+    # by `EventStore.append`.
+    assert db_dict["id"] == "00000000-0000-4000-8000-000000000001"
+    assert db_dict["event_type"] == "plugin.completed"
+    assert db_dict["aggregate_type"] == PLUGIN_AGGREGATE_TYPE
+    assert db_dict["aggregate_id"] == "corr-bridge"
+    # The full audit event becomes the persisted payload (plus the
+    # event_version sentinel BaseEvent injects).
+    assert db_dict["payload"]["event_type"] == "plugin.completed"
+    assert db_dict["payload"]["plugin"]["name"] == "github-pr-ops"
+    # Timestamp is parsed back into a real datetime.
+    assert db_dict["timestamp"].isoformat().startswith("2026-05-07T12:00:00")
+
+
+def test_envelope_to_base_event_rejects_non_plugin_envelope() -> None:
+    """The bridge refuses envelopes that are not plugin-aggregate rows."""
+    bad = wrap_plugin_event(
+        _audit_event("plugin.invoked"),
+        correlation_id="x",
+    )
+    bad["aggregate_type"] = "session"  # tamper
+    with pytest.raises(ValueError, match="not a plugin envelope"):
+        envelope_to_base_event(bad)

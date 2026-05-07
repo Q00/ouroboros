@@ -144,6 +144,56 @@ def test_happy_path_emits_invoked_then_permission_then_completed(tmp_path: Path)
     assert "stdout_sha256" in events[-1]["provenance"]
 
 
+def test_event_sink_exception_does_not_break_invocation_result(tmp_path: Path) -> None:
+    """A failing event_sink (e.g. ledger outage) on the terminal emit
+    must NOT propagate; the firewall must still return an InvocationResult.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    be5e480: previously `_emit()` called event_sink directly and let
+    exceptions escape, so a ledger append failure during the terminal
+    `plugin.completed`/`plugin.failed` emission left the caller with no
+    structured result even though the plugin command had already
+    executed. The chokepoint now isolates sink failures: invocation
+    outcome is still surfaced as InvocationResult.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    fail_count = {"n": 0}
+
+    def _flaky_sink(event: dict) -> None:
+        # Fail only on terminal events — the most damaging case: the
+        # subprocess has already run and the caller still needs a result.
+        if event["event_type"] in {"plugin.completed", "plugin.failed"}:
+            fail_count["n"] += 1
+            raise RuntimeError("simulated ledger outage")
+
+    # Successful subprocess: the terminal emit is plugin.completed.
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=_flaky_sink,
+        correlation_id="corr-flaky",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    assert result.status == "success"
+    assert result.exit_code == 0
+    # The sink raised at least once (terminal emit), but the firewall
+    # absorbed it and still produced a structured result.
+    assert fail_count["n"] >= 1
+    # The events tuple still records what the firewall observed locally,
+    # including the terminal event the sink rejected.
+    types = [e["event_type"] for e in result.events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.completed"]
+
+
 def test_trust_record_for_wrong_plugin_is_rejected(tmp_path: Path) -> None:
     """A TrustRecord whose plugin name does not match must NOT authorize.
 

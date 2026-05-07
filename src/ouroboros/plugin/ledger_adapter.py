@@ -33,7 +33,11 @@ async session and bridges to `append_fn`.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 import uuid
+
+if TYPE_CHECKING:  # pragma: no cover — type-only; keeps the module import-light
+    from ouroboros.events.base import BaseEvent
 
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
@@ -120,6 +124,65 @@ def unwrap_plugin_event(envelope: dict) -> dict:
     return dict(payload)
 
 
+def envelope_to_base_event(envelope: dict) -> BaseEvent:
+    """Convert a wrapped plugin envelope into a `BaseEvent` for the core
+    event store.
+
+    The PR introducing this adapter intentionally avoids importing the
+    async-SQLAlchemy `EventStore` machinery at module import time, but
+    the production integration path is `EventStore.append`, which only
+    accepts `BaseEvent`. This helper is the documented bridge: the CLI
+    integration point (#731) calls it to translate the dict envelope
+    produced by `wrap_plugin_event` into a `BaseEvent` and then awaits
+    `event_store.append(event)`.
+
+    `BaseEvent` is imported lazily so consumers that only need
+    wrap/unwrap (e.g. tests, schema-shape validation) do not pay the
+    pydantic-import cost.
+
+    Args:
+        envelope: A row envelope produced by `wrap_plugin_event`.
+
+    Returns:
+        A `BaseEvent` whose `to_db_dict()` matches the events_table
+        column shape and whose `data` is the audit-event payload.
+
+    Raises:
+        ValueError: if the envelope is not a plugin envelope.
+    """
+    from datetime import datetime
+
+    from ouroboros.events.base import BaseEvent  # local import — see docstring
+
+    agg = envelope.get("aggregate_type")
+    if agg != PLUGIN_AGGREGATE_TYPE:
+        raise ValueError(
+            f"envelope is not a plugin envelope (aggregate_type={agg!r}); "
+            f"expected {PLUGIN_AGGREGATE_TYPE!r}"
+        )
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("envelope payload is missing or not a dict")
+
+    raw_ts = envelope.get("timestamp")
+    if not isinstance(raw_ts, str):
+        raise ValueError("envelope timestamp must be an RFC3339 string")
+    # BaseEvent.timestamp is a `datetime`; the audit-event `occurred_at`
+    # is RFC3339 ("YYYY-MM-DDThh:mm:ssZ"). Convert the trailing Z so
+    # `datetime.fromisoformat` accepts it on Python <3.11 too.
+    iso = raw_ts.replace("Z", "+00:00")
+    timestamp = datetime.fromisoformat(iso)
+
+    return BaseEvent(
+        id=envelope["id"],
+        type=envelope["event_type"],
+        timestamp=timestamp,
+        aggregate_type=envelope["aggregate_type"],
+        aggregate_id=envelope["aggregate_id"],
+        data=dict(payload),
+    )
+
+
 def make_event_sink(
     append_fn: Callable[[dict], None],
     *,
@@ -129,10 +192,27 @@ def make_event_sink(
 ) -> Callable[[dict], None]:
     """Build a firewall-compatible `EventSink` that wraps and appends.
 
+    The sink expects an `append_fn` that consumes the **dict envelope**
+    produced by `wrap_plugin_event`, NOT the typed `BaseEvent` that
+    `EventStore.append` requires. Production wiring (#731) pairs this
+    factory with `envelope_to_base_event` to perform the typed
+    translation, e.g.::
+
+        async def _ledger_append(envelope: dict) -> None:
+            await event_store.append(envelope_to_base_event(envelope))
+
+        sink = make_event_sink(
+            lambda env: asyncio.run(_ledger_append(env)),
+            correlation_id=corr,
+        )
+
+    Tests pass `list.append` to inspect the dict-shaped envelopes
+    directly without bringing the async store online.
+
     Args:
         append_fn: Where to append the wrapped envelope. In production,
-            wire to an EventStore.append wrapper. In tests, pass
-            `list.append`.
+            wire through `envelope_to_base_event` to `EventStore.append`.
+            In tests, pass `list.append`.
         correlation_id: Default aggregate id and forwarded to wrap.
         aggregate_id: Override.
         envelope_id_factory: Override for envelope id generation
@@ -157,6 +237,7 @@ def make_event_sink(
 __all__ = [
     "AUDIT_EVENT_TYPES",
     "PLUGIN_AGGREGATE_TYPE",
+    "envelope_to_base_event",
     "make_event_sink",
     "unwrap_plugin_event",
     "wrap_plugin_event",
