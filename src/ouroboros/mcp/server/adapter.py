@@ -1710,7 +1710,6 @@ def create_ouroboros_server(
             event_store=event_store,
         ),
         InterviewHandler(
-            interview_engine=interview_engine,
             event_store=event_store,
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,

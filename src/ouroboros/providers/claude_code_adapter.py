@@ -601,9 +601,10 @@ class ClaudeCodeAdapter:
             "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": os.environ.get(
                 "OUROBOROS_SKIP_VERSION_CHECK", "1"
             ),
+            "CLAUDECODE": "",
+            "CLAUDE_PLUGIN_DATA": "",
+            "CLAUDE_PLUGIN_ROOT": "",
         }
-        if claudecode_present:
-            env_overrides["CLAUDECODE"] = ""
 
         stderr_lines: list[str] = []
 
