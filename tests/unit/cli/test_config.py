@@ -284,6 +284,22 @@ class TestConfigValidate:
             result = runner.invoke(app, ["validate"])
         assert result.exit_code == 0
 
+    @pytest.mark.parametrize(
+        "alias",
+        ["claude_code", "codex_cli", "opencode_cli", "gemini_cli", "hermes_cli"],
+    )
+    def test_runtime_backend_alias_is_valid(self, tmp_path: Path, alias: str) -> None:
+        """validate should accept runtime_backend aliases that the schema permits."""
+        config = {"orchestrator": {"runtime_backend": alias}, "llm": {"backend": "claude"}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=tmp_path),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 0
+
     def test_missing_cli_path_exits_nonzero(self, tmp_path: Path) -> None:
         """validate should exit 1 when CLI path doesn't exist."""
         config = {

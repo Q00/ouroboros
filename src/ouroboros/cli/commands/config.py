@@ -14,6 +14,7 @@ import yaml
 
 from ouroboros.backends import (
     get_backend_capability,
+    resolve_runtime_backend_name,
     runtime_backend_choices,
 )
 from ouroboros.cli.formatters import console
@@ -440,8 +441,11 @@ def validate() -> None:
     backend_val = data.get("orchestrator", {}).get("runtime_backend")
     if not backend_val:
         issues.append("orchestrator.runtime_backend is not set")
-    elif backend_val not in _VALID_BACKENDS:
-        issues.append(f"orchestrator.runtime_backend '{backend_val}' is not supported")
+    else:
+        try:
+            resolve_runtime_backend_name(str(backend_val))
+        except ValueError:
+            issues.append(f"orchestrator.runtime_backend '{backend_val}' is not supported")
 
     # Check CLI path exists
     capability = get_backend_capability(str(backend_val or ""))
