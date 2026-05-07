@@ -13,17 +13,26 @@ import asyncio
 from typing import Any
 
 from ouroboros.auto.pipeline import AutoPipelineResult
+from ouroboros.auto.state import AutoResumeCapability
 from ouroboros.mcp.tools.auto_handler import AutoHandler, _format_result
 
 
 def _result(
-    capability: str, *, status: str = "blocked", session_id: str = "auto_mcp"
+    capability: AutoResumeCapability | str,
+    *,
+    status: str = "blocked",
+    session_id: str = "auto_mcp",
 ) -> AutoPipelineResult:
+    cap = (
+        capability
+        if isinstance(capability, AutoResumeCapability)
+        else AutoResumeCapability(capability)
+    )
     return AutoPipelineResult(
         status=status,
         auto_session_id=session_id,
         phase=status,
-        resume_capability=capability,
+        resume_capability=cap,
     )
 
 
