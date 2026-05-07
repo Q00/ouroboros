@@ -160,8 +160,8 @@ class HermesCliRuntime(AgentRuntime):
     _display_name = "Hermes CLI"
     _process_shutdown_timeout_seconds = 5.0
     _max_ouroboros_depth = 5
-    _startup_output_timeout_seconds: float | None = None
-    _stdout_idle_timeout_seconds: float | None = None
+    _startup_output_timeout_seconds = 60.0
+    _stdout_idle_timeout_seconds = 300.0
     _max_stderr_lines = 512
 
     def __init__(
@@ -190,9 +190,9 @@ class HermesCliRuntime(AgentRuntime):
         # ``0``/negative disables the guard so the generation watchdog —
         # not the runtime's own stream loop — owns long-running liveness.
         # Hermes runs in quiet mode (``-Q``) and can legitimately emit no
-        # stdout while the model is working.  Therefore the class defaults are
-        # disabled; operators can opt back into local stdout watchdogs via
-        # OUROBOROS_HERMES_*_TIMEOUT_SECONDS or explicit constructor kwargs.
+        # stdout while the model is working.  Keep class defaults conservative
+        # for direct callers; watchdog-wrapped seed execution may opt out via
+        # explicit constructor kwargs.
         self._startup_output_timeout_seconds = _resolve_timeout_override(
             startup_output_timeout_seconds,
             _STARTUP_TIMEOUT_ENV,

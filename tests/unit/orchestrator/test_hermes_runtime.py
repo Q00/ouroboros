@@ -135,15 +135,16 @@ class TestHermesCliRuntime:
         ):
             monkeypatch.delenv(name, raising=False)
 
-    def test_default_timeouts_are_disabled_for_quiet_hermes(
+    def test_default_timeouts_match_class_attributes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._clear_timeout_env(monkeypatch)
         runtime = HermesCliRuntime(cli_path="hermes")
-        assert HermesCliRuntime._startup_output_timeout_seconds is None
-        assert HermesCliRuntime._stdout_idle_timeout_seconds is None
-        assert runtime._startup_output_timeout_seconds is None
-        assert runtime._stdout_idle_timeout_seconds is None
+        assert (
+            runtime._startup_output_timeout_seconds
+            == HermesCliRuntime._startup_output_timeout_seconds
+        )
+        assert runtime._stdout_idle_timeout_seconds == HermesCliRuntime._stdout_idle_timeout_seconds
 
     def test_explicit_timeout_kwargs_override_defaults(
         self, monkeypatch: pytest.MonkeyPatch

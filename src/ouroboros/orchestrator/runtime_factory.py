@@ -45,6 +45,8 @@ def create_agent_runtime(
     cli_path: str | Path | None = None,
     cwd: str | Path | None = None,
     llm_backend: str | None = None,
+    startup_output_timeout_seconds: float | None = None,
+    stdout_idle_timeout_seconds: float | None = None,
 ) -> AgentRuntime:
     """Create an orchestrator agent runtime from config or explicit options."""
     resolved_backend = resolve_agent_runtime_backend(backend)
@@ -98,6 +100,8 @@ def create_agent_runtime(
 
         return HermesCliRuntime(
             cli_path=cli_path or get_hermes_cli_path(),
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
             **runtime_kwargs,
         )
 

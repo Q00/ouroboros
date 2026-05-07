@@ -421,6 +421,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     backend=self.agent_runtime_backend,
                     cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
                     llm_backend=self.llm_backend,
+                    startup_output_timeout_seconds=0,
+                    stdout_idle_timeout_seconds=0,
                     **(
                         {"permission_mode": delegated_permission_mode}
                         if delegated_permission_mode
