@@ -14,6 +14,7 @@ from ouroboros.auto.interview_driver import (
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.repo_context import repo_auto_answer_context
+from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
@@ -215,7 +216,7 @@ def test_seed_draft_ledger_uses_later_repeated_non_goal_as_correction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
+async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_1")
 
@@ -233,9 +234,68 @@ async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path)
 
     result = await driver.run(state, ledger)
 
+    assert result.status == "seed_ready"
+    assert state.phase == AutoPhase.INTERVIEW
+    assert state.interview_completed is True
+    assert ledger.is_seed_ready()
+    assert ledger.summary()["open_gaps"] == []
+    final_actor = ledger.sections["actors"].entries[-1]
+    assert final_actor.status == LedgerStatus.DEFAULTED
+    assert final_actor.source == LedgerSource.ASSUMPTION
+    assert any("safe-default policy" in item for item in final_actor.evidence)
+
+
+def test_safe_default_non_goals_do_not_make_later_finalization_unsafe() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a small local CLI")
+    ledger.add_entry(
+        "non_goals",
+        LedgerEntry(
+            key="non_goals.safe_boundary",
+            value="Do not perform credential handling, billing, or production deployment.",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+            rationale="Conservative scope boundary recorded by auto policy.",
+        ),
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal="Build a small local CLI",
+        provenance="unit test",
+    )
+
+    assert result.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(
+        goal="Deploy the service to production and configure the required credentials",
+        cwd=str(tmp_path),
+    )
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
     assert "unresolved gaps" in (result.blocker or "")
+    assert "unsafe default context" in (result.blocker or "")
+    assert not ledger.is_seed_ready()
 
 
 @pytest.mark.asyncio

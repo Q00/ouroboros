@@ -24,6 +24,7 @@ from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
+from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 log = structlog.get_logger(__name__)
@@ -254,7 +255,25 @@ class AutoInterviewDriver:
             self._save(state)
 
         if not ledger.is_seed_ready():
-            gaps = ", ".join(ledger.open_gaps())
+            finalization = finalize_safe_defaultable_gaps(
+                ledger,
+                goal=state.goal,
+                provenance=f"auto interview max rounds {self.max_rounds}",
+                pending_question=state.pending_question,
+            )
+            state.ledger = ledger.to_dict()
+            if finalization.completed and ledger.is_seed_ready():
+                state.pending_question = None
+                state.interview_completed = True
+                state.mark_progress(
+                    "auto interview finalized safe-defaultable gaps at max rounds",
+                    tool_name="interview_driver",
+                )
+                self._save(state)
+                return AutoInterviewResult(
+                    "seed_ready", state.interview_session_id, ledger, self.max_rounds
+                )
+            gaps = ", ".join(finalization.unsafe_gaps or ledger.open_gaps())
             blocker = f"auto interview reached max rounds with unresolved gaps: {gaps}"
             state.mark_blocked(blocker, tool_name="interview_driver")
             record_authoring_backend(state)
