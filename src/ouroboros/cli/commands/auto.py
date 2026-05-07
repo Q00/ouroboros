@@ -20,6 +20,7 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.provenance import resolve_provenance
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
@@ -132,6 +133,13 @@ def auto_command(
         str | None,
         typer.Option("--reconcile-source", help="Source label for run handoff reconciliation."),
     ] = None,
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet",
+            help="Suppress live phase/grade/repair progress lines; only the final summary prints.",
+        ),
+    ] = False,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -167,6 +175,7 @@ def auto_command(
                 attach_source=attach_source,
                 reconcile_run=reconcile_run,
                 reconcile_source=reconcile_source,
+                progress_callback=_make_progress_renderer(quiet=quiet),
             )
         )
     except Exception as exc:
@@ -207,6 +216,7 @@ async def _run_auto(
     attach_source: str | None = None,
     reconcile_run: bool = False,
     reconcile_source: str | None = None,
+    progress_callback: AutoProgressCallback | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
     incoming_provenance = resolve_provenance()
@@ -327,6 +337,7 @@ async def _run_auto(
         attach_source=attach_source,
         reconcile_run=reconcile_run,
         reconcile_source=reconcile_source,
+        progress_callback=progress_callback,
     )
     result = await pipeline.run(state)
     return result
@@ -369,6 +380,25 @@ def _format_runtime_labels(
     else:
         run_label = backend_name
     return authoring, run_label
+
+
+def _make_progress_renderer(*, quiet: bool) -> AutoProgressCallback | None:
+    """Build a callback that prints live phase/grade/repair lines, unless quiet."""
+    if quiet:
+        return None
+
+    def render(event: AutoProgressEvent) -> None:
+        if event.kind == "grade":
+            label = f"grade {event.grade}" if event.grade else "grade"
+        elif event.kind == "repair":
+            label = f"repair round {event.round}"
+        else:
+            label = event.phase
+        # Escape the leading "[" so Rich treats "[auto]" as literal text
+        # rather than as a markup style name.
+        print_info(rf"\[auto] {label} — {event.message}")
+
+    return render
 
 
 def _print_status(state: AutoPipelineState) -> None:
