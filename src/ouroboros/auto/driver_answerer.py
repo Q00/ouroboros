@@ -66,7 +66,7 @@ class DriverAutoAnswerer:
                 source=AutoAnswerSource.BLOCKER,
                 confidence=1.0,
                 blocker=AutoBlocker(reason=reason, question=question),
-        )
+            )
 
         if self.adapter is None:
             try:
