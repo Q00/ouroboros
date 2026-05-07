@@ -6,6 +6,7 @@ import asyncio
 from enum import Enum
 import os
 from pathlib import Path
+import shutil
 import sys
 from typing import Annotated
 
@@ -24,10 +25,24 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoBrakeMode, AutoPipelineState, AutoStore
-from ouroboros.backends import interview_driver_backend_choices, resolve_interview_driver_backend
+from ouroboros.backends import (
+    get_backend_capability,
+    interview_driver_backend_choices,
+    resolve_interview_driver_backend,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
-from ouroboros.config import get_auto_interview_driver_backend, get_opencode_mode
+from ouroboros.config import (
+    get_auto_interview_driver_backend,
+    get_cli_path,
+    get_codex_cli_path,
+    get_copilot_cli_path,
+    get_gemini_cli_path,
+    get_hermes_cli_path,
+    get_kiro_cli_path,
+    get_opencode_cli_path,
+    get_opencode_mode,
+)
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
@@ -175,6 +190,16 @@ def _safe_default_cwd() -> Path:
 _DEFAULT_MAX_INTERVIEW_ROUNDS = 12
 _DEFAULT_MAX_REPAIR_ROUNDS = 5
 
+_DRIVER_CLI_PATH_GETTERS = {
+    "claude": get_cli_path,
+    "codex": get_codex_cli_path,
+    "copilot": get_copilot_cli_path,
+    "gemini": get_gemini_cli_path,
+    "hermes": get_hermes_cli_path,
+    "kiro": get_kiro_cli_path,
+    "opencode": get_opencode_cli_path,
+}
+
 
 def _prompt_driver_if_missing(*, driver: str | None, resume: str | None) -> str | None:
     """Prompt interactive new sessions to opt into a selected interview driver."""
@@ -184,10 +209,15 @@ def _prompt_driver_if_missing(*, driver: str | None, resume: str | None) -> str 
         return driver
     if not sys.stdin.isatty():
         return driver
+    choices = _installed_interview_driver_backends()
+    if not choices:
+        print_info(
+            "No installed interview driver CLI detected; using deterministic auto answers."
+        )
+        return driver
     if not typer.confirm("Use an interview driver to answer auto questions?", default=True):
         return driver
 
-    choices = interview_driver_backend_choices()
     default = "hermes" if "hermes" in choices else choices[0]
     prompt = f"Interview driver ({', '.join(choices)})"
     while True:
@@ -198,6 +228,30 @@ def _prompt_driver_if_missing(*, driver: str | None, resume: str | None) -> str 
             print_error(f"Unsupported interview driver backend: {selected}")
             continue
         return selected
+
+
+def _installed_interview_driver_backends() -> tuple[str, ...]:
+    """Return interview drivers with a configured or PATH-discoverable CLI."""
+    installed: list[str] = []
+    for backend in interview_driver_backend_choices():
+        capability = get_backend_capability(backend)
+        if capability is None or capability.cli_name is None:
+            continue
+        getter = _DRIVER_CLI_PATH_GETTERS.get(capability.name)
+        configured_path = getter() if getter is not None else None
+        if _is_executable_command(configured_path) or shutil.which(capability.cli_name):
+            installed.append(backend)
+    return tuple(installed)
+
+
+def _is_executable_command(value: str | None) -> bool:
+    """Return True when a configured command path/name is executable."""
+    if value is None or not value.strip():
+        return False
+    candidate = Path(value).expanduser()
+    if candidate.parent == Path("."):
+        return shutil.which(str(candidate)) is not None
+    return candidate.is_file() and os.access(candidate, os.X_OK)
 
 
 async def _run_auto(

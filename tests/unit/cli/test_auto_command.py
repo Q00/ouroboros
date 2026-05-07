@@ -58,6 +58,10 @@ def test_auto_prompts_for_driver_when_interactive_and_unconfigured() -> None:
     with (
         patch("ouroboros.cli.commands.auto.get_auto_interview_driver_backend", return_value=None),
         patch("ouroboros.cli.commands.auto.sys.stdin.isatty", return_value=True),
+        patch(
+            "ouroboros.cli.commands.auto._installed_interview_driver_backends",
+            return_value=("hermes",),
+        ),
         patch("ouroboros.cli.commands.auto.typer.confirm", return_value=True) as confirm,
         patch("ouroboros.cli.commands.auto.typer.prompt", return_value="hermes") as prompt,
     ):
@@ -75,6 +79,10 @@ def test_auto_prompt_decline_keeps_deterministic_driver() -> None:
     with (
         patch("ouroboros.cli.commands.auto.get_auto_interview_driver_backend", return_value=None),
         patch("ouroboros.cli.commands.auto.sys.stdin.isatty", return_value=True),
+        patch(
+            "ouroboros.cli.commands.auto._installed_interview_driver_backends",
+            return_value=("hermes",),
+        ),
         patch("ouroboros.cli.commands.auto.typer.confirm", return_value=False),
         patch("ouroboros.cli.commands.auto.typer.prompt") as prompt,
     ):
@@ -82,6 +90,51 @@ def test_auto_prompt_decline_keeps_deterministic_driver() -> None:
 
     assert driver is None
     prompt.assert_not_called()
+
+
+def test_auto_prompt_skips_when_no_driver_cli_is_installed() -> None:
+    """Do not offer selected-driver mode when no local driver executable is available."""
+    from ouroboros.cli.commands.auto import _prompt_driver_if_missing
+
+    with (
+        patch("ouroboros.cli.commands.auto.get_auto_interview_driver_backend", return_value=None),
+        patch("ouroboros.cli.commands.auto.sys.stdin.isatty", return_value=True),
+        patch(
+            "ouroboros.cli.commands.auto._installed_interview_driver_backends",
+            return_value=(),
+        ),
+        patch("ouroboros.cli.commands.auto.typer.confirm") as confirm,
+    ):
+        driver = _prompt_driver_if_missing(driver=None, resume=None)
+
+    assert driver is None
+    confirm.assert_not_called()
+
+
+def test_installed_driver_choices_exclude_missing_hermes_cli() -> None:
+    """Hermes should not become the default prompt choice unless its CLI is available."""
+    from ouroboros.cli.commands.auto import _installed_interview_driver_backends
+
+    path_getters = {
+        "claude": lambda: None,
+        "codex": lambda: None,
+        "copilot": lambda: None,
+        "gemini": lambda: None,
+        "hermes": lambda: None,
+        "kiro": lambda: None,
+        "opencode": lambda: None,
+    }
+
+    def fake_which(command: str) -> str | None:
+        return "/usr/local/bin/codex" if command == "codex" else None
+
+    with (
+        patch("ouroboros.cli.commands.auto._DRIVER_CLI_PATH_GETTERS", path_getters),
+        patch("ouroboros.cli.commands.auto.shutil.which", side_effect=fake_which),
+    ):
+        choices = _installed_interview_driver_backends()
+
+    assert choices == ("codex",)
 
 
 def test_auto_prompt_skips_when_configured_driver_exists() -> None:

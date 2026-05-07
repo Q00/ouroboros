@@ -47,7 +47,8 @@ ooo auto "Build a local-first habit tracker CLI" --driver hermes --brake on
 The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.
 
 When invoked through the interactive CLI without `--driver` or a configured
-default driver, `ooo auto` asks whether to use a selected interview driver.
-Declining that prompt keeps the deterministic auto answerer. Use
+default driver, `ooo auto` asks whether to use a selected interview driver if
+one of the supported driver CLIs is installed. Declining that prompt, or having
+no installed driver CLI, keeps the deterministic auto answerer. Use
 `--driver <backend>` to select a driver explicitly; use `--brake on|off` to
 control whether risky driver answers block for approval.
