@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from ouroboros.plugin.firewall import (
     invoke_plugin,
 )
@@ -74,12 +76,15 @@ def _fake_runner(
     stdout: str = "",
     stderr: str = "",
     raise_filenotfound: bool = False,
+    raise_oserror: BaseException | None = None,
 ):
     """Build a stand-in for subprocess.run that returns canned data."""
 
     def _run(argv, *args, **kwargs) -> subprocess.CompletedProcess:
         if raise_filenotfound:
             raise FileNotFoundError(argv[0])
+        if raise_oserror is not None:
+            raise raise_oserror
         return subprocess.CompletedProcess(
             args=argv,
             returncode=returncode,
@@ -373,3 +378,53 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
     assert "not found" in result.message.lower()
+
+
+@pytest.mark.parametrize(
+    "exc, expected_code, descriptor_substr",
+    [
+        (PermissionError(13, "Permission denied"), 126, "not executable"),
+        (IsADirectoryError(21, "Is a directory"), 126, "is a directory"),
+        (NotADirectoryError(20, "Not a directory"), 126, "not a directory"),
+        (OSError(5, "I/O error"), 126, "launcher error"),
+    ],
+)
+def test_launcher_oserror_emits_terminal_failed(
+    tmp_path: Path,
+    exc: OSError,
+    expected_code: int,
+    descriptor_substr: str,
+) -> None:
+    """All launcher-side OSErrors must produce a terminal `plugin.failed`.
+
+    Pre-fix the firewall only caught `FileNotFoundError`. Anything else
+    escaped as an exception AFTER `plugin.invoked` and
+    `plugin.permission_used` had already been emitted, leaving an
+    incomplete audit trail and breaking the documented contract that
+    `invoke_plugin` always returns an `InvocationResult`.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-oserror",
+        subprocess_runner=_fake_runner(raise_oserror=exc),
+    )
+    assert result.status == "failed"
+    assert result.exit_code == expected_code
+    assert descriptor_substr in result.message.lower()
+    types = [e["event_type"] for e in events]
+    # Contract: once `plugin.invoked` is emitted, a terminal event MUST
+    # follow. permission_used appears between them per locked order.
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
+    assert events[-1]["result"]["status"] == "failed"

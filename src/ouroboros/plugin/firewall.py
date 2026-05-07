@@ -144,6 +144,25 @@ def _scope_risk_index(manifest: PluginManifest) -> dict[str, str]:
     return {p.scope: p.risk for p in manifest.permissions}
 
 
+def _classify_launcher_oserror(exc: OSError) -> tuple[int, str]:
+    """Classify a launcher-side OSError into (exit_code, descriptor).
+
+    Exit codes follow POSIX shell convention so callers can distinguish
+    "missing entrypoint" (127) from "found but not executable" (126).
+    Other launcher-side OSErrors fall through to 126 with a descriptor
+    that names the underlying condition for the audit trail.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return 127, "entrypoint not found"
+    if isinstance(exc, PermissionError):
+        return 126, "entrypoint not executable"
+    if isinstance(exc, IsADirectoryError):
+        return 126, "entrypoint is a directory"
+    if isinstance(exc, NotADirectoryError):
+        return 126, "entrypoint path component is not a directory"
+    return 126, "entrypoint launcher error"
+
+
 def invoke_plugin(
     program: RegisteredProgram,
     *,
@@ -291,8 +310,17 @@ def invoke_plugin(
             text=True,
             check=False,
         )
-    except FileNotFoundError as exc:
-        message = f"entrypoint not found: {cmd_argv[0]!r} ({exc})"
+    except OSError as exc:
+        # Map every launcher-side OSError to a terminal `plugin.failed` so
+        # the firewall contract holds: once `plugin.invoked` has been
+        # emitted, a terminal event ALWAYS follows. Pre-fix only
+        # `FileNotFoundError` was caught; `PermissionError`,
+        # `NotADirectoryError`, `IsADirectoryError`, and generic `OSError`
+        # would escape uncaught after `plugin.invoked` and
+        # `plugin.permission_used` had already been emitted, leaving a
+        # hung audit trail.
+        exit_code, descriptor = _classify_launcher_oserror(exc)
+        message = f"{descriptor}: {cmd_argv[0]!r} ({exc})"
         _emit(
             _event_envelope(
                 event_type="plugin.failed",
@@ -307,7 +335,7 @@ def invoke_plugin(
         )
         return InvocationResult(
             status="failed",
-            exit_code=127,
+            exit_code=exit_code,
             message=message,
             events=tuple(emitted),
         )
