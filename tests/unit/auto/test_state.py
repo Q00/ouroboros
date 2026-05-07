@@ -253,15 +253,62 @@ def test_store_load_rejects_session_id_mismatch(tmp_path) -> None:
         store.load(state.auto_session_id)
 
 
-def test_store_load_rejects_partial_timeout_map(tmp_path) -> None:
+def test_store_load_repairs_partial_timeout_map_with_defaults(tmp_path) -> None:
+    """Legacy auto sessions written before #686 may persist only a subset of
+    ``timeout_seconds_by_phase``. ``from_dict`` MUST fill in the documented
+    defaults rather than reject the file, so the per-phase timeout helper
+    introduced in #686 actually has a reachable fallback path. The next
+    save will persist the repaired map. (Bot-flagged in #699 review.)
+    """
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
     data = state.to_dict()
-    data["timeout_seconds_by_phase"] = {AutoPhase.RUN.value: 60}
+    data["timeout_seconds_by_phase"] = {AutoPhase.RUN.value: 30}  # only RUN, custom
     path = store.path_for(state.auto_session_id)
     path.write_text(__import__("json").dumps(data), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="missing required phases"):
+    loaded = store.load(state.auto_session_id)
+
+    # Custom value preserved.
+    assert loaded.timeout_seconds_by_phase[AutoPhase.RUN.value] == 30
+    # Missing phases filled with documented defaults.
+    assert loaded.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] == 120
+    assert loaded.timeout_seconds_by_phase[AutoPhase.SEED_GENERATION.value] == 120
+    assert loaded.timeout_seconds_by_phase[AutoPhase.REVIEW.value] == 90
+    assert loaded.timeout_seconds_by_phase[AutoPhase.REPAIR.value] == 90
+
+
+def test_store_load_repairs_missing_timeout_map_with_defaults(tmp_path) -> None:
+    """Same legacy compatibility path when the field is entirely absent."""
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    del data["timeout_seconds_by_phase"]
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    loaded = store.load(state.auto_session_id)
+    assert loaded.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] == 120
+    assert loaded.timeout_seconds_by_phase[AutoPhase.RUN.value] == 60
+
+
+def test_store_load_still_rejects_malformed_timeout_value(tmp_path) -> None:
+    """The repair logic only fills missing keys; explicitly-invalid values
+    still fail loudly so genuinely corrupt state is not silently masked."""
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["timeout_seconds_by_phase"] = {
+        AutoPhase.INTERVIEW.value: -1,
+        AutoPhase.SEED_GENERATION.value: 120,
+        AutoPhase.REVIEW.value: 90,
+        AutoPhase.REPAIR.value: 90,
+        AutoPhase.RUN.value: 60,
+    }
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="positive integers"):
         store.load(state.auto_session_id)
 
 

@@ -261,9 +261,7 @@ class AutoInterviewDriver:
         try:
             return await asyncio.wait_for(awaitable, timeout=self.timeout_seconds)
         except TimeoutError as exc:
-            source = (
-                f" (source={self.timeout_source})" if self.timeout_source else ""
-            )
+            source = f" (source={self.timeout_source})" if self.timeout_source else ""
             msg = (
                 f"{tool_name} timed out after {self.timeout_seconds:.0f}s{source}"
                 f" for {state.auto_session_id}"

@@ -194,6 +194,26 @@ class AutoPipelineState:
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
+        # Pre-policy auto sessions (#686) predate the durable per-phase timeout
+        # map. Treat the field as opt-in: fill in the documented defaults for
+        # any missing phase entries so legacy state files keep loading and the
+        # ``interview_timeout_for_state`` fallback path is actually reachable
+        # (bot-flagged in #699 review). Validation below still rejects
+        # explicitly-malformed values (non-int / non-positive) so genuinely
+        # corrupt state still fails loudly.
+        _DEFAULT_PHASE_TIMEOUTS = {
+            AutoPhase.INTERVIEW.value: 120,
+            AutoPhase.SEED_GENERATION.value: 120,
+            AutoPhase.REVIEW.value: 90,
+            AutoPhase.REPAIR.value: 90,
+            AutoPhase.RUN.value: 60,
+        }
+        existing_timeouts = payload.get("timeout_seconds_by_phase")
+        if not isinstance(existing_timeouts, dict):
+            payload["timeout_seconds_by_phase"] = dict(_DEFAULT_PHASE_TIMEOUTS)
+        else:
+            for phase, default in _DEFAULT_PHASE_TIMEOUTS.items():
+                existing_timeouts.setdefault(phase, default)
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
