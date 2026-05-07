@@ -176,12 +176,21 @@ attacker-controlled), all permissions they declare — including
 `required: true` — are treated as **implicitly trusted at boot** by the
 firewall (see Invocation Contract below). The boot-time registration step
 populates the trust store with these grants in-process; there is no
-user-visible "trust" prompt for first-party programs and no path for users
-to revoke them short of disabling the program. This is the deliberate
-contract: first-party programs MAY declare `required: true` permissions,
-and conforming firewalls MUST NOT block them on the trust check. Plugins
-that are not first-party never receive this treatment regardless of
-`source.type`.
+user-visible "trust" prompt for first-party programs by default. This is
+the deliberate contract: first-party programs MAY declare `required: true`
+permissions, and conforming firewalls MUST NOT block them on the trust
+check. Plugins that are not first-party never receive this treatment
+regardless of `source.type`.
+
+The user-facing revocation path for a first-party program is
+`ooo plugin disable <name>` (see UX § lifecycle), which is the same verb
+used for third-party plugins. For first-party that flag overrides the
+boot-time implicit grant: the next start (and every start thereafter)
+sees the program as un-trusted until the user re-runs
+`ooo plugin trust …` against it, which clears the override and writes
+explicit grants bound to the program's current triple. Disabled first-
+party programs remain installed (so re-enable is cheap) but are not
+invocable.
 
 The manifest schema versions per
 [Q00/ouroboros-plugins#11](https://github.com/Q00/ouroboros-plugins/issues/11):
@@ -360,7 +369,7 @@ identify the trust subject. Trust records — and the lockfile entries in
 `~/.ouroboros/plugins.lock` — MUST be keyed by the tuple
 
 ```text
-( source.type , source_identity , manifest_digest )
+( source.type , source_identity , artifact_digest )
 ```
 
 where `source_identity` is dispatched on `source.type` so the key works
@@ -370,33 +379,70 @@ URL-shaped):
 
 | `source.type` | `source_identity` | Notes |
 |---|---|---|
-| `plugin_home` | normalized repo URL the plugin was added from | This is the URL the user typed into `ooo plugin add <repo-url>`; normalization strips scheme variants, the trailing `.git`, and any fragment so the same repo cannot be smuggled in under aliases |
+| `plugin_home` | normalized repo URL the plugin was added from | Normalization is **strict and conservative**: it strips a trailing `.git`, the URL fragment, and any embedded `userinfo` (`user:pass@`), but **preserves the scheme exactly** (so `http://…` and `https://…` are distinct trust subjects) and preserves the host case-insensitively. Aliasing across schemes, hosts, or paths produces a different `source_identity` and forces fresh trust |
 | `local_path` | the absolute, resolved filesystem path of the plugin directory at install time | Symlinks are resolved; relative paths are rejected. Two installs of the same path resolve to the same `source_identity` |
 | `first_party` | the manifest `name` (the program is shipped inside the core release artifact) | First-party programs do not produce trust records in the user lockfile; their required permissions are populated as implicitly trusted at boot per the Manifest Schema section. The triple is recorded in core's in-process trust table for audit symmetry, not in `~/.ouroboros/plugins.lock` |
 
-`manifest_digest` is the sha256 of the canonical-form manifest at install
-time, in every case (including `first_party`).
+`artifact_digest` is the sha256 of the **complete installed artifact**,
+not just the manifest, computed at install time and re-verified before
+each invocation. The hashing input is dispatched per source type so it
+covers all executable bytes the plugin will run:
 
-This closes the permission-escalation path that would otherwise exist
-when a user runs `remove` + `add` and a different repository ships a
-plugin with the same `name`: the reinstalled plugin presents a different
-`(source_identity, manifest_digest)` pair, so the firewall MUST treat
-its required scopes as untrusted and force a fresh `ooo plugin trust`
-decision before invocation.
+| `source.type` | `artifact_digest` input | Re-verification rule |
+|---|---|---|
+| `plugin_home` | sha256 of the canonical-ordered tarball (`tar --sort=name --owner=0 --group=0 --mtime=@0 --format=ustar`) of the installed plugin subtree, including manifest, entrypoint, and any in-bundle assets | Recomputed only at `install` / `add` time. The installed copy in `~/.ouroboros/plugins/<...>/` is treated as the trusted snapshot; subsequent invocations re-verify the snapshot against the recorded digest |
+| `local_path` | the same canonical-ordered subtree hash, computed against the path on disk **at every invocation** | Because the path is mutable in place, the firewall MUST recompute the digest before each invocation. If the recomputed digest does not match the trusted record, the firewall MUST emit `plugin.failed` with `result.status="trust_subject_changed"` and refuse to run; the user must re-issue `ooo plugin trust ...` to re-confirm the new artifact |
+| `first_party` | sha256 of the entrypoint file (or the canonical subtree if the program ships as a directory) at boot | Rolls with each core release; restart picks up the new digest and the boot-time grant attaches to the new triple |
+
+Manifest-only binding is **insufficient** and explicitly rejected: an
+attacker (or a careless edit) that swaps the entrypoint while leaving
+the manifest untouched would otherwise inherit the prior trust. Binding
+to the artifact digest closes that code-substitution path.
+
+This collectively closes the two permission-escalation paths the trust
+subject is designed to defeat:
+
+1. **Same-name reinstall under a different source** — `remove` + `add`
+   from a different repository produces a new `source_identity`, hence
+   a new triple, hence un-trusted required scopes.
+2. **Code substitution under the same source** — modifying the
+   entrypoint without touching the manifest produces a new
+   `artifact_digest`, hence a new triple, hence un-trusted required
+   scopes. For `local_path` this is checked on every invocation; for
+   `plugin_home` and `first_party` it is checked at install / boot.
 
 Concrete obligations on the lifecycle commands:
 
 - `ooo plugin remove <name>` MUST delete every trust record bound to
-  that plugin's current triple. No "tombstone with implicit re-grant"
-  behavior is permitted — uninstall fully revokes.
-- `ooo plugin install` MUST compute the new triple and, if any field
-  differs from a previously-trusted record for the same `name`, MUST
-  treat the install as a fresh trust subject (all `required: true`
-  permissions begin un-trusted).
+  that plugin's current triple AND remove the installed snapshot (for
+  `plugin_home`) or the catalog registration (for `local_path`). No
+  "tombstone with implicit re-grant" behavior is permitted — uninstall
+  fully revokes.
+- `ooo plugin install` MUST compute the new triple (recomputing
+  `artifact_digest` from the just-installed bytes, not copying it from
+  upstream metadata) and, if any field differs from a previously-trusted
+  record for the same `name`, MUST treat the install as a fresh trust
+  subject (all `required: true` permissions begin un-trusted).
 - `ooo plugin trust ...` writes a record bound to the current triple of
   the named plugin. Trust does NOT carry across triple changes, ever,
-  including version bumps from the same source.url (digest changes ⇒
-  new trust subject).
+  including version bumps from the same source (digest changes ⇒ new
+  trust subject). `trust` also clears the `disabled` flag below.
+- `ooo plugin disable <name>` is the **revocation primitive** for both
+  third-party plugins and first-party programs. It MUST:
+  - delete every trust record bound to the plugin's current triple
+    (so the firewall's pre-invocation trust check refuses on the next
+    invocation, exactly as if the user had never run `trust`);
+  - set a durable `disabled: true` flag in the lockfile (or, for
+    first-party, in core's in-process disabled set persisted to a
+    sibling override file) — this prevents boot-time implicit grants
+    from re-attaching on the next start;
+  - leave the installed bytes and manifest in place, so re-enabling
+    is cheap and identity-preserving.
+  Re-enabling is performed by re-running `ooo plugin trust …` on the
+  same plugin: that clears the `disabled` flag and writes fresh trust
+  records bound to the *current* triple. There is no separate `enable`
+  verb in v0; the trust prompt is the only re-grant entrypoint, which
+  keeps every grant decision explicit and recorded.
 - The deferred `update` flow, when it lands, MUST surface the digest
   change to the user and require explicit re-confirmation of any
   permission whose risk class changed; until `update` exists, the
