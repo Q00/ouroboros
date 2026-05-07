@@ -40,9 +40,7 @@ class InterviewTurn:
 class InterviewBackend(Protocol):
     """Minimal backend interface needed by the auto interview driver."""
 
-    async def start(
-        self, goal: str, *, cwd: str, interview_id: str | None = None
-    ) -> InterviewTurn:
+    async def start(self, goal: str, *, cwd: str, interview_id: str | None = None) -> InterviewTurn:
         """Start an interview and return the first question.
 
         ``interview_id`` is an optional caller-supplied id.  Backends that
@@ -90,6 +88,12 @@ class AutoInterviewDriver:
         self._ensure_interview_phase(state)
         answer_context = self.context_provider(state.cwd)
         interview_tool_name = "interview.start"
+        # Pre-allocated interview id, kept local until we have evidence the
+        # backend actually persisted (or said it did).  Writing it onto
+        # ``state`` prematurely would point ``ooo auto --resume`` at a
+        # nonexistent session whenever the backend rejects the start
+        # outright (validation/config error).  See Q00/ouroboros#687.
+        preassigned_id: str | None = None
         try:
             if state.interview_session_id:
                 if state.pending_question:
@@ -109,29 +113,18 @@ class AutoInterviewDriver:
                     state.pending_question = turn.question
                     self._save(state)
             else:
-                # Pre-allocate the interview id and persist it on auto state
-                # BEFORE invoking the backend.  ``asyncio.wait_for`` cancels
-                # the backend task on timeout, so any id only learned from
-                # the backend's return value would be lost.  Pre-allocation
-                # guarantees ``ooo auto --resume`` can find the persisted
-                # interview even when the first-question call is cancelled.
-                # See Q00/ouroboros#687.
                 preassigned_id = _generate_interview_id()
-                state.interview_session_id = preassigned_id
-                self._save(state)
                 turn = _validate_turn(
                     await self._with_timeout(
-                        self.backend.start(
-                            state.goal, cwd=state.cwd, interview_id=preassigned_id
-                        ),
+                        self.backend.start(state.goal, cwd=state.cwd, interview_id=preassigned_id),
                         state,
                         tool_name=interview_tool_name,
                     )
                 )
                 if turn.session_id != preassigned_id:
-                    # Misbehaving backend ignored the supplied id.  Auto
-                    # state would diverge from the on-disk interview file;
-                    # warn so operators can spot the contract violation.
+                    # Misbehaving backend ignored the supplied id.  Trust
+                    # whatever id the backend actually returned; warn so
+                    # operators can spot the contract violation.
                     log.warning(
                         "auto.interview.backend_ignored_preassigned_id",
                         preassigned_id=preassigned_id,
@@ -142,14 +135,14 @@ class AutoInterviewDriver:
                 state.pending_question = turn.question
                 self._save(state)
         except TimeoutError as exc:
-            self._capture_partial_session_id(state, exc)
+            self._record_evidence_based_session_id(state, exc, preassigned_id)
             state.mark_blocked(str(exc), tool_name=interview_tool_name)
             self._save(state)
             return AutoInterviewResult(
                 "blocked", state.interview_session_id, ledger, state.current_round, str(exc)
             )
         except Exception as exc:
-            self._capture_partial_session_id(state, exc)
+            self._record_evidence_based_session_id(state, exc, preassigned_id)
             action = "resume" if interview_tool_name == "interview.resume" else "start"
             blocker = f"interview {action} failed: {exc}"
             state.mark_blocked(blocker, tool_name=interview_tool_name)
@@ -299,16 +292,25 @@ class AutoInterviewDriver:
         if self.store is not None:
             self.store.save(state)
 
-    @staticmethod
-    def _capture_partial_session_id(state: AutoPipelineState, exc: BaseException) -> None:
-        """Record a session id surfaced by a partial-success error on AutoState.
+    def _record_evidence_based_session_id(
+        self,
+        state: AutoPipelineState,
+        exc: BaseException,
+        preassigned_id: str | None,
+    ) -> None:
+        """Save an ``interview_session_id`` on auto state only with evidence.
 
-        When ``backend.start`` fails after the handler has already persisted
-        the interview server-side, the backend raises
-        ``PartialInterviewStartError`` carrying the persisted ``session_id``.
-        Saving it on the auto state lets ``ooo auto --resume`` pick up the
-        same interview instead of creating a duplicate.  See
-        Q00/ouroboros#687.
+        Two evidence channels are accepted (Q00/ouroboros#687):
+
+        * ``PartialInterviewStartError`` carries a session id the handler
+          has explicitly confirmed as persisted.
+        * For ``asyncio.wait_for`` cancellations or other exceptions, the
+          driver may probe the backend via the optional
+          ``is_session_persisted`` method to see whether a file for the
+          pre-allocated id was written before the cancel.
+
+        Without one of these the auto state stays ``None`` so
+        ``ooo auto --resume`` cannot point at a nonexistent session.
         """
         if state.interview_session_id:
             return
@@ -316,10 +318,25 @@ class AutoInterviewDriver:
         # interview_driver importable on its own.
         from ouroboros.auto.adapters import PartialInterviewStartError
 
-        if not isinstance(exc, PartialInterviewStartError):
-            return
-        if exc.session_id:
+        if isinstance(exc, PartialInterviewStartError) and exc.session_id:
             state.interview_session_id = exc.session_id
+            return
+        if not preassigned_id:
+            return
+        probe = getattr(self.backend, "is_session_persisted", None)
+        if probe is None:
+            return
+        try:
+            persisted = probe(preassigned_id)
+        except Exception as probe_exc:  # pragma: no cover - defensive
+            log.warning(
+                "auto.interview.persistence_probe_failed",
+                preassigned_id=preassigned_id,
+                error=str(probe_exc),
+            )
+            return
+        if persisted:
+            state.interview_session_id = preassigned_id
 
 
 class FunctionInterviewBackend:
@@ -330,14 +347,14 @@ class FunctionInterviewBackend:
         start: Callable[[str, str], Awaitable[InterviewTurn]],
         answer: Callable[[str, str], Awaitable[InterviewTurn]],
         resume: Callable[[str], Awaitable[InterviewTurn]] | None = None,
+        is_session_persisted: Callable[[str], bool] | None = None,
     ) -> None:
         self._start = start
         self._answer = answer
         self._resume = resume
+        self._is_session_persisted = is_session_persisted
 
-    async def start(
-        self, goal: str, *, cwd: str, interview_id: str | None = None
-    ) -> InterviewTurn:
+    async def start(self, goal: str, *, cwd: str, interview_id: str | None = None) -> InterviewTurn:
         # Forward ``interview_id`` only to callables that opt into the new
         # contract; plain ``(goal, cwd)`` callables remain compatible.
         if "interview_id" in inspect.signature(self._start).parameters:
@@ -352,6 +369,11 @@ class FunctionInterviewBackend:
             msg = "interview resume is unavailable because no pending question is persisted"
             raise RuntimeError(msg)
         return await self._resume(session_id)
+
+    def is_session_persisted(self, session_id: str) -> bool:
+        if self._is_session_persisted is None:
+            return False
+        return bool(self._is_session_persisted(session_id))
 
 
 def _generate_interview_id() -> str:

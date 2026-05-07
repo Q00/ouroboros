@@ -52,9 +52,7 @@ class _FakeInterviewEngine:
         await self.save_state(state)
         return Result.ok(state)
 
-    async def ask_next_question(
-        self, state: InterviewState
-    ) -> Result[str, MCPServerError]:
+    async def ask_next_question(self, state: InterviewState) -> Result[str, MCPServerError]:
         return Result.err(_RecoverableProviderError("Question generation timed out"))
 
     async def save_state(self, state: InterviewState) -> Result[Path, MCPServerError]:
@@ -94,7 +92,9 @@ async def test_subprocess_handler_persists_session_id_on_question_failure(tmp_pa
     assert meta.get("recoverable") is True
 
     persisted = tmp_path / f"interview_{session_id}.json"
-    assert persisted.exists(), "interview state file must exist on disk after first-question failure"
+    assert persisted.exists(), (
+        "interview state file must exist on disk after first-question failure"
+    )
     assert engine.saved_states, "engine.save_state must have been invoked"
 
 

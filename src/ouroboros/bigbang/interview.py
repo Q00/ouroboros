@@ -354,13 +354,25 @@ class InterviewEngine:
 
         # Persist the freshly-created state immediately so that downstream
         # failures (e.g. a question-generation timeout) still leave a
-        # resumable handle on disk.  See Q00/ouroboros#687.
+        # resumable handle on disk.  Hard-fail on save errors: the
+        # recovery contract downstream (recoverable ``MCPToolResult`` with
+        # ``meta.session_id`` returned from ``InterviewHandler`` on a
+        # first-question failure) assumes the on-disk state file exists.
+        # Returning ``Result.ok`` after a failed save would silently lie
+        # to callers that the session is resumable.  See Q00/ouroboros#687.
         save_result = await self.save_state(state)
         if save_result.is_err:
-            log.warning(
+            log.error(
                 "interview.start_save_failed",
                 interview_id=interview_id,
                 error=str(save_result.error),
+            )
+            return Result.err(
+                ValidationError(
+                    f"Failed to persist initial interview state: {save_result.error}",
+                    field="interview_id",
+                    value=interview_id,
+                )
             )
 
         return Result.ok(state)

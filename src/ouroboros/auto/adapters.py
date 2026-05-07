@@ -9,7 +9,11 @@ import yaml
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
 from ouroboros.core.seed import Seed
 from ouroboros.mcp.errors import MCPServerError
-from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.authoring_handlers import (
+    _DATA_DIR,
+    GenerateSeedHandler,
+    InterviewHandler,
+)
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.types import MCPToolResult
 
@@ -50,9 +54,7 @@ class HandlerInterviewBackend(InterviewBackend):
         self.handler = handler
         self.cwd = cwd
 
-    async def start(
-        self, goal: str, *, cwd: str, interview_id: str | None = None
-    ) -> InterviewTurn:
+    async def start(self, goal: str, *, cwd: str, interview_id: str | None = None) -> InterviewTurn:
         arguments: dict[str, str] = {"initial_context": goal, "cwd": cwd or self.cwd}
         if interview_id:
             arguments["interview_id"] = interview_id
@@ -92,6 +94,20 @@ class HandlerInterviewBackend(InterviewBackend):
             tool_name="ouroboros_interview",
         )
         return _turn_from_result(result, fallback_session_id=session_id)
+
+    def is_session_persisted(self, session_id: str) -> bool:
+        """Return True when ``interview_<session_id>.json`` exists on disk.
+
+        Used by ``AutoInterviewDriver`` to decide whether a pre-allocated
+        id may be retained on auto state after a driver-level
+        ``asyncio.wait_for`` cancel — without this probe the driver cannot
+        distinguish "handler crashed before persisting" from "handler
+        persisted then got cancelled".  See Q00/ouroboros#687.
+        """
+        if not session_id:
+            return False
+        state_dir = self.handler.data_dir or _DATA_DIR
+        return (state_dir / f"interview_{session_id}.json").exists()
 
 
 class HandlerSeedGenerator:
