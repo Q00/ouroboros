@@ -430,9 +430,7 @@ def test_required_permission_order_matches_manifest_declaration(tmp_path: Path) 
         subprocess_runner=_fake_runner(stdout="ok"),
     )
     assert happy.status == "success"
-    permission_events = [
-        e for e in happy_events if e["event_type"] == "plugin.permission_used"
-    ]
+    permission_events = [e for e in happy_events if e["event_type"] == "plugin.permission_used"]
     scopes_in_order = [e["permissions_used"][0] for e in permission_events]
     assert scopes_in_order == ["github:read", "shell:execute", "github:repo:read"]
 

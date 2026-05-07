@@ -165,9 +165,7 @@ class TrustStore:
 
             granted = list(existing.granted_scopes) if existing else []
             if all(g.scope != scope for g in granted):
-                granted.append(
-                    GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by)
-                )
+                granted.append(GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by))
 
             payload = {
                 "schema_version": TRUST_SCHEMA_VERSION,
@@ -179,9 +177,7 @@ class TrustStore:
                 ],
             }
             self._write_atomic(plugin, payload)
-            return TrustRecord(
-                plugin=plugin, version=version, granted_scopes=tuple(granted)
-            )
+            return TrustRecord(plugin=plugin, version=version, granted_scopes=tuple(granted))
 
     def reset_for_version_bump(self, plugin: str, new_version: str) -> None:
         """Invalidate trust because the plugin's version changed.
