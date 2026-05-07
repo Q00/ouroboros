@@ -144,6 +144,46 @@ def test_happy_path_emits_invoked_then_permission_then_completed(tmp_path: Path)
     assert "stdout_sha256" in events[-1]["provenance"]
 
 
+def test_default_confirm_fails_closed_for_destructive_command(tmp_path: Path) -> None:
+    """The default `confirm` parameter denies, so a caller that forgot to
+    wire a prompt cannot silently execute a destructive command.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    7509b0e: previously `confirm` defaulted to `lambda _: True`, which
+    auto-approved every confirmation gate, so a missing caller hook
+    became a silent destructive action instead of failing closed. The
+    default now denies (per the locked Q2 contract); explicit tests
+    that exercise the confirmed path pass `confirm=lambda _: True`.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="merge",  # requires_confirmation = True per fixture
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-default-confirm",
+        # NO confirm= argument — must fall back to the fail-closed default.
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    assert "user declined confirmation" in result.message
+    # The confirmation gate fires before any subprocess launch, so only
+    # the terminal `plugin.failed` (status=blocked) is emitted — not
+    # `plugin.invoked`. This matches the locked emission ordering for a
+    # blocked-by-confirmation invocation.
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[-1]["result"]["status"] == "blocked"
+
+
 def test_event_sink_exception_does_not_break_invocation_result(tmp_path: Path) -> None:
     """A failing event_sink (e.g. ledger outage) on the terminal emit
     must NOT propagate; the firewall must still return an InvocationResult.

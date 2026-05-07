@@ -160,6 +160,20 @@ def _scope_risk_index(manifest: PluginManifest) -> dict[str, str]:
     return {p.scope: p.risk for p in manifest.permissions}
 
 
+def _deny_confirmation(_msg: str) -> bool:
+    """Fail-closed default for `invoke_plugin(confirm=...)`.
+
+    Locked Q2 of Q00/ouroboros-plugins#9 mandates a single, explicit
+    user-confirmation gate for `requires_confirmation: true` commands.
+    The firewall is the documented chokepoint, so a caller that simply
+    forgot to wire a prompt MUST NOT silently execute the destructive
+    command — it must fail closed. CLI callers pass an interactive
+    prompt; tests pass `lambda _: True` only when they intentionally
+    exercise the confirmed path.
+    """
+    return False
+
+
 def invoke_plugin(
     program: RegisteredProgram,
     *,
@@ -168,7 +182,7 @@ def invoke_plugin(
     trust_record: TrustRecord | None,
     event_sink: EventSink,
     correlation_id: str,
-    confirm: ConfirmFn = lambda _msg: True,
+    confirm: ConfirmFn = _deny_confirmation,
     subprocess_runner: Callable[..., subprocess.CompletedProcess] | None = None,
 ) -> InvocationResult:
     """Invoke a UserLevel plugin command through the firewall.
@@ -184,9 +198,13 @@ def invoke_plugin(
             ledger writer (#737) in production; pass `events.append` in
             tests.
         correlation_id: Cross-event correlation id for the ledger.
-        confirm: Optional callable for confirmation prompts. Default is
-            "auto-confirm" (returns True). CLI passes a function that
-            actually prompts.
+        confirm: Callable for the per-command confirmation prompt
+            (locked Q2). The default fails closed (always returns False)
+            so a caller that forgot to wire a real prompt cannot
+            silently execute a `requires_confirmation: true` command.
+            The CLI passes a function that actually prompts the user;
+            tests pass `lambda _: True` only when they intentionally
+            exercise the confirmed path.
         subprocess_runner: Optional override (for tests) of subprocess.run.
 
     Returns:
