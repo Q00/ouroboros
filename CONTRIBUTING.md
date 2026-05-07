@@ -106,9 +106,22 @@ The last command enforces that the `ooo auto` core source files do
 not introduce domain-specific keywords (`github`, `pull_request`,
 `jira`, `slack`, …). Domain workflows belong in UserLevel plugins,
 not in `ooo auto`. The CI workflow `ooo-auto-boundary` runs the same
-check on every PR. If a forbidden keyword is genuinely necessary on
-a line (rare), append `# domain-keyword-allowed: <reason>` and
-include rationale in the PR description.
+check on every PR.
+
+Coverage is the union of (a) every `*.py` under `src/ouroboros/auto/`
+and (b) `src/ouroboros/cli/commands/auto.py`, so any new module added
+under the auto package is scanned automatically. Forbidden keywords
+are matched as case-insensitive substrings, which catches realistic
+identifier forms such as `GitHubClient`, `github_client`, `JiraIssue`,
+or `SlackNotifier`. The script also fails loud if a load-bearing
+anchor file (declared in `ANCHOR_FILES` inside the script) is missing,
+so a refactor that renames or removes one of those files cannot
+silently strip enforcement coverage — update `ANCHOR_FILES` in the
+same PR.
+
+If a forbidden keyword is genuinely necessary on a line (rare),
+append `# domain-keyword-allowed: <reason>` and include rationale in
+the PR description.
 
 ### 6. Submit PR
 
