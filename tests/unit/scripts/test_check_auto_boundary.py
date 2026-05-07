@@ -309,6 +309,65 @@ def test_anchor_file_present_but_outside_scan_dir_still_anchored(
     assert rc == 1
 
 
+def test_allowlist_marker_inside_string_literal_does_not_bypass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allowlist marker is only honored inside a real comment.
+
+    A forbidden keyword on a line whose only marker is embedded in a
+    string literal -- e.g. ``MSG = "domain-keyword-allowed: github"``
+    -- must still be flagged. Substring-only marker detection (the
+    pre-fix behavior) was a real bypass that defeated the guard.
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    watched_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    watched_dir.mkdir(parents=True)
+    (watched_dir / "auto.py").write_text('MSG = "domain-keyword-allowed: docs github"\n')
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 1
+
+
+def test_allowlist_marker_in_real_comment_still_bypasses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allowlist marker still works when it appears in a genuine
+    Python comment (trailing ``#`` form) -- regression guard for the
+    string-literal fix above."""
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    watched_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    watched_dir.mkdir(parents=True)
+    (watched_dir / "auto.py").write_text(
+        "import legacy_github  # domain-keyword-allowed: legacy plumbing\n"
+    )
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 0
+
+
+def test_allowlist_marker_split_string_and_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A line where the marker is in a string AND a separate (non-marker)
+    real comment exists must NOT bypass. Only a marker in a real comment
+    counts."""
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    watched_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    watched_dir.mkdir(parents=True)
+    (watched_dir / "auto.py").write_text(
+        'MSG = "domain-keyword-allowed: github"  # actual comment without marker\n'
+    )
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 1
+
+
 def test_scan_extra_files_are_scanned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A SCAN_EXTRA_FILES entry that lives outside SCAN_DIRS is still
     scanned for forbidden keywords (regression guard for the union

@@ -19,8 +19,12 @@ CI:
 Allowlist:
     Lines that genuinely need a forbidden keyword (rare; usually a
     legacy import) can be marked with the trailing comment
-    `# domain-keyword-allowed: <reason>` to bypass the check. Each
-    allowlist usage requires reviewer sign-off.
+    `# domain-keyword-allowed: <reason>` to bypass the check. The
+    marker is honored only when it appears inside a real Python
+    comment token (the file is tokenized for this), so a stray
+    "domain-keyword-allowed:" inside a string literal cannot be used
+    to smuggle a forbidden keyword past the guard. Each allowlist
+    usage requires reviewer sign-off.
 
 Coverage strategy:
     The scan target is the *union* of (a) every `*.py` under
@@ -42,8 +46,10 @@ Pattern strategy:
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 import sys
+import tokenize
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -137,20 +143,47 @@ def _resolve_scan_targets() -> tuple[list[Path], list[str]]:
     return targets, missing
 
 
+def _allowlisted_lines(text: str) -> set[int]:
+    """Return the set of line numbers carrying a *real* Python comment
+    that contains the allowlist marker.
+
+    A naive substring check (``ALLOWLIST_MARKER in line``) would also
+    bypass a forbidden keyword when the marker appears inside a string
+    literal -- e.g. ``MSG = "domain-keyword-allowed: github"`` -- which
+    silently undermines the contract documented in CONTRIBUTING.md and
+    the script docstring. Tokenize the file and only honor the marker
+    when it appears in a ``COMMENT`` token.
+
+    On tokenize failure (malformed Python, partial file, etc.), return
+    an empty set: the safer default for a boundary guard is to flag
+    rather than over-allowlist.
+    """
+    allowed: set[int] = set()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT and ALLOWLIST_MARKER in tok.string:
+                allowed.add(tok.start[0])
+    except (tokenize.TokenizeError, IndentationError, SyntaxError):
+        return set()
+    return allowed
+
+
 def _scan_file(path: Path) -> list[tuple[int, str, str]]:
     """Return offending ``(line_no, line, matched_pattern)`` tuples for ``path``.
 
-    Lines carrying the allowlist marker are skipped. Lines inside
-    string literals or comments are still checked -- a stray keyword
-    in a docstring of a watched file would catch, which is the desired
-    behavior.
+    Lines carrying the allowlist marker *as a real comment* are skipped.
+    Lines inside string literals or docstrings are still checked -- a
+    stray keyword in a docstring of a watched file would catch, which
+    is the desired behavior; and a forbidden keyword on a line whose
+    only marker is inside a string literal is *not* allowlisted.
     """
     findings: list[tuple[int, str, str]] = []
     if not path.is_file():
         return findings
     text = path.read_text(encoding="utf-8")
+    allowed_lines = _allowlisted_lines(text)
     for lineno, line in enumerate(text.splitlines(), start=1):
-        if ALLOWLIST_MARKER in line:
+        if lineno in allowed_lines:
             continue
         lowered = line.lower()
         for pattern in FORBIDDEN_PATTERNS:
