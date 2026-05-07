@@ -21,7 +21,6 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import (
-    AutoPhase,
     AutoPipelineState,
     AutoStore,
     ResumeCapability,
