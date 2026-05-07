@@ -173,6 +173,121 @@ async def test_auto_handler_meta_omits_progress_events_when_state_log_empty(
 
 
 @pytest.mark.asyncio
+async def test_auto_handler_meta_includes_terminal_phase_event_persisted_during_run(
+    monkeypatch, tmp_path
+) -> None:
+    """The save that records a terminal phase transition must persist the matching event.
+
+    Regression for the bot finding that ``_save()`` previously persisted
+    ``state`` *before* ``_maybe_emit_phase`` appended the new event, so
+    a terminal ``complete`` / ``blocked`` / ``failed`` transition (which
+    is always followed by an immediate ``return``) was never written to
+    ``state.progress_events`` on disk. The handler then re-loaded a
+    history that was always one save behind.
+    """
+    from ouroboros.auto.grading import GradeResult, SeedGrade
+    from ouroboros.auto.ledger import SeedDraftLedger
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.auto.seed_repairer import RepairResult
+    from ouroboros.auto.seed_reviewer import SeedReview
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+    from ouroboros.core.seed import (
+        EvaluationPrinciple,
+        ExitCondition,
+        OntologyField,
+        OntologySchema,
+        Seed,
+        SeedMetadata,
+    )
+
+    seed = Seed(
+        goal="Build a CLI",
+        constraints=("Use existing project patterns",),
+        acceptance_criteria=("Command prints stable output",),
+        ontology_schema=OntologySchema(
+            name="CliTask",
+            description="CLI task ontology",
+            fields=(OntologyField(name="command", field_type="string", description="Command"),),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(name="testability", description="Observable behavior", weight=1.0),
+        ),
+        exit_conditions=(
+            ExitCondition(
+                name="verified",
+                description="Checks pass",
+                evaluation_criteria="All acceptance criteria pass",
+            ),
+        ),
+        metadata=SeedMetadata(ambiguity_score=0.12),
+    )
+
+    class _StubInterviewDriver:
+        async def run(self, _state, _ledger):  # noqa: ARG002
+            raise AssertionError("interview driver must not run on this resume path")
+
+    async def fake_seed_generator(_session_id):  # noqa: ARG001
+        raise AssertionError("seed generator must not run when seed_artifact is persisted")
+
+    def fake_seed_saver(_seed):
+        return str(tmp_path / "seed.yaml")
+
+    store = AutoStore(tmp_path / "store")
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.seed_artifact = seed.to_dict()
+    state.seed_path = str(tmp_path / "seed.yaml")
+    state.last_grade = "A"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    state.ledger = ledger.to_dict()
+    state.transition(AutoPhase.INTERVIEW, "primed")
+    state.transition(AutoPhase.SEED_GENERATION, "ready for seed generation")
+    state.transition(AutoPhase.REVIEW, "review queued")
+    state.skip_run = True
+    store.save(state)
+
+    class _PassingReviewer:
+        def review(self, _seed, *, ledger=None):  # noqa: ARG002
+            grade = GradeResult(grade=SeedGrade.A, scores={}, may_run=True)
+            return SeedReview(grade_result=grade, findings=())
+
+    class _PassingRepairer:
+        def converge(self, seed_in, *, ledger=None):
+            review = _PassingReviewer().review(seed_in, ledger=ledger)
+            return (
+                seed_in,
+                review,
+                [
+                    RepairResult(
+                        changed=False,
+                        seed=seed_in,
+                        applied_repairs=(),
+                        unresolved_findings=(),
+                    )
+                ],
+            )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        fake_seed_generator,
+        store=store,
+        seed_saver=fake_seed_saver,
+        skip_run=True,
+        reviewer=_PassingReviewer(),
+        repairer=_PassingRepairer(),
+        progress_callback=None,
+    )
+    await pipeline.run(state)
+
+    persisted = store.load(state.auto_session_id)
+    assert persisted.phase is AutoPhase.COMPLETE
+    persisted_kinds = [event["kind"] for event in persisted.progress_events]
+    persisted_phases = [event["phase"] for event in persisted.progress_events]
+    assert "complete" in persisted_phases, persisted.progress_events
+    assert persisted_kinds[-1] == "phase"
+    assert persisted_phases[-1] == "complete"
+
+
+@pytest.mark.asyncio
 async def test_auto_handler_meta_tolerates_unloadable_state_after_run(
     monkeypatch, tmp_path
 ) -> None:

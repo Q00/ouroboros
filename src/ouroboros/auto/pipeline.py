@@ -574,9 +574,16 @@ class AutoPipeline:
         return False, None
 
     def _save(self, state: AutoPipelineState) -> None:
+        # Emit *before* persisting so the new phase event lands in
+        # ``state.progress_events`` and gets durably written by the same
+        # save call. Otherwise terminal phase transitions
+        # (complete / blocked / failed) — which are followed only by an
+        # immediate ``return`` — would never be persisted, and
+        # AutoHandler.handle()'s post-run reload would surface a
+        # progress history that is always one save behind.
+        self._maybe_emit_phase(state)
         if self.store is not None:
             self.store.save(state)
-        self._maybe_emit_phase(state)
 
     def _maybe_emit_phase(self, state: AutoPipelineState) -> None:
         phase = state.phase.value
