@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 from jsonschema import Draft202012Validator
+import pytest
 
 from ouroboros.plugin.ledger_adapter import (
     AUDIT_EVENT_TYPES,
@@ -16,7 +15,6 @@ from ouroboros.plugin.ledger_adapter import (
     unwrap_plugin_event,
     wrap_plugin_event,
 )
-
 
 # Audit-event schema is vendored in CR-3 at this path.
 SCHEMA_PATH = Path(__file__).resolve().parents[3] / (

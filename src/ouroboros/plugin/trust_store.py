@@ -21,13 +21,13 @@ from this store.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
 import os
-import tempfile
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+import tempfile
 
 TRUST_SCHEMA_VERSION = "0.1"
 
@@ -122,7 +122,7 @@ class TrustStore:
     ) -> TrustRecord:
         """Grant `scope` to `plugin@version`. Idempotent: granting an
         already-granted scope is a no-op (timestamps preserved)."""
-        when = when or datetime.now(tz=timezone.utc)
+        when = when or datetime.now(tz=UTC)
         ts = when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         existing = self.read(plugin)

@@ -111,6 +111,18 @@ class UserLevelProgramRegistry:
                     f"refusing to register {manifest.name!r}"
                 )
 
+            # When replacing, the new manifest may declare a different namespace
+            # than the prior version. Drop the stale namespace mapping so that
+            # `get_by_namespace(old_ns)` no longer resolves to this plugin and
+            # the old namespace becomes available to other plugins.
+            if existing is not None:
+                old_namespace = existing.namespace
+                if (
+                    old_namespace != namespace
+                    and self._namespace_owner.get(old_namespace) == manifest.name
+                ):
+                    self._namespace_owner.pop(old_namespace)
+
             program = RegisteredProgram(manifest=manifest)
             self._by_name[manifest.name] = program
             self._namespace_owner[namespace] = manifest.name

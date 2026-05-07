@@ -17,13 +17,13 @@ take on a `tomli_w` dependency. Reading uses stdlib `tomllib`.
 
 from __future__ import annotations
 
-import os
-import tempfile
-import tomllib
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 from pathlib import Path
-from typing import Iterator
+import tempfile
+import tomllib
 
 LOCKFILE_SCHEMA_VERSION = "0.1"
 

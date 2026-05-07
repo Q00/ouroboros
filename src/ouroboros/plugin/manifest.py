@@ -24,8 +24,8 @@ runtime side effects.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -128,7 +128,7 @@ class AuditSpec:
     events: tuple[str, ...]
 
     @staticmethod
-    def standard_four_events() -> "AuditSpec":
+    def standard_four_events() -> AuditSpec:
         return AuditSpec(
             events=(
                 "plugin.invoked",
@@ -153,8 +153,11 @@ class PluginManifest:
     version: str
     source: SourceSpec
     commands: tuple[CommandSpec, ...]
-    capabilities: frozenset[Capability]
-    permissions: frozenset[Permission]
+    # Ordered tuples (not frozensets) so the firewall's audit-event/message
+    # iteration order matches manifest declaration order. Uniqueness is
+    # enforced at load time via `_unique_in_order`.
+    capabilities: tuple[Capability, ...]
+    permissions: tuple[Permission, ...]
     entrypoint: Entrypoint
     description: str = ""
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
@@ -283,19 +286,49 @@ def load_manifest(path: str | Path) -> PluginManifest:
     )
 
     commands = tuple(_build_command(c) for c in raw["commands"])
-    capabilities = frozenset(
-        Capability(name=c["name"], access=c["access"], reason=c.get("reason", ""))
-        for c in raw["capabilities"]
-    )
-    permissions = frozenset(
-        Permission(
-            scope=p["scope"],
-            risk=p["risk"],
-            required=p["required"],
-            reason=p.get("reason", ""),
+
+    # Capabilities and permissions preserve manifest declaration order so the
+    # firewall's audit-event emission and "first missing scope" message are
+    # deterministic. Duplicate keys are rejected with a structured pointer
+    # rather than silently deduped, so manifest authors get a clear error.
+    capabilities_seen: set[str] = set()
+    capabilities_list: list[Capability] = []
+    for index, c in enumerate(raw["capabilities"]):
+        if c["name"] in capabilities_seen:
+            raise PluginManifestError(
+                f"duplicate capability name {c['name']!r}",
+                path=str(manifest_path),
+                json_pointer=f"/capabilities/{index}/name",
+                expected="unique capability name across the array",
+                got=c["name"],
+            )
+        capabilities_seen.add(c["name"])
+        capabilities_list.append(
+            Capability(name=c["name"], access=c["access"], reason=c.get("reason", ""))
         )
-        for p in raw["permissions"]
-    )
+    capabilities = tuple(capabilities_list)
+
+    permissions_seen: set[str] = set()
+    permissions_list: list[Permission] = []
+    for index, p in enumerate(raw["permissions"]):
+        if p["scope"] in permissions_seen:
+            raise PluginManifestError(
+                f"duplicate permission scope {p['scope']!r}",
+                path=str(manifest_path),
+                json_pointer=f"/permissions/{index}/scope",
+                expected="unique permission scope across the array",
+                got=p["scope"],
+            )
+        permissions_seen.add(p["scope"])
+        permissions_list.append(
+            Permission(
+                scope=p["scope"],
+                risk=p["risk"],
+                required=p["required"],
+                reason=p.get("reason", ""),
+            )
+        )
+    permissions = tuple(permissions_list)
     entrypoint = Entrypoint(
         type=raw["entrypoint"]["type"],
         command=raw["entrypoint"]["command"],

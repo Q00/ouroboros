@@ -13,12 +13,11 @@ from pathlib import Path
 import pytest
 
 from ouroboros.plugin.manifest import (
+    SUPPORTED_SCHEMA_VERSIONS,
     PluginManifest,
     PluginManifestError,
     load_manifest,
-    SUPPORTED_SCHEMA_VERSIONS,
 )
-
 
 REFERENCE_MANIFEST: dict = {
     "schema_version": "0.1",
@@ -201,3 +200,67 @@ def test_missing_file_reports_clean_error(tmp_path: Path) -> None:
     with pytest.raises(PluginManifestError) as excinfo:
         load_manifest(tmp_path / "does-not-exist.json")
     assert "not found" in excinfo.value.args[0]
+
+
+def test_capabilities_and_permissions_preserve_declaration_order(tmp_path: Path) -> None:
+    """Capabilities and permissions are exposed in manifest declaration order.
+
+    Regression for ouroboros-agent[bot] design-note finding on PR #749:
+    `frozenset` storage made multi-permission iteration order
+    nondeterministic, so the firewall's `plugin.permission_used` event
+    sequence and "first missing scope" message varied between runs. The
+    loader now stores both as ordered tuples.
+    """
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["capabilities"] = [
+        {"name": "ledger", "access": "write"},
+        {"name": "provenance", "access": "write"},
+        {"name": "runtime", "access": "read"},
+    ]
+    payload["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {"scope": "github:write", "risk": "write", "required": True},
+        {"scope": "ledger:append", "risk": "write", "required": False},
+    ]
+    manifest = load_manifest(_write(tmp_path, payload))
+
+    assert isinstance(manifest.capabilities, tuple)
+    assert isinstance(manifest.permissions, tuple)
+    assert [c.name for c in manifest.capabilities] == ["ledger", "provenance", "runtime"]
+    assert [p.scope for p in manifest.permissions] == [
+        "github:read",
+        "github:write",
+        "ledger:append",
+    ]
+
+
+def test_duplicate_permission_scope_rejected(tmp_path: Path) -> None:
+    """Two permissions with the same scope but different `required` are rejected.
+
+    JSON Schema's `uniqueItems` only catches *whole-item* duplicates, so
+    natural-key collisions (same scope, different risk/required) slip
+    past schema validation. The loader rejects them with a structured
+    JSON pointer.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {"scope": "github:read", "risk": "write", "required": False},
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/permissions/1/scope"
+    assert "duplicate permission scope" in excinfo.value.args[0]
+
+
+def test_duplicate_capability_name_rejected(tmp_path: Path) -> None:
+    """Two capabilities sharing a name (with different access) are rejected."""
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["capabilities"] = [
+        {"name": "ledger", "access": "write"},
+        {"name": "ledger", "access": "read"},
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/capabilities/1/name"
+    assert "duplicate capability name" in excinfo.value.args[0]

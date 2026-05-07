@@ -9,7 +9,6 @@ import pytest
 
 from ouroboros.plugin.manifest import load_manifest
 from ouroboros.plugin.userlevel_registry import (
-    LookupResult,
     RegisteredProgram,
     RegistryError,
     UserLevelProgramRegistry,
@@ -17,7 +16,6 @@ from ouroboros.plugin.userlevel_registry import (
     lookup_command,
     reset_userlevel_registry,
 )
-
 
 REFERENCE_MANIFEST: dict = {
     "schema_version": "0.1",
@@ -58,7 +56,7 @@ def _write_manifest(tmp_path: Path, payload: dict) -> Path:
     return target
 
 
-def _load_ref(tmp_path: Path, **overrides) -> "RegisteredProgram":
+def _load_ref(tmp_path: Path, **overrides) -> RegisteredProgram:
     payload = json.loads(json.dumps(REFERENCE_MANIFEST))
     payload.update(overrides)
     return load_manifest(_write_manifest(tmp_path, payload))
@@ -97,6 +95,39 @@ def test_duplicate_name_requires_replace(tmp_path: Path) -> None:
         registry.register(manifest)
     # With replace=True, succeeds.
     registry.register(manifest, replace=True)
+
+
+def test_replace_with_changed_namespace_releases_old_namespace(tmp_path: Path) -> None:
+    """Re-registering the same name with a NEW namespace must release the old.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749:
+    `register(replace=True)` previously left the prior namespace pointing at
+    the same plugin name, so `get_by_namespace(old_ns)` resolved to the new
+    program and other plugins could never claim the old namespace.
+    """
+    registry = UserLevelProgramRegistry()
+    v1 = _load_ref(tmp_path / "v1")
+    registry.register(v1)
+    assert registry.get_by_namespace("github-pr") is not None
+
+    v2_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    v2_payload["version"] = "0.2.0"
+    v2_payload["commands"][0]["namespace"] = "github-pr-v2"
+    v2 = load_manifest(_write_manifest(tmp_path / "v2", v2_payload))
+    program = registry.register(v2, replace=True)
+
+    # New namespace resolves to the new program.
+    assert registry.get_by_namespace("github-pr-v2") is program
+    # Old namespace is released — get_by_namespace returns None, NOT the new
+    # program (the bug previously surfaced as a stale alias).
+    assert registry.get_by_namespace("github-pr") is None
+
+    # And the released namespace becomes claimable by a different plugin.
+    other_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    other_payload["name"] = "plugin-other"
+    other = load_manifest(_write_manifest(tmp_path / "other", other_payload))
+    registry.register(other)
+    assert registry.get_by_namespace("github-pr").name == "plugin-other"
 
 
 def test_unregister(tmp_path: Path) -> None:

@@ -30,18 +30,17 @@ ledger writer (#737). Tests pass a list-appender for inspection.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import hashlib
 import shlex
 import subprocess
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Iterable, Literal
+from typing import Literal
 
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
-
 
 SCHEMA_VERSION = "0.1"
 
@@ -60,7 +59,7 @@ class InvocationResult:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _source_type_for_event(manifest: PluginManifest) -> str:
@@ -292,8 +291,22 @@ def invoke_plugin(
             text=True,
             check=False,
         )
-    except FileNotFoundError as exc:
-        message = f"entrypoint not found: {cmd_argv[0]!r} ({exc})"
+    except OSError as exc:
+        # Cover the full launch-failure surface (FileNotFoundError,
+        # PermissionError, IsADirectoryError, ENOEXEC, etc.). The firewall is
+        # the documented single chokepoint, so every launch failure must emit
+        # a terminal `plugin.failed` event rather than escaping as an
+        # uncaught exception. Exit code uses the conventional shell mapping
+        # (127 = not found, 126 = found-but-not-executable, otherwise 1).
+        if isinstance(exc, FileNotFoundError):
+            message = f"entrypoint not found: {cmd_argv[0]!r} ({exc})"
+            launch_exit_code = 127
+        elif isinstance(exc, PermissionError):
+            message = f"entrypoint not executable: {cmd_argv[0]!r} ({exc})"
+            launch_exit_code = 126
+        else:
+            message = f"entrypoint launch failed: {cmd_argv[0]!r} ({exc})"
+            launch_exit_code = 1
         _emit(
             _event_envelope(
                 event_type="plugin.failed",
@@ -308,7 +321,7 @@ def invoke_plugin(
         )
         return InvocationResult(
             status="failed",
-            exit_code=127,
+            exit_code=launch_exit_code,
             message=message,
             events=tuple(emitted),
         )

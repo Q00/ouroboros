@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-import pytest
+import subprocess
 
 from ouroboros.plugin.firewall import (
-    InvocationResult,
     invoke_plugin,
 )
 from ouroboros.plugin.manifest import load_manifest
@@ -19,7 +14,6 @@ from ouroboros.plugin.trust_store import TrustStore
 from ouroboros.plugin.userlevel_registry import (
     UserLevelProgramRegistry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -379,3 +373,76 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
     assert "not found" in result.message.lower()
+
+
+def _raising_runner(exc: BaseException):
+    """Build a stand-in for subprocess.run that always raises `exc`."""
+
+    def _run(argv, *args, **kwargs):
+        raise exc
+
+    return _run
+
+
+def test_entrypoint_permission_error_emits_failed_126(tmp_path: Path) -> None:
+    """PermissionError on launch → terminal plugin.failed, exit_code=126.
+
+    Regression for ouroboros-agent[bot] follow-up finding on PR #749:
+    invoke_plugin previously only caught FileNotFoundError, so other
+    common launch failures (PermissionError, generic OSError) escaped
+    uncaught — leaving the firewall's "single chokepoint" contract broken
+    (plugin.invoked emitted but no terminal plugin.failed).
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-9b",
+        subprocess_runner=_raising_runner(PermissionError("perm denied")),
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
+    assert "not executable" in result.message.lower()
+    assert events[-1]["result"]["status"] == "failed"
+
+
+def test_entrypoint_generic_oserror_emits_failed(tmp_path: Path) -> None:
+    """Generic OSError on launch → terminal plugin.failed, exit_code=1.
+
+    Same regression as PermissionError: any OSError variant must produce a
+    clean terminal failure event rather than escaping as an exception.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-9c",
+        subprocess_runner=_raising_runner(OSError("ENOEXEC")),
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 1
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
+    assert "launch failed" in result.message.lower()
