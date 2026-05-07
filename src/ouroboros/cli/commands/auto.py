@@ -20,7 +20,7 @@ from ouroboros.auto.adapters import (
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
@@ -282,6 +282,7 @@ async def _run_auto(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
         max_rounds=max_interview_rounds,
+        timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
     )
     pipeline = AutoPipeline(
         driver,

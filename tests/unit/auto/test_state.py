@@ -4,7 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.auto.state import (
+    DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
+    AutoPhase,
+    AutoPipelineState,
+    AutoStore,
+)
 
 
 def test_state_transition_and_stale_detection() -> None:
@@ -49,6 +54,41 @@ def test_terminal_state_is_not_stale() -> None:
 
     future = datetime.now(UTC) + timedelta(days=1)
     assert not state.is_stale(future)
+
+
+def test_phase_timeout_seconds_returns_persisted_value() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = 175
+
+    assert state.phase_timeout_seconds(AutoPhase.INTERVIEW) == 175.0
+
+
+def test_phase_timeout_seconds_falls_back_to_canonical_default() -> None:
+    """A missing or unusable entry must fall back to the dataclass default,
+    not silently halve the operator's budget."""
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.timeout_seconds_by_phase.pop(AutoPhase.INTERVIEW.value)
+
+    expected = float(DEFAULT_TIMEOUT_SECONDS_BY_PHASE[AutoPhase.INTERVIEW.value])
+    assert expected == 120.0
+    assert state.phase_timeout_seconds(AutoPhase.INTERVIEW) == expected
+
+
+def test_phase_timeout_seconds_rejects_non_positive_persisted_value() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = 0
+
+    assert state.phase_timeout_seconds(AutoPhase.INTERVIEW) == float(
+        DEFAULT_TIMEOUT_SECONDS_BY_PHASE[AutoPhase.INTERVIEW.value]
+    )
+
+
+def test_default_policy_matches_dataclass_default() -> None:
+    """Guards against drift between the module constant and dataclass default."""
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+
+    assert state.timeout_seconds_by_phase == DEFAULT_TIMEOUT_SECONDS_BY_PHASE
+    assert state.timeout_seconds_by_phase is not DEFAULT_TIMEOUT_SECONDS_BY_PHASE
 
 
 def test_run_phase_uses_run_timeout_key_for_staleness() -> None:

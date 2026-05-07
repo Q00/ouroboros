@@ -32,6 +32,14 @@ class AutoPolicy(StrEnum):
     BALANCED = "balanced"
 
 
+DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
+    AutoPhase.INTERVIEW.value: 120,
+    AutoPhase.SEED_GENERATION.value: 120,
+    AutoPhase.REVIEW.value: 90,
+    AutoPhase.REPAIR.value: 90,
+    AutoPhase.RUN.value: 60,
+}
+
 TERMINAL_PHASES = {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}
 _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.CREATED: {AutoPhase.INTERVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
@@ -123,14 +131,21 @@ class AutoPipelineState:
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     timeout_seconds_by_phase: dict[str, int] = field(
-        default_factory=lambda: {
-            AutoPhase.INTERVIEW.value: 120,
-            AutoPhase.SEED_GENERATION.value: 120,
-            AutoPhase.REVIEW.value: 90,
-            AutoPhase.REPAIR.value: 90,
-            AutoPhase.RUN.value: 60,
-        }
+        default_factory=lambda: dict(DEFAULT_TIMEOUT_SECONDS_BY_PHASE)
     )
+
+    def phase_timeout_seconds(self, phase: AutoPhase) -> float:
+        """Return the configured timeout for ``phase`` in seconds.
+
+        Falls back to the canonical default policy when the persisted entry
+        is missing or has an unusable type. The fallback matches the dataclass
+        default so legacy/partial state never silently halves an operator's
+        budget.
+        """
+        raw = self.timeout_seconds_by_phase.get(phase.value)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            return float(DEFAULT_TIMEOUT_SECONDS_BY_PHASE[phase.value])
+        return float(raw)
 
     def transition(self, next_phase: AutoPhase, message: str, *, error: str | None = None) -> None:
         """Move to ``next_phase`` after validating the phase state machine."""

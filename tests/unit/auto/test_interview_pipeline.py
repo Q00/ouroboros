@@ -261,6 +261,33 @@ async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_timeout_message_records_state_policy_source(tmp_path) -> None:
+    """Regression for #686: timeout error must report seconds + state-policy source."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        await asyncio.sleep(0.05)
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        timeout_seconds=0.001,
+    )
+
+    result = await driver.run(state, ledger)
+
+    blocker = result.blocker or ""
+    assert "interview.start timed out after 0s" in blocker
+    assert "policy: state.timeout_seconds_by_phase[interview]" in blocker
+    assert state.last_error == blocker
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_supplies_bounded_repo_facts_to_answerer(tmp_path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "\n".join(

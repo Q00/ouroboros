@@ -18,7 +18,7 @@ from ouroboros.auto.adapters import (
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -217,6 +217,7 @@ class AutoHandler:
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,
             max_rounds=max_interview_rounds,
+            timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
         )
         pipeline = AutoPipeline(
             driver,

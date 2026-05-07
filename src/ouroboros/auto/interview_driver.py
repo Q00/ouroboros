@@ -242,7 +242,11 @@ class AutoInterviewDriver:
         try:
             return await asyncio.wait_for(awaitable, timeout=self.timeout_seconds)
         except TimeoutError as exc:
-            msg = f"{tool_name} timed out after {self.timeout_seconds:.0f}s for {state.auto_session_id}"
+            msg = (
+                f"{tool_name} timed out after {self.timeout_seconds:.0f}s "
+                f"for {state.auto_session_id} "
+                f"(policy: state.timeout_seconds_by_phase[interview])"
+            )
             raise TimeoutError(msg) from exc
 
     def _ensure_interview_phase(self, state: AutoPipelineState) -> None:
