@@ -205,6 +205,49 @@ async def test_auto_pipeline_callback_errors_do_not_break_run(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_pipeline_emits_repair_event_when_repairer_changes_seed(tmp_path) -> None:
+    """A non-zero ``repair_round`` after converge must emit a ``repair`` event."""
+    captured: list[AutoProgressEvent] = []
+
+    async def fake_seed_generator(_session_id: str) -> Seed:
+        return _make_seed()
+
+    def fake_seed_saver(_seed: Seed) -> str:
+        return str(tmp_path / "seed.yaml")
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    state.ledger = ledger.to_dict()
+    state.interview_session_id = "interview_xyz"
+    state.interview_completed = True
+    state.transition(AutoPhase.INTERVIEW, "primed for resume")
+    state.transition(AutoPhase.SEED_GENERATION, "ready for seed generation")
+    state.skip_run = True
+    store.save(state)
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        fake_seed_generator,
+        store=store,
+        seed_saver=fake_seed_saver,
+        skip_run=True,
+        # ``_PassingRepairer(repair_rounds=2)`` synthesizes a converge
+        # history of length 2 so ``state.repair_round`` becomes non-zero.
+        reviewer=_PassingReviewer(),
+        repairer=_PassingRepairer(repair_rounds=2),
+        progress_callback=captured.append,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    repair_events = [event for event in captured if event.kind == "repair"]
+    assert len(repair_events) == 1
+    assert repair_events[0].round == 2
+
+
+@pytest.mark.asyncio
 async def test_auto_pipeline_emits_phase_for_blocked_terminal(tmp_path) -> None:
     async def fake_seed_generator(_session_id: str) -> Seed:
         raise AssertionError("seed generator should not be invoked when interview blocks")
