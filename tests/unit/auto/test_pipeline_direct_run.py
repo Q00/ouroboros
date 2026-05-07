@@ -12,12 +12,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
-
-import pytest
 
 from ouroboros.auto.goal_classifier import classify_goal
-from ouroboros.auto.interview_driver import AutoInterviewDriver, AutoInterviewResult
+from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
@@ -164,6 +161,55 @@ def test_classification_persists_on_resume(tmp_path) -> None:
     assert reloaded.ledger
     ledger = SeedDraftLedger.from_dict(reloaded.ledger)
     assert ledger.direct_path_reason == reloaded.direct_path_reason
+
+
+def test_goal_classifier_blocked_session_is_resumable(tmp_path) -> None:
+    """Sessions blocked at classification must be recoverable on resume."""
+    store = AutoStore(tmp_path)
+    pipeline_initial, driver_initial = _make_pipeline(operational_env_override=True)
+    pipeline_initial.store = store
+    state = AutoPipelineState(goal=_operational_goal(), cwd=str(tmp_path))
+    state.interview_strategy = "auto"
+
+    asyncio.run(pipeline_initial.run(state))
+
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "goal_classifier"
+    assert driver_initial.called is False
+
+    reloaded = store.load(state.auto_session_id)
+    # Operator follows blocker guidance: switch strategy and resume.
+    reloaded.interview_strategy = "always"
+    pipeline_resume, driver_resume = _make_pipeline(operational_env_override=False)
+    pipeline_resume.store = store
+
+    asyncio.run(pipeline_resume.run(reloaded))
+
+    # Without the goal_classifier branch in _recoverable_phase_for_tool,
+    # the resumed session would have returned the persisted blocked
+    # result without ever invoking the interview driver.
+    assert driver_resume.called is True
+
+
+def test_strategy_never_idea_session_resumes_with_strategy_auto(tmp_path) -> None:
+    """The blocker guidance ("rerun with --interview-strategy=auto") works."""
+    store = AutoStore(tmp_path)
+    pipeline_initial, _ = _make_pipeline(operational_env_override=True)
+    pipeline_initial.store = store
+    state = AutoPipelineState(goal=_idea_goal(), cwd=str(tmp_path))
+    state.interview_strategy = "never"
+
+    asyncio.run(pipeline_initial.run(state))
+    assert state.phase is AutoPhase.BLOCKED
+
+    reloaded = store.load(state.auto_session_id)
+    reloaded.interview_strategy = "auto"
+    pipeline_resume, driver_resume = _make_pipeline(operational_env_override=False)
+    pipeline_resume.store = store
+
+    asyncio.run(pipeline_resume.run(reloaded))
+
+    assert driver_resume.called is True
 
 
 def test_resume_does_not_reclassify_after_goal_drift(tmp_path) -> None:

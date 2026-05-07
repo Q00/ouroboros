@@ -547,6 +547,13 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         "interview.answer",
         "auto_answerer",
         "interview_driver",
+        # ``goal_classifier`` blocks happen pre-interview from the
+        # CREATED phase (#689 PR-C).  Recovery routes the session into
+        # the interview path so that operators following the blocker
+        # guidance (re-run with ``--interview-strategy=auto`` or
+        # ``=always``) actually progress instead of hitting the same
+        # blocked state forever.
+        "goal_classifier",
     }:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":

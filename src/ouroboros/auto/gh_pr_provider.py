@@ -212,11 +212,23 @@ def _coerce_ci_state(rollup: object) -> CIState:
     """Map gh's ``statusCheckRollup`` into a single coarse CI tier.
 
     Pessimistic merge: any failure dominates; a single pending check
-    keeps the rollup pending; only an entirely-success list (or no
-    checks at all) yields ``SUCCESS``.
+    keeps the rollup pending; only an entirely-success list yields
+    ``SUCCESS``.
+
+    Fail-closed shape handling:
+
+    - A non-list payload (the ``gh`` schema changed or returned ``null``)
+      maps to ``UNKNOWN`` so the gate cannot be silently passed by a
+      malformed response.
+    - An empty list is treated as ``SUCCESS`` because GitHub uses an
+      empty rollup to signal "no required checks defined".
+    - A list whose items are all non-dict (or otherwise unparseable)
+      maps to ``UNKNOWN`` rather than ``SUCCESS``.
     """
-    if not isinstance(rollup, list) or not rollup:
-        return CIState.SUCCESS  # No required checks defined → treat as clean.
+    if not isinstance(rollup, list):
+        return CIState.UNKNOWN
+    if not rollup:
+        return CIState.SUCCESS
     states: list[CIState] = []
     for item in rollup:
         if not isinstance(item, dict):
@@ -229,6 +241,10 @@ def _coerce_ci_state(rollup: object) -> CIState:
             states.append(CIState.UNKNOWN)
             continue
         states.append(_CI_STATE_MAP.get(raw.upper(), CIState.UNKNOWN))
+    if not states:
+        # The list contained items but none were parseable.  Treat this
+        # as a malformed payload, not as an empty rollup.
+        return CIState.UNKNOWN
     if any(state is CIState.FAILURE for state in states):
         return CIState.FAILURE
     if any(state is CIState.PENDING for state in states):
@@ -238,7 +254,30 @@ def _coerce_ci_state(rollup: object) -> CIState:
     return CIState.SUCCESS
 
 
-def _coerce_reviews(reviews: object) -> tuple[ReviewState, ...]:
+def _coerce_reviews(reviews: object, decision: object) -> tuple[ReviewState, ...]:
+    """Combine ``latestReviews`` with the aggregate ``reviewDecision``.
+
+    GitHub's ``reviewDecision`` is the authoritative aggregate that the
+    repository UI displays: an approver who later leaves a non-blocking
+    ``COMMENTED`` review keeps the PR's aggregate at ``APPROVED`` even
+    though the reviewer's *latest* review state changed.  The previous
+    implementation rebuilt approval state from ``latestReviews`` alone
+    and would block such PRs.
+
+    Rules (the gate then enforces "≥1 APPROVED and 0 CHANGES_REQUESTED"
+    on its own):
+
+    - ``decision == "APPROVED"`` → return a single synthetic
+      ``APPROVED`` so the gate sees the aggregate, ignoring noise from
+      ``COMMENTED`` reviews.
+    - ``decision == "CHANGES_REQUESTED"`` → use ``latestReviews`` so the
+      gate sees the actual blocking reviewers.
+    - ``decision in {"REVIEW_REQUIRED", None, ""}`` → use
+      ``latestReviews`` so the gate decides on raw reviewer state.
+    """
+    decision_text = (decision or "").upper() if isinstance(decision, str) else ""
+    if decision_text == "APPROVED":
+        return (ReviewState.APPROVED,)
     if not isinstance(reviews, list):
         return ()
     out: list[ReviewState] = []
@@ -256,10 +295,7 @@ def _coerce_reviews(reviews: object) -> tuple[ReviewState, ...]:
 
 def _coerce_permission(payload: dict[str, Any]) -> bool:
     """Treat ``push``/``maintain``/``admin`` as sufficient for merge."""
-    for key in ("admin", "maintain", "push"):
-        if bool(payload.get(key)):
-            return True
-    return False
+    return any(bool(payload.get(key)) for key in ("admin", "maintain", "push"))
 
 
 def _build_status(
@@ -284,7 +320,7 @@ def _build_status(
         head_sha=head_sha,
         mergeable=_coerce_mergeable(pr.get("mergeable"), pr.get("mergeStateStatus")),
         ci_state=_coerce_ci_state(pr.get("statusCheckRollup")),
-        review_states=_coerce_reviews(pr.get("latestReviews")),
+        review_states=_coerce_reviews(pr.get("latestReviews"), pr.get("reviewDecision")),
         has_write_permission=_coerce_permission(perm),
         is_draft=bool(pr.get("isDraft")),
     )

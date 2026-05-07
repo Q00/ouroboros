@@ -22,23 +22,21 @@ from ouroboros.auto.merge_policy import (
 
 
 def _ok_classification() -> GoalClassification:
-    return classify_goal(
-        "merge https://github.com/Q00/ouroboros/pull/689 once CI is green"
-    )
+    return classify_goal("merge https://github.com/Q00/ouroboros/pull/689 once CI is green")
 
 
 def _ok_status(**overrides) -> PullRequestStatus:
-    base = dict(
-        repo="Q00/ouroboros",
-        number=689,
-        target_branch="main",
-        head_sha="0123456789abcdef0123456789abcdef01234567",
-        mergeable=True,
-        ci_state=CIState.SUCCESS,
-        review_states=(ReviewState.APPROVED,),
-        has_write_permission=True,
-        is_draft=False,
-    )
+    base: dict = {
+        "repo": "Q00/ouroboros",
+        "number": 689,
+        "target_branch": "main",
+        "head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "mergeable": True,
+        "ci_state": CIState.SUCCESS,
+        "review_states": (ReviewState.APPROVED,),
+        "has_write_permission": True,
+        "is_draft": False,
+    }
     base.update(overrides)
     return PullRequestStatus(**base)
 
@@ -89,9 +87,7 @@ def test_target_branch_policy_extension_unblocks_merge() -> None:
     decision = evaluate_merge(
         classification=_ok_classification(),
         status=_ok_status(target_branch="release/2025-Q4"),
-        policy=MergePolicy(
-            allowed_target_branches=frozenset({"main", "release/2025-Q4"})
-        ),
+        policy=MergePolicy(allowed_target_branches=frozenset({"main", "release/2025-Q4"})),
     )
     assert decision.allowed is True
 
@@ -121,8 +117,7 @@ def test_unknown_mergeability_blocks_with_wait_guidance() -> None:
     )
     assert decision.allowed is False
     assert any(
-        "mergeability check has not finished" in reason
-        for reason in decision.blocking_reasons
+        "mergeability check has not finished" in reason for reason in decision.blocking_reasons
     )
     assert any("Wait for GitHub" in action for action in decision.required_actions)
 
@@ -148,9 +143,7 @@ def test_pending_ci_blocks_until_success() -> None:
 def test_changes_requested_blocks_merge() -> None:
     decision = evaluate_merge(
         classification=_ok_classification(),
-        status=_ok_status(
-            review_states=(ReviewState.CHANGES_REQUESTED, ReviewState.APPROVED)
-        ),
+        status=_ok_status(review_states=(ReviewState.CHANGES_REQUESTED, ReviewState.APPROVED)),
     )
     assert decision.allowed is False
     assert any("requested changes" in reason for reason in decision.blocking_reasons)
@@ -163,6 +156,61 @@ def test_no_approving_reviews_blocks_merge() -> None:
     )
     assert decision.allowed is False
     assert any("approving reviews" in reason for reason in decision.blocking_reasons)
+
+
+def test_low_risk_review_classification_does_not_authorize_merge() -> None:
+    """A read-only goal (``review ...``) must never authorize MERGE.
+
+    Without the action/classification check, a clean PR + a review-only
+    goal would have allowed the gate to authorize a merge that the user
+    never asked for.
+    """
+    review_classification = classify_goal("review https://github.com/Q00/ouroboros/pull/689")
+    decision = evaluate_merge(
+        classification=review_classification,
+        status=_ok_status(),
+        action=MergeAction.MERGE,
+    )
+
+    assert decision.allowed is False
+    assert any("does not authorize action 'merge'" in r for r in decision.blocking_reasons)
+    assert any("action:merge=needs:high" in s for s in decision.matched_signals)
+
+
+def test_low_risk_review_classification_does_not_authorize_close() -> None:
+    """Read-only verbs do not authorize CLOSE either (CLOSE needs MEDIUM)."""
+    review_classification = classify_goal("review https://github.com/Q00/ouroboros/pull/689")
+    decision = evaluate_merge(
+        classification=review_classification,
+        status=_ok_status(),
+        action=MergeAction.CLOSE,
+    )
+
+    assert decision.allowed is False
+    assert any("does not authorize action 'close'" in r for r in decision.blocking_reasons)
+
+
+def test_high_risk_classification_authorizes_close_via_min_risk_floor() -> None:
+    """HIGH ≥ MEDIUM, so a merge-classified goal can also authorize close."""
+    decision = evaluate_merge(
+        classification=_ok_classification(),
+        status=_ok_status(),
+        action=MergeAction.CLOSE,
+    )
+
+    assert decision.allowed is True
+
+
+def test_action_classification_match_can_be_disabled_for_isolation() -> None:
+    """Tests of repository-only checks may opt out of the consistency rule."""
+    decision = evaluate_merge(
+        classification=classify_goal("review https://github.com/Q00/ouroboros/pull/689"),
+        status=_ok_status(),
+        action=MergeAction.MERGE,
+        policy=MergePolicy(require_action_classification_match=False),
+    )
+
+    assert decision.allowed is True
 
 
 def test_review_requirement_does_not_apply_to_close_action() -> None:
@@ -205,9 +253,7 @@ def test_record_decision_appends_audit_entry_to_ledger() -> None:
 
 
 def test_record_decision_rejects_object_without_required_method() -> None:
-    decision = evaluate_merge(
-        classification=_ok_classification(), status=_ok_status()
-    )
+    decision = evaluate_merge(classification=_ok_classification(), status=_ok_status())
 
     class _Stub:
         pass

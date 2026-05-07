@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
+import json
 
 import pytest
 
 from ouroboros.auto.gh_pr_provider import (
     CommandResult,
-    GhPrProvider,
     GhProviderError,
+    GhPrProvider,
 )
 from ouroboros.auto.merge_policy import CIState, ReviewState
 
@@ -80,9 +80,7 @@ def _make_provider(
                 "--json",
                 "mergeable,mergeStateStatus,headRefOid,baseRefName,"
                 "isDraft,reviewDecision,latestReviews,statusCheckRollup",
-            ): CommandResult(
-                returncode=pr_returncode, stdout=pr_payload, stderr=pr_stderr
-            ),
+            ): CommandResult(returncode=pr_returncode, stdout=pr_payload, stderr=pr_stderr),
             ("gh", "api", f"repos/{repo}", "--jq", ".permissions"): CommandResult(
                 returncode=perm_returncode, stdout=perm_payload, stderr=perm_stderr
             ),
@@ -166,13 +164,15 @@ def test_no_status_checks_treats_ci_as_success() -> None:
 
 
 def test_review_state_mapping_filters_unknown_values() -> None:
+    """When the aggregate is not APPROVED, latestReviews drives the result."""
     provider, _ = _make_provider(
         pr=_pr_view_payload(
+            reviewDecision="CHANGES_REQUESTED",
             latestReviews=[
                 {"state": "APPROVED"},
                 {"state": "CHANGES_REQUESTED"},
                 {"state": "DISMISSED"},  # not in our enum, dropped
-            ]
+            ],
         )
     )
     status = provider.fetch_status("Q00/ouroboros", 689)
@@ -180,6 +180,69 @@ def test_review_state_mapping_filters_unknown_values() -> None:
         ReviewState.APPROVED,
         ReviewState.CHANGES_REQUESTED,
     )
+
+
+def test_review_decision_approved_overrides_stale_commented_review() -> None:
+    """An approver who later leaves a comment must not flip aggregate.
+
+    GitHub keeps ``reviewDecision=APPROVED`` even after the same
+    reviewer leaves a non-blocking COMMENTED review; the gate must see
+    that aggregate so it does not block a merge the repository UI
+    allows.
+    """
+    provider, _ = _make_provider(
+        pr=_pr_view_payload(
+            reviewDecision="APPROVED",
+            latestReviews=[{"state": "COMMENTED"}],
+        )
+    )
+    status = provider.fetch_status("Q00/ouroboros", 689)
+    assert status.review_states == (ReviewState.APPROVED,)
+
+
+def test_review_decision_changes_requested_uses_latest_reviews() -> None:
+    """When the aggregate is CHANGES_REQUESTED, blocking reviewers surface."""
+    provider, _ = _make_provider(
+        pr=_pr_view_payload(
+            reviewDecision="CHANGES_REQUESTED",
+            latestReviews=[{"state": "APPROVED"}, {"state": "CHANGES_REQUESTED"}],
+        )
+    )
+    status = provider.fetch_status("Q00/ouroboros", 689)
+    assert ReviewState.CHANGES_REQUESTED in status.review_states
+
+
+def test_review_decision_review_required_uses_latest_reviews_when_present() -> None:
+    """REVIEW_REQUIRED with a single APPROVED in latestReviews still surfaces it."""
+    provider, _ = _make_provider(
+        pr=_pr_view_payload(
+            reviewDecision="REVIEW_REQUIRED",
+            latestReviews=[{"state": "APPROVED"}],
+        )
+    )
+    status = provider.fetch_status("Q00/ouroboros", 689)
+    assert status.review_states == (ReviewState.APPROVED,)
+
+
+def test_ci_rollup_non_list_payload_is_unknown_not_success() -> None:
+    """A malformed (non-list) rollup must not silently pass the CI gate."""
+    provider, _ = _make_provider(pr=_pr_view_payload(statusCheckRollup="not-a-list"))
+    status = provider.fetch_status("Q00/ouroboros", 689)
+    assert status.ci_state is CIState.UNKNOWN
+
+
+def test_ci_rollup_list_of_non_dicts_is_unknown_not_success() -> None:
+    """A list of unparseable items must not silently pass either."""
+    provider, _ = _make_provider(pr=_pr_view_payload(statusCheckRollup=["not-a-dict", 42, None]))
+    status = provider.fetch_status("Q00/ouroboros", 689)
+    assert status.ci_state is CIState.UNKNOWN
+
+
+def test_ci_rollup_null_payload_is_unknown_not_success() -> None:
+    """gh sometimes returns ``null`` for the rollup field; map to UNKNOWN."""
+    provider, _ = _make_provider(pr=_pr_view_payload(statusCheckRollup=None))
+    status = provider.fetch_status("Q00/ouroboros", 689)
+    assert status.ci_state is CIState.UNKNOWN
 
 
 def test_permission_admin_grants_write() -> None:
@@ -201,17 +264,13 @@ def test_permission_null_payload_denies_write() -> None:
 
 
 def test_pr_view_failure_raises_provider_error() -> None:
-    provider, _ = _make_provider(
-        pr_returncode=1, pr_stderr="HTTP 404: Not Found"
-    )
+    provider, _ = _make_provider(pr_returncode=1, pr_stderr="HTTP 404: Not Found")
     with pytest.raises(GhProviderError, match="HTTP 404"):
         provider.fetch_status("Q00/ouroboros", 689)
 
 
 def test_permission_failure_raises_provider_error() -> None:
-    provider, _ = _make_provider(
-        perm_returncode=1, perm_stderr="auth required"
-    )
+    provider, _ = _make_provider(perm_returncode=1, perm_stderr="auth required")
     with pytest.raises(GhProviderError, match="auth required"):
         provider.fetch_status("Q00/ouroboros", 689)
 
