@@ -204,6 +204,17 @@ class TrustStore:
         Held under the per-plugin trust lock so it cannot race a
         concurrent `grant()` or `reset_for_version_bump()` and re-create
         a partially written file.
+
+        The sidecar lock file is intentionally left in place: unlinking
+        it after releasing the flock would let a concurrent `grant()`
+        racing this remove lock the *old* inode, while the next writer
+        recreates the path and locks a *new* inode — so the two
+        processes would no longer serialise. Keeping the lock file
+        sticky guarantees every future writer locks the same inode that
+        is still held open by any concurrent process. The trade-off is
+        that the plugin directory is not pruned by `remove()` alone;
+        directory cleanup is the caller's job (e.g. `ooo plugin remove`
+        deletes the whole plugin home).
         """
         path = self._path(plugin)
         if not path.is_file():
@@ -214,18 +225,6 @@ class TrustStore:
             if not path.is_file():
                 return False
             path.unlink()
-        # Lock has been released, so the sidecar can now be removed and
-        # the directory pruned without holding the lock open on a file
-        # we are about to delete.
-        lock_path = path.with_suffix(path.suffix + ".lock")
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
-        try:
-            path.parent.rmdir()
-        except OSError:
-            pass
         return True
 
 

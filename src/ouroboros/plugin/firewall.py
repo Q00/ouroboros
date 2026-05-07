@@ -168,11 +168,20 @@ def _resolve_plugin_cwd(manifest: PluginManifest) -> str | None:
     required block) — entrypoints typically reference their own
     installation tree (`./run.sh`, `python -m foo`), so the firewall
     runs the subprocess with cwd set to the resolved plugin directory.
-    `~`-style expansion is handled here so a manifest like
-    `{"path": "~/.ouroboros/plugins/x"}` works even when the calling
-    process didn't pre-expand it. First-party plugins keep cwd=None
-    (current process cwd) because they are launched from the parent
-    ouroboros runtime and have no installation tree of their own.
+
+    Resolution rules:
+      - `~` is expanded so `{"path": "~/.ouroboros/plugins/x"}` works
+        even if the calling process did not pre-expand it.
+      - Absolute paths are honored verbatim.
+      - **Relative** paths are resolved against the *manifest's*
+        directory, NOT the calling process cwd. The manifest carries
+        its own loaded-from location in `manifest_path`, so an
+        installed plugin invoked from any other working directory
+        still resolves the same way.
+
+    First-party plugins keep cwd=None (current process cwd) because
+    they are launched from the parent ouroboros runtime and have no
+    installation tree of their own.
     """
     if manifest.source.type == "first_party":
         return None
@@ -182,7 +191,13 @@ def _resolve_plugin_cwd(manifest: PluginManifest) -> str | None:
     from os.path import expanduser
     from pathlib import Path
 
-    return str(Path(expanduser(raw)).resolve())
+    expanded = Path(expanduser(raw))
+    if expanded.is_absolute():
+        return str(expanded.resolve())
+    if manifest.manifest_path is None:  # pragma: no cover — synthetic manifests in tests
+        return str(expanded.resolve())
+    base = Path(manifest.manifest_path).resolve().parent
+    return str((base / expanded).resolve())
 
 
 def _deny_confirmation(_msg: str) -> bool:

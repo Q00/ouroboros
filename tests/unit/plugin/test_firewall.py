@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from ouroboros.plugin.firewall import (
     invoke_plugin,
 )
@@ -187,6 +189,69 @@ def test_subprocess_runs_in_resolved_plugin_cwd(tmp_path: Path) -> None:
     assert result.status == "success"
     # The cwd argument must point to the manifest's resolved source
     # path — exactly what the bot's reproducer cared about.
+    assert captured["cwd"] == str(plugin_dir.resolve())
+
+
+def test_subprocess_cwd_resolves_relative_path_against_manifest_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Relative `source.path` resolves against the manifest directory,
+    not the calling process cwd.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    093873e: previously `_resolve_plugin_cwd` used
+    `Path(...).resolve()` against the *process* cwd, so an installed
+    plugin with `source.path: "plugins/github-pr-ops"` invoked from
+    any other directory would compute the wrong cwd and break
+    relative entrypoints again. The firewall now resolves relative
+    paths against `manifest.manifest_path`'s directory.
+    """
+    # Layout:
+    #   <root>/install/ouroboros.plugin.json   (manifest path)
+    #   <root>/install/plugins/github-pr-ops/  (target plugin dir)
+    install = tmp_path / "install"
+    install.mkdir()
+    plugin_dir = install / "plugins" / "github-pr-ops"
+    plugin_dir.mkdir(parents=True)
+
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["source"]["path"] = "plugins/github-pr-ops"  # RELATIVE
+    manifest_file = install / "ouroboros.plugin.json"
+    manifest_file.write_text(json.dumps(payload))
+    manifest = load_manifest(manifest_file)
+    program = UserLevelProgramRegistry().register(manifest)
+
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    # Move the calling process into a directory that is NOT the
+    # manifest directory, to prove the firewall does not use proc cwd.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    captured: dict[str, object] = {}
+
+    def _capturing_runner(argv, *args, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="ok", stderr="")
+
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=[].append,
+        correlation_id="corr-rel",
+        subprocess_runner=_capturing_runner,
+    )
+    assert result.status == "success"
+    # cwd MUST be the resolved plugin directory inside <install>, NOT
+    # something derived from `elsewhere/`.
     assert captured["cwd"] == str(plugin_dir.resolve())
 
 

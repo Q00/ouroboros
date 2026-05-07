@@ -161,6 +161,12 @@ class PluginManifest:
     entrypoint: Entrypoint
     description: str = ""
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
+    # Filesystem path the manifest was loaded from. Used downstream to
+    # resolve relative `source.path` values against the manifest
+    # directory (not the calling process cwd). May be `None` for
+    # synthetic manifests built in tests; production code paths set it
+    # via `load_manifest`.
+    manifest_path: str | None = None
 
 
 def _load_schema(schema_version: str) -> dict[str, Any]:
@@ -369,6 +375,7 @@ def load_manifest(path: str | Path) -> PluginManifest:
         entrypoint=entrypoint,
         description=raw.get("description", ""),
         audit=audit,
+        manifest_path=str(manifest_path.resolve()),
     )
 
 

@@ -89,15 +89,20 @@ def test_reset_for_version_bump(tmp_path: Path) -> None:
 
 
 def test_remove_drops_trust_file(tmp_path: Path) -> None:
-    """Test 6: remove() deletes the trust file and prunes the empty dir."""
+    """Test 6: remove() deletes the trust file and is idempotent.
+
+    The sidecar `trust.json.lock` is intentionally left in place
+    (see TrustStore.remove docstring) so the per-plugin flock keeps
+    serialising concurrent writers that might still be racing the
+    removal. Caller-side directory cleanup is `ooo plugin remove`'s
+    job, not the trust store's.
+    """
     store = TrustStore(root=tmp_path)
     store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
     file_path = tmp_path / "X" / "trust.json"
     assert file_path.is_file()
     assert store.remove("X") is True
     assert not file_path.exists()
-    # Directory pruned.
-    assert not file_path.parent.exists()
     # Removing again is a no-op.
     assert store.remove("X") is False
 
@@ -169,6 +174,82 @@ def _reset_in_subprocess(root_str: str, plugin: str, new_version: str) -> None:
     from ouroboros.plugin.trust_store import TrustStore
 
     TrustStore(root=Path(root_str)).reset_for_version_bump(plugin, new_version)
+
+
+def _remove_in_subprocess(root_str: str, plugin: str) -> None:
+    from pathlib import Path
+
+    from ouroboros.plugin.trust_store import TrustStore
+
+    TrustStore(root=Path(root_str)).remove(plugin)
+
+
+def test_remove_keeps_lock_file_sticky_for_serialisation(tmp_path: Path) -> None:
+    """`remove()` must NOT unlink the sidecar lock file.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    093873e: previously remove() unlinked `trust.json.lock` after
+    releasing the flock, opening a race in which a concurrent grant()
+    locked the old inode and the next writer locked a different
+    (recreated) inode — so the two processes no longer serialised.
+    The sidecar is now sticky so every future writer locks the same
+    inode that any concurrent process still holds open.
+    """
+    store = TrustStore(root=tmp_path)
+    store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
+    lock_path = tmp_path / "X" / "trust.json.lock"
+    # Force the lock-file path to exist by triggering a second mutation
+    # (grant takes the lock, which creates the sidecar).
+    store.grant(plugin="X", version="0.1.0", scope="github:write", granted_by="u")
+    assert lock_path.is_file(), "lock file should exist after a mutation"
+
+    assert store.remove("X") is True
+    # The trust file is gone, but the lock file remains so future
+    # writers serialise against the same inode.
+    assert not (tmp_path / "X" / "trust.json").exists()
+    assert lock_path.is_file()
+
+
+def test_concurrent_remove_and_grants_keep_state_consistent(tmp_path: Path) -> None:
+    """A `remove()` racing concurrent `grant()`s must not corrupt the
+    trust file or leave it in an inconsistent (plugin, version) state.
+
+    Same regression class as the earlier concurrent-grant test but
+    extended to cover the third mutating path. With the sticky-lock
+    fix, all writers serialise on the same lock inode, so any final
+    state is internally coherent.
+    """
+    import json as _json
+    import multiprocessing as mp
+
+    plugin = "concurrent-remove"
+    ctx = mp.get_context("spawn")
+
+    TrustStore(root=tmp_path).grant(plugin=plugin, version="0.1.0", scope="seed", granted_by="u")
+
+    workers = [
+        ctx.Process(target=_grant_in_subprocess, args=(str(tmp_path), plugin, "0.1.0", "alpha")),
+        ctx.Process(target=_remove_in_subprocess, args=(str(tmp_path), plugin)),
+        ctx.Process(target=_grant_in_subprocess, args=(str(tmp_path), plugin, "0.1.0", "beta")),
+    ]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=30)
+        assert w.exitcode == 0, f"worker failed: pid={w.pid} exit={w.exitcode}"
+
+    trust_file = tmp_path / plugin / "trust.json"
+    if trust_file.is_file():
+        # If a grant won the race, the file must be a coherent JSON
+        # document with the expected schema_version and plugin name.
+        payload = _json.loads(trust_file.read_text())
+        assert payload["plugin"] == plugin
+        assert payload["schema_version"] == "0.1"
+        assert payload["version"] == "0.1.0"
+        # And the public reader must succeed without raising.
+        assert TrustStore(root=tmp_path).read(plugin) is not None
+    # Sidecar lock file persists either way, so future serialisation works.
+    assert (tmp_path / plugin / "trust.json.lock").is_file()
 
 
 def test_concurrent_reset_and_grant_produce_valid_file(tmp_path: Path) -> None:
