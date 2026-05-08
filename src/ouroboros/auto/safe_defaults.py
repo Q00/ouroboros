@@ -278,6 +278,15 @@ _INACTIVE_LEDGER_STATUSES: frozenset[LedgerStatus] = frozenset(
     {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
 )
 
+# Sources whose entries describe boundary defaults or explicit exclusions
+# rather than user-asserted scope. Filtering on source (not status) keeps
+# CONSERVATIVE_DEFAULT entries — which can land with status DEFAULTED but
+# may still carry production/auth/billing scope that needs to flag — visible
+# to the unsafe-context gate.
+_SKIP_SOURCES_FOR_UNSAFE_GATE: frozenset[LedgerSource] = frozenset(
+    {LedgerSource.ASSUMPTION, LedgerSource.NON_GOAL}
+)
+
 
 def _unsafe_ledger_values(ledger: SeedDraftLedger) -> tuple[str, ...]:
     """Return active ledger entry values that may carry unsafe user assertions.
@@ -286,23 +295,25 @@ def _unsafe_ledger_values(ledger: SeedDraftLedger) -> tuple[str, ...]:
     and CONSERVATIVE_DEFAULT entries. Excludes:
 
     * inactive entries (weak/conflicting/blocked) — superseded or rejected,
-    * the safe-default policy's own DEFAULTED outputs — to avoid re-flagging
-      its own boundary text on a subsequent pass,
-    * any ASSUMPTION-source entry — assumptions describe boundary defaults,
-      not user-affirmed scope, and
+    * any ASSUMPTION-source entry — assumptions describe boundary defaults
+      (including the safe-default policy's own outputs), not user-affirmed
+      scope, so re-feeding them would re-flag the gate's own boundary text
+      on a subsequent pass, and
     * ``NON_GOAL`` entries — confirmed non-goals are explicit exclusions
       ("non-goals are auth and production deployment"), and reading them as
       active unsafe scope would invert the user's intent.
+
+    DEFAULTED-status entries from other sources (notably
+    ``CONSERVATIVE_DEFAULT``) remain visible because they can still encode
+    user-derived unsafe scope — for example, a prior round may have recorded
+    a conservative default that nonetheless authorizes a production deploy.
     """
-    skip_sources = {LedgerSource.ASSUMPTION, LedgerSource.NON_GOAL}
     values: list[str] = []
     for section in ledger.sections.values():
         for entry in section.entries:
             if entry.status in _INACTIVE_LEDGER_STATUSES:
                 continue
-            if entry.status == LedgerStatus.DEFAULTED:
-                continue
-            if entry.source in skip_sources:
+            if entry.source in _SKIP_SOURCES_FOR_UNSAFE_GATE:
                 continue
             values.append(entry.value)
     return tuple(values)

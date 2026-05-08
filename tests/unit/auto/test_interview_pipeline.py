@@ -312,6 +312,35 @@ def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -
     assert not ledger.is_seed_ready()
 
 
+def test_safe_default_blocks_when_conservative_default_entry_authorizes_unsafe_scope() -> None:
+    # CONSERVATIVE_DEFAULT entries land with status DEFAULTED but still carry
+    # user-derived scope — the unsafe gate must not silently treat them as
+    # safe just because their status is DEFAULTED.
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime_context.conservative_default",
+            value="Production database connection is the conservative default for this CLI.",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.6,
+            status=LedgerStatus.DEFAULTED,
+            rationale="Recorded by an earlier auto round.",
+        ),
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert not result.completed
+    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
+    assert not ledger.is_seed_ready()
+
+
 def test_safe_default_blocks_when_non_user_goal_entry_introduces_unsafe_context() -> None:
     ledger = SeedDraftLedger.from_goal("Build a small local CLI")
     ledger.add_entry(
