@@ -237,10 +237,41 @@ def _unsafe_context_reason(
         )
         if value.strip()
     ).lower()
+    context = _strip_negated_clauses(context)
     for reason, pattern in _UNSAFE_CONTEXT_PATTERNS:
         if re.search(pattern, context):
             return reason
     return None
+
+
+_NEGATION_CLAUSE_PATTERN = re.compile(
+    # Negation cue at a word boundary, then the rest of the clause it scopes
+    # up to the next sentence break or contrastive conjunction. This lets
+    # ``No production deployment`` and ``Do not use customer credentials`` be
+    # stripped before the unsafe regex bank runs, while keeping a positively
+    # asserted clause that follows ``but``/``however``/``although`` visible.
+    r"\b(?:no|not|never|don[’']t|do not|do n[’']t|without|none(?:\s+of)?|neither|nor|"
+    r"skip|skips|skipped|avoid|avoids|avoided|exclude|excludes|excluded|forbid|forbids|forbidden)\b"
+    r"(?:(?!\b(?:but|however|although|except)\b)[^.;?!\n])*",
+    re.IGNORECASE,
+)
+
+
+def _strip_negated_clauses(text: str) -> str:
+    """Blank clauses the user has explicitly negated.
+
+    The unsafe-context gate must not trip on phrases like ``No production
+    deployment`` or ``Do not use customer credentials``: those are explicit
+    *exclusions*, not authorizations. We replace the negation cue plus the
+    rest of the clause it scopes (up to the next sentence-break punctuation
+    or contrastive conjunction) with whitespace so the regex bank only sees
+    positively asserted scope. The implementation is deliberately a coarse
+    lexical heuristic — it stops at ``.``, ``;``, ``?``, ``!``, newlines, and
+    contrastive conjunctions (``but``, ``however``, ``although``, ``except``)
+    so a clause like ``no prod deploys, but log credentials`` keeps the
+    second half visible to the unsafe gate.
+    """
+    return _NEGATION_CLAUSE_PATTERN.sub(" ", text)
 
 
 _INACTIVE_LEDGER_STATUSES: frozenset[LedgerStatus] = frozenset(

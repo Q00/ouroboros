@@ -359,6 +359,54 @@ def test_safe_default_allows_benign_external_mentions(goal: str) -> None:
     assert ledger.is_seed_ready()
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "No production deployment.",
+        "No authentication required.",
+        "Do not use customer credentials.",
+        "Never deploy to production.",
+        "We avoid OAuth and skip billing.",
+        "No auth, credentials, and production deployment.",
+        "Without payment processing or webhook callbacks.",
+    ],
+)
+def test_safe_default_respects_negated_unsafe_terms(answer: str) -> None:
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+    ledger.record_qa("How should this work?", answer)
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert result.completed, f"negated answer {answer!r} should not block finalization"
+    assert result.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
+def test_safe_default_still_blocks_when_negation_does_not_cover_unsafe_term() -> None:
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+    # Contrastive conjunctions cancel the negation scope — the second half is
+    # a positive assertion and must still flag.
+    ledger.record_qa(
+        "Walk me through the auth model.",
+        "No prod deploys, but log credentials in env so the daemon can read them.",
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert not result.completed
+    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
+
+
 def test_safe_default_treats_confirmed_non_goals_as_exclusions_not_unsafe_scope() -> None:
     goal = "Build a small local CLI"
     ledger = SeedDraftLedger.from_goal(goal)
