@@ -40,7 +40,11 @@ import shlex
 import subprocess
 from typing import Literal
 
-from ouroboros.plugin.digest import canonical_tree_hash
+from ouroboros.plugin.digest import (
+    EscapingSymlinkError,
+    UnsupportedFileTypeError,
+    canonical_tree_hash,
+)
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
@@ -308,9 +312,21 @@ def _record_matches_subject(
     """
     if trust_record is None or trust_record.version != manifest.version:
         return False
-    # source.type is always known from the manifest; require record's
-    # source_type (when set) to match. An empty record source_type is a
-    # legacy record — accept under the version-only contract.
+    # When the caller plumbs the lockfile-recorded ``expected_*``
+    # (production CLI dispatch path), we are operating under the new
+    # subject contract: a record that is silent on a subject column
+    # cannot prove it was granted for THIS install subject. Refuse such
+    # legacy/partial records so a same-version reinstall from a
+    # different repo / path / bytes does NOT silently inherit pre-RFC
+    # grants. Firewall unit tests that don't plumb ``expected_*`` keep
+    # the legacy version-only behavior for backwards compatibility.
+    if expected_source_identity is not None or expected_artifact_digest is not None:
+        if (
+            not trust_record.source_type
+            or not trust_record.source_identity
+            or not trust_record.artifact_digest
+        ):
+            return False
     if trust_record.source_type and trust_record.source_type != manifest.source.type:
         return False
     if expected_source_identity is not None:
@@ -516,8 +532,12 @@ def invoke_plugin(
     if expected_artifact_digest is not None and plugin_home is not None:
         try:
             current_digest = canonical_tree_hash(plugin_home)
-        except FileNotFoundError as exc:
-            message = f"plugin home missing: {plugin_home} ({exc})"
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            # Plugin home gone or replaced with a non-directory: the
+            # firewall MUST refuse rather than crash. Treat both as the
+            # subject having changed since install (the trusted bytes
+            # are no longer hashable at the recorded path).
+            message = f"plugin home unreadable: {plugin_home} ({type(exc).__name__}: {exc})"
             _emit(
                 _event_envelope(
                     event_type="plugin.failed",
@@ -530,6 +550,67 @@ def invoke_plugin(
                     provenance={
                         "correlation_id": correlation_id,
                         "reason": "plugin_home_missing",
+                    },
+                )
+            )
+            return InvocationResult(
+                status="blocked",
+                exit_code=None,
+                message=message,
+                events=tuple(emitted),
+            )
+        except (EscapingSymlinkError, UnsupportedFileTypeError) as exc:
+            # ``canonical_tree_hash`` rejects symlinks that escape the
+            # plugin root and unsupported file types (devices, FIFOs,
+            # sockets) — both indicate post-install tampering that the
+            # digest contract says we must refuse to invoke. Fail closed
+            # with ``trust_subject_changed`` so the audit trail records
+            # the exact reason, not a stack trace.
+            message = (
+                f"plugin home failed digest verification: {plugin_home} "
+                f"({type(exc).__name__}: {exc})"
+            )
+            _emit(
+                _event_envelope(
+                    event_type="plugin.failed",
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state="installed",
+                    result={"status": "trust_subject_changed", "message": message},
+                    provenance={
+                        "correlation_id": correlation_id,
+                        "reason": "plugin_home_tampered",
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+            )
+            return InvocationResult(
+                status="blocked",
+                exit_code=None,
+                message=message,
+                events=tuple(emitted),
+            )
+        except OSError as exc:
+            # Permission errors, broken symlink loops, generic I/O on
+            # plugin_home: same fail-closed contract as above. Without
+            # this branch the exception would escape the firewall and
+            # skip the required terminal ``plugin.failed`` event.
+            message = f"plugin home unreadable: {plugin_home} ({type(exc).__name__}: {exc})"
+            _emit(
+                _event_envelope(
+                    event_type="plugin.failed",
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state="installed",
+                    result={"status": "trust_subject_changed", "message": message},
+                    provenance={
+                        "correlation_id": correlation_id,
+                        "reason": "plugin_home_unreadable",
+                        "exception_type": type(exc).__name__,
                     },
                 )
             )

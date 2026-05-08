@@ -545,14 +545,31 @@ def test_artifact_digest_match_proceeds(tmp_path: Path) -> None:
     """
     from ouroboros.plugin.digest import canonical_tree_hash
 
-    program = _make_program(tmp_path)
+    # Plugin home and trust root MUST be separate directories — production
+    # ``DEFAULT_TRUST_ROOT`` lives outside ``DEFAULT_PLUGIN_HOME_ROOT``
+    # for exactly this reason: every trust write would otherwise mutate
+    # the hashed plugin tree and trip the firewall's digest check on
+    # the next invoke.
+    plugin_home = tmp_path / "plugin_home"
+    plugin_home.mkdir()
+    program = _make_program(plugin_home)
+    expected_digest = canonical_tree_hash(plugin_home)
+    # Trust is granted under the full install subject (post-RFC contract):
+    # version + source_type + source_identity + artifact_digest. The
+    # firewall's ``_record_matches_subject`` requires every column to
+    # be populated when the caller plumbs ``expected_*``, so a record
+    # bound to the actual install subject is what proves "granted for
+    # THIS install" — the legacy version-only record path is reserved
+    # for tests that don't plumb subject expectations.
     trust = TrustStore(root=tmp_path / "trust").grant(
         plugin="github-pr-ops",
         version="0.1.0",
         scope="github:read",
         granted_by="u",
+        source_type="local_path",
+        source_identity=str(plugin_home),
+        artifact_digest=expected_digest,
     )
-    expected_digest = canonical_tree_hash(tmp_path)
     events: list[dict] = []
     result = invoke_plugin(
         program,
@@ -561,13 +578,128 @@ def test_artifact_digest_match_proceeds(tmp_path: Path) -> None:
         trust_record=trust,
         event_sink=events.append,
         correlation_id="corr-match",
-        plugin_home=tmp_path,
+        plugin_home=plugin_home,
+        expected_source_identity=str(plugin_home),
         expected_artifact_digest=expected_digest,
         subprocess_runner=_fake_runner(stdout="ok"),
     )
     assert result.status == "success"
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.completed"]
+
+
+def test_legacy_trust_record_refused_when_subject_plumbed(tmp_path: Path) -> None:
+    """A pre-RFC trust record (blank ``source_type`` /
+    ``source_identity`` / ``artifact_digest``) MUST NOT match a
+    same-version reinstall when the dispatcher plumbs the new install
+    subject. Otherwise an operator who upgrades into the trust-subject
+    contract would silently keep their old grants for a freshly
+    installed plugin from a different repo or with different bytes —
+    exactly the boundary the new model is meant to enforce.
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    plugin_home = tmp_path / "plugin_home"
+    plugin_home.mkdir()
+    program = _make_program(plugin_home)
+    expected_digest = canonical_tree_hash(plugin_home)
+    # Pre-RFC grant: only `version` + `scope` recorded. The firewall
+    # cannot prove this was granted for the current install subject.
+    legacy_trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=legacy_trust,
+        event_sink=events.append,
+        correlation_id="corr-legacy",
+        plugin_home=plugin_home,
+        expected_source_identity=str(plugin_home),
+        expected_artifact_digest=expected_digest,
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert "plugin.invoked" not in types
+    assert types[-1] == "plugin.failed"
+
+
+def test_digest_fails_closed_when_plugin_home_replaced_with_file(tmp_path: Path) -> None:
+    """``canonical_tree_hash`` raises ``NotADirectoryError`` when
+    ``plugin_home`` has been replaced with a regular file. The
+    firewall MUST refuse with ``result.status="trust_subject_changed"``
+    rather than letting the exception escape past the audit trail.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    not_a_dir = tmp_path / "ph_file"
+    not_a_dir.write_text("not a plugin")
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-notadir",
+        plugin_home=not_a_dir,
+        expected_artifact_digest="sha256:" + "0" * 64,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+
+
+def test_digest_fails_closed_on_escaping_symlink(tmp_path: Path) -> None:
+    """``canonical_tree_hash`` raises ``EscapingSymlinkError`` for
+    symlinks that escape the plugin root (post-install tampering).
+    The firewall MUST fail closed with ``trust_subject_changed``,
+    not let the exception escape.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    plugin_home = tmp_path / "ph_escaping"
+    plugin_home.mkdir()
+    (plugin_home / "ouroboros.plugin.json").write_text("{}")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("escaped")
+    # Symlink inside plugin_home pointing to a sibling outside the root.
+    (plugin_home / "leak").symlink_to(outside)
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-escaping",
+        plugin_home=plugin_home,
+        expected_artifact_digest="sha256:" + "0" * 64,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+    assert events[0]["provenance"]["exception_type"] == "EscapingSymlinkError"
 
 
 def test_disable_record_blocks_independently_of_trust(tmp_path: Path) -> None:
