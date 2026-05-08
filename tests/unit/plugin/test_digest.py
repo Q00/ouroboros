@@ -138,3 +138,32 @@ def test_normalize_repo_url_preserves_scheme(tmp_path: Path) -> None:
     assert normalize_repo_url("http://github.com/x/y") != normalize_repo_url(
         "https://github.com/x/y"
     )
+
+
+def test_normalize_repo_url_unwraps_git_plus_https() -> None:
+    """Regression: ``git+https://repo`` and ``https://repo`` clone the
+    same upstream, so they MUST canonicalize to a single
+    ``source_identity``. Recording them as different sources splits
+    trust on cosmetic spelling and breaks ``ooo plugin install <name>``
+    when the catalog ends up with both forms.
+    """
+    canonical = normalize_repo_url("https://github.com/Q00/plug")
+    assert normalize_repo_url("git+https://github.com/Q00/plug") == canonical
+    assert normalize_repo_url("git+https://github.com/Q00/plug.git") == canonical
+
+
+def test_normalize_repo_url_unwraps_git_plus_ssh_to_ssh() -> None:
+    """``git+ssh://`` is just ``ssh://`` with a Git-flavored wrapper —
+    same transport, same host, same trust subject. It must not be
+    recorded under a separate identity than plain ``ssh://``."""
+    canonical = normalize_repo_url("ssh://git@github.com/Q00/plug")
+    assert normalize_repo_url("git+ssh://git@github.com/Q00/plug") == canonical
+    assert normalize_repo_url("git+ssh://git@github.com/Q00/plug.git") == canonical
+
+
+def test_normalize_repo_url_canonicalizes_plain_ssh() -> None:
+    """Plain ``ssh://`` URLs must go through the same userinfo-strip /
+    host-lowercase path as https — otherwise a uppercase host or an
+    embedded user creates a fake "different source" record.
+    """
+    assert normalize_repo_url("ssh://git@GitHub.com/Q00/plug.git") == "ssh://github.com/Q00/plug"

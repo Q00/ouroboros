@@ -1869,3 +1869,88 @@ def test_trust_audit_event_records_real_source_type(runner: CliRunner, tmp_path:
     payload = envelope["payload"]
     # Reference manifest has source.type=local_path, NOT plugin_home.
     assert payload["plugin"]["source_type"] == "local_path", payload["plugin"]
+
+
+def test_atomic_replace_dir_preserves_symlinks(tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:225.
+
+    ``_atomic_replace_dir`` MUST copy symlinks as links rather than
+    dereferencing them. A manifest tree with `evil → /etc/passwd` would
+    otherwise smuggle host-file contents into ``plugin_home`` and let
+    the firewall hash them as if the plugin authored those bytes —
+    both a privacy escalation and a digest-model contract violation,
+    because ``canonical_tree_hash`` is explicitly designed to bind the
+    artifact to the symlink target as a separate digest record.
+    """
+    from ouroboros.cli.commands.plugin import _atomic_replace_dir
+
+    # Stage a "manifest tree" that includes a symlink pointing outside
+    # itself — the same shape an attacker would produce.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ouroboros.plugin.json").write_text("{}")
+    target = tmp_path / "host_secret"
+    target.write_text("HOST_SECRET")
+    (src / "evil").symlink_to(target)
+
+    dest = tmp_path / "installed"
+    _atomic_replace_dir(src, dest)
+
+    installed_link = dest / "evil"
+    # The link itself must survive — not the dereferenced bytes.
+    assert installed_link.is_symlink(), (
+        "_atomic_replace_dir flattened a symlink; copytree(symlinks=True) is required"
+    )
+    # Sanity: the original target is unchanged (no copy of the host
+    # secret should have landed inside plugin_home as a plain file).
+    assert not (dest / "evil").is_file() or (dest / "evil").is_symlink()
+
+
+def test_inspect_friendly_error_on_corrupt_lockfile(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:479.
+
+    A damaged ``plugins.lock`` MUST surface a friendly recovery hint
+    rather than a raw ``ValueError`` traceback. ``inspect`` is the
+    operator's diagnostic tool — crashing it defeats its purpose.
+    """
+    paths = _common_paths(tmp_path)
+    paths["lockfile"].write_text("not valid json {")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    # The friendly hint names the file and points at the recovery flag.
+    plain = " ".join(result.output.split())
+    assert "lockfile is unreadable" in plain
+    assert "--lockfile" in plain
+
+
+def test_list_friendly_error_on_corrupt_lockfile(runner: CliRunner, tmp_path: Path) -> None:
+    """Same regression catch as ``test_inspect_friendly_error_on_corrupt_lockfile``,
+    but for ``list`` (which read-shares the same lockfile path).
+    """
+    paths = _common_paths(tmp_path)
+    paths["lockfile"].write_text("{ partial json")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "lockfile is unreadable" in plain

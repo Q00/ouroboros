@@ -220,9 +220,16 @@ def _atomic_replace_dir(src: Path, dest: Path) -> None:
     staging = dest.with_name(f"{dest.name}.staging-{suffix}")
     backup = dest.with_name(f"{dest.name}.bak-{suffix}")
 
-    # Step 1: stage copy.
+    # Step 1: stage copy. Pass symlinks=True so symlinks are copied as
+    # links rather than dereferenced into the trusted artifact:
+    #   - Security: a manifest tree with `evil → /etc/passwd` would
+    #     otherwise smuggle host-file contents into plugin_home and
+    #     fold them into artifact_digest as if the plugin authored them.
+    #   - Digest contract: canonical_tree_hash hashes symlink targets
+    #     as part of artifact identity, which only works when the
+    #     install actually preserves the link.
     try:
-        shutil.copytree(src, staging)
+        shutil.copytree(src, staging, symlinks=True)
     except Exception:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -449,7 +456,14 @@ def discover_command(
     console.print(f"  permissions:    {len(manifest.permissions)}")
     required_perms = [p for p in manifest.permissions if p.required]
     if required_perms:
-        console.print("  required scopes (must be trusted before invocation):")
+        # First-party manifests bypass the user-facing trust prompt
+        # (RFC: "First-party trust semantics"), so the "must be
+        # trusted" hint is misleading for them — those scopes are
+        # already implicitly trusted at boot.
+        if manifest.source.type == "first_party":
+            console.print("  required scopes (implicitly trusted for first-party):")
+        else:
+            console.print("  required scopes (must be trusted before invocation):")
         for perm in required_perms:
             console.print(f"    - {perm.scope} ({perm.risk})")
 
@@ -476,7 +490,21 @@ def inspect_command(
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
-    entries = lock.read()
+    # Treat malformed local state as a first-class diagnostic condition,
+    # not a stack trace. `inspect` is precisely the command operators
+    # reach for when something is wrong; crashing here defeats its
+    # purpose. Lockfile.read() raises ValueError on schema violations
+    # and OSError on filesystem issues — both surface a friendly hint
+    # pointing the user at the offending file path.
+    try:
+        entries = lock.read()
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"lockfile is unreadable ({lock.path}): {exc}. "
+            f"Inspect or replace the file, or pass --lockfile to point "
+            f"at a known-good copy."
+        )
+        raise typer.Exit(code=1) from exc
     entry = entries.get(name)
     if entry is None:
         print_error(f"{name!r} is not installed (no entry in {lock.path})")
@@ -492,7 +520,23 @@ def inspect_command(
         )
         raise typer.Exit(code=1) from exc
 
-    record = trust.read(name)
+    # First-party programs bypass the user-facing trust flow at the
+    # firewall (per the RFC's "First-party trust semantics"); a stale
+    # or corrupt trust file MUST NOT block their inspection. We also
+    # protect every other source.type from raw decode/IO errors so the
+    # operator sees a hint rather than a traceback.
+    if manifest.source.type == "first_party":
+        record = None
+    else:
+        try:
+            record = trust.read(name)
+        except (ValueError, OSError) as exc:
+            print_error(
+                f"trust store is unreadable for {name!r}: {exc}. "
+                f"Pass --trust-root to point at a known-good copy, or "
+                f"remove the offending file."
+            )
+            raise typer.Exit(code=1) from exc
     # A trust record applies to the displayed scopes only when its full
     # install subject matches the lockfile entry: version,
     # source.type, source_identity, and artifact_digest. Otherwise the
@@ -547,7 +591,18 @@ def list_command(
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
-    entries = lock.read()
+    # Same operator-friendly handling as `inspect` (see above): malformed
+    # local state must not crash the diagnostic command meant to help
+    # the user notice and recover from it.
+    try:
+        entries = lock.read()
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"lockfile is unreadable ({lock.path}): {exc}. "
+            f"Inspect or replace the file, or pass --lockfile to point "
+            f"at a known-good copy."
+        )
+        raise typer.Exit(code=1) from exc
     if not entries:
         if json_output:
             # Plain stdout (no Rich highlighting) so consumers can pipe to jq.
@@ -558,7 +613,6 @@ def list_command(
 
     rows = []
     for entry in sorted(entries.values(), key=lambda e: e.name):
-        record = trust.read(entry.name)
         # Per the locked RFC, a record only applies to the install
         # subject if every field of (version, source.type,
         # source_identity, artifact_digest) matches. Same-version
@@ -572,6 +626,40 @@ def list_command(
         manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
         try:
             manifest = load_manifest(manifest_path)
+        except PluginManifestError:
+            # Manifest unreadable post-install (e.g. external mutation):
+            # show conservatively as "installed", no granted scopes.
+            rows.append(
+                {
+                    "name": entry.name,
+                    "version": entry.version,
+                    "source_kind": entry.source_kind,
+                    "trust_state": "installed",
+                    "granted_scopes": [],
+                }
+            )
+            continue
+        # First-party programs are implicitly trusted by the firewall
+        # (RFC: "First-party trust semantics"), so skip the trust read
+        # entirely. Listing them as "trusted" matches what would
+        # actually happen at invocation, and avoids letting a corrupt
+        # trust file mislabel them.
+        if manifest.source.type == "first_party":
+            rows.append(
+                {
+                    "name": entry.name,
+                    "version": entry.version,
+                    "source_kind": entry.source_kind,
+                    "trust_state": "trusted",
+                    "granted_scopes": [p.scope for p in manifest.permissions if p.required],
+                }
+            )
+            continue
+        # For non-first-party entries, treat malformed trust state as
+        # "trust unreadable" rather than crashing the listing — the
+        # operator should still see every other plugin's state.
+        try:
+            record = trust.read(entry.name)
             trust_state = _trust_state_label(
                 manifest,
                 trust,
@@ -580,10 +668,8 @@ def list_command(
             )
             applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
             scopes = [g.scope for g in record.granted_scopes] if applies and record else []
-        except PluginManifestError:
-            # Manifest unreadable post-install (e.g. external mutation):
-            # show conservatively as "installed", no granted scopes.
-            trust_state = "installed"
+        except (ValueError, OSError):
+            trust_state = "trust_unreadable"
             scopes = []
         rows.append(
             {

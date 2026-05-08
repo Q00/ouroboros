@@ -187,8 +187,13 @@ def normalize_repo_url(url: str) -> str:
     - Strip any trailing `.git`.
     - Strip the URL fragment (everything after `#`).
     - Strip embedded userinfo (`https://user:pass@host/...` → `https://host/...`).
-    - Preserve the scheme exactly (`http://` and `https://` are distinct
-      trust subjects).
+    - Drop the `git+` URL wrapper (`git+https://...` and `git+ssh://...`
+      both clone the same upstream as their unwrapped forms; recording
+      them as different `source_identity` values would split trust on
+      cosmetic spelling).
+    - Preserve the underlying transport scheme (`http://`, `https://`,
+      and `ssh://` remain distinct trust subjects — they actually reach
+      the host through different transports).
     - Lowercase the host portion case-insensitively; preserve path case.
 
     Anything outside that set is left untouched — the value will appear
@@ -197,9 +202,16 @@ def normalize_repo_url(url: str) -> str:
     """
     if "#" in url:
         url, _ = url.split("#", 1)
+    # Per the RFC's "URL forms accepted as the same source", `git+https://X`
+    # and `https://X` clone the same upstream; record them as one
+    # canonical form so trust binds to the repo, not the spelling.
+    for wrapper in ("git+https://", "git+http://", "git+ssh://"):
+        if url.startswith(wrapper):
+            url = url[len("git+") :]
+            break
     # Strip embedded userinfo and lowercase host without pulling in urllib for
     # speed (this is the install hot path).
-    for scheme in ("https://", "http://", "git+https://", "git+http://", "git+ssh://"):
+    for scheme in ("https://", "http://", "ssh://"):
         if url.startswith(scheme):
             rest = url[len(scheme) :]
             if "@" in rest and "/" in rest and rest.index("@") < rest.index("/"):
