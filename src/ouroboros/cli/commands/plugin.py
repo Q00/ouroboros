@@ -386,7 +386,20 @@ def list_command(
         if manifest is not None and manifest.source.type == "first_party":
             record = None
         elif manifest is not None:
-            record = _read_trust_or_exit(trust, entry.name)
+            # `_read_trust_or_exit` raises `typer.Exit(1)` when the trust
+            # file is unparseable. In `inspect <plugin>` that single-target
+            # behavior is correct (the user asked about exactly that
+            # plugin). In `list` it is the opposite of helpful: one
+            # plugin's corrupt `trust.json` would abort the entire listing
+            # and hide every other installed plugin from the operator —
+            # who depended on `list` to see what is installed in order to
+            # diagnose the very file that crashed it. Mirror the
+            # manifest-unreadable branch below: catch and degrade to
+            # `record = None` so the row is still emitted.
+            try:
+                record = trust.read(entry.name)
+            except _STATE_FILE_ERRORS:
+                record = None
         else:
             # Manifest unreadable: we can't tell whether this is a
             # first-party plugin (trust ignored) or a third-party one

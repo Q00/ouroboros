@@ -802,6 +802,71 @@ def test_list_survives_doubly_corrupt_row(runner: CliRunner, tmp_path: Path) -> 
     assert row["trust_version_stale"] is False
 
 
+def test_list_survives_corrupt_trust_with_readable_manifest(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: a single plugin with a corrupt ``trust.json`` must
+    NOT abort the entire ``list`` output when its manifest is readable.
+
+    With the prior behavior, the readable-manifest branch called
+    ``_read_trust_or_exit`` which raises ``typer.Exit(1)`` on any JSON
+    parse error — collapsing the listing for every other plugin and
+    hiding the exact diagnostic state the operator needed to find the
+    bad file. The fix mirrors the unreadable-manifest branch: degrade
+    the offending row to ``record = None`` instead of aborting.
+    """
+    # Plugin A: clean — readable manifest, no trust file (yet).
+    clean_home = tmp_path / "clean_home"
+    _write_manifest(clean_home, {**REFERENCE_MANIFEST, "name": "clean-plugin"})
+    # Plugin B: readable manifest, but corrupt ``trust.json`` (invalid JSON
+    # entirely — not just missing keys).
+    bad_home = tmp_path / "bad_home"
+    _write_manifest(bad_home, {**REFERENCE_MANIFEST, "name": "bad-plugin"})
+
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    lock = Lockfile(lock_path)
+    for name, home in (("clean-plugin", clean_home), ("bad-plugin", bad_home)):
+        lock.add(
+            LockEntry(
+                name=name,
+                version="0.1.0",
+                source_kind="local",
+                repository=None,
+                git_sha=None,
+                manifest_checksum="sha256:0",
+                installed_at="2026-05-08T00:00:00Z",
+                plugin_home=str(home),
+            )
+        )
+    bad_trust = trust_root / "bad-plugin" / "trust.json"
+    bad_trust.parent.mkdir(parents=True, exist_ok=True)
+    bad_trust.write_text("{not valid json")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--json",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 2
+    by_name = {row["name"]: row for row in data}
+    # The clean plugin's row is fully populated.
+    assert "clean-plugin" in by_name
+    # The corrupt-trust plugin's row is degraded but PRESENT — that is
+    # the contract being restored.
+    assert "bad-plugin" in by_name
+    bad_row = by_name["bad-plugin"]
+    assert bad_row["granted_scopes"] == []
+
+
 FIRST_PARTY_REQUIRED_MANIFEST: dict = {
     **REFERENCE_MANIFEST,
     "name": "ouroboros-builtin",
