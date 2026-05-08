@@ -27,6 +27,50 @@ def _make_entry(name: str = "github-pr-ops", version: str = "0.1.0") -> LockEntr
     )
 
 
+@pytest.mark.parametrize(
+    "ctrl_char",
+    [
+        "\x01",  # SOH
+        "\x05",  # ENQ
+        "\x08",  # BS — has \b escape but earlier code only handled \n,\t,\r
+        "\x0b",  # VT
+        "\x0c",  # FF — has \f escape but earlier code only handled \n,\t,\r
+        "\x1f",  # US — last C0
+        "\x7f",  # DEL — TOML basic strings forbid this too
+    ],
+)
+def test_toml_str_escapes_all_control_chars(tmp_path: Path, ctrl_char: str) -> None:
+    """Lockfile entries containing C0 bytes (or DEL) must round-trip through tomllib.
+
+    Before the escape-table fix, ``_toml_str`` only handled ``\\``, ``"``,
+    ``\\n``, ``\\t`` and ``\\r`` — every other ``ord(ch) < 0x20`` byte was
+    emitted verbatim into the output. ``tomllib.loads`` rejects those bare
+    bytes inside a basic string with ``Illegal character ...``, so the very
+    next ``Lockfile.read()`` after such an ``add()`` would crash.
+    """
+    lock = Lockfile(tmp_path / "plugins.lock")
+    # Stuff the control character into a value that survives across the lock
+    # boundary — manifest_checksum is a free-form string in the schema.
+    entry = LockEntry(
+        name="ctrl-char-plugin",
+        version="0.1.0",
+        source_kind="git",
+        repository="https://example.invalid/repo",
+        git_sha="deadbeef",
+        manifest_checksum=f"sha256:abc{ctrl_char}123",
+        installed_at="2026-05-08T03:14:00Z",
+        plugin_home="~/.ouroboros/plugins/ctrl-char-plugin",
+    )
+    lock.add(entry)
+
+    # The bug surfaces here: tomllib refuses to parse the file the lockfile
+    # itself just wrote.
+    fresh = Lockfile(tmp_path / "plugins.lock")
+    entries = fresh.read()
+    assert "ctrl-char-plugin" in entries
+    assert entries["ctrl-char-plugin"].manifest_checksum == f"sha256:abc{ctrl_char}123"
+
+
 def test_install_then_read(tmp_path: Path) -> None:
     """Test 1: install → lockfile entry present; round-trip through TOML."""
     lock = Lockfile(tmp_path / "plugins.lock")

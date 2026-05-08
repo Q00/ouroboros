@@ -59,22 +59,44 @@ class LockEntry:
         return lines
 
 
+_TOML_BASIC_ESCAPES: dict[str, str] = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\t": "\\t",
+    "\r": "\\r",
+    "\b": "\\b",
+    "\f": "\\f",
+}
+
+
 def _toml_str(value: str) -> str:
-    """Serialize a string value as TOML basic string. Restricts content to
-    avoid escaping edge cases — the lockfile only stores names, paths, hashes
-    and timestamps, none of which contain control chars or non-ASCII in
-    practice."""
-    if any(ch == "\\" or ch == '"' or ord(ch) < 0x20 for ch in value):
-        # Use TOML's basic string escapes for the small set we actually need.
-        escaped = (
-            value.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("\n", "\\n")
-            .replace("\t", "\\t")
-            .replace("\r", "\\r")
-        )
-        return f'"{escaped}"'
-    return f'"{value}"'
+    """Serialize a string value as a TOML basic string.
+
+    The lockfile normally stores names, paths, hashes and timestamps, none of
+    which contain control characters in practice. The escape table previously
+    only covered ``\\``, ``"``, ``\\n``, ``\\t`` and ``\\r``, so any other C0
+    byte (e.g. ``\\x0b``, ``\\x0c``, ``\\x05``) was emitted verbatim into the
+    output even though :func:`tomllib.loads` rejects bare C0 inside basic
+    strings — meaning a value like ``"sha256:\\x0b..."`` produced a lockfile
+    that the next ``Lockfile.read()`` call would fail to parse.
+
+    The fix keeps the well-known escapes for ``\\b`` and ``\\f`` (TOML 1.0
+    §2.1) and falls back to ``\\uXXXX`` for any remaining ``ord(ch) < 0x20``
+    or ``ord(ch) == 0x7f`` (DEL) byte. ASCII printable values are still
+    emitted verbatim, so existing well-formed lockfiles remain unchanged.
+    """
+    if not any(ch in _TOML_BASIC_ESCAPES or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        return f'"{value}"'
+    parts: list[str] = []
+    for ch in value:
+        if ch in _TOML_BASIC_ESCAPES:
+            parts.append(_TOML_BASIC_ESCAPES[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            parts.append(f"\\u{ord(ch):04x}")
+        else:
+            parts.append(ch)
+    return f'"{"".join(parts)}"'
 
 
 class Lockfile:
