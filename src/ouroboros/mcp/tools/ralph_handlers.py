@@ -320,7 +320,8 @@ class RalphHandler:
                     )
                 )
             if (
-                max_total_seconds < MIN_MAX_TOTAL_SECONDS
+                not math.isfinite(max_total_seconds)
+                or max_total_seconds < MIN_MAX_TOTAL_SECONDS
                 or max_total_seconds > MAX_MAX_TOTAL_SECONDS
             ):
                 return Result.err(

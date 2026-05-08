@@ -329,6 +329,23 @@ async def test_ralph_handler_rejects_non_numeric_max_total_seconds() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+async def test_ralph_handler_rejects_non_finite_max_total_seconds(value: str) -> None:
+    handler = RalphHandler(evolve_handler=_ImmediateEvolveHandler())  # type: ignore[arg-type]
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_budget_non_finite",
+            "max_total_seconds": value,
+        }
+    )
+
+    assert result.is_err
+    assert "max_total_seconds" in str(result.error)
+    assert "between 1 and 86400" in str(result.error)
+
+
+@pytest.mark.asyncio
 async def test_plugin_dispatch_forwards_max_total_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
