@@ -189,7 +189,7 @@ def _unsafe_context_reason(
             goal,
             pending_question or "",
             *_unsafe_ledger_values(ledger),
-            *_interview_questions(ledger),
+            *_interview_transcript(ledger),
         )
         if value.strip()
     ).lower()
@@ -199,17 +199,42 @@ def _unsafe_context_reason(
     return None
 
 
+_INACTIVE_LEDGER_STATUSES: frozenset[LedgerStatus] = frozenset(
+    {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+)
+
+
 def _unsafe_ledger_values(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """Return active ledger entry values that may carry unsafe interview context.
+
+    Includes any source that represents user-supplied, repository-derived, or
+    interview-derived requirements (USER_GOAL, REPO_FACT, EXISTING_CONVENTION,
+    INFERENCE, NON_GOAL, BLOCKER, CONSERVATIVE_DEFAULT). Excludes inactive
+    entries (weak/conflicting/blocked) and the safe-default policy's own
+    DEFAULTED outputs so the gate does not re-flag its own boundary text on a
+    subsequent pass.
+    """
     values: list[str] = []
     for section in ledger.sections.values():
         for entry in section.entries:
-            if entry.source == LedgerSource.USER_GOAL:
-                values.append(entry.value)
+            if entry.status in _INACTIVE_LEDGER_STATUSES:
+                continue
+            if entry.status == LedgerStatus.DEFAULTED:
+                continue
+            if entry.source == LedgerSource.ASSUMPTION:
+                continue
+            values.append(entry.value)
     return tuple(values)
 
 
-def _interview_questions(ledger: SeedDraftLedger) -> tuple[str, ...]:
+def _interview_transcript(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """Return both questions and answers recorded during the interview."""
     values: list[str] = []
     for item in ledger.question_history:
-        values.append(item.get("question", ""))
+        question = item.get("question", "")
+        answer = item.get("answer", "")
+        if question:
+            values.append(question)
+        if answer:
+            values.append(answer)
     return tuple(values)

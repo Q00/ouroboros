@@ -245,6 +245,50 @@ async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_pat
     assert any("safe-default policy" in item for item in final_actor.evidence)
 
 
+def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a small local CLI")
+    ledger.record_qa(
+        "How should the CLI authenticate?",
+        "It needs to call the production OAuth provider with the customer access token.",
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal="Build a small local CLI",
+        provenance="unit test",
+    )
+
+    assert not result.completed
+    assert result.unsafe_gaps  # at least one gap stays unsafe
+    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
+    assert not ledger.is_seed_ready()
+
+
+def test_safe_default_blocks_when_non_user_goal_entry_introduces_unsafe_context() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a small local CLI")
+    ledger.add_entry(
+        "inputs",
+        LedgerEntry(
+            key="inputs.repo_fact",
+            value="Reads the production database credentials file from disk.",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+            rationale="Surfaced from repo scan during interview.",
+        ),
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal="Build a small local CLI",
+        provenance="unit test",
+    )
+
+    assert not result.completed
+    assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
+    assert not ledger.is_seed_ready()
+
+
 def test_safe_default_non_goals_do_not_make_later_finalization_unsafe() -> None:
     ledger = SeedDraftLedger.from_goal("Build a small local CLI")
     ledger.add_entry(
