@@ -7,6 +7,7 @@ longer have to own the multi-generation loop in prompt/skill pseudo-code.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import math
 from typing import Any
 
@@ -42,6 +43,10 @@ MAX_RALPH_GENERATIONS = 10
 MIN_PER_ITERATION_TIMEOUT_SECONDS = 30.0
 MAX_PER_ITERATION_TIMEOUT_SECONDS = 7200.0
 MIN_PROGRESS_WINDOW = 2  # smallest window where strict-decrease / repeat checks are meaningful
+MIN_MAX_TOTAL_SECONDS = 1.0
+MAX_MAX_TOTAL_SECONDS = 86400.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -169,6 +174,21 @@ class RalphHandler:
                     required=False,
                     default=DEFAULT_GRADE_REGRESSION_WINDOW,
                 ),
+                MCPToolParameter(
+                    name="max_total_seconds",
+                    type=ToolInputType.NUMBER,
+                    description=(
+                        "Total wall-clock budget for the entire Ralph loop in "
+                        "seconds. Checked at the top of every iteration BEFORE "
+                        "launching evolve_step; on exhaustion the loop stops "
+                        "with stop_reason='wall_clock_exhausted'. When omitted, "
+                        "a derived ceiling of "
+                        "max_generations * per_iteration_timeout_seconds is "
+                        "auto-applied (with a WARNING log) for standalone "
+                        "callers. Range: 1-86400."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -280,6 +300,42 @@ class RalphHandler:
                 )
             )
 
+        raw_max_total_seconds = arguments.get("max_total_seconds")
+        max_total_seconds: float | None
+        if raw_max_total_seconds is None:
+            max_total_seconds = None
+        else:
+            try:
+                max_total_seconds = float(raw_max_total_seconds)
+            except (TypeError, ValueError):
+                return Result.err(
+                    MCPToolError(
+                        "max_total_seconds must be a number",
+                        tool_name="ouroboros_ralph",
+                    )
+                )
+            if (
+                max_total_seconds < MIN_MAX_TOTAL_SECONDS
+                or max_total_seconds > MAX_MAX_TOTAL_SECONDS
+            ):
+                return Result.err(
+                    MCPToolError(
+                        "max_total_seconds must be between "
+                        f"{MIN_MAX_TOTAL_SECONDS:g} and "
+                        f"{MAX_MAX_TOTAL_SECONDS:g}",
+                        tool_name="ouroboros_ralph",
+                    )
+                )
+
+        if max_total_seconds is None:
+            derived = float(max_generations) * per_iteration_timeout_seconds
+            logger.warning(
+                "max_total_seconds not provided; auto-applying derived ceiling "
+                "of %ss based on max_generations × per_iteration_timeout_seconds",
+                f"{derived:g}",
+            )
+            max_total_seconds = derived
+
         if arguments.get("delegation_depth", 0):
             return Result.err(
                 MCPToolError(
@@ -299,6 +355,7 @@ class RalphHandler:
             per_iteration_timeout_seconds=per_iteration_timeout_seconds,
             oscillation_window=oscillation_window,
             grade_regression_window=grade_regression_window,
+            max_total_seconds=max_total_seconds,
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
