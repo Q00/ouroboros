@@ -281,6 +281,15 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["run_reconciliation_status"] = result.run_reconciliation_status
         meta["run_reconciliation_source"] = result.run_reconciliation_source
         meta["run_reconciled_at"] = result.run_reconciled_at
+    # Always emit the ledger-provenance surface so MCP clients can distinguish
+    # "computed and empty" (no resolved sections yet, or no per-source split
+    # available) from "field not provided at all".  Empty containers are part
+    # of the contract — consumers should treat absence as a protocol error.
+    meta["ledger_provenance"] = {
+        source: list(sections) for source, sections in result.ledger_provenance.items()
+    }
+    meta["evidence_backed_sections"] = list(result.evidence_backed_sections)
+    meta["assumption_only_sections"] = list(result.assumption_only_sections)
     return meta
 
 

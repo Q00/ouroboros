@@ -1555,3 +1555,187 @@ def test_auto_answerer_routes_safe_regulated_product_questions_to_product_behavi
         assert regulated_noun in combined.lower(), (
             f"Regulated noun {regulated_noun!r} not found in answer/ledger for {question!r}"
         )
+
+
+def test_ledger_summary_groups_active_sections_by_provenance_source() -> None:
+    ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.repo_fact",
+            value="Python 3.14",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+            evidence=["pyproject.toml"],
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.mvp",
+            value="Smallest safe MVP",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.assumed",
+            value="Single local user",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    summary = ledger.summary()
+    provenance = summary["provenance"]
+
+    assert "runtime_context" in provenance["repo_fact"]
+    assert "goal" in provenance["user_goal"]
+    assert "constraints" in provenance["conservative_default"]
+    assert "actors" in provenance["assumption"]
+    assert "runtime_context" in summary["evidence_backed_sections"]
+    assert "goal" in summary["evidence_backed_sections"]
+    assert "constraints" in summary["assumption_only_sections"]
+    assert "actors" in summary["assumption_only_sections"]
+    assert "runtime_context" not in summary["assumption_only_sections"]
+
+
+def test_ledger_summary_excludes_inactive_entries_from_provenance() -> None:
+    ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.weak_guess",
+            value="maybe Python",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.4,
+            status=LedgerStatus.WEAK,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.blocked",
+            value="needs human input",
+            source=LedgerSource.BLOCKER,
+            confidence=1.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+
+    summary = ledger.summary()
+    provenance = summary["provenance"]
+
+    assert "runtime_context" not in provenance.get("repo_fact", [])
+    assert "constraints" not in provenance.get("blocker", [])
+    assert "runtime_context" not in summary["evidence_backed_sections"]
+    assert "runtime_context" not in summary["assumption_only_sections"]
+    assert "constraints" not in summary["assumption_only_sections"]
+
+
+def test_ledger_summary_excludes_unresolved_sections_from_classification() -> None:
+    """Sections that are not aggregate-resolved must not surface as grounded.
+
+    A section can carry both a resolved entry (DEFAULTED) and a later blocker
+    (BLOCKED), in which case ``LedgerSection.status()`` returns ``BLOCKED``.
+    The provenance summary must respect the section's aggregate status so
+    consumers do not see ``constraints`` listed as "evidence-backed" or
+    "assumption-only" while the section is actually unresolved.
+    """
+    ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.mvp",
+            value="Smallest safe MVP",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="blocker.constraints",
+            value="needs human input",
+            source=LedgerSource.BLOCKER,
+            confidence=1.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+
+    summary = ledger.summary()
+    assert ledger.sections["constraints"].status() == LedgerStatus.BLOCKED
+    assert "constraints" not in summary["evidence_backed_sections"]
+    assert "constraints" not in summary["assumption_only_sections"]
+    assert "constraints" in summary["open_gaps"]
+    # The raw provenance dict must also exclude unresolved sections so MCP
+    # consumers cannot attribute a source to a section the ledger considers
+    # blocked.
+    for source_sections in summary["provenance"].values():
+        assert "constraints" not in source_sections
+
+
+def test_ledger_summary_treats_non_goal_entries_as_evidence_backed() -> None:
+    """Explicit non-goals are user-stated policy, not bare assumptions.
+
+    Both user-supplied non-goals (CONFIRMED) and auto-defaulted non-goals
+    (DEFAULTED) represent deliberate scope boundaries, so the section should
+    surface as evidence-backed rather than assumption-only.
+    """
+    explicit_ledger = SeedDraftLedger.from_goal(
+        "Build hello CLI. Non-goals are cloud sync and authentication."
+    )
+    explicit_summary = explicit_ledger.summary()
+
+    assert "non_goals" in explicit_summary["provenance"].get("non_goal", [])
+    assert "non_goals" in explicit_summary["evidence_backed_sections"]
+    assert "non_goals" not in explicit_summary["assumption_only_sections"]
+
+    defaulted_ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    defaulted_ledger.add_entry(
+        "non_goals",
+        LedgerEntry(
+            key="non_goals.mvp_scope",
+            value="No cloud sync; no paid services.",
+            source=LedgerSource.NON_GOAL,
+            confidence=0.86,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    defaulted_summary = defaulted_ledger.summary()
+
+    assert "non_goals" in defaulted_summary["evidence_backed_sections"]
+    assert "non_goals" not in defaulted_summary["assumption_only_sections"]
+
+
+def test_ledger_summary_treats_inference_only_sections_as_assumption_only() -> None:
+    """Inference is a model-derived guess, not anchored evidence.
+
+    A section resolved purely from INFERENCE entries must surface in
+    ``assumption_only_sections``, never in ``evidence_backed_sections`` —
+    otherwise the surface would present speculative content as grounded fact
+    and defeat the trust-signal purpose of the split.
+    """
+    ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.inferred",
+            value="Local developer",
+            source=LedgerSource.INFERENCE,
+            confidence=0.7,
+            status=LedgerStatus.INFERRED,
+        ),
+    )
+
+    summary = ledger.summary()
+
+    assert "actors" in summary["provenance"].get("inference", [])
+    assert "actors" not in summary["evidence_backed_sections"]
+    assert "actors" in summary["assumption_only_sections"]
