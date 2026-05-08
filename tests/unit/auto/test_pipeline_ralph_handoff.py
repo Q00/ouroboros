@@ -21,12 +21,14 @@ from ouroboros.auto.pipeline import (
     PIPELINE_DEADLINE_TOOL_NAME,
     AutoPipeline,
     AutoPipelineResult,
+    _recoverable_phase_for_tool,
 )
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
     AutoPhase,
     AutoPipelineState,
+    AutoResumeCapability,
 )
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -172,6 +174,8 @@ def test_state_machine_allows_ralph_handoff_terminal_transitions() -> None:
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
     }
+    assert AutoPhase.RALPH_HANDOFF in _ALLOWED_TRANSITIONS[AutoPhase.BLOCKED]
+    assert AutoPhase.RALPH_HANDOFF in _ALLOWED_TRANSITIONS[AutoPhase.FAILED]
 
 
 def test_blocked_stop_reasons_pinned() -> None:
@@ -188,6 +192,15 @@ def test_blocked_stop_reasons_pinned() -> None:
         )
         == _RALPH_BLOCKED_STOP_REASONS
     )
+
+
+def test_ralph_starter_blocker_is_recoverable_to_ralph_handoff(tmp_path) -> None:
+    state = _state_at_run_phase(tmp_path)
+    state.ralph_lineage_id = "ralph-seed_test_001-auto_abc"
+    state.mark_blocked("iteration_timeout", tool_name="ralph_starter")
+
+    assert _recoverable_phase_for_tool("ralph_starter") is AutoPhase.RALPH_HANDOFF
+    assert state.resume_capability() is AutoResumeCapability.RESUME
 
 
 # ---------------------------------------------------------------------------

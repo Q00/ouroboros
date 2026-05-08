@@ -175,6 +175,7 @@ class AutoPipeline:
         )
         if self.skip_run and not state.skip_run:
             state.skip_run = True
+        _arm_legacy_missing_deadline(state)
         # Top-level deadline check on resume (#779). When ``deadline_at`` is
         # already set and has passed before this process even starts work,
         # immediately transition to BLOCKED so no phase work is invoked. The
@@ -631,8 +632,11 @@ class AutoPipeline:
             run_meta: dict[str, Any] | None = None
             run_start_timeout = self._deadline_capped_timeout(state, self.run_start_timeout_seconds)
             try:
+                run_kwargs: dict[str, Any] = {}
+                if _accepts_keyword(self.run_starter, "idempotency_key"):
+                    run_kwargs["idempotency_key"] = idempotency_key
                 run_meta = await asyncio.wait_for(
-                    self.run_starter(seed, idempotency_key=idempotency_key),
+                    self.run_starter(seed, **run_kwargs),
                     timeout=run_start_timeout,
                 )
                 if not isinstance(run_meta, dict):
@@ -1276,7 +1280,19 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.REVIEW
     if tool_name == "run_starter":
         return AutoPhase.RUN
+    if tool_name == "ralph_starter":
+        return AutoPhase.RALPH_HANDOFF
     return None
+
+
+def _arm_legacy_missing_deadline(state: AutoPipelineState) -> bool:
+    """Arm #779 deadline for legacy resumed sessions already past CREATED."""
+    if state.phase in {AutoPhase.CREATED, AutoPhase.COMPLETE}:
+        return False
+    if state.deadline_at is not None or state.deadline_at_epoch is not None:
+        return False
+    state.arm_deadline()
+    return True
 
 
 def _first_nonempty(*values: str | None) -> str | None:

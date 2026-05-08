@@ -353,6 +353,26 @@ async def test_resume_after_deadline_expired_immediately_blocks(tmp_path) -> Non
     assert driver.invocations == 0
 
 
+@pytest.mark.asyncio
+async def test_legacy_non_created_resume_with_missing_deadline_gets_armed(tmp_path) -> None:
+    """Legacy states past CREATED must not bypass the top-level deadline forever."""
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "legacy interview checkpoint")
+    state.last_tool_name = "unknown_legacy_tool"
+    state.mark_blocked("legacy blocked checkpoint", tool_name="unknown_legacy_tool")
+    assert state.deadline_at is None
+    assert state.deadline_at_epoch is None
+
+    pipeline = AutoPipeline(_NeverInterviewDriver(), _unused_seed_generator)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_error == "legacy blocked checkpoint"
+    assert state.deadline_at is not None
+    assert state.deadline_at_epoch is not None
+
+
 def test_arm_deadline_is_idempotent() -> None:
     """Re-calling ``arm_deadline()`` must not silently shift the absolute target."""
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")

@@ -1327,7 +1327,6 @@ def build_ralph_subagent(
             f"invocation exceeds {per_iteration_timeout_seconds:g} seconds; "
             "that satisfies the public contract `stop_reason=iteration_timeout`.\n"
         )
-
     progress_stop_lines: list[str] = []
     if oscillation_window is not None:
         progress_stop_lines.append(
@@ -1411,12 +1410,12 @@ do not enqueue another background Ralph job."""
     }
     if per_iteration_timeout_seconds is not None:
         context["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds
+    if max_total_seconds is not None:
+        context["max_total_seconds"] = max_total_seconds
     if oscillation_window is not None:
         context["oscillation_window"] = oscillation_window
     if grade_regression_window is not None:
         context["grade_regression_window"] = grade_regression_window
-    if max_total_seconds is not None:
-        context["max_total_seconds"] = max_total_seconds
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",

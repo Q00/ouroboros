@@ -215,12 +215,14 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.SEED_GENERATION,
         AutoPhase.REVIEW,
         AutoPhase.RUN,
+        AutoPhase.RALPH_HANDOFF,
     },
     AutoPhase.FAILED: {
         AutoPhase.INTERVIEW,
         AutoPhase.SEED_GENERATION,
         AutoPhase.REVIEW,
         AutoPhase.RUN,
+        AutoPhase.RALPH_HANDOFF,
     },
 }
 
@@ -523,6 +525,19 @@ class AutoPipelineState:
                 return AutoResumeCapability.RESUME
             if self.run_start_attempted:
                 return AutoResumeCapability.NONE
+            if self.seed_artifact:
+                return AutoResumeCapability.RESUME
+            if self.seed_path:
+                return AutoResumeCapability.PARTIAL_RESUME
+            return AutoResumeCapability.NONE
+
+        # Ralph handoff phase. Persisted Ralph handles or plugin dispatch
+        # markers let the pipeline resume without starting duplicate run/Ralph
+        # work; otherwise a Seed is enough to return to the checkpoint and
+        # surface manual recovery guidance.
+        if recoverable == AutoPhase.RALPH_HANDOFF:
+            if any((self.ralph_job_id, self.ralph_lineage_id, self.ralph_dispatch_mode)):
+                return AutoResumeCapability.RESUME
             if self.seed_artifact:
                 return AutoResumeCapability.RESUME
             if self.seed_path:

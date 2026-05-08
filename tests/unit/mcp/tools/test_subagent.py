@@ -270,6 +270,7 @@ class TestBuildRalphSubagent:
             "allow_nested_ouroboros_ralph": False,
         }
         assert "per_iteration_timeout_seconds" not in payload.context
+        assert "max_total_seconds" not in payload.context
 
     def test_forwards_per_iteration_timeout_to_prompt_and_context(self) -> None:
         payload = build_ralph_subagent(
