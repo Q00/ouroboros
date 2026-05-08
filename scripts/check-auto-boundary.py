@@ -198,35 +198,98 @@ _COMPILED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in F
 ALLOWLIST_MARKER = "domain-keyword-allowed:"
 
 
+def _resolve_inside_repo(path: Path, repo_root_resolved: Path) -> Path | None:
+    """Return ``path.resolve()`` iff it stays inside ``repo_root_resolved``.
+
+    The architectural boundary for the scan is "does this path resolve
+    to a location inside the repo?", not "is this path a symlink?". A
+    symlink to another in-repo file is an implementation detail —
+    Python imports it normally and the guard must police it. A symlink
+    whose target escapes the tree is not in-repo code and must not be
+    policed (Q00/ouroboros#797 review).
+    """
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:  # broken symlink, permission denied, ELOOP, ...
+        return None
+    try:
+        resolved.relative_to(repo_root_resolved)
+    except ValueError:
+        return None
+    return resolved
+
+
 def _resolve_scan_targets() -> tuple[list[Path], list[str]]:
     """Return ``(scan_targets, missing_anchors)``.
 
     ``scan_targets`` is the union of every existing ``*.py`` file under
     SCAN_DIRS plus any SCAN_EXTRA_FILES that exist. ``missing_anchors``
-    is the list of ANCHOR_FILES that do not exist on disk; a non-empty
-    list means the guard must fail loud.
+    is the list of ANCHOR_FILES that do not exist on disk *or* whose
+    resolved path leaves the repo (e.g. their parent directory is a
+    symlink to an external tree); a non-empty list means the guard
+    must fail loud.
     """
     targets: list[Path] = []
     seen: set[Path] = set()
 
+    repo_root_resolved = REPO_ROOT.resolve()
+
     for d in SCAN_DIRS:
         root = REPO_ROOT / d
-        if root.is_dir():
-            for p in sorted(root.rglob("*.py")):
-                rp = p.resolve()
-                if rp not in seen:
-                    seen.add(rp)
-                    targets.append(p)
+        if not root.is_dir():
+            continue
+        # Root-level escape: if SCAN_DIR itself is a symlink whose
+        # target lives outside the repo (``src/ouroboros/auto ->
+        # /tmp/external_auto``), every per-file boundary check below
+        # would fail and ``targets`` would be empty for this root —
+        # silently stripping coverage for the entire subtree. Skip
+        # the rglob walk; the missing-anchor check below makes this
+        # fail loud, because anchors that live under this root no
+        # longer resolve in-repo (Q00/ouroboros#797 review).
+        if _resolve_inside_repo(root, repo_root_resolved) is None:
+            continue
+        for p in sorted(root.rglob("*.py")):
+            resolved = _resolve_inside_repo(p, repo_root_resolved)
+            if resolved is None:
+                # File resolved outside REPO_ROOT — symlink leaf to an
+                # external file, or a descendant of an in-rglob
+                # symlinked directory whose target escapes. Either way,
+                # not in-repo code: do not police it.
+                continue
+            if resolved not in seen:
+                seen.add(resolved)
+                targets.append(p)
 
     for rel in SCAN_EXTRA_FILES:
         p = REPO_ROOT / rel
-        if p.is_file():
-            rp = p.resolve()
-            if rp not in seen:
-                seen.add(rp)
-                targets.append(p)
+        if not p.is_file():
+            continue
+        # Same repo-boundary rule as SCAN_DIRS, applied to the explicit
+        # extra-file slot: a contributor accidentally pointing
+        # ``src/ouroboros/cli/commands/auto.py`` at an external file
+        # would otherwise re-introduce the same false-positive class
+        # the SCAN_DIRS check rejects.
+        resolved = _resolve_inside_repo(p, repo_root_resolved)
+        if resolved is None:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            targets.append(p)
 
-    missing = [rel for rel in ANCHOR_FILES if not (REPO_ROOT / rel).is_file()]
+    # An anchor file is "present" only if it (a) exists and (b) still
+    # resolves inside the repo. ``is_file()`` follows symlink chains,
+    # so a parent directory that has been symlinked out of the tree
+    # would otherwise let an anchor look healthy on disk while no
+    # longer being scanned — exactly the coverage-stripping escape the
+    # guard is meant to catch.
+    missing: list[str] = []
+    for rel in ANCHOR_FILES:
+        anchor = REPO_ROOT / rel
+        if not anchor.is_file():
+            missing.append(rel)
+            continue
+        if _resolve_inside_repo(anchor, repo_root_resolved) is None:
+            missing.append(rel)
     return targets, missing
 
 
