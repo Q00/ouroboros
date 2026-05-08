@@ -208,6 +208,14 @@ class AutoPipeline:
                 resume_phase,
                 f"resuming {resume_phase.value} after {previous_phase.value}: {state.last_error or 'no error recorded'}",
             )
+            # Legacy auto sessions saved before #779 had no
+            # ``deadline_at_epoch``, and ``from_dict()`` deliberately leaves
+            # the deadline unset for terminal phases. After recovering them
+            # back to a working phase, arm the deadline so subsequent
+            # ``_enforce_deadline`` checks are not silent no-ops for the
+            # rest of this resume (#790 review-4). ``arm_deadline`` is
+            # idempotent — non-legacy resumes are unaffected.
+            state.arm_deadline()
             self._save(state)
 
         review: SeedReview | None = None
