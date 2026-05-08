@@ -126,8 +126,16 @@ _UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
 # unsafe-context gate never re-feeds policy-emitted answers (auto answers or
 # our own synthesis) back into itself — keeping safe-default finalization
 # idempotent across resume/re-finalize calls.
-_AUTO_ANSWER_PREFIX = "[from-auto]"
-_SAFE_DEFAULT_SYNTHESIS_TAG = "[safe-default-synthesis]"
+#
+# These constants are public because the interview driver also needs to build
+# follow-up completion signals tagged the same way (see
+# :meth:`AutoInterviewDriver._record_safe_default_synthesis`).
+AUTO_ANSWER_PREFIX = "[from-auto]"
+SAFE_DEFAULT_SYNTHESIS_TAG = "[safe-default-synthesis]"
+# Backwards-compatible aliases (kept underscore-private for the local helpers
+# below that already reference them inline).
+_AUTO_ANSWER_PREFIX = AUTO_ANSWER_PREFIX
+_SAFE_DEFAULT_SYNTHESIS_TAG = SAFE_DEFAULT_SYNTHESIS_TAG
 
 
 def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:

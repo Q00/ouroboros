@@ -25,6 +25,8 @@ from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.safe_defaults import (
+    AUTO_ANSWER_PREFIX,
+    SAFE_DEFAULT_SYNTHESIS_TAG,
     SafeDefaultFinalization,
     build_safe_default_synthesis,
     finalize_safe_defaultable_gaps,
@@ -423,6 +425,16 @@ class AutoInterviewDriver:
         self._save(state)
         return AutoInterviewResult("blocked", state.interview_session_id, ledger, rounds, blocker)
 
+    # Maximum number of completion-signal turns the driver will send when
+    # closing the interview after safe-default finalization. The production
+    # InterviewHandler requires a stability streak of
+    # ``AUTO_COMPLETE_STREAK_REQUIRED`` (=2) qualifying completion signals
+    # before it actually closes the transcript, so a single synthesis turn
+    # does not always suffice — we send the full synthesis once and then
+    # short follow-up confirmations until the backend confirms or we hit
+    # this cap.
+    _SYNTHESIS_COMPLETION_MAX_ATTEMPTS = 3
+
     async def _record_safe_default_synthesis(
         self,
         state: AutoPipelineState,
@@ -435,60 +447,71 @@ class AutoInterviewDriver:
         disk, not from the auto ledger, so a ledger that becomes Seed-ready
         only via :func:`finalize_safe_defaultable_gaps` would otherwise leave
         the transcript missing those assumptions (Q00/ouroboros#763 review on
-        ``c072ed94``). Push a one-shot synthesis answer through
-        ``backend.answer`` so the transcript and ledger stay in sync. Returns
-        a blocker string if the synthesis cannot be persisted; ``None`` on
-        success or when there is nothing to synthesize.
+        ``c072ed94``). Push the synthesis answer through ``backend.answer``
+        so the transcript and ledger stay in sync, then send up to
+        :pyattr:`_SYNTHESIS_COMPLETION_MAX_ATTEMPTS - 1` short confirmation
+        turns until the backend signals ``seed_ready``/``completed``. The
+        production interview handler requires a streak of two qualifying
+        completion signals before it closes the transcript (review of
+        ``64875869``), so a single synthesis turn does not reliably end the
+        session. Returns ``None`` on success or when there is nothing to
+        synthesize, and a blocker string if the synthesis cannot be
+        persisted within the attempt budget.
         """
         synthesis = build_safe_default_synthesis(finalization)
         if not synthesis or not state.interview_session_id:
             return None
-        try:
-            synthesis_turn = _validate_turn(
-                await self._with_timeout(
-                    self.backend.answer(state.interview_session_id, synthesis),
-                    state,
-                    tool_name="interview.answer",
-                )
-            )
-        except TimeoutError as exc:
-            blocker = (
-                f"safe-default synthesis could not be persisted to the interview transcript: {exc}"
-            )
-            state.mark_blocked(blocker, tool_name="interview.answer")
-            record_authoring_backend(state)
-            self._save(state)
-            return blocker
-        except Exception as exc:
-            blocker = f"safe-default synthesis answer failed: {exc}"
-            state.mark_blocked(blocker, tool_name="interview.answer")
-            record_authoring_backend(state)
-            self._save(state)
-            return blocker
-        state.interview_session_id = synthesis_turn.session_id
-        ledger.record_qa(
-            state.pending_question or "auto safe-default finalization",
-            synthesis,
+        follow_up = (
+            f"{AUTO_ANSWER_PREFIX}{SAFE_DEFAULT_SYNTHESIS_TAG} "
+            "Mark the interview complete and hand off for seed generation. "
+            "No remaining ambiguity for safe-defaultable sections."
         )
-        state.ledger = ledger.to_dict()
-        # The synthesis text contains a completion signal recognised by the
-        # production interview handler ("mark the interview complete / hand
-        # off for seed generation"). If the backend honoured it the turn
-        # comes back with seed_ready/completed and the persisted transcript
-        # is closed. If it did not, the transcript still has a trailing
-        # unanswered question — finalising auto state at that point would
-        # leave seed generation reading a transcript that disagrees with
-        # the auto pipeline, so we block instead.
-        if not (synthesis_turn.seed_ready or synthesis_turn.completed):
-            blocker = (
-                "interview backend did not honour the safe-default completion "
-                "signal; transcript would still contain an unanswered question."
-            )
-            state.mark_blocked(blocker, tool_name="interview.answer")
-            record_authoring_backend(state)
-            self._save(state)
-            return blocker
-        return None
+        for attempt in range(self._SYNTHESIS_COMPLETION_MAX_ATTEMPTS):
+            text = synthesis if attempt == 0 else follow_up
+            try:
+                turn = _validate_turn(
+                    await self._with_timeout(
+                        self.backend.answer(state.interview_session_id, text),
+                        state,
+                        tool_name="interview.answer",
+                    )
+                )
+            except TimeoutError as exc:
+                blocker = (
+                    "safe-default synthesis could not be persisted to the "
+                    f"interview transcript: {exc}"
+                )
+                state.mark_blocked(blocker, tool_name="interview.answer")
+                record_authoring_backend(state)
+                self._save(state)
+                return blocker
+            except Exception as exc:
+                blocker = f"safe-default synthesis answer failed: {exc}"
+                state.mark_blocked(blocker, tool_name="interview.answer")
+                record_authoring_backend(state)
+                self._save(state)
+                return blocker
+            state.interview_session_id = turn.session_id
+            if attempt == 0:
+                ledger.record_qa(
+                    state.pending_question or "auto safe-default finalization",
+                    synthesis,
+                )
+                state.ledger = ledger.to_dict()
+            if turn.seed_ready or turn.completed:
+                return None
+        # The backend still has not honoured the completion signal. Block
+        # rather than declare seed_ready against a transcript that still
+        # contains unanswered turns.
+        blocker = (
+            "interview backend did not honour the safe-default completion "
+            f"signal within {self._SYNTHESIS_COMPLETION_MAX_ATTEMPTS} attempts; "
+            "transcript would still contain an unanswered question."
+        )
+        state.mark_blocked(blocker, tool_name="interview.answer")
+        record_authoring_backend(state)
+        self._save(state)
+        return blocker
 
     async def _with_timeout(
         self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str

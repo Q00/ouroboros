@@ -295,6 +295,54 @@ async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_finalizes_when_backend_requires_two_completion_signals(
+    tmp_path,
+) -> None:
+    # The production interview handler closes the transcript only after a
+    # streak of two qualifying completion signals. The driver must follow up
+    # with additional confirmation turns until the backend confirms.
+    completion_streak = 0
+    answer_calls: list[tuple[str, str]] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:
+        nonlocal completion_streak
+        answer_calls.append((session_id, text))
+        if "mark the interview complete" in text.lower():
+            completion_streak += 1
+            if completion_streak >= 2:
+                return InterviewTurn("", session_id, seed_ready=True, completed=True)
+            # Streak shortfall — backend asks the user to confirm again.
+            return InterviewTurn("Type done once more", session_id, seed_ready=False)
+        return InterviewTurn("What else?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert state.interview_completed is True
+    assert ledger.is_seed_ready()
+    # Round-1 user answer + synthesis (turn 1) + confirmation (turn 2) = 3.
+    completion_signal_calls = [
+        text for _sid, text in answer_calls if "mark the interview complete" in text.lower()
+    ]
+    assert len(completion_signal_calls) >= 2, (
+        "expected the driver to send at least two completion signals to satisfy "
+        f"the streak contract; got {completion_signal_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_blocks_when_backend_ignores_synthesis_completion_signal(
     tmp_path,
 ) -> None:
