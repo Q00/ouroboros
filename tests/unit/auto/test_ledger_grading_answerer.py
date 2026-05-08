@@ -645,6 +645,35 @@ def test_auto_answerer_routes_multilingual_questions_by_ledger_intent() -> None:
         assert expected_sections <= updated_sections, question
 
 
+def test_auto_answerer_property_lookup_cues_do_not_misroute_to_intent_handlers() -> None:
+    """Broad cue substrings (``input``, ``output``, ``repository``, ``architecture``)
+    must not by themselves trigger ACTOR_IO or RUNTIME_CONTEXT routing.  These
+    questions are property/status lookups, not contract or selection questions,
+    and would otherwise mutate ledger state with the wrong contract — the exact
+    silent misrouting flagged by ouroboros-agent on commit 9ab5ae1.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "What is the output directory?",
+        "What is the input schema?",
+        "What is the repository status?",
+        "What architecture decisions are documented?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+
+        assert answer.blocker is None, question
+        assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question
+        # Routing must not write actor/IO or runtime ledger entries for these
+        # property-shaped questions — the safe default is the only outcome.
+        assert "actors" not in updated_sections, question
+        assert "inputs" not in updated_sections, question
+        assert "outputs" not in updated_sections, question
+        assert "runtime_context" not in updated_sections, question
+
+
 def test_auto_answerer_unknown_multilingual_question_uses_safe_default() -> None:
     answer = AutoAnswerer().answer(
         "¿Cuál es el color favorito del tablero?",

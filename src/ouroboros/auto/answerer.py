@@ -685,11 +685,9 @@ def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
         lowered, QuestionIntent.ACCEPTANCE_CRITERIA
     ):
         intents.add(QuestionIntent.ACCEPTANCE_CRITERIA)
-    if _is_actor_or_io_question(lowered) or _contains_actor_io_intent_cue(lowered):
+    if _has_actor_io_intent(lowered):
         intents.add(QuestionIntent.ACTOR_IO)
-    if _is_runtime_context_question(lowered) or _contains_intent_cue(
-        lowered, QuestionIntent.RUNTIME_CONTEXT
-    ):
+    if _has_runtime_context_intent(lowered):
         intents.add(QuestionIntent.RUNTIME_CONTEXT)
     if _is_product_behavior_question(lowered):
         intents.add(QuestionIntent.PRODUCT_BEHAVIOR)
@@ -701,75 +699,199 @@ def _contains_intent_cue(lowered: str, intent: QuestionIntent) -> bool:
     return any(cue in lowered for cue in _INTENT_CUES[intent])
 
 
-def _contains_actor_io_intent_cue(lowered: str) -> bool:
-    io_cues = (
-        "input",
-        "inputs",
-        "output",
-        "outputs",
-        "argument",
-        "arguments",
-        "entrada",
-        "entradas",
-        "salida",
-        "salidas",
-        "entrée",
-        "entree",
-        "sortie",
-        "eingabe",
-        "ausgabe",
-        "입력",
-        "출력",
-        "入力",
-        "出力",
-        "输入",
-        "輸入",
-        "输出",
-        "輸出",
-    )
-    if any(cue in lowered for cue in io_cues):
-        return True
+_IO_NOUN_CUES: tuple[str, ...] = (
+    "input",
+    "inputs",
+    "output",
+    "outputs",
+    "argument",
+    "arguments",
+    "entrada",
+    "entradas",
+    "salida",
+    "salidas",
+    "entrée",
+    "entree",
+    "sortie",
+    "eingabe",
+    "ausgabe",
+    "입력",
+    "출력",
+    "入力",
+    "出力",
+    "输入",
+    "輸入",
+    "输出",
+    "輸出",
+)
 
-    actor_cues = (
-        "actor",
-        "actors",
-        "persona",
-        "stakeholder",
-        "usuario",
-        "usuarios",
-        "utilisateur",
-        "utilisateurs",
-        "benutzer",
-        "사용자",
-        "利用者",
-        "ユーザー",
-        "用户",
-        "使用者",
+
+# Cross-lingual flow-verb / interrogative anchors that indicate the question is
+# really asking about the IO contract (what flows in/out, what is produced or
+# returned, what schema/structure to expect).  English shape coverage lives in
+# ``_is_actor_or_io_question``; the patterns below add multilingual signals so
+# that broad nouns like "input" or "output" alone never authoritatively classify
+# a question — there must also be an action-/contract-asking shape.  This is a
+# direct response to ouroboros-agent's design note that broad noun substrings
+# were being treated as authoritative intent without question-shape validation.
+_IO_FLOW_SHAPE_PATTERNS: tuple[str, ...] = (
+    # Spanish flow verbs
+    r"\b(produce|produzca|produzcan|devuelve|devuelven|devolver|emite|emitir|"
+    r"escribe|escribir|recibe|recibir|genera|generan|generar|retorna|retornar)\b",
+    # Spanish interrogative shape: qué/cuál/cuáles + entradas/salidas
+    r"\b(qu[éeè]|cu[áa]l(?:es)?)\b.+\b(entradas?|salidas?)\b",
+    # French flow verbs
+    r"\b(produire|produit|produits|retourner|retourne|[ée]mettre|renvoyer|"
+    r"renvoie|[ée]crire|recevoir|re[çc]oit|g[ée]n[ée]rer|g[ée]n[ée]re)\b",
+    # French interrogative shape
+    r"\b(quels?|quelles?|que)\b.+\b(entr[ée]es?|sorties?)\b",
+    # German flow verbs
+    r"\b(produzieren|produziert|zur[üu]ckgeben|emittieren|schreiben|"
+    r"empfangen|erzeugen|generieren)\b",
+    # German interrogative shape
+    r"\bwelche\b.+\b(eingaben?|ausgaben?)\b",
+    # Korean: 입력/출력 followed by an action/asking particle, or asking words
+    # paired with 입력/출력.
+    r"(입력|출력)(?:은|는|을|를|이|가|에)?[^\?]*?(무엇|뭐|어떤|어떻게|어떠|"
+    r"반환|생성|내보|쓰|받|보내|만들|돌려)",
+    r"(어떤|무엇|뭐|어떠|어떠한)[^\?]*?(입력|출력)",
+    # Japanese: 入力/出力 paired with 何/どの or generation/return verbs.
+    r"(入力|出力)[^\?]*?(何|どの|どんな|生成|返|書|出す|出力|作)",
+    r"(何|どの|どんな)[^\?]*?(入力|出力)",
+    # Chinese (simplified + traditional)
+    r"(输入|输出|輸入|輸出)[^\?]*?(是什么|是甚麼|有哪些|有什么|生成|返回|"
+    r"产生|產生|寫|写|输出|輸出)",
+    r"(什么|甚麼|哪些|哪個|哪个)[^\?]*?(输入|输出|輸入|輸出)",
+)
+
+
+_ACTOR_NOUN_CUES: tuple[str, ...] = (
+    "actor",
+    "actors",
+    "persona",
+    "stakeholder",
+    "usuario",
+    "usuarios",
+    "utilisateur",
+    "utilisateurs",
+    "benutzer",
+    "사용자",
+    "유저",
+    "利用者",
+    "ユーザー",
+    "ユーザ",
+    "用户",
+    "使用者",
+)
+
+
+_ACTOR_QUESTION_CUES: tuple[str, ...] = (
+    "who",
+    "which user",
+    "what user",
+    "primary user",
+    "end user",
+    "quién",
+    "quien",
+    "quiénes",
+    "quienes",
+    "qui ",
+    "quel utilisateur",
+    "quels utilisateurs",
+    "welche benutzer",
+    "wer ",
+    "누구",
+    "어떤 사용자",
+    "어떤 유저",
+    "誰",
+    "どのユーザー",
+    "どのユーザ",
+    "谁",
+    "哪些用户",
+    "哪个用户",
+    "哪些使用者",
+    "哪個使用者",
+)
+
+
+def _has_io_cue_with_flow_shape(lowered: str) -> bool:
+    if not any(cue in lowered for cue in _IO_NOUN_CUES):
+        return False
+    return any(re.search(pattern, lowered) for pattern in _IO_FLOW_SHAPE_PATTERNS)
+
+
+def _has_actor_cue_with_question_shape(lowered: str) -> bool:
+    return any(cue in lowered for cue in _ACTOR_NOUN_CUES) and any(
+        cue in lowered for cue in _ACTOR_QUESTION_CUES
     )
-    actor_question_cues = (
-        "who",
-        "which user",
-        "what user",
-        "primary user",
-        "end user",
-        "quién",
-        "quien",
-        "quiénes",
-        "quienes",
-        "qui ",
-        "quel utilisateur",
-        "welche benutzer",
-        "wer ",
-        "누구",
-        "어떤 사용자",
-        "誰",
-        "どのユーザー",
-        "谁",
-        "哪些用户",
-    )
-    return any(cue in lowered for cue in actor_cues) and any(
-        cue in lowered for cue in actor_question_cues
-    )
+
+
+def _contains_actor_io_intent_cue(lowered: str) -> bool:
+    """Cue-based actor/IO classifier with question-shape validation.
+
+    The previous implementation triggered ``True`` for *any* string containing
+    broad nouns like ``"input"`` or ``"output"``, which silently misrouted
+    questions such as ``"What is the output directory?"`` (a property lookup,
+    not an IO contract question) to the actor/IO answerer.  IO cues now require
+    a flow-verb or interrogative shape; actor cues continue to require an
+    interrogative subject paired with the actor noun.
+    """
+    return _has_io_cue_with_flow_shape(lowered) or _has_actor_cue_with_question_shape(lowered)
+
+
+def _has_actor_io_intent(lowered: str) -> bool:
+    return _is_actor_or_io_question(lowered) or _contains_actor_io_intent_cue(lowered)
+
+
+# Cross-lingual selection/decision shape for runtime questions.  Cue words like
+# ``"runtime"``, ``"repo"``, or ``"architecture"`` are concept anchors but
+# product/property questions can mention them too ("What is the repository
+# status?", "What architecture decisions are documented?").  We require a
+# selection/decision verb in addition to the cue before the runtime intent is
+# inferred.  English shape selection is also handled by the stricter
+# ``_is_runtime_context_question`` regex.
+_RUNTIME_SELECTION_SHAPE_PATTERNS: tuple[str, ...] = (
+    # English selection/decision verbs not always covered by the strict shape regex
+    r"\b(use|using|uses|used|choose|chose|chosen|select|selected|adopt|adopted|"
+    r"configure|configured|set up|setup|target|targets|run on|run in|deploy on|"
+    r"build on|switch to|migrate to|standardize on|standardise on)\b",
+    # Spanish
+    r"\b(usar|usamos|usa|usan|elegir|elegimos|elegido|seleccionar|seleccionamos|"
+    r"configurar|configuramos|adoptar|adoptamos|migrar|escoger)\b",
+    # French
+    r"\b(utiliser|utilise|utilisons|utilis[ée]|choisir|choisissons|choisi|"
+    r"s[ée]lectionner|configurer|adopter|adopt[ée]|migrer)\b",
+    # German
+    r"\b(verwenden|verwendet|nutzen|nutzt|w[äa]hlen|ausw[äa]hlen|"
+    r"konfigurieren|konfiguriert|adoptieren|migrieren|einrichten)\b",
+    # Korean: 사용/선택/구성/설정/채택/도입
+    r"사용|선택|구성|설정|채택|도입",
+    # Japanese: 使う/使い/使用/選ぶ/選択/構成/設定/採用/導入
+    r"使う|使い|使用|選ぶ|選択|構成|設定|採用|導入",
+    # Chinese (simplified + traditional): 使用/选择/选用/配置/采用/設定/設置
+    r"使用|选择|選擇|选用|選用|采用|採用|配置|設定|设定|設置|设置|採納|采纳",
+)
+
+
+def _has_runtime_selection_shape(lowered: str) -> bool:
+    return any(re.search(pattern, lowered) for pattern in _RUNTIME_SELECTION_SHAPE_PATTERNS)
+
+
+def _has_runtime_context_intent(lowered: str) -> bool:
+    """Classify runtime intent with question-shape validation for cue matches.
+
+    The previous implementation accepted *any* string containing broad nouns
+    like ``"repository"`` or ``"architecture"`` as runtime intent, which
+    silently misrouted property/status questions ("What is the repository
+    status?") into ``_runtime_answer()``.  We keep the strict English shape
+    selector as the authoritative trigger and only let cross-lingual cues add
+    the intent when paired with a selection/decision verb.
+    """
+    if _is_runtime_context_question(lowered):
+        return True
+    if not _contains_intent_cue(lowered, QuestionIntent.RUNTIME_CONTEXT):
+        return False
+    return _has_runtime_selection_shape(lowered)
 
 
 def _is_verification_question(lowered: str) -> bool:
