@@ -1505,6 +1505,43 @@ def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> No
     assert not paths["audit_log"].exists() or paths["audit_log"].read_text() == ""
 
 
+def test_install_refuses_reserved_top_level_name(runner: CliRunner, tmp_path: Path) -> None:
+    """Per the RFC ("UX / Plugin name → command-namespace mapping"),
+    `install` MUST refuse a manifest whose `name` collides with a
+    reserved top-level command (e.g. `auto`, `run`, `plugin`). Otherwise
+    the install would silently shadow the built-in dispatch.
+
+    Regression catch for the bot's follow-up on plugin.py:927.
+    """
+    paths = _common_paths(tmp_path)
+    plugin_dir = tmp_path / "src"
+    plugin_dir.mkdir()
+    bad = {**REFERENCE_MANIFEST, "name": "auto"}  # collides with `ooo auto`
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(bad))
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert result.exit_code == 1
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    plain = plain.replace("│", " ").replace("╭", " ").replace("╮", " ")
+    plain = plain.replace("╰", " ").replace("╯", " ").replace("─", " ")
+    flat = " ".join(plain.split())
+    assert "reserved" in flat
+    assert "auto" in flat
+    # Lockfile must NOT have been written.
+    assert "auto" not in Lockfile(paths["lockfile"]).read()
+
+
 def test_trust_re_enables_zero_permission_plugin_with_no_scope_arg(
     runner: CliRunner, tmp_path: Path
 ) -> None:

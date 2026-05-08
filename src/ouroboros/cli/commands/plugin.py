@@ -619,6 +619,68 @@ def list_command(
 # ---------------------------------------------------------------------------
 
 
+# Names that the top-level `ooo` CLI reserves for first-party programs
+# and built-in subcommands. A third-party plugin manifest declaring any
+# of these as ``name`` would silently shadow the built-in dispatch (or
+# produce ambiguous resolution at boot), so we refuse the install.
+#
+# Per the locked RFC ("UX / Plugin name → command-namespace mapping"),
+# the install MUST refuse a new install whose manifest ``name``
+# collides with any name already occupying the top-level ``ooo``
+# command namespace. The reserved set is the union of:
+#   - first-party UserLevel programs (`auto`, `run`, `pm`, `plugin`,
+#     `init`, `cancel`, `codex`, `config`, `detect`, `mcp`, `setup`,
+#     `status`, `tui`, `resume`, `uninstall`),
+#   - top-level `ooo` built-ins / aliases that are not first-party
+#     programs (`help`, `version`, `monitor`).
+#
+# Same-name third-party reinstall checking happens at the lockfile
+# layer (``Lockfile.add`` overwrites the entry by name) AND at the
+# UserLevel registry (`get`/`get_by_namespace` collision detection).
+# This set covers the third boundary the RFC names: collision with
+# names the core release artifact owns.
+_RESERVED_TOP_LEVEL_NAMES: frozenset[str] = frozenset(
+    {
+        # First-party UserLevel programs
+        "auto",
+        "init",
+        "run",
+        "config",
+        "status",
+        "cancel",
+        "codex",
+        "mcp",
+        "setup",
+        "detect",
+        "tui",
+        "pm",
+        "plugin",
+        "resume",
+        "uninstall",
+        # Built-in CLI surface
+        "help",
+        "version",
+        "monitor",
+    }
+)
+
+
+def _refuse_reserved_name(name: str) -> None:
+    """Refuse to install a plugin whose name collides with a reserved
+    top-level command. Per the RFC ("UX / Plugin name →
+    command-namespace mapping"), name collisions MUST produce an
+    explicit error rather than silently shadow the built-in dispatch.
+    """
+    if name in _RESERVED_TOP_LEVEL_NAMES:
+        print_error(
+            f"refusing to install plugin {name!r}: that name is reserved "
+            "by a first-party `ooo` command or a built-in subcommand. "
+            "Rename the plugin's manifest `name` field to avoid silent "
+            "dispatch shadowing."
+        )
+        raise typer.Exit(code=1)
+
+
 # The anti-pattern install string explicitly forbidden by the locked spec.
 # Examples: git+https://.../foo.git#plugins/github-pr-ops
 _REJECTED_FRAGMENT_PREFIX = "#plugins/"
@@ -793,7 +855,12 @@ def _install_one(
     full ``(source.type, source_identity, artifact_digest)`` triple so
     the firewall can detect code substitution and same-name reinstalls
     from a different source.
+
+    Refuses the install if the manifest's ``name`` collides with a
+    reserved top-level command — that check happens BEFORE the lockfile
+    is touched so a rejected install never produces a half-applied state.
     """
+    _refuse_reserved_name(manifest.name)
     entry = LockEntry(
         name=manifest.name,
         version=manifest.version,

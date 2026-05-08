@@ -91,6 +91,19 @@ def canonical_tree_hash(root: Path) -> str:
     if not root.is_dir():
         raise NotADirectoryError(f"canonical_tree_hash root must be a directory: {root}")
 
+    def _record_symlink(entry_path: Path, mode: int) -> bytes:
+        content_hash = _hash_link_target(entry_path)
+        relative = entry_path.relative_to(root).as_posix()
+        mode_str = _file_mode_octal(mode)
+        return (
+            mode_str.encode("ascii")
+            + b"\0"
+            + relative.encode("utf-8", errors="surrogateescape")
+            + b"\0"
+            + content_hash.encode("ascii")
+            + b"\0"
+        )
+
     records: list[bytes] = []
     for current, dirnames, filenames in os.walk(root, followlinks=False):
         # Stable iteration: sort dir + file names so the os.walk traversal
@@ -100,6 +113,33 @@ def canonical_tree_hash(root: Path) -> str:
         dirnames.sort()
         filenames.sort()
         current_path = Path(current)
+
+        # Capture symlinked directories that os.walk reports in
+        # ``dirnames`` but never recurses into (because we run with
+        # ``followlinks=False``). Without this, a plugin can hide
+        # executable content behind a directory symlink and later
+        # retarget that symlink without changing the artifact digest —
+        # defeating the per-invocation drift check the trust model
+        # relies on. We hash the link target the same way as a file
+        # symlink and DROP the entry from ``dirnames`` so os.walk
+        # doesn't try to descend into it (it wouldn't anyway with
+        # followlinks=False, but keeping ``dirnames`` clean prevents
+        # a future maintainer from flipping the flag and silently
+        # double-counting the subtree).
+        kept_dirnames: list[str] = []
+        for dname in dirnames:
+            dpath = current_path / dname
+            try:
+                dlstat = dpath.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(dlstat.st_mode):
+                records.append(_record_symlink(dpath, dlstat.st_mode))
+                # Skip recursion into the link target.
+                continue
+            kept_dirnames.append(dname)
+        dirnames[:] = kept_dirnames
+
         for name in filenames:
             entry_path = current_path / name
             try:
@@ -110,8 +150,9 @@ def canonical_tree_hash(root: Path) -> str:
                 continue
             mode = lstat.st_mode
             if stat.S_ISLNK(mode):
-                content_hash = _hash_link_target(entry_path)
-            elif stat.S_ISREG(mode):
+                records.append(_record_symlink(entry_path, mode))
+                continue
+            if stat.S_ISREG(mode):
                 content_hash = _hash_file_content(entry_path)
             else:
                 raise UnsupportedFileTypeError(
