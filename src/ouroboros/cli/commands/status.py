@@ -7,7 +7,8 @@ from typing import Annotated
 
 import typer
 
-from ouroboros.cli.formatters.panels import print_info
+from ouroboros.auto.state import AutoPhase, AutoStore
+from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import create_status_table, print_table
 
 app = typer.Typer(
@@ -15,6 +16,81 @@ app = typer.Typer(
     help="Check Ouroboros system status.",
     no_args_is_help=True,
 )
+
+
+def _format_auto_status(state) -> str:
+    """Render a unified auto + ralph status block as plain text.
+
+    Pinned by the snapshot test in ``tests/integration/auto/test_status_unified.py``.
+    Each line is intentionally compact (one fact per line) so a human can grep
+    the output and a Cucumber-style assertion can match it line-by-line. Layout
+    mirrors :py:meth:`SessionStatusHandler._handle_auto_session` so the CLI and
+    MCP surfaces never disagree.
+    """
+    lines = [
+        "Auto status",
+        "===========",
+        f"Auto session: {state.auto_session_id}",
+        f"Phase: {state.phase.value}",
+    ]
+
+    is_terminal = state.phase in {
+        AutoPhase.COMPLETE,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    }
+    lines.append(f"Terminal: {is_terminal}")
+    lines.append(f"Last progress: {state.last_progress_message}")
+
+    is_gap_window = (
+        state.ralph_lineage_id is not None
+        and state.ralph_job_id is None
+        and state.ralph_dispatch_mode != "plugin"
+    )
+
+    if state.ralph_dispatch_mode == "plugin":
+        lines.append("Ralph (plugin):")
+        lines.append("  dispatch_mode: plugin")
+        lines.append("  guidance: ralph delegated to OpenCode Task widget; follow that lifecycle")
+    elif state.ralph_job_id is not None:
+        lines.append("Ralph (job):")
+        lines.append(f"  job_id: {state.ralph_job_id}")
+        lines.append(f"  lineage_id: {state.ralph_lineage_id}")
+        lines.append(f"  status: {state.ralph_job_status}")
+        lines.append(f"  current_generation: {state.ralph_current_generation}")
+        lines.append(f"  stop_reason: {state.ralph_stop_reason}")
+    elif is_gap_window:
+        lines.append("Ralph (pending):")
+        lines.append(f"  lineage_id: {state.ralph_lineage_id}")
+        lines.append("  pending: starting ralph")
+
+    if state.last_error:
+        lines.append(f"Blocker: {state.last_error}")
+
+    return "\n".join(lines) + "\n"
+
+
+@app.command()
+def auto(
+    auto_session_id: Annotated[
+        str,
+        typer.Argument(help="Auto session id to inspect (auto_<hex>)."),
+    ],
+) -> None:
+    """Show unified auto + ralph status for an ``ooo auto`` session.
+
+    Q00/ouroboros#782 — renders both the auto pipeline phase and the ralph
+    sub-block in a single human-readable view.
+    """
+    if not auto_session_id.startswith("auto_"):
+        print_error("auto_session_id must start with auto_")
+        raise typer.Exit(1)
+    try:
+        state = AutoStore().load(auto_session_id)
+    except ValueError as exc:
+        print_error(f"Auto status failed: {exc}")
+        raise typer.Exit(1) from exc
+    typer.echo(_format_auto_status(state), nl=False)
 
 
 @app.command()

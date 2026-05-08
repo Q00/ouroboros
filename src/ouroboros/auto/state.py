@@ -277,6 +277,17 @@ class AutoPipelineState:
     ralph_job_id: str | None = None
     ralph_lineage_id: str | None = None
     ralph_dispatch_mode: str | None = None
+    # Q00/ouroboros#782: best-effort mirror of the linked ralph job's most
+    # recent observation. Populated by ``ouroboros.auto.listeners`` from the
+    # ``mcp.job.*`` event-store topics — never by polling — and persisted only
+    # when the auto pipeline next saves state for any other reason. All four
+    # default to ``None`` so legacy state files continue to load and the
+    # gap window (lineage_id set, job_id not yet set) renders as
+    # ``pending: "starting ralph"`` instead of fabricating stale status.
+    ralph_job_status: str | None = None
+    ralph_last_event_at: float | None = None
+    ralph_stop_reason: str | None = None
+    ralph_current_generation: int | None = None
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -560,6 +571,10 @@ class AutoPipelineState:
         payload.setdefault("ralph_job_id", None)
         payload.setdefault("ralph_lineage_id", None)
         payload.setdefault("ralph_dispatch_mode", None)
+        payload.setdefault("ralph_job_status", None)
+        payload.setdefault("ralph_last_event_at", None)
+        payload.setdefault("ralph_stop_reason", None)
+        payload.setdefault("ralph_current_generation", None)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
         payload.setdefault("seed_origin", SeedOrigin.NONE.value)
@@ -641,6 +656,25 @@ class AutoPipelineState:
                 continue
             if isinstance(value, bool) or not isinstance(value, int | float):
                 msg = f"{field_name} must be a number or null"
+                raise ValueError(msg)
+
+        # Q00/ouroboros#782 ralph mirror fields. ``ralph_last_event_at`` is a
+        # ``time.monotonic()``-domain reading set by the listener; persisted
+        # values from a prior process are still numerically valid for sorting
+        # but must not be reused as live monotonic deltas across processes.
+        if self.ralph_last_event_at is not None:
+            if isinstance(self.ralph_last_event_at, bool) or not isinstance(
+                self.ralph_last_event_at, int | float
+            ):
+                msg = "ralph_last_event_at must be a number or null"
+                raise ValueError(msg)
+        if self.ralph_current_generation is not None:
+            if (
+                isinstance(self.ralph_current_generation, bool)
+                or not isinstance(self.ralph_current_generation, int)
+                or self.ralph_current_generation < 0
+            ):
+                msg = "ralph_current_generation must be a non-negative integer or null"
                 raise ValueError(msg)
 
         for field_name in (
@@ -729,6 +763,8 @@ class AutoPipelineState:
             "ralph_job_id",
             "ralph_lineage_id",
             "ralph_dispatch_mode",
+            "ralph_job_status",
+            "ralph_stop_reason",
             "last_grade",
             "pending_question",
             "last_tool_name",
