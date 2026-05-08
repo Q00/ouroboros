@@ -27,6 +27,48 @@ def _make_entry(name: str = "github-pr-ops", version: str = "0.1.0") -> LockEntr
     )
 
 
+_FORBIDDEN_TOML_CONTROL_BYTES: tuple[str, ...] = tuple(chr(b) for b in [*range(0x00, 0x20), 0x7F])
+
+
+@pytest.mark.parametrize("ctrl_char", _FORBIDDEN_TOML_CONTROL_BYTES)
+def test_toml_str_escapes_all_control_chars(tmp_path: Path, ctrl_char: str) -> None:
+    """Lockfile entries containing any C0 byte (0x00–0x1f) or DEL (0x7f)
+    must round-trip through tomllib.
+
+    Earlier the escape table covered only ``\\``, ``"``, ``\\n``, ``\\t``
+    and ``\\r``, so every other ``ord(ch) < 0x20`` byte and ``\\x7f``
+    were emitted verbatim. ``tomllib.loads`` rejects those bare bytes
+    inside a basic string with ``Illegal character ...`` — the very next
+    ``Lockfile.read()`` after such an ``add()`` would crash.
+
+    Iterates the **full forbidden range** rather than spot-checking a
+    handful, so the regression coverage matches the implementation
+    (which now handles every byte in the same range). Per ouroboros-
+    agent[bot] non-blocking suggestion on PR #795.
+    """
+    lock = Lockfile(tmp_path / "plugins.lock")
+    # Stuff the control character into a value that survives across the lock
+    # boundary — manifest_checksum is a free-form string in the schema.
+    entry = LockEntry(
+        name="ctrl-char-plugin",
+        version="0.1.0",
+        source_kind="git",
+        repository="https://example.invalid/repo",
+        git_sha="deadbeef",
+        manifest_checksum=f"sha256:abc{ctrl_char}123",
+        installed_at="2026-05-08T03:14:00Z",
+        plugin_home="~/.ouroboros/plugins/ctrl-char-plugin",
+    )
+    lock.add(entry)
+
+    # The bug surfaces here: tomllib refuses to parse the file the lockfile
+    # itself just wrote.
+    fresh = Lockfile(tmp_path / "plugins.lock")
+    entries = fresh.read()
+    assert "ctrl-char-plugin" in entries
+    assert entries["ctrl-char-plugin"].manifest_checksum == f"sha256:abc{ctrl_char}123"
+
+
 def test_install_then_read(tmp_path: Path) -> None:
     """Test 1: install → lockfile entry present; round-trip through TOML."""
     lock = Lockfile(tmp_path / "plugins.lock")
@@ -150,3 +192,56 @@ def test_concurrent_writes_do_not_corrupt(tmp_path: Path) -> None:
     assert {e.name for e in entries.values()} == {
         f"{prefix}-{i}" for prefix in ("p1", "p2") for i in range(5)
     }
+
+
+def test_transaction_allows_nested_add_and_remove(tmp_path: Path) -> None:
+    """``Lockfile.transaction()`` holds the file lock across a multi-step
+    operation so the caller can combine a lockfile mutation with related
+    on-disk work atomically. Inside the ``with`` block, ``add()`` and
+    ``remove()`` MUST NOT re-acquire the flock (that would deadlock on
+    POSIX where a second ``flock()`` on a different fd against the same
+    file blocks). Verifies the re-entrancy guard.
+    """
+    lock = Lockfile(tmp_path / "plugins.lock")
+    with lock.transaction():
+        lock.add(_make_entry("github-pr-ops"))
+        lock.add(_make_entry("other-plugin"))
+        # The transactional remove of one of the entries should also
+        # complete without deadlocking on the outer flock.
+        removed = lock.remove("other-plugin")
+        assert removed is True
+
+    # Outside the transaction the file lock is released and a fresh
+    # ``read()`` sees the persisted state.
+    entries = Lockfile(tmp_path / "plugins.lock").read()
+    assert set(entries) == {"github-pr-ops"}
+
+
+def test_transaction_serializes_with_external_flock(tmp_path: Path) -> None:
+    """A second process MUST block while another holds ``transaction()``.
+    This guards the contract that ``remove`` / multi-step lifecycles
+    can rely on the lock to suppress concurrent ``install``.
+    """
+    import fcntl
+    import time
+
+    lock = Lockfile(tmp_path / "plugins.lock")
+    lock.add(_make_entry("github-pr-ops"))
+    lock_path = (tmp_path / "plugins.lock").with_suffix(".lock.lock")
+
+    with lock.transaction():
+        # Acquiring a non-blocking exclusive flock from a separate fd
+        # MUST fail because the transaction owner is holding the lock.
+        with lock_path.open("w") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # Once we exit the transaction, the same non-blocking acquire
+    # succeeds (proves the lock is released, not leaked).
+    with lock_path.open("w") as handle:
+        # Should not raise.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    # Touch ``time`` so the import is used (keeps the test self-
+    # contained without relying on a real sleep window — the
+    # contract is exclusivity, not timing).
+    _ = time.monotonic()

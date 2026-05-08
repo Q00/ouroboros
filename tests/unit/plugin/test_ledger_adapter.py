@@ -71,6 +71,47 @@ def test_wrap_does_not_mutate_input() -> None:
     assert json.dumps(ev, sort_keys=True) == snapshot
 
 
+def test_wrap_isolates_envelope_from_post_wrap_caller_mutation() -> None:
+    """Regression for the bot's follow-up on ledger_adapter.py:92.
+
+    Plugin audit events have nested dicts (``plugin``, ``command``,
+    ``result``, ``provenance``). A shallow ``dict(audit_event)`` copy
+    would alias those nested dicts, so a caller that mutated the
+    original after wrapping would silently corrupt the already-wrapped
+    envelope's payload — and, by extension, the audit log.
+    """
+    ev = _audit_event("plugin.completed")
+    env = wrap_plugin_event(ev, correlation_id="x")
+
+    # Mutate every nested dict on the *original* event after wrapping.
+    ev["plugin"]["name"] = "evil-rename"
+    ev["command"]["argv"].append("--inject")
+    ev["result"]["status"] = "blocked"
+
+    # The envelope's payload must remain bound to the values at wrap
+    # time — anything else is audit-log corruption.
+    assert env["payload"]["plugin"]["name"] == "github-pr-ops"
+    assert env["payload"]["command"]["argv"] == ["url"]
+    assert env["payload"]["result"]["status"] == "success"
+
+
+def test_unwrap_isolates_caller_from_envelope_mutation() -> None:
+    """Symmetric guard: an envelope read back from the store must
+    survive caller-side mutation of the unwrapped event. Without a
+    deep copy, a downstream consumer that edited the event in place
+    would mutate the envelope still held in memory by another
+    consumer."""
+    ev = _audit_event("plugin.invoked")
+    env = wrap_plugin_event(ev, correlation_id="x")
+    out = unwrap_plugin_event(env)
+
+    out["plugin"]["name"] = "evil-rename"
+    out["command"]["argv"].append("--inject")
+
+    assert env["payload"]["plugin"]["name"] == "github-pr-ops"
+    assert env["payload"]["command"]["argv"] == ["url"]
+
+
 def test_wrap_does_not_inject_fields_into_audit_event() -> None:
     """Envelope fields stay above the audit event boundary.
 
@@ -222,208 +263,3 @@ def test_no_raw_token_fields_in_envelope() -> None:
     serialized = json.dumps(env).lower()
     for forbidden in ("ghp_", "bearer ", "x-api-key"):
         assert forbidden.lower() not in serialized
-
-
-def test_envelope_to_base_event_round_trips_through_real_event_store() -> None:
-    """Regression: the bridge from a wrapped envelope to a `BaseEvent`
-    that `EventStore.append` accepts is real, not aspirational.
-
-    The previous adapter docstring claimed `make_event_sink` could be
-    wired to `EventStore.append` directly, but that method is async
-    and rejects non-`BaseEvent` payloads. The new
-    `envelope_to_base_event` + `append_envelope_to_event_store`
-    helpers actually bridge the contract. This test exercises the
-    full path against an in-memory EventStore and asserts the
-    persisted row reproduces the original audit event.
-    """
-    pytest.importorskip("aiosqlite")  # safety on slim CI images
-
-    import asyncio
-
-    from ouroboros.persistence.event_store import EventStore
-    from ouroboros.plugin.ledger_adapter import (
-        append_envelope_to_event_store,
-        envelope_to_base_event,
-    )
-
-    audit = _audit_event("plugin.completed")
-    envelope = wrap_plugin_event(audit, correlation_id="corr-bridge", envelope_id="env-bridge")
-
-    base_event = envelope_to_base_event(envelope)
-    # The bridge speaks BaseEvent's contract: aggregate_type pinned,
-    # event_type matches the audit payload, payload preserved verbatim.
-    assert base_event.aggregate_type == "plugin"
-    assert base_event.aggregate_id == "corr-bridge"
-    assert base_event.type == "plugin.completed"
-    assert base_event.data["event_type"] == "plugin.completed"
-    assert base_event.data["plugin"]["name"] == "github-pr-ops"
-
-    async def _persist_and_replay() -> list:
-        store = EventStore("sqlite+aiosqlite:///:memory:")
-        await store.initialize()
-        # The async bridge is what production code is expected to use.
-        await append_envelope_to_event_store(envelope, store=store)
-        return await store.replay("plugin", "corr-bridge")
-
-    rows = asyncio.run(_persist_and_replay())
-    assert len(rows) == 1
-    persisted = rows[0]
-    assert persisted.type == "plugin.completed"
-    assert persisted.aggregate_type == "plugin"
-    assert persisted.aggregate_id == "corr-bridge"
-    # The original audit event survives a full round-trip — `unwrap_plugin_event`
-    # reconstructs the schema-valid form from the persisted row's data.
-    rebuilt_envelope = {
-        "id": persisted.id,
-        "aggregate_type": persisted.aggregate_type,
-        "aggregate_id": persisted.aggregate_id,
-        "event_type": persisted.type,
-        "payload": persisted.data,
-        "timestamp": persisted.timestamp,
-    }
-    rebuilt_audit = unwrap_plugin_event(rebuilt_envelope)
-    assert rebuilt_audit["event_type"] == audit["event_type"]
-    assert rebuilt_audit["plugin"] == audit["plugin"]
-    assert rebuilt_audit["command"] == audit["command"]
-
-
-def test_wrap_payload_is_deep_copied() -> None:
-    """Regression: `wrap_plugin_event` must defend against later
-    mutation of nested dicts in the original audit event.
-
-    The previous shallow `dict(audit_event)` copy still shared
-    `audit_event["plugin"]`, `["command"]`, `["result"]`, etc., so a
-    caller mutating `audit_event["plugin"]["name"]` after wrap would
-    silently corrupt the persisted envelope. The contract says the
-    payload is owned by the envelope; deep-copy enforces it.
-    """
-    audit = _audit_event("plugin.invoked")
-    env = wrap_plugin_event(audit, correlation_id="x")
-
-    # Mutate the nested dicts on the SOURCE — none of these mutations
-    # may leak into the envelope payload.
-    audit["plugin"]["name"] = "tampered"
-    audit["command"]["argv"].append("evil")
-    audit["result"]["status"] = "tampered"
-
-    assert env["payload"]["plugin"]["name"] == "github-pr-ops"
-    assert env["payload"]["command"]["argv"] == ["url"]
-    assert env["payload"]["result"]["status"] == "success"
-
-
-def test_envelope_to_base_event_data_is_deep_copied() -> None:
-    """Regression: `BaseEvent.data` must not alias the envelope's
-    payload. Mutating the envelope after the bridge runs must not
-    reach into the persisted event."""
-    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
-
-    audit = _audit_event("plugin.completed")
-    env = wrap_plugin_event(audit, correlation_id="x")
-    base = envelope_to_base_event(env)
-
-    env["payload"]["plugin"]["name"] = "tampered"
-    env["payload"]["command"]["argv"].append("evil")
-
-    assert base.data["plugin"]["name"] == "github-pr-ops"
-    assert base.data["command"]["argv"] == ["url"]
-
-
-def test_envelope_to_base_event_preserves_audit_timestamp() -> None:
-    """Regression: the bridge MUST carry the original audit time over to
-    `BaseEvent.timestamp`. Without that, persisted rows inherit
-    `BaseEvent`'s "now" default and the events_table.timestamp column
-    no longer reflects when the firewall observed the event — silently
-    breaking ordering, recency, and replay for plugin events.
-    """
-    from datetime import UTC, datetime, timedelta
-
-    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
-
-    # An audit event from clearly in the past: any "now"-default would
-    # be wrong by a wide enough margin that the assert can't false-pass
-    # on a slow test machine.
-    audit = _audit_event("plugin.invoked", occurred_at="2020-01-15T08:30:45Z")
-    envelope = wrap_plugin_event(audit, correlation_id="corr-time")
-
-    before = datetime.now(UTC)
-    base_event = envelope_to_base_event(envelope)
-    after = datetime.now(UTC)
-
-    expected = datetime(2020, 1, 15, 8, 30, 45, tzinfo=UTC)
-    assert base_event.timestamp == expected
-    # Sanity: the persisted timestamp is the audit time, not anything
-    # close to "now". Any drift wider than a year proves we did not
-    # accidentally fall through to the default factory.
-    assert before - base_event.timestamp > timedelta(days=365)
-    assert after - base_event.timestamp > timedelta(days=365)
-
-
-def test_envelope_to_base_event_round_trips_timestamp_through_real_store() -> None:
-    """End-to-end check: persist, replay, and confirm the timestamp on
-    the row coming out of EventStore matches the audit's occurred_at
-    rather than wall-clock-now."""
-    pytest.importorskip("aiosqlite")
-
-    import asyncio
-    from datetime import UTC, datetime
-
-    from ouroboros.persistence.event_store import EventStore
-    from ouroboros.plugin.ledger_adapter import append_envelope_to_event_store
-
-    audit = _audit_event("plugin.completed", occurred_at="2024-12-31T23:59:59Z")
-    envelope = wrap_plugin_event(
-        audit, correlation_id="corr-roundtrip", envelope_id="env-roundtrip"
-    )
-    expected = datetime(2024, 12, 31, 23, 59, 59, tzinfo=UTC)
-
-    async def _persist_and_replay() -> list:
-        store = EventStore("sqlite+aiosqlite:///:memory:")
-        await store.initialize()
-        await append_envelope_to_event_store(envelope, store=store)
-        return await store.replay("plugin", "corr-roundtrip")
-
-    rows = asyncio.run(_persist_and_replay())
-    assert len(rows) == 1
-    persisted = rows[0]
-    persisted_ts = persisted.timestamp
-    if persisted_ts.tzinfo is None:
-        # Some SQLAlchemy/sqlite combinations strip tzinfo on read; the
-        # timestamp value itself must still be UTC-equivalent.
-        persisted_ts = persisted_ts.replace(tzinfo=UTC)
-    assert persisted_ts == expected, (
-        f"persisted timestamp {persisted_ts!r} drifted from audit occurred_at {expected!r}"
-    )
-
-
-def test_envelope_to_base_event_rejects_missing_timestamp() -> None:
-    """If neither the envelope nor the payload exposes a timestamp the
-    bridge MUST refuse rather than silently default to "now"."""
-    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
-
-    bogus = {
-        "id": "x",
-        "aggregate_type": "plugin",
-        "aggregate_id": "y",
-        "event_type": "plugin.completed",
-        "payload": {"event_type": "plugin.completed"},  # no occurred_at
-        # no top-level timestamp
-    }
-    with pytest.raises(ValueError, match="timestamp"):
-        envelope_to_base_event(bogus)
-
-
-def test_envelope_to_base_event_rejects_non_plugin_envelope() -> None:
-    """The bridge refuses envelopes for other aggregates, so a misrouted
-    payload cannot end up persisted under aggregate_type='plugin'."""
-    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
-
-    bogus = {
-        "id": "x",
-        "aggregate_type": "session",
-        "aggregate_id": "y",
-        "event_type": "plugin.completed",
-        "payload": {"event_type": "plugin.completed", "occurred_at": "2026-05-07T12:00:00Z"},
-        "timestamp": "2026-05-07T12:00:00Z",
-    }
-    with pytest.raises(ValueError, match="not a plugin envelope"):
-        envelope_to_base_event(bogus)

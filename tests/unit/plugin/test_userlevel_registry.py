@@ -399,6 +399,51 @@ def test_global_singleton_persists_within_session(tmp_path: Path) -> None:
     assert a is b
 
 
+def test_replace_with_changed_namespace_releases_old_namespace(
+    tmp_path: Path,
+) -> None:
+    """When `register(replace=True)` swaps in a manifest with a different
+    namespace, the registry must release the old namespace.
+
+    Without this, `get_by_namespace(<old>)` keeps returning the program
+    (phantom ownership) and no other plugin can claim the freed namespace.
+    Regression catch for the bot's follow-up on userlevel_registry.py:100.
+    """
+    registry = UserLevelProgramRegistry()
+    v1 = _load_ref(tmp_path / "v1")
+    registry.register(v1)
+    assert registry.get_by_namespace("github-pr") is not None
+
+    v2_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    v2_payload["version"] = "0.2.0"
+    v2_payload["commands"][0]["namespace"] = "github-pr2"
+    v2_target = tmp_path / "v2"
+    v2_target.mkdir(parents=True)
+    (v2_target / "ouroboros.plugin.json").write_text(json.dumps(v2_payload))
+    v2 = load_manifest(v2_target / "ouroboros.plugin.json")
+
+    program = registry.register(v2, replace=True)
+    # New namespace resolves correctly.
+    assert registry.get_by_namespace("github-pr2") is program
+    # OLD namespace MUST be released — no phantom owner.
+    assert registry.get_by_namespace("github-pr") is None
+
+    # Another plugin can now claim the freed namespace. Distinct
+    # command name + plugin name avoids main's cross-axis shadow
+    # rejection (see #747); we're specifically asserting the freed
+    # namespace is genuinely available, not testing the collision
+    # rule itself.
+    other_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    other_payload["name"] = "github-pr-clone"
+    other_payload["commands"][0]["name"] = "audit"
+    other_target = tmp_path / "other"
+    other_target.mkdir(parents=True)
+    (other_target / "ouroboros.plugin.json").write_text(json.dumps(other_payload))
+    other = load_manifest(other_target / "ouroboros.plugin.json")
+    other_program = registry.register(other)
+    assert registry.get_by_namespace("github-pr") is other_program
+
+
 def test_skill_registry_unaffected(tmp_path: Path) -> None:
     """Test 10: existing skill registry tests still work — no state shared.
 

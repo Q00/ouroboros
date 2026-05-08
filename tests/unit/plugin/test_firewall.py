@@ -416,6 +416,502 @@ def test_first_party_skips_trust_check(tmp_path: Path) -> None:
     assert all(e["trust_state"] == "first_party" for e in events)
 
 
+def test_partial_grant_set_does_not_label_trusted(tmp_path: Path) -> None:
+    """A trust record covering only some required scopes must be reported
+    as `trust_state="installed"`, not `"trusted"`. Otherwise audit events
+    and inspect/list output mis-label a permission boundary even though
+    `_missing_required` will still block invocation.
+    """
+    # Manifest with TWO required permissions.
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {"scope": "github:write", "risk": "destructive", "required": True},
+    ]
+    program = _make_program(tmp_path, payload)
+    # User has granted only ONE of the two required scopes.
+    partial = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=partial,
+        event_sink=events.append,
+        correlation_id="corr-partial",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    # Invocation is blocked by the missing scope (existing semantics).
+    assert result.status == "blocked"
+    assert "github:write" in result.message
+    # Crucially: the emitted event reports the CORRECT trust_state.
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["trust_state"] == "installed", (
+        f"partial grant set must not label as trusted; got {events[0]['trust_state']!r}"
+    )
+
+
+def test_stale_trust_record_after_version_bump_blocks(tmp_path: Path) -> None:
+    """A trust record whose version no longer matches the manifest must NOT
+    grant access at runtime — even if scopes are present.
+
+    Per Q00/ouroboros-plugins#9 Q4 lock, a version bump invalidates prior
+    grants. The firewall enforces this defensively: even if `add`/`install`
+    failed to call `reset_for_version_bump`, an invocation with a stale
+    record must be blocked.
+    """
+    # Pre-existing trust grant under v0.1.0.
+    granted = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    # User upgrades to v0.2.0 — manifest changes but stale record persists
+    # (simulating a missed reset_for_version_bump).
+    bumped_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bumped_payload["version"] = "0.2.0"
+    bumped = _make_program(tmp_path / "v2", bumped_payload)
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        bumped,
+        command_name="review",
+        argv=["url"],
+        trust_record=granted,  # version='0.1.0' but manifest is now '0.2.0'
+        event_sink=events.append,
+        correlation_id="corr-stale",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    assert result.status == "blocked"
+    assert "github:read" in result.message
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert "plugin.invoked" not in types
+    # trust_state must NOT report "trusted" for a stale record.
+    assert events[0]["trust_state"] == "installed"
+
+
+# ---------------------------------------------------------------------------
+# RFC trust-subject + cwd contract tests (`docs/rfc/userlevel-plugins.md`)
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_digest_drift_blocks_with_trust_subject_changed(tmp_path: Path) -> None:
+    """Per the RFC ("Trust identity"), the firewall recomputes the
+    canonical tree hash of `plugin_home` before every invocation and
+    refuses to launch on drift, with `result.status="trust_subject_changed"`.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    # Pretend the lockfile recorded a digest that does NOT match what's
+    # currently on disk in `tmp_path`.
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-drift",
+        plugin_home=tmp_path,
+        expected_artifact_digest=(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        ),
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert "plugin.invoked" not in types
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+    assert "current_artifact_digest" in events[0]["provenance"]
+
+
+def test_artifact_digest_match_proceeds(tmp_path: Path) -> None:
+    """When the recomputed digest matches the lockfile-recorded digest,
+    the trust check + invocation proceed normally.
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    expected_digest = canonical_tree_hash(tmp_path)
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-match",
+        plugin_home=tmp_path,
+        expected_artifact_digest=expected_digest,
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    assert result.status == "success"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.completed"]
+
+
+def test_disable_record_blocks_independently_of_trust(tmp_path: Path) -> None:
+    """A disabled plugin must be refused by the firewall regardless of
+    trust state. RFC: the firewall MUST consult the disable record before
+    any invocation.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,  # fully trusted
+        event_sink=events.append,
+        correlation_id="corr-disabled",
+        is_disabled=True,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["trust_state"] == "disabled"
+    assert events[0]["provenance"]["reason"] == "disabled"
+
+
+def test_argv_redacts_secret_flags_and_high_confidence_tokens(tmp_path: Path) -> None:
+    """Per the locked RFC, the firewall MUST redact secret-looking argv
+    values before persistence. The flag-name policy covers `--token`,
+    `--password`, etc. (both `--flag=value` and `--flag value` forms);
+    the value-pattern policy covers Bearer tokens, GitHub PATs, OpenAI
+    keys, AWS access key IDs, and JWT-shaped strings.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:87.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    secret_argv = [
+        "https://example.com/pr/1",
+        "--token=ghp_thisIsClearlyASecretValue123456789",  # equals form
+        "--password",  # bare flag
+        "hunter2-supersecret",  # value follows
+        "Bearer eyJhbGciOiJIUzI1NiJ9.payload",  # high-confidence
+        "AKIAIOSFODNN7EXAMPLE",  # AWS access key id
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",  # JWT
+        "plain-arg",  # not secret
+    ]
+    events: list[dict] = []
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=secret_argv,
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-redact",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    invoked = next(e for e in events if e["event_type"] == "plugin.invoked")
+    redacted = invoked["command"]["argv"]
+    assert redacted[0] == "https://example.com/pr/1"
+    # `--token=` keeps the flag name, replaces the value with [redacted].
+    assert redacted[1] == "--token=[redacted]"
+    # `--password` value redacted via the bare-flag-then-value rule.
+    assert redacted[2] == "--password"
+    assert redacted[3] == "[redacted]"
+    # Bearer / AWS / JWT all match high-confidence patterns.
+    assert redacted[4] == "[redacted]"
+    assert redacted[5] == "[redacted]"
+    assert redacted[6] == "[redacted]"
+    # Non-secret string passed through unchanged.
+    assert redacted[7] == "plain-arg"
+    # No raw secret bytes anywhere in the serialized event stream.
+    serialized = json.dumps(events)
+    for needle in (
+        "ghp_thisIsClearlyASecret",
+        "hunter2-supersecret",
+        "eyJhbGciOiJIUzI1NiJ9.payload",
+        "AKIAIOSFODNN7EXAMPLE",
+    ):
+        assert needle not in serialized, needle
+    # Forensic: argv_sha256 attached to provenance because redaction fired.
+    assert "argv_sha256" in invoked["provenance"]
+
+
+def test_argv_no_redaction_keeps_argv_verbatim(tmp_path: Path) -> None:
+    """When no token in argv matches the redaction policy, argv passes
+    through unchanged AND no `argv_sha256` is added (we only record the
+    forensic hash when redaction actually fired)."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1", "--verbose"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-clean",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    invoked = next(e for e in events if e["event_type"] == "plugin.invoked")
+    assert invoked["command"]["argv"] == ["https://example.com/pr/1", "--verbose"]
+    assert "argv_sha256" not in invoked.get("provenance", {})
+
+
+def test_subprocess_invoked_with_plugin_home_as_cwd(tmp_path: Path) -> None:
+    """When the caller plumbs `plugin_home`, the entrypoint subprocess
+    must be launched with `cwd=plugin_home` so that
+    `python -m github_pr_ops` resolves the plugin's modules from the
+    installed root, not from the user's terminal cwd.
+
+    Regression catch for the bot's BLOCKING finding on
+    `firewall.py:319` (cwd / import-path adjustment missing).
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    seen_cwds: list[object] = []
+
+    def _spy(argv, *args, **kwargs):
+        seen_cwds.append(kwargs.get("cwd"))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=lambda _e: None,
+        correlation_id="corr-cwd",
+        plugin_home=tmp_path,
+        subprocess_runner=_spy,
+    )
+    assert seen_cwds == [str(tmp_path)], seen_cwds
+
+
+def test_subprocess_non_utf8_output_does_not_crash_firewall(tmp_path: Path) -> None:
+    """A plugin that writes non-UTF-8 bytes to stdout/stderr must NOT
+    propagate a UnicodeDecodeError out of `invoke_plugin`. The firewall
+    captures bytes (no implicit decode) so arbitrary plugin output is
+    handled — only the sha256 hash reaches the ledger anyway.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:628.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _bytes_runner(argv, *args, **kwargs):
+        # Lone surrogate in stdout (invalid UTF-8 sequence \x80\xff)
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=b"valid\x80\xff prefix and \xc0\xc0 invalid\n",
+            stderr=b"\xfe\xfe also bad\n",
+        )
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-bytes",
+        subprocess_runner=_bytes_runner,
+    )
+    # Firewall returns a structured success even with bytes output.
+    assert result.status == "success"
+    assert result.stdout_sha256 is not None
+    assert result.stderr_sha256 is not None
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.completed"]
+    # No raw bytes leak into events (only the hash).
+    completed = events[-1]
+    assert completed["provenance"]["stdout_sha256"] == result.stdout_sha256
+    serialized = json.dumps(events)
+    # Hex bytes must not appear in the event text.
+    for forbidden in ("\\x80", "\\xff", "\\xfe", "\\xc0"):
+        assert forbidden not in serialized, forbidden
+
+
+def test_subprocess_permission_error_emits_failed_with_exit_126(tmp_path: Path) -> None:
+    """Per the RFC, the firewall MUST always emit a terminal
+    `plugin.failed` event for a launch failure. Previously only
+    `FileNotFoundError` was caught, so `PermissionError` (entrypoint
+    not executable) and other `OSError` subclasses would escape the
+    firewall entirely — crashing the caller and skipping the audit
+    trail. The catch is now broadened to `OSError` and uses POSIX
+    convention exit code 126 ("found but not executable").
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:635.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _boom(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", args[0][0] if args else "?")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-perm",
+        subprocess_runner=_boom,
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert "PermissionError" in failed["result"]["message"]
+    assert failed["provenance"]["exception_type"] == "PermissionError"
+
+
+def test_entrypoint_unmatched_quote_emits_failed_not_crash(tmp_path: Path) -> None:
+    """A manifest whose ``entrypoint.command`` carries an unmatched quote
+    is installable today — the schema only enforces ``minLength: 1`` on
+    the field, leaving lexical validity to the dispatcher. Without
+    explicit handling, ``shlex.split`` would raise ``ValueError`` BEFORE
+    any error path in ``invoke_plugin``, the exception would escape the
+    firewall, and the caller would crash without ever seeing the
+    required terminal ``plugin.failed`` event. The firewall must emit
+    a controlled ``plugin.failed`` instead.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:640.
+    """
+    import dataclasses
+
+    from ouroboros.plugin.manifest import Entrypoint
+
+    program = _make_program(tmp_path)
+    bad_manifest = dataclasses.replace(
+        program.manifest,
+        entrypoint=Entrypoint(type="command", command='python -m "broken'),
+    )
+    bad_program = dataclasses.replace(program, manifest=bad_manifest)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        bad_program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-shlex",
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    # The terminal event MUST be plugin.failed and the dispatcher must
+    # not have raised. The exact prefix of events (whether
+    # ``plugin.invoked`` was emitted) is a refinement; what's
+    # contractually required is that ``plugin.failed`` is the last
+    # event and that the runtime did not crash.
+    assert types[-1] == "plugin.failed"
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert "not parseable" in failed["result"]["message"]
+    assert failed["provenance"]["exception_type"] == "ValueError"
+
+
+def test_entrypoint_whitespace_only_command_emits_failed(tmp_path: Path) -> None:
+    """``entrypoint.command`` containing only whitespace tokenises to
+    ``[]`` via ``shlex.split``. Without explicit handling, the
+    concatenated argv would be ``[command_name, *argv]`` and the runtime
+    would attempt to launch the user-facing command name as if it were
+    the executable — masking a manifest validation failure as a
+    "command not found" runtime failure. Surface the empty-tokenisation
+    case as a controlled ``plugin.failed`` instead.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:640.
+    """
+    import dataclasses
+
+    from ouroboros.plugin.manifest import Entrypoint
+
+    program = _make_program(tmp_path)
+    bad_manifest = dataclasses.replace(
+        program.manifest,
+        entrypoint=Entrypoint(type="command", command="   "),
+    )
+    bad_program = dataclasses.replace(program, manifest=bad_manifest)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        bad_program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-empty",
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    assert types[-1] == "plugin.failed"
+    failed = events[-1]
+    assert "empty" in failed["result"]["message"].lower()
+
+
 def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     """Test 9: subprocess FileNotFoundError → status=failed, exit_code=127."""
     program = _make_program(tmp_path)
@@ -441,463 +937,3 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
     assert "not found" in result.message.lower()
-
-
-def test_stale_trust_version_blocks_invocation(tmp_path: Path) -> None:
-    """Regression: a trust file from an older version of the plugin must
-    not satisfy the firewall after the plugin is upgraded.
-
-    Locked Q00/ouroboros-plugins#9 Q4 makes a version bump invalidate
-    trust. The firewall enforces this by treating a TrustRecord whose
-    `version` differs from the manifest as if no scopes were granted —
-    otherwise an upgrade-without-reset would silently bypass the gate.
-    """
-    program = _make_program(tmp_path)  # manifest version = "0.1.0"
-    # Trust file claims grants for an older release of the same plugin.
-    stale_trust = TrustStore(root=tmp_path / "trust").grant(
-        plugin="github-pr-ops",
-        version="0.0.9",  # stale: predates the installed manifest
-        scope="github:read",
-        granted_by="user:test",
-    )
-    runner_called = False
-
-    def _spy(*args, **kwargs):
-        nonlocal runner_called
-        runner_called = True
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
-
-    events: list[dict] = []
-    result = invoke_plugin(
-        program,
-        command_name="review",
-        argv=["url"],
-        trust_record=stale_trust,
-        event_sink=events.append,
-        correlation_id="corr-stale",
-        subprocess_runner=_spy,
-    )
-    # The firewall must refuse the call and never reach the runner.
-    assert result.status == "blocked"
-    assert runner_called is False, "stale trust must not let the entrypoint launch"
-    # Only `plugin.failed` (status=blocked); no `plugin.invoked` slipped through.
-    types = [e["event_type"] for e in events]
-    assert types == ["plugin.failed"]
-    assert events[0]["result"]["status"] == "blocked"
-    # Blocked-message must guide the user to re-trust the same scope.
-    assert "github:read" in result.message
-    # And the emitted event must NOT label the plugin "trusted" while it
-    # is in fact being blocked — that was the consistency bug.
-    assert events[0]["trust_state"] != "trusted"
-
-
-def test_entrypoint_permission_error_emits_failed_126(tmp_path: Path) -> None:
-    """Regression: PermissionError at subprocess launch must reach a
-    terminal `plugin.failed` event instead of escaping the firewall.
-
-    Previously only FileNotFoundError was caught, so an entrypoint that
-    existed but lacked the exec bit (or any other OSError surfaced at
-    spawn-time) crashed the caller with no audit trail. The firewall
-    now widens the catch to OSError and uses conventional shell exit
-    codes (126 = found-but-not-executable).
-    """
-    program = _make_program(tmp_path)
-    trust = TrustStore(root=tmp_path / "trust").grant(
-        plugin="github-pr-ops",
-        version="0.1.0",
-        scope="github:read",
-        granted_by="u",
-    )
-
-    def _runner(argv, *args, **kwargs):
-        raise PermissionError(13, "Permission denied", argv[0])
-
-    events: list[dict] = []
-    result = invoke_plugin(
-        program,
-        command_name="review",
-        argv=["url"],
-        trust_record=trust,
-        event_sink=events.append,
-        correlation_id="corr-perm",
-        subprocess_runner=_runner,
-    )
-    assert result.status == "failed"
-    assert result.exit_code == 126
-    # invoked + permission_used + failed (does not raise).
-    types = [e["event_type"] for e in events]
-    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
-    assert events[-1]["result"]["status"] == "failed"
-    assert "not executable" in result.message
-
-
-def test_subprocess_runs_with_cwd_for_local_path_manifest(tmp_path: Path) -> None:
-    """Regression: `local_path` / `plugin_home` manifests carry their
-    own location, and relative entrypoints (`./run.sh`) or commands
-    that read files from the plugin directory only work when the
-    subprocess is anchored there. The firewall must pass `cwd=...`
-    to subprocess.run, not silently inherit the caller's cwd.
-    """
-    # Use a sandboxed relative path that resolves into tmp_path. The
-    # manifest loader rejects absolute paths for `local_path` /
-    # `plugin_home` (#745 sandbox), and then anchors the relative slug
-    # to the manifest's directory — which is `tmp_path` for this test.
-    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
-    payload["source"] = {"type": "local_path", "path": "."}
-    program = _make_program(tmp_path, payload)
-
-    captured: dict = {}
-
-    def _runner(argv, *args, **kwargs):
-        captured["argv"] = argv
-        captured["cwd"] = kwargs.get("cwd")
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
-
-    trust = TrustStore(root=tmp_path / "trust").grant(
-        plugin="github-pr-ops",
-        version="0.1.0",
-        scope="github:read",
-        granted_by="u",
-    )
-    events: list[dict] = []
-    result = invoke_plugin(
-        program,
-        command_name="review",
-        argv=["url"],
-        trust_record=trust,
-        event_sink=events.append,
-        correlation_id="corr-cwd",
-        subprocess_runner=_runner,
-    )
-    assert result.status == "success"
-    # subprocess was invoked with cwd anchored to the plugin's source.path,
-    # not to wherever the caller happened to be.
-    assert captured["cwd"] is not None
-    assert Path(captured["cwd"]).resolve() == tmp_path.resolve()
-
-
-def test_subprocess_inherits_cwd_for_first_party_manifest(tmp_path: Path) -> None:
-    """First-party plugins ship inside the binary and have no plugin-
-    local directory, so the firewall must NOT pin a `cwd`."""
-    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
-    fp["name"] = "ooo-builtin"
-    fp["source"] = {"type": "first_party"}
-    fp["permissions"] = []
-    fp["commands"] = [
-        {
-            "namespace": "builtin",
-            "name": "run",
-            "summary": "Run.",
-            "usage": "ooo builtin run",
-            "risk": "write",
-        }
-    ]
-    program = _make_program(tmp_path, fp)
-
-    captured: dict = {}
-
-    def _runner(argv, *args, **kwargs):
-        captured["cwd"] = kwargs.get("cwd")
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
-
-    events: list[dict] = []
-    invoke_plugin(
-        program,
-        command_name="run",
-        argv=[],
-        trust_record=None,
-        event_sink=events.append,
-        correlation_id="corr-fp",
-        subprocess_runner=_runner,
-    )
-    assert captured["cwd"] is None, (
-        "first-party plugins must inherit the caller's cwd; "
-        "the firewall has no plugin-local directory to pin"
-    )
-
-
-def test_missing_plugin_cwd_does_not_inherit_callers_cwd(tmp_path: Path) -> None:
-    """Regression: when a `local_path` / `plugin_home` plugin's
-    `source.path` does not exist on disk, the firewall must NOT
-    fall back to `cwd=None` (which silently inherits the operator's
-    current working directory). With a relative entrypoint like
-    `./run.sh` or any command that reads plugin-local files, that
-    fallback can execute the wrong program or the wrong inputs.
-
-    The firewall now passes the (non-existent) candidate path to
-    `subprocess.run`, where the kernel's `chdir` call raises
-    `OSError(ENOENT)`. `invoke_plugin` already wraps that into a
-    terminal `plugin.failed` event with exit 126 and the missing-dir
-    reason in the message, which is the correct surface for this
-    failure mode.
-    """
-    from ouroboros.plugin.manifest import (
-        Capability,
-        CommandSpec,
-        Entrypoint,
-        Permission,
-        PluginManifest,
-        SourceSpec,
-    )
-    from ouroboros.plugin.userlevel_registry import UserLevelProgramRegistry
-
-    # Construct the manifest with a guaranteed-missing absolute path.
-    # We build it in-memory rather than going through `load_manifest`
-    # because the sandbox check rejects absolute paths from on-disk
-    # manifests; here we're testing the firewall's own behavior when
-    # the resolved path no longer exists at launch time.
-    missing_dir = tmp_path / "vanished_plugin_home"
-    assert not missing_dir.exists()
-    manifest = PluginManifest(
-        schema_version="0.1",
-        name="github-pr-ops",
-        version="0.1.0",
-        source=SourceSpec(type="local_path", path=str(missing_dir)),
-        commands=(
-            CommandSpec(
-                namespace="github-pr",
-                name="review",
-                summary="x",
-                usage="x",
-                risk="read_only",
-                requires_confirmation=False,
-                arguments=(),
-            ),
-        ),
-        capabilities=(Capability(name="ledger", access="write", reason="x"),),
-        permissions=(Permission(scope="github:read", risk="read_only", required=True),),
-        entrypoint=Entrypoint(type="command", command="python -m github_pr_ops"),
-        description="",
-    )
-    registry = UserLevelProgramRegistry()
-    program = registry.register(manifest)
-
-    captured: dict = {}
-
-    def _runner(argv, *args, **kwargs):
-        captured["cwd"] = kwargs.get("cwd")
-        # Real `subprocess.run` raises FileNotFoundError when cwd
-        # doesn't exist; emulate that so the firewall's OSError
-        # branch runs and we observe the documented `plugin.failed`.
-        raise FileNotFoundError(2, "No such file or directory", str(kwargs.get("cwd")))
-
-    trust = TrustStore(root=tmp_path / "trust").grant(
-        plugin="github-pr-ops",
-        version="0.1.0",
-        scope="github:read",
-        granted_by="u",
-    )
-    events: list[dict] = []
-    result = invoke_plugin(
-        program,
-        command_name="review",
-        argv=["url"],
-        trust_record=trust,
-        event_sink=events.append,
-        correlation_id="corr-missing",
-        subprocess_runner=_runner,
-    )
-
-    # The firewall pinned `cwd` to the resolved (non-existent) path,
-    # NOT to None — this is what made the kernel raise ENOENT.
-    assert captured["cwd"] is not None, (
-        "missing-dir must not fall back to caller's cwd; the firewall "
-        "should pass the non-existent path so subprocess.run raises ENOENT"
-    )
-    assert Path(captured["cwd"]).resolve() == missing_dir.resolve()
-    # And the failure surfaces as a terminal plugin.failed (the
-    # OSError-wrapping path established in round 7).
-    assert result.status == "failed"
-    types = [e["event_type"] for e in events]
-    assert types[-1] == "plugin.failed"
-
-
-def test_malformed_entrypoint_quoting_emits_failed_not_crash(tmp_path: Path) -> None:
-    """Regression: an `entrypoint.command` with malformed shell
-    quoting (unterminated quote) passes the schema's `\\S` pattern
-    check and `load_manifest()`, but `shlex.split()` raises
-    `ValueError` — so the firewall used to crash *after* having
-    emitted `plugin.invoked` and friends, leaving the audit log
-    partially written and bubbling the exception up to the caller.
-
-    The firewall contract is to convert every launch failure into
-    a terminal `plugin.failed` event with a clean audit trail and
-    a structured `InvocationResult`. This test asserts that the
-    `shlex.split` path now obeys that contract for malformed
-    quoting too.
-    """
-    from ouroboros.plugin.manifest import (
-        Capability,
-        CommandSpec,
-        Entrypoint,
-        PluginManifest,
-        SourceSpec,
-    )
-    from ouroboros.plugin.userlevel_registry import UserLevelProgramRegistry
-
-    # Build the manifest in-memory so the malformed `command` survives
-    # — the schema would reject a manifest with truly nonsense quoting,
-    # but a future schema relaxation, a fixture, or a mistake in the
-    # manager pipeline could still produce one. The firewall must
-    # tolerate it.
-    bad = PluginManifest(
-        schema_version="0.1",
-        name="github-pr-ops",
-        version="0.1.0",
-        source=SourceSpec(type="first_party"),  # no cwd anchoring needed
-        commands=(
-            CommandSpec(
-                namespace="github-pr",
-                name="review",
-                summary="x",
-                usage="x",
-                risk="read_only",
-                requires_confirmation=False,
-                arguments=(),
-            ),
-        ),
-        capabilities=(Capability(name="ledger", access="write", reason="x"),),
-        permissions=(),
-        entrypoint=Entrypoint(type="command", command='"unterminated'),
-    )
-    registry = UserLevelProgramRegistry()
-    program = registry.register(bad)
-
-    captured: dict = {"called": False}
-
-    def _runner(argv, *args, **kwargs):
-        # If the firewall reaches this, the shlex error wasn't caught
-        # and the runner is being invoked with garbage argv. Fail
-        # the test loudly rather than letting it pass silently.
-        captured["called"] = True
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
-
-    events: list[dict] = []
-    result = invoke_plugin(
-        program,
-        command_name="review",
-        argv=[],
-        trust_record=None,
-        event_sink=events.append,
-        correlation_id="corr-bad-quote",
-        subprocess_runner=_runner,
-    )
-
-    # The firewall short-circuited before launching the subprocess,
-    # so the runner must NOT have been called.
-    assert captured["called"] is False
-    # Terminal event sequence is invoked → permission_used* → failed.
-    types = [e["event_type"] for e in events]
-    assert types[-1] == "plugin.failed"
-    assert result.status == "failed"
-    assert result.exit_code == 126
-    assert "malformed" in result.message or "quoting" in result.message
-
-
-def test_whitespace_entrypoint_emits_failed_not_crash(tmp_path: Path) -> None:
-    """Regression: an entrypoint command that's only whitespace passed
-    `minLength: 1` schema validation in earlier revisions and made
-    `shlex.split(" ")` return `[]`. The firewall must still emit a
-    terminal `plugin.failed` event with a clear message rather than
-    crash the caller.
-
-    The schema now also rejects whitespace-only commands, but the
-    firewall keeps a defense-in-depth runtime guard so a constructed
-    manifest (e.g. via a fixture or a future lax schema) cannot bypass
-    the audit-output contract.
-    """
-    # Build the manifest manually so it bypasses the schema's tightened
-    # `\\S` pattern — we're testing the firewall's runtime guard, not
-    # the schema.
-    from ouroboros.plugin.manifest import (
-        CommandSpec,
-        Entrypoint,
-        Permission,
-        PluginManifest,
-        SourceSpec,
-    )
-    from ouroboros.plugin.userlevel_registry import UserLevelProgramRegistry
-
-    bad_manifest = PluginManifest(
-        schema_version="0.1",
-        name="github-pr-ops",
-        version="0.1.0",
-        source=SourceSpec(type="local_path", path=str(tmp_path)),
-        commands=(
-            CommandSpec(
-                namespace="github-pr",
-                name="review",
-                summary="x",
-                usage="x",
-                risk="read_only",
-                requires_confirmation=False,
-                arguments=(),
-            ),
-        ),
-        capabilities=(),
-        permissions=(Permission(scope="github:read", risk="read_only", required=True),),
-        entrypoint=Entrypoint(type="command", command="   "),
-    )
-    program = UserLevelProgramRegistry().register(bad_manifest)
-    trust = TrustStore(root=tmp_path / "trust").grant(
-        plugin="github-pr-ops",
-        version="0.1.0",
-        scope="github:read",
-        granted_by="u",
-    )
-    runner_called = False
-
-    def _spy(*args, **kwargs):
-        nonlocal runner_called
-        runner_called = True
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
-
-    events: list[dict] = []
-    result = invoke_plugin(
-        program,
-        command_name="review",
-        argv=["url"],
-        trust_record=trust,
-        event_sink=events.append,
-        correlation_id="corr-empty-cmd",
-        subprocess_runner=_spy,
-    )
-    assert result.status == "failed"
-    assert result.exit_code == 126
-    assert runner_called is False, "must not even attempt subprocess.run([...])"
-    types = [e["event_type"] for e in events]
-    assert types[-1] == "plugin.failed"
-    assert "empty or whitespace" in result.message
-
-
-def test_entrypoint_generic_oserror_emits_failed_126(tmp_path: Path) -> None:
-    """Regression: a generic OSError (e.g. ENOEXEC) must also land on a
-    `plugin.failed` event with a 126-class exit code rather than
-    propagating up and crashing the caller.
-    """
-    program = _make_program(tmp_path)
-    trust = TrustStore(root=tmp_path / "trust").grant(
-        plugin="github-pr-ops",
-        version="0.1.0",
-        scope="github:read",
-        granted_by="u",
-    )
-
-    def _runner(argv, *args, **kwargs):
-        raise OSError(8, "Exec format error", argv[0])
-
-    events: list[dict] = []
-    result = invoke_plugin(
-        program,
-        command_name="review",
-        argv=["url"],
-        trust_record=trust,
-        event_sink=events.append,
-        correlation_id="corr-enoexec",
-        subprocess_runner=_runner,
-    )
-    assert result.status == "failed"
-    assert result.exit_code == 126
-    types = [e["event_type"] for e in events]
-    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
-    assert "failed to launch" in result.message

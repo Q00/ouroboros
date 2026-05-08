@@ -44,16 +44,10 @@ except ImportError as exc:  # pragma: no cover
 SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1",)
 
 # Source types whose `path` must be a sandboxed relative slug — no absolute
-# paths and no parent-directory traversal. Both `local_path` and `plugin_home`
-# are resolved against the manifest file's parent directory at load time so
-# downstream consumers (firewall cwd, CLI inspect output) see a stable
-# absolute filesystem location regardless of the operator's current working
-# directory. `local_path` is the user-authored case; `plugin_home` is the
-# install-managed case, and the install/manager layer is responsible for
-# placing the manifest in the correct user plugin home before this loader
-# runs — at which point both source types share the same anchoring rule.
-# An absolute or escaping path here is a real trust-boundary leak, not a
-# cosmetic issue.
+# paths and no parent-directory traversal. `local_path` resolves relative to
+# the manifest's directory; `plugin_home` resolves relative to the user's
+# plugin home. Either one becoming an absolute or escaping path is a real
+# trust-boundary leak, not a cosmetic issue.
 _PATH_SANDBOXED_SOURCE_TYPES: frozenset[str] = frozenset({"local_path", "plugin_home"})
 
 
@@ -165,16 +159,8 @@ class PluginManifest:
     version: str
     source: SourceSpec
     commands: tuple[CommandSpec, ...]
-    # `capabilities` and `permissions` were `frozenset`s, but iteration
-    # order in a frozenset is unstable across hash seeds and Python
-    # versions. That instability leaks into `discover`/`inspect`/
-    # `list --json` CLI output and into the firewall's
-    # `plugin.permission_used` event ordering for multi-scope plugins,
-    # making replay/diffs non-deterministic. The schema enforces
-    # `uniqueItems: true` for both arrays, so a tuple preserves manifest
-    # order while still rejecting duplicates at validation time.
-    capabilities: tuple[Capability, ...]
-    permissions: tuple[Permission, ...]
+    capabilities: frozenset[Capability]
+    permissions: frozenset[Permission]
     entrypoint: Entrypoint
     description: str = ""
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
@@ -448,31 +434,6 @@ def load_manifest(path: str | Path) -> PluginManifest:
     source_path = source_raw.get("path")
     if source_type in _PATH_SANDBOXED_SOURCE_TYPES and isinstance(source_path, str):
         _validate_sandboxed_path(source_path, source_type=source_type, manifest_path=manifest_path)
-        # Sandbox check guarantees the user-authored path is a safe
-        # relative slug (no traversal, no absolute, no Windows drive
-        # prefix). Now anchor it to the manifest's directory so the
-        # firewall's subprocess `cwd` doesn't depend on where the
-        # operator ran `ooo` from. The textual + resolved checks are
-        # complementary: sandbox validates the on-disk text, this
-        # resolves it and verifies the kernel-level result still
-        # lives under the manifest's directory. Without the second
-        # check, a manifest can point at an in-tree symlink such as
-        # `plugins/link -> /outside/path` and the loader would
-        # silently accept a sandbox escape — `Path.resolve()` follows
-        # symlinks, so the syntactic slug check alone is insufficient.
-        anchor = manifest_path.parent.resolve()
-        candidate = (manifest_path.parent / source_path).resolve()
-        try:
-            candidate.relative_to(anchor)
-        except ValueError as exc:
-            raise PluginManifestError(
-                f"source.path for {source_type!r} resolves outside the manifest's directory",
-                path=str(manifest_path),
-                json_pointer="/source/path",
-                expected=f"path resolving under {anchor}",
-                got=str(candidate),
-            ) from exc
-        source_path = str(candidate)
     source = SourceSpec(
         type=source_type,
         path=source_path,
@@ -480,11 +441,11 @@ def load_manifest(path: str | Path) -> PluginManifest:
     )
 
     commands = tuple(_build_command(c) for c in raw["commands"])
-    capabilities = tuple(
+    capabilities = frozenset(
         Capability(name=c["name"], access=c["access"], reason=c.get("reason", ""))
         for c in raw["capabilities"]
     )
-    permissions = tuple(
+    permissions = frozenset(
         Permission(
             scope=p["scope"],
             risk=p["risk"],

@@ -89,10 +89,12 @@ def test_reset_for_version_bump(tmp_path: Path) -> None:
 
 
 def test_remove_drops_trust_file(tmp_path: Path) -> None:
-    """remove() deletes the trust file. The per-plugin `*.lock` file
-    is intentionally preserved (see `test_remove_keeps_lock_file_to_avoid_inode_race`),
-    so the directory is only pruned when the lock file isn't there
-    (e.g. on platforms without flock support)."""
+    """Test 6: remove() deletes the trust file. The parent directory is
+    not pruned because the per-plugin POSIX lock file
+    (``trust.json.lock``) is intentionally kept on disk to preserve
+    flock semantics across grant/remove cycles — see
+    ``test_remove_keeps_lock_file_to_avoid_inode_race``.
+    """
     store = TrustStore(root=tmp_path)
     store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
     file_path = tmp_path / "test-plugin" / "trust.json"
@@ -258,3 +260,32 @@ def test_concurrent_grants_do_not_lose_scopes(tmp_path: Path) -> None:
     assert persisted == set(scopes), (
         f"trust store lost {set(scopes) - persisted} under concurrent grants"
     )
+
+
+def test_read_disable_raises_value_error_on_malformed_json(tmp_path):
+    """Regression for the bot's BLOCKING finding on trust_store.py:461.
+
+    ``read_disable`` is read by the firewall, ``inspect``, ``list``, and
+    the top-level dispatch path. Those callers catch
+    ``(ValueError, OSError)`` only — a raw ``json.JSONDecodeError``
+    would escape as a traceback in the very commands operators use to
+    repair plugin state. Truncated / non-object ``disabled.json`` files
+    must surface as ``ValueError`` so the friendly recovery hint shape
+    holds end to end.
+    """
+    from ouroboros.plugin.trust_store import TrustStore
+
+    store = TrustStore(root=tmp_path)
+    plugin_root = tmp_path / "broken-plugin"
+    plugin_root.mkdir()
+
+    # Truncated JSON.
+    disabled = plugin_root / "disabled.json"
+    disabled.write_text("{ truncated")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        store.read_disable("broken-plugin")
+
+    # Parseable JSON but a non-object root (e.g. a stray array).
+    disabled.write_text("[]")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        store.read_disable("broken-plugin")

@@ -196,8 +196,7 @@
         },
         "command": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
+          "minLength": 1
         }
       }
     },

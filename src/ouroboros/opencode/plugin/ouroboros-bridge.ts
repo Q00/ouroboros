@@ -85,6 +85,7 @@ interface Sub {
   prompt: string
   truncated: boolean
   hash: string
+  timeout?: ChildTimeout
 }
 
 interface Raw {
@@ -92,6 +93,16 @@ interface Raw {
   title?: string
   agent?: string
   prompt: string
+  timeout?: unknown
+}
+
+interface ChildTimeout {
+  timeoutMs: number
+  stopReason: "iteration_timeout" | "wall_clock_exhausted" | "child_timeout"
+  source: string
+  behavior?: string
+  perIterationTimeoutSeconds?: number | null
+  maxTotalSeconds?: number | null
 }
 
 type Output = {
@@ -129,7 +140,51 @@ export function build(p: unknown, idx: number): Sub | null {
     prompt,
     truncated,
     hash: fnv(prompt),
+    timeout: parseChildTimeout(r.timeout),
   }
+}
+
+function optionalNumber(v: unknown): number | null | undefined {
+  if (v === null) return null
+  if (v === undefined) return undefined
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined
+}
+
+export function parseChildTimeout(raw: unknown): ChildTimeout | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const r = raw as Record<string, unknown>
+  const timeoutMs = r.timeout_ms
+  const stopReason = r.stop_reason
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return undefined
+  if (stopReason !== "iteration_timeout" && stopReason !== "wall_clock_exhausted") return undefined
+  const perIterationTimeoutSeconds = optionalNumber(r.per_iteration_timeout_seconds)
+  const maxTotalSeconds = optionalNumber(r.max_total_seconds)
+  return {
+    timeoutMs: Math.max(1, Math.floor(timeoutMs)),
+    stopReason,
+    source: typeof r.source === "string" && r.source ? r.source : "payload",
+    behavior: typeof r.behavior === "string" && r.behavior ? r.behavior : undefined,
+    perIterationTimeoutSeconds,
+    maxTotalSeconds,
+  }
+}
+
+export function childTimeout(s: Sub): ChildTimeout {
+  return s.timeout ?? {
+    timeoutMs: CHILD_TIMEOUT_MS,
+    stopReason: "child_timeout",
+    source: "OUROBOROS_CHILD_TIMEOUT_MS",
+  }
+}
+
+export function timeoutMessage(t: ChildTimeout): string {
+  if (t.stopReason === "wall_clock_exhausted") {
+    return `stop_reason=wall_clock_exhausted; child aborted after ${t.timeoutMs}ms wall-clock budget`
+  }
+  if (t.stopReason === "iteration_timeout") {
+    return `stop_reason=iteration_timeout; child aborted after ${t.timeoutMs}ms per-iteration budget`
+  }
+  return `child timed out after ${t.timeoutMs}ms`
 }
 
 // Parse { _subagent: {...} } OR { _subagents: [...] } from tool output text.
@@ -395,6 +450,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
   const callID = id("tool")
   const start = Date.now()
   const input = { description: s.title, prompt: s.prompt, subagent_type: s.agent }
+  const timeout = childTimeout(s)
 
   // --- Awaited phase (fast) ---
   const created = await cli.session.create({ body: { parentID: pid, title: s.title } })
@@ -414,7 +470,12 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
       status: "running",
       input,
       title: s.title,
-      metadata: { sessionId: childID },
+      metadata: {
+        sessionId: childID,
+        timeout_ms: timeout.timeoutMs,
+        timeout_source: timeout.source,
+        stop_reason_on_timeout: timeout.stopReason,
+      },
       time: { start },
     },
   }, `running:${partID}`)
@@ -425,7 +486,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
   // handled by the promise chain below, which PATCHes the widget when
   // the child resolves/rejects/times out.
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), CHILD_TIMEOUT_MS)
+  const timer = setTimeout(() => ctrl.abort(), timeout.timeoutMs)
 
   cli.session.prompt({
     path: { id: childID },
@@ -455,7 +516,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
   }).catch(async (e: unknown) => {
     clearTimeout(timer)
     const err = e instanceof Error ? e : new Error(String(e))
-    const msg = ctrl.signal.aborted ? `child timed out after ${CHILD_TIMEOUT_MS}ms` : err.message
+    const msg = ctrl.signal.aborted ? timeoutMessage(timeout) : err.message
     await cli.session.abort({ path: { id: childID } }).catch((ae) => log(`ABORT_FAIL child=${childID} err=${errMsg(ae)}`))
     await patch(b, pid, mid, partID, {
       id: partID,
@@ -468,7 +529,14 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
         status: "error",
         input,
         error: `${msg} (child=${childID})`,
-        metadata: { sessionId: childID },
+        metadata: {
+          sessionId: childID,
+          ...(ctrl.signal.aborted ? {
+            stop_reason: timeout.stopReason,
+            timeout_ms: timeout.timeoutMs,
+            timeout_source: timeout.source,
+          } : {}),
+        },
         time: { start, end: Date.now() },
       },
     }, `error:${partID}`).catch((pe) => log(`PATCH_ERR_FAIL part=${partID} err=${errMsg(pe)}`))

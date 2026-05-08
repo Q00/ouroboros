@@ -177,7 +177,9 @@ class UserLevelProgramRegistry:
             # namespace and command-name slots the previous incarnation owned
             # but the new manifest no longer claims. Without this, stale
             # entries linger and either block future registrations or skew
-            # the lookup result for a name that should be free.
+            # the lookup result for a name that should be free. Main's
+            # transactional release strictly supersedes the namespace-only
+            # release the PR previously shipped, so we adopt it wholesale.
             if existing is not None:
                 if existing.namespace != namespace and (
                     self._namespace_owner.get(existing.namespace) == manifest.name

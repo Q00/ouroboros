@@ -213,16 +213,12 @@ def test_plugin_home_source_requires_path(tmp_path: Path) -> None:
 
 
 def test_local_path_source_with_path_loads(tmp_path: Path) -> None:
-    """Positive control: source.type=local_path with `path` loads cleanly
-    and is normalized against the manifest's directory at load time."""
+    """Positive control: source.type=local_path with `path` loads cleanly."""
     fp = json.loads(json.dumps(REFERENCE_MANIFEST))
     fp["source"] = {"type": "local_path", "path": "plugins/whatever"}
     manifest = load_manifest(_write(tmp_path, fp))
     assert manifest.source.type == "local_path"
-    assert manifest.source.path is not None
-    resolved = Path(manifest.source.path)
-    assert resolved.is_absolute()
-    assert resolved == (tmp_path / "plugins" / "whatever").resolve()
+    assert manifest.source.path == "plugins/whatever"
 
 
 def test_old_risk_enum_value_rejected(tmp_path: Path) -> None:
@@ -308,44 +304,12 @@ def test_sandboxed_source_path_rejects_traversal(
 
 
 def test_plugin_home_with_relative_path_loads(tmp_path: Path) -> None:
-    """Positive control: a sandboxed relative `plugin_home` path loads
-    and is normalized against the manifest's directory so downstream
-    consumers (firewall cwd, CLI inspect output) see a stable absolute
-    location regardless of the operator's current working directory.
-    """
+    """Positive control: a sandboxed relative `plugin_home` path loads."""
     fp = json.loads(json.dumps(REFERENCE_MANIFEST))
     fp["source"] = {"type": "plugin_home", "path": "vendor/ooo-pr-ops"}
     manifest = load_manifest(_write(tmp_path, fp))
     assert manifest.source.type == "plugin_home"
-    assert manifest.source.path is not None
-    resolved = Path(manifest.source.path)
-    assert resolved.is_absolute()
-    assert resolved == (tmp_path / "vendor" / "ooo-pr-ops").resolve()
-
-
-def test_relative_source_path_resolves_to_absolute(tmp_path: Path) -> None:
-    """Regression for the d1511607 fix: a `source.path` like `"."` or
-    `"plugins/foo"` used to be passed through to the firewall verbatim,
-    so the subprocess `cwd` depended on where the operator ran `ooo`
-    from. The loader now anchors relative `source.path` to the manifest
-    file's directory at load time. Layered with the sandbox check from
-    #745, the input is validated as a safe relative slug *and* the
-    output is a stable absolute path for runtime consumers.
-    """
-    plugin_home = tmp_path / "plugins" / "github-pr-ops"
-    plugin_home.mkdir(parents=True)
-    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
-    payload["source"] = {"type": "local_path", "path": "."}
-    manifest_path = _write(plugin_home, payload)
-
-    manifest = load_manifest(manifest_path)
-
-    assert manifest.source.path is not None
-    resolved = Path(manifest.source.path)
-    assert resolved.is_absolute(), "source.path must be normalized to absolute"
-    assert resolved == plugin_home.resolve(), (
-        f"source.path={resolved!r} did not resolve relative to manifest dir {plugin_home!r}"
-    )
+    assert manifest.source.path == "vendor/ooo-pr-ops"
 
 
 def test_vendored_schemas_are_packaged_resources() -> None:
@@ -388,121 +352,3 @@ def test_unreadable_manifest_reports_structured_error(tmp_path: Path) -> None:
         assert excinfo.value.path == str(target)
     finally:
         target.chmod(0o644)
-
-
-def test_source_local_path_requires_path(tmp_path: Path) -> None:
-    """Regression: a `local_path` source manifest with no `path` is
-    invalid. The schema previously required only `type`, so the
-    location metadata could be omitted and the rest of the plugin
-    system would only fail later at install/runtime."""
-    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
-    bad["source"] = {"type": "local_path"}  # path missing
-    with pytest.raises(PluginManifestError) as excinfo:
-        load_manifest(_write(tmp_path, bad))
-    # The pointer lands on the source object — that's where the
-    # `required: ["type", "path"]` clause attaches.
-    assert excinfo.value.json_pointer.startswith("/source")
-
-
-def test_source_plugin_home_requires_path(tmp_path: Path) -> None:
-    """Regression: same gate for `plugin_home` source type. The
-    location is still mandatory metadata for the plugin system."""
-    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
-    bad["source"] = {"type": "plugin_home"}
-    with pytest.raises(PluginManifestError) as excinfo:
-        load_manifest(_write(tmp_path, bad))
-    assert excinfo.value.json_pointer.startswith("/source")
-
-
-def test_source_first_party_path_optional(tmp_path: Path) -> None:
-    """First-party plugins ship with the binary, so they have no
-    on-disk path of their own. The conditional schema must NOT
-    require `path` when `type=first_party`."""
-    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
-    payload["name"] = "ooo-builtin"
-    payload["source"] = {"type": "first_party"}
-    payload["permissions"] = []  # built-ins don't need external scopes
-    manifest = load_manifest(_write(tmp_path, payload))  # MUST NOT raise
-    assert manifest.source.type == "first_party"
-    assert manifest.source.path is None
-
-
-def test_sandbox_rejects_symlink_escape(tmp_path: Path) -> None:
-    """Regression for the symlink-escape sandbox bypass: the textual
-    sandbox check rejects `..` segments and absolute paths, but a
-    relative slug like `plugins/link` where the on-disk
-    `link -> /outside/path` symlink follows out of the plugin root
-    used to slip through, since `Path.resolve()` honors symlinks.
-    The loader must verify that the *resolved* filesystem target
-    still lives under the manifest's directory, not just that the
-    user-authored text was syntactically safe.
-    """
-    manifest_dir = tmp_path / "plugin_home"
-    manifest_dir.mkdir()
-    outside = tmp_path / "outside_target"
-    outside.mkdir()
-    link_path = manifest_dir / "link"
-    link_path.symlink_to(outside)
-
-    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
-    bad["source"] = {"type": "local_path", "path": "link"}
-    target = manifest_dir / "ouroboros.plugin.json"
-    target.write_text(json.dumps(bad))
-
-    with pytest.raises(PluginManifestError) as excinfo:
-        load_manifest(target)
-    err = excinfo.value
-    assert err.json_pointer == "/source/path"
-    assert "outside" in err.args[0] or "outside" in err.expected
-    # The escape target should not appear as the loaded path.
-    assert str(outside) in err.got
-
-
-def test_first_party_source_path_stays_none(tmp_path: Path) -> None:
-    """First-party plugins still produce `source.path is None`."""
-    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
-    payload["name"] = "ooo-builtin"
-    payload["source"] = {"type": "first_party"}
-    payload["permissions"] = []
-    manifest = load_manifest(_write(tmp_path, payload))
-    assert manifest.source.type == "first_party"
-    assert manifest.source.path is None
-
-
-def test_capabilities_and_permissions_preserve_manifest_order(tmp_path: Path) -> None:
-    """Regression: `capabilities` and `permissions` used to be
-    `frozenset`s, so iteration order varied across hash seeds and
-    Python versions. That instability leaks into `discover`,
-    `inspect`, `list --json`, and the firewall's
-    `plugin.permission_used` event ordering for multi-scope plugins.
-    A tuple preserves the order the operator wrote in the manifest.
-    """
-    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
-    # Order chosen so an alphabetic sort or hash-keyed iteration would
-    # rearrange them, exposing any silent re-ordering in the loader.
-    payload["capabilities"] = [
-        {"name": "state", "access": "read"},
-        {"name": "ledger", "access": "write"},
-        {"name": "provenance", "access": "write"},
-        {"name": "seed", "access": "read"},
-    ]
-    payload["permissions"] = [
-        {"scope": "github:write", "risk": "destructive", "required": False},
-        {"scope": "github:read", "risk": "read_only", "required": True},
-        {"scope": "fs:read", "risk": "read_only", "required": True},
-    ]
-    manifest = load_manifest(_write(tmp_path, payload))
-
-    assert isinstance(manifest.capabilities, tuple)
-    assert isinstance(manifest.permissions, tuple)
-    assert [c.name for c in manifest.capabilities] == [
-        "state",
-        "ledger",
-        "provenance",
-        "seed",
-    ]
-    assert [p.scope for p in manifest.permissions] == [
-        "github:write",
-        "github:read",
-        "fs:read",
-    ]

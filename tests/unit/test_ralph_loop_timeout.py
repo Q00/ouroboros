@@ -273,3 +273,81 @@ async def test_plugin_dispatch_forwards_iteration_and_total_timeouts(
     assert "max_total_seconds: 4321" in sub["prompt"]
     assert "stop_reason=iteration_timeout" in sub["prompt"]
     assert "stop_reason=wall_clock_exhausted" in sub["prompt"]
+
+
+
+@dataclass
+class _SuccessThenHangEvolveHandler:
+    """First call succeeds quickly; subsequent calls hang past the timeout."""
+
+    hang_seconds: float
+    calls: int = 0
+
+    async def handle(self, arguments: dict[str, Any]):
+        self.calls += 1
+        if self.calls == 1:
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="iter1-output"),),
+                    is_error=False,
+                    meta={
+                        "lineage_id": arguments["lineage_id"],
+                        "generation": 1,
+                        "action": "continue",
+                    },
+                )
+            )
+        await asyncio.sleep(self.hang_seconds)
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                is_error=False,
+                meta={
+                    "lineage_id": arguments["lineage_id"],
+                    "generation": self.calls,
+                    "action": "continue",
+                },
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_iteration_timeout_after_successful_iteration_replaces_terminal_result() -> None:
+    """Timeout after iteration 1 must NOT leak iter 1's output into terminal result.
+
+    Regression for #789 review-3: when iteration 2+ times out, the runner
+    used to keep ``final_result`` pointing at iteration 1's success, so the
+    terminal MCPToolResult reported ``stop_reason=iteration_timeout`` while
+    its content/meta still showed ``action=continue`` from iteration 1. The
+    fix always replaces ``final_result`` with the synthetic timeout result.
+    """
+    evolve = _SuccessThenHangEvolveHandler(hang_seconds=0.5)
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(
+        RalphLoopConfig(
+            lineage_id="lin_timeout_after_success",
+            seed_content="goal: timeout",
+            max_generations=5,
+            per_iteration_timeout_seconds=0.05,
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.stop_reason == "iteration_timeout"
+    # Two iterations recorded: success then timeout.
+    assert result.iteration_count == 2
+    assert result.iterations[0].action == "continue"
+    assert result.iterations[1].action == "iteration_timeout"
+
+    # Terminal MCPToolResult must reflect the timeout, not iter 1's output.
+    assert result.final_result.meta["action"] == "iteration_timeout"
+    assert result.final_result.meta["generation"] is None
+    assert "exceeded" in result.final_result.text_content
+    assert "iter1-output" not in result.final_result.text_content
+
+    tool_result = result.to_tool_result()
+    assert tool_result.is_error is True
+    assert tool_result.meta["status"] == "failed"
+    assert tool_result.meta["stop_reason"] == "iteration_timeout"
+    assert "iter1-output" not in tool_result.text_content

@@ -120,6 +120,83 @@ async def test_ralph_loop_wall_clock_exhausted_surfaces_in_tool_result_meta() ->
     assert tool_result.meta["stop_reason"] == "wall_clock_exhausted"
 
 
+@dataclass
+class _SuccessThenSlowEvolveHandler:
+    """First call returns immediately; later calls sleep, exhausting the budget."""
+
+    slow_sleep_seconds: float
+    calls: int = 0
+
+    async def handle(self, arguments: dict[str, Any]):
+        self.calls += 1
+        if self.calls > 1:
+            await asyncio.sleep(self.slow_sleep_seconds)
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=f"iter{self.calls}-output"),),
+                is_error=False,
+                meta={
+                    "lineage_id": arguments["lineage_id"],
+                    "generation": self.calls,
+                    "action": "continue",
+                },
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_exhausted_after_successful_iteration_replaces_terminal_result() -> None:
+    """Budget exhaustion after iteration 1 must NOT leak iter 1's output.
+
+    Regression for #789 review-3: when iteration N+1 was skipped pre-launch
+    on budget exhaustion, the runner used to keep ``final_result`` pointing
+    at the prior successful iteration's MCPToolResult, so the terminal
+    response reported ``stop_reason=wall_clock_exhausted`` while its
+    content/meta still carried ``action=continue`` and the prior iteration
+    number. The fix always replaces ``final_result`` with the synthetic
+    exhaustion result.
+    """
+    # Iter 1 finishes immediately (~0s), iter 2 sleeps 0.12s. Budget = 0.05s.
+    # Top-of-iter-2 check sees ~0s elapsed and lets iter 2 run; iter 2
+    # completes at ~0.12s. Top-of-iter-3 check sees 0.12s >= 0.05s and skips,
+    # firing the budget-exhausted branch with a prior successful final_result
+    # in flight.
+    evolve = _SuccessThenSlowEvolveHandler(slow_sleep_seconds=0.12)
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(
+        RalphLoopConfig(
+            lineage_id="lin_budget_after_success",
+            seed_content="goal: budget",
+            max_generations=5,
+            per_iteration_timeout_seconds=1.0,
+            max_total_seconds=0.05,
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.stop_reason == "wall_clock_exhausted"
+    assert evolve.calls == 2  # iter 1 + iter 2 ran; iter 3 skipped pre-launch.
+    assert result.iteration_count == 2  # only the two successful iterations.
+    assert result.iterations[0].action == "continue"
+    assert result.iterations[1].action == "continue"
+
+    # Terminal MCPToolResult must reflect budget exhaustion, not iter 2's output.
+    assert result.final_result.meta["action"] == "wall_clock_exhausted"
+    assert result.final_result.meta["generation"] is None
+    assert "wall-clock budget exhausted" in result.final_result.text_content
+    assert "iter1-output" not in result.final_result.text_content
+    assert "iter2-output" not in result.final_result.text_content
+
+    tool_result = result.to_tool_result()
+    assert tool_result.is_error is True
+    assert tool_result.meta["status"] == "failed"
+    assert tool_result.meta["stop_reason"] == "wall_clock_exhausted"
+    assert "iter1-output" not in tool_result.text_content
+    assert "iter2-output" not in tool_result.text_content
+
+
+
 @pytest.mark.asyncio
 async def test_ralph_loop_max_total_seconds_none_does_not_constrain() -> None:
     """When max_total_seconds is None at the runner level, no extra cap applies."""
@@ -250,3 +327,121 @@ async def test_ralph_handler_rejects_non_numeric_max_total_seconds() -> None:
 
     assert result.is_err
     assert "max_total_seconds must be a number" in str(result.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+async def test_ralph_handler_rejects_non_finite_max_total_seconds(value: str) -> None:
+    handler = RalphHandler(evolve_handler=_ImmediateEvolveHandler())  # type: ignore[arg-type]
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_budget_non_finite",
+            "max_total_seconds": value,
+        }
+    )
+
+    assert result.is_err
+    assert "max_total_seconds" in str(result.error)
+    assert "between 1 and 86400" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_plugin_dispatch_forwards_max_total_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin-mode dispatch must forward ``max_total_seconds``.
+
+    Wiring lock for #789 review-1: when ``should_dispatch_via_plugin`` returns
+    True, the produced ``_subagent`` payload context must include
+    ``max_total_seconds`` and the prompt must surface the
+    ``stop_reason=wall_clock_exhausted`` contract. Otherwise the public
+    wall-clock budget contract is silently dropped on the plugin path and the
+    child session can run past an explicit total budget.
+    """
+    import json as _json
+
+    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
+
+    handler = RalphHandler(
+        evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(
+        _ralph_handlers,
+        "emit_subagent_dispatched_event",
+        _noop_emit,
+    )
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_plugin_budget",
+            "seed_content": "goal: ship",
+            "max_generations": 3,
+            "per_iteration_timeout_seconds": 600,
+            "max_total_seconds": 4321,
+        }
+    )
+
+    assert result.is_ok
+    tool_result = result.value
+    body = _json.loads(tool_result.content[0].text)
+    sub = body["_subagent"]
+    assert sub["tool_name"] == "ouroboros_ralph"
+    assert sub["context"]["max_total_seconds"] == 4321
+    assert "max_total_seconds: 4321" in sub["prompt"]
+    assert "stop_reason=wall_clock_exhausted" in sub["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_dispatch_forwards_derived_max_total_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin-mode dispatch forwards the derived ceiling when budget is omitted.
+
+    Standalone callers that omit ``max_total_seconds`` get a derived ceiling
+    of ``max_generations × per_iteration_timeout_seconds`` auto-applied at the
+    handler. The plugin path must forward that derived value too so the child
+    session enforces the same implicit ceiling rather than running unbounded.
+    """
+    import json as _json
+
+    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
+
+    handler = RalphHandler(
+        evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(
+        _ralph_handlers,
+        "emit_subagent_dispatched_event",
+        _noop_emit,
+    )
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_plugin_derived",
+            "seed_content": "goal: ship",
+            "max_generations": 4,
+            "per_iteration_timeout_seconds": 60,
+            # max_total_seconds intentionally omitted
+        }
+    )
+
+    assert result.is_ok
+    tool_result = result.value
+    body = _json.loads(tool_result.content[0].text)
+    sub = body["_subagent"]
+    assert sub["context"]["max_total_seconds"] == pytest.approx(240.0)
+    assert "max_total_seconds: 240" in sub["prompt"]
+    assert "stop_reason=wall_clock_exhausted" in sub["prompt"]

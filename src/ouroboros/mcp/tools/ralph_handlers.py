@@ -45,6 +45,10 @@ MAX_PER_ITERATION_TIMEOUT_SECONDS = 7200.0
 MIN_MAX_TOTAL_SECONDS = 1.0
 MAX_MAX_TOTAL_SECONDS = 86400.0
 MIN_PROGRESS_WINDOW = 2  # smallest window where strict-decrease / repeat checks are meaningful
+MIN_MAX_TOTAL_SECONDS = 1.0
+MAX_MAX_TOTAL_SECONDS = 86400.0
+
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +193,26 @@ class RalphHandler:
                     required=False,
                     default=DEFAULT_GRADE_REGRESSION_WINDOW,
                 ),
+                MCPToolParameter(
+                    name="max_total_seconds",
+                    type=ToolInputType.NUMBER,
+                    description=(
+                        "Total wall-clock budget for the entire Ralph loop "
+                        "in seconds. In the in-process runner this is "
+                        "enforced by RalphLoopRunner: checked at the top of "
+                        "every iteration BEFORE launching evolve_step, and "
+                        "on exhaustion the loop stops with "
+                        "stop_reason='wall_clock_exhausted'. In OpenCode "
+                        "plugin mode the bound is forwarded to the child "
+                        "session and the plugin is expected to self-enforce; "
+                        "the MCP server cannot abort a foreign child "
+                        "process. When omitted, a derived ceiling of "
+                        "max_generations * per_iteration_timeout_seconds is "
+                        "auto-applied (with a WARNING log) for standalone "
+                        "callers. Range: 1-86400."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -265,49 +289,6 @@ class RalphHandler:
                 )
             )
 
-        raw_max_total_seconds = arguments.get("max_total_seconds")
-        max_total_seconds: float | None
-        if raw_max_total_seconds is None:
-            max_total_seconds = None
-        else:
-            try:
-                max_total_seconds = float(raw_max_total_seconds)
-            except (TypeError, ValueError):
-                return Result.err(
-                    MCPToolError(
-                        "max_total_seconds must be a number",
-                        tool_name="ouroboros_ralph",
-                    )
-                )
-            if not math.isfinite(max_total_seconds):
-                return Result.err(
-                    MCPToolError(
-                        "max_total_seconds must be a finite number",
-                        tool_name="ouroboros_ralph",
-                    )
-                )
-            if (
-                max_total_seconds < MIN_MAX_TOTAL_SECONDS
-                or max_total_seconds > MAX_MAX_TOTAL_SECONDS
-            ):
-                return Result.err(
-                    MCPToolError(
-                        "max_total_seconds must be between "
-                        f"{MIN_MAX_TOTAL_SECONDS:g} and "
-                        f"{MAX_MAX_TOTAL_SECONDS:g}",
-                        tool_name="ouroboros_ralph",
-                    )
-                )
-
-        if max_total_seconds is None:
-            derived = float(max_generations) * per_iteration_timeout_seconds
-            logger.warning(
-                "max_total_seconds not provided; auto-applying derived ceiling "
-                "of %ss based on max_generations × per_iteration_timeout_seconds",
-                f"{derived:g}",
-            )
-            max_total_seconds = derived
-
         oscillation_window_result = _coerce_window(
             arguments.get("oscillation_window", DEFAULT_OSCILLATION_WINDOW),
             field_name="oscillation_window",
@@ -343,6 +324,43 @@ class RalphHandler:
                 )
             )
 
+        raw_max_total_seconds = arguments.get("max_total_seconds")
+        max_total_seconds: float | None
+        if raw_max_total_seconds is None:
+            max_total_seconds = None
+        else:
+            try:
+                max_total_seconds = float(raw_max_total_seconds)
+            except (TypeError, ValueError):
+                return Result.err(
+                    MCPToolError(
+                        "max_total_seconds must be a number",
+                        tool_name="ouroboros_ralph",
+                    )
+                )
+            if (
+                not math.isfinite(max_total_seconds)
+                or max_total_seconds < MIN_MAX_TOTAL_SECONDS
+                or max_total_seconds > MAX_MAX_TOTAL_SECONDS
+            ):
+                return Result.err(
+                    MCPToolError(
+                        "max_total_seconds must be between "
+                        f"{MIN_MAX_TOTAL_SECONDS:g} and "
+                        f"{MAX_MAX_TOTAL_SECONDS:g}",
+                        tool_name="ouroboros_ralph",
+                    )
+                )
+
+        if max_total_seconds is None:
+            derived = float(max_generations) * per_iteration_timeout_seconds
+            logger.warning(
+                "max_total_seconds not provided; auto-applying derived ceiling "
+                "of %ss based on max_generations × per_iteration_timeout_seconds",
+                f"{derived:g}",
+            )
+            max_total_seconds = derived
+
         if arguments.get("delegation_depth", 0):
             return Result.err(
                 MCPToolError(
@@ -366,6 +384,12 @@ class RalphHandler:
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Plugin mode: per_iteration_timeout_seconds and max_total_seconds
+            # are forwarded to the child session as instructions. The MCP
+            # server cannot enforce them server-side because execution lives
+            # in a foreign OpenCode child process this server does not own;
+            # the in-process RalphLoopRunner is the only path with hard
+            # enforcement. See build_ralph_subagent docstring (#789 review-2).
             payload = build_ralph_subagent(
                 lineage_id=config.lineage_id,
                 seed_content=config.seed_content,

@@ -25,6 +25,7 @@ Payload structure:
             "prompt": str,      # full prompt for subagent LLM
             "model": str|None,  # optional model override hint
             "context": dict,    # original tool args for round-trip
+            "timeout": dict|None, # optional structural child timeout budget
         }
     }
 """
@@ -71,6 +72,7 @@ class SubagentPayload:
     agent: str = "general"
     model: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    timeout: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to plain dict for JSON transport in MCPToolResult.meta."""
@@ -81,6 +83,7 @@ class SubagentPayload:
             "prompt": self.prompt,
             "model": self.model,
             "context": self.context,
+            "timeout": self.timeout,
         }
 
 
@@ -97,6 +100,7 @@ def build_subagent_payload(
     agent: str = "general",
     model: str | None = None,
     context: dict[str, Any] | None = None,
+    timeout: dict[str, Any] | None = None,
 ) -> SubagentPayload:
     """Build a SubagentPayload with validation.
 
@@ -107,6 +111,7 @@ def build_subagent_payload(
         agent: OpenCode subagent type. Default "general".
         model: Optional model override hint for the subagent.
         context: Original tool arguments for bridge round-trip.
+        timeout: Optional bridge-enforced child timeout metadata.
 
     Returns:
         Validated SubagentPayload.
@@ -128,7 +133,57 @@ def build_subagent_payload(
         agent=agent,
         model=model,
         context=context or {},
+        timeout=timeout,
     )
+
+
+def _positive_number(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return numeric
+
+
+def _ralph_timeout_metadata(
+    *,
+    per_iteration_timeout_seconds: float | None,
+    max_total_seconds: float | None,
+) -> dict[str, Any] | None:
+    """Build bridge-enforced timeout metadata for plugin-mode Ralph.
+
+    The OpenCode bridge owns one session-scoped abort timer per child; it has
+    no per-iteration reset hook because the bridge cannot observe iteration
+    boundaries inside the foreign child session. The bridge timer must
+    therefore represent a *whole-session ceiling only*, driven exclusively by
+    ``max_total_seconds``. Mapping ``per_iteration_timeout_seconds`` onto the
+    same timer (e.g. via ``min(per_iteration, max_total)``) would silently
+    abort healthy multi-iteration runs at the per-iteration budget, even when
+    no single generation hung — see #790 review-3.
+
+    Per-iteration semantics still travel to the child via the prompt and
+    ``context["per_iteration_timeout_seconds"]`` for in-child self-enforcement;
+    the value is also echoed in this metadata for observability, but it does
+    NOT influence ``timeout_ms`` or ``stop_reason``. When ``max_total_seconds``
+    is None there is no whole-session ceiling to enforce, so no metadata is
+    emitted (the bridge falls back to its environment-default child timeout).
+    """
+    per_iteration = _positive_number(per_iteration_timeout_seconds)
+    max_total = _positive_number(max_total_seconds)
+    if max_total is None:
+        return None
+    return {
+        "timeout_ms": max(1, int(max_total * 1000)),
+        "stop_reason": "wall_clock_exhausted",
+        "source": "max_total_seconds",
+        "behavior": "session_ceiling_only",
+        "per_iteration_timeout_seconds": per_iteration,
+        "max_total_seconds": max_total,
+    }
 
 
 def build_subagent_result(
@@ -1182,6 +1237,18 @@ def build_ralph_subagent(
     ``_subagent`` envelope and let the plugin's Task pane own execution rather
     than enqueueing an unobservable local background job.
 
+    Cross-runtime contract (#789 review-2): the in-process ``RalphLoopRunner``
+    enforces ``per_iteration_timeout_seconds`` and ``max_total_seconds`` itself
+    via ``asyncio.wait_for`` and a monotonic budget check. The plugin path
+    cannot enforce those limits server-side — execution happens inside a
+    foreign child session this server does not control — so both bounds are
+    forwarded into the prompt **and** context as instructions for the child to
+    self-enforce. Honesty about that split is encoded in the prompt
+    (``stop_reason=iteration_timeout`` / ``stop_reason=wall_clock_exhausted``
+    are framed as obligations of the child session) and in the public MCP
+    parameter descriptions so callers know plugin-mode bounds are
+    plugin-honored, not MCP-enforced.
+
     Args:
         per_iteration_timeout_seconds: Advisory per-iteration wall-clock bound
             forwarded from the MCP handler. The parent MCP process cannot
@@ -1203,6 +1270,18 @@ def build_ralph_subagent(
             ``grade`` values must be strictly decreasing before the plugin
             child session must stop with ``stop_reason=grade_regressing``. When
             ``None``, the block is omitted from the prompt and context.
+        max_total_seconds: Total wall-clock budget for the entire Ralph loop,
+            forwarded from the MCP handler. The plugin child session must
+            check the cumulative wall-clock elapsed since the loop started
+            BEFORE launching each iteration and surface
+            ``stop_reason=wall_clock_exhausted`` to the parent on exhaustion.
+            On the plugin path, ``max_total_seconds`` is *also* the only true
+            whole-session ceiling that drives the bridge's session-kill timer
+            (see ``_ralph_timeout_metadata``); the per-iteration bound is
+            advisory because the bridge cannot reset its timer per iteration.
+            When ``None``, the field is omitted from both prompt and context
+            (legacy shape preserved for callers that don't care about the
+            bound).
     """
     seed_note = ""
     if seed_content is not None:
@@ -1277,6 +1356,18 @@ def build_ralph_subagent(
     if progress_stop_lines:
         progress_note = "\n## Progress Stop Conditions\n" + "\n".join(progress_stop_lines) + "\n"
 
+    budget_note = ""
+    if max_total_seconds is not None:
+        budget_note = (
+            "\n## Total Wall-Clock Budget\n"
+            f"max_total_seconds: {max_total_seconds:g}\n"
+            "Track wall-clock elapsed since the loop started. BEFORE launching "
+            "each next `evolve_step` iteration, abort the loop if the cumulative "
+            f"elapsed wall clock has met or exceeded {max_total_seconds:g} seconds; "
+            "that satisfies the public contract "
+            "`stop_reason=wall_clock_exhausted`.\n"
+        )
+
     prompt = f"""## Your Task
 
 Run a Ralph loop for the given lineage inside this OpenCode child session.
@@ -1294,6 +1385,8 @@ Repeat one evolutionary generation at a time until one stop condition is met:
   not yet passed (when supplied) — return stop_reason=oscillation_detected
 - the last `grade_regression_window` non-None grades are strictly decreasing
   (when supplied) — return stop_reason=grade_regressing
+- cumulative wall clock since loop start meets or exceeds max_total_seconds
+  (when supplied) — return stop_reason=wall_clock_exhausted
 
 ## Lineage ID
 {lineage_id}
@@ -1306,7 +1399,7 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - allow_nested_ouroboros_ralph: {str(allow_nested_ouroboros_ralph).lower()}
 - Do not call ouroboros_ralph from this child session. Run the loop directly
   by executing/evaluating one generation at a time.
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{total_timeout_note}{timeout_note}{progress_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{total_timeout_note}{timeout_note}{progress_note}{budget_note}
 For generation 1, use the seed content when present. For later generations,
 reconstruct state from the lineage and continue without resending seed_content.
 
@@ -1334,10 +1427,16 @@ do not enqueue another background Ralph job."""
         context["oscillation_window"] = oscillation_window
     if grade_regression_window is not None:
         context["grade_regression_window"] = grade_regression_window
+    if max_total_seconds is not None:
+        context["max_total_seconds"] = max_total_seconds
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",
         title="Ralph: full loop",
         prompt=prompt,
         context=context,
+        timeout=_ralph_timeout_metadata(
+            per_iteration_timeout_seconds=per_iteration_timeout_seconds,
+            max_total_seconds=max_total_seconds,
+        ),
     )

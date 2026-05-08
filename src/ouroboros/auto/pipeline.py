@@ -248,6 +248,13 @@ class AutoPipeline:
                 resume_phase,
                 f"resuming {resume_phase.value} after {previous_phase.value}: {state.last_error or 'no error recorded'}",
             )
+            # Legacy auto sessions saved before #779 had no
+            # ``deadline_at_epoch``, and ``from_dict()`` deliberately leaves
+            # the deadline unset for terminal phases. After recovering them
+            # back to a working phase, arm the deadline so subsequent
+            # ``_enforce_deadline`` checks are not silent no-ops for the
+            # rest of this resume (#790 review-4). ``arm_deadline`` is
+            # idempotent — non-legacy resumes are unaffected.
             state.arm_deadline()
             self._save(state)
 
@@ -259,6 +266,12 @@ class AutoPipeline:
             # CREATED → INTERVIEW transition so every later phase entry can
             # compare ``time.monotonic()`` against a stable absolute target.
             # Idempotent for resumed sessions whose deadline already armed.
+            # Persist immediately so a crash during the first
+            # ``interview_driver.run()`` cannot leave the saved state
+            # without ``deadline_at_epoch`` — otherwise a resumed session
+            # would silently extend the pipeline by re-arming a fresh 2h
+            # window and break the "preserved across process restarts"
+            # contract (#790 review-5).
             if state.phase == AutoPhase.CREATED:
                 state.arm_deadline()
                 self._save(state)
@@ -538,8 +551,8 @@ class AutoPipeline:
                     if self._enforce_deadline(state):
                         return self._result(state, ledger, blocker=state.last_error)
                     state.mark_blocked(
-                        f"review phase exceeded {state.phase_timeout_seconds(AutoPhase.REVIEW):.0f}s",
-                        tool_name="grade_gate",
+                        "review timed out before run could be started",
+                        tool_name="seed_reviewer",
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
@@ -913,6 +926,26 @@ class AutoPipeline:
             # and surface the public pipeline_deadline blocker.
             return 0.001
         return max(0.001, min(phase_timeout, remaining))
+
+    def _deadline_capped_timeout(self, state: AutoPipelineState, phase_timeout: float) -> float:
+        """Return ``phase_timeout`` capped by the remaining pipeline deadline.
+
+        Without this cap, ``_enforce_deadline`` only fires at phase
+        boundaries — a single ``await`` inside the interview / seed-gen /
+        repair / run-start path could spend the full per-phase timeout
+        even after the top-level deadline expired, breaking the public
+        ``pipeline_timeout`` contract (#790 review-6). Returns
+        ``phase_timeout`` unchanged when no deadline is armed; returns a
+        near-zero floor when the deadline is already past so the next
+        ``asyncio.wait_for`` trips immediately and routes the failure into
+        ``_enforce_deadline``.
+        """
+        if state.deadline_at is None:
+            return float(phase_timeout)
+        remaining = state.deadline_at - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        return float(min(float(phase_timeout), remaining))
 
     def _enforce_deadline(self, state: AutoPipelineState) -> bool:
         """Return True when the pipeline must abort because the deadline expired.

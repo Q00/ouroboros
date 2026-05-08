@@ -128,6 +128,203 @@ def test_state_save_load_roundtrip_preserves_deadline(tmp_path) -> None:
     assert abs(loaded_remaining - original_remaining) < 0.1
 
 
+def _legacy_state_payload_for_phase(phase: AutoPhase, tmp_path) -> dict:
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    if phase in {
+        AutoPhase.INTERVIEW,
+        AutoPhase.SEED_GENERATION,
+        AutoPhase.REVIEW,
+        AutoPhase.RUN,
+    }:
+        state.transition(AutoPhase.INTERVIEW, "interview")
+    if phase in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
+        state.transition(AutoPhase.SEED_GENERATION, "seed")
+    if phase in {AutoPhase.REVIEW, AutoPhase.RUN}:
+        state.transition(AutoPhase.REVIEW, "review")
+    if phase is AutoPhase.RUN:
+        state.transition(AutoPhase.RUN, "run")
+
+    payload = state.to_dict()
+    payload.pop("deadline_at", None)
+    payload.pop("deadline_at_epoch", None)
+    return payload
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        AutoPhase.INTERVIEW,
+        AutoPhase.SEED_GENERATION,
+        AutoPhase.REVIEW,
+        AutoPhase.RUN,
+    ],
+)
+def test_legacy_active_state_load_arms_missing_deadline(tmp_path, phase: AutoPhase) -> None:
+    """Legacy active auto states without deadline fields must resume with a deadline."""
+    payload = _legacy_state_payload_for_phase(phase, tmp_path)
+
+    loaded = AutoPipelineState.from_dict(payload)
+
+    assert loaded.phase is phase
+    assert loaded.deadline_at is not None
+    assert loaded.deadline_at_epoch is not None
+    assert loaded.deadline_at > time.monotonic()
+    assert loaded.deadline_at_epoch > time.time()
+
+
+class _ForeverInterviewDriver:
+    """Driver whose ``run`` blocks until cancelled, simulating a hung backend."""
+
+    def __init__(self) -> None:
+        self.invocations = 0
+        self.entered = asyncio.Event()
+        self.progress_callback = None
+
+    async def run(self, _state, _ledger):  # noqa: ARG002
+        self.invocations += 1
+        self.entered.set()
+        await asyncio.sleep(3600)
+        raise AssertionError("interview driver should have been cancelled by deadline")
+
+
+@pytest.mark.asyncio
+async def test_in_flight_interview_is_cancelled_by_pipeline_deadline(tmp_path) -> None:
+    """An expired deadline must cancel an in-flight interview within tens of ms (#790 review-6).
+
+    The bot's blocker called out that ``_enforce_deadline`` only fired at
+    phase boundaries, so a hung interview backend could outlive the
+    top-level timeout by the full per-phase budget. With the
+    deadline-capped ``asyncio.wait_for`` cap, the in-flight call must be
+    cut off as soon as the deadline passes and surface the public
+    ``pipeline_deadline`` blocker — NOT the per-phase
+    ``interview_driver`` timeout.
+    """
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "starting interview")
+    # Deadline expires 50ms in the future. Phase timeout (default 600s)
+    # is far larger; without the cap, the interview would block until
+    # min(phase_timeout, infinity) instead of stopping at the deadline.
+    state.deadline_at = time.monotonic() + 0.05
+    state.deadline_at_epoch = time.time() + 0.05
+
+    driver = _ForeverInterviewDriver()
+    pipeline = AutoPipeline(driver, _unused_seed_generator)
+
+    started = time.monotonic()
+    result = await pipeline.run(state)
+    elapsed = time.monotonic() - started
+
+    assert driver.invocations == 1
+    # Cap fires at the deadline, not at the 600s phase timeout.
+    assert elapsed < 5.0, f"pipeline outlived deadline by {elapsed:.2f}s"
+    assert result.status == "blocked"
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_fresh_created_session_persists_deadline_before_interview(tmp_path) -> None:
+    """The CREATED → INTERVIEW deadline must be saved BEFORE the driver runs (#790 review-5).
+
+    If the process crashes during the first ``interview_driver.run()`` call
+    on a fresh session, the persisted state must already carry the armed
+    deadline. Otherwise ``from_dict()`` would arm a brand-new 2h deadline
+    on resume — silently extending the pipeline past the user-requested
+    timeout and breaking the "preserved across process restarts" contract.
+    """
+    captured: dict[str, AutoPipelineState] = {}
+
+    class _CrashingDriver:
+        """Driver that records the persisted state then raises mid-run."""
+
+        def __init__(self) -> None:
+            self.invocations = 0
+            self.progress_callback = None
+
+        async def run(self, state, ledger):  # noqa: ARG002
+            self.invocations += 1
+            store = AutoStore(tmp_path)
+            captured["loaded"] = store.load(state.auto_session_id)
+            raise RuntimeError("simulated crash during backend.start()")
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    store.save(state)
+    assert state.deadline_at is None
+    assert state.deadline_at_epoch is None
+
+    driver = _CrashingDriver()
+    pipeline = AutoPipeline(driver, _unused_seed_generator, store=store)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await pipeline.run(state)
+
+    assert driver.invocations == 1
+    persisted = captured["loaded"]
+    assert persisted.deadline_at is not None
+    assert persisted.deadline_at_epoch is not None
+    assert persisted.deadline_at_epoch > time.time()
+
+
+@pytest.mark.asyncio
+async def test_legacy_blocked_session_arms_deadline_on_recovery(tmp_path) -> None:
+    """Resuming a legacy BLOCKED session must arm the missing deadline (#790 review-4).
+
+    Pre-#779 sessions stored as ``BLOCKED`` had no ``deadline_at_epoch``.
+    ``from_dict()`` leaves both deadline fields ``None`` for terminal phases
+    so the load is byte-for-byte stable, but ``pipeline.run()`` then
+    recovers the state to a working phase and would otherwise execute the
+    rest of the resume with no top-level timeout. After recovery the
+    deadline must be armed so ``_enforce_deadline`` is not a silent no-op.
+    """
+    captured: dict[str, AutoPipelineState] = {}
+
+    class _CapturingDriver:
+        def __init__(self) -> None:
+            self.invocations = 0
+            self.progress_callback = None
+
+        async def run(self, state, ledger):  # noqa: ARG002
+            self.invocations += 1
+            captured["state"] = state
+            return AutoInterviewResult(
+                status="needs_input",
+                session_id="interview-stub",
+                ledger=ledger,
+                rounds=0,
+            )
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "starting interview")
+    state.mark_blocked("interview.start failed", tool_name="interview.start")
+    payload = state.to_dict()
+    payload.pop("deadline_at", None)
+    payload.pop("deadline_at_epoch", None)
+
+    legacy = AutoPipelineState.from_dict(payload)
+    # Confirm the legacy precondition the bot's blocker calls out: terminal
+    # phase + no persisted deadline ⇒ ``from_dict()`` leaves the fields None.
+    assert legacy.phase is AutoPhase.BLOCKED
+    assert legacy.deadline_at is None
+    assert legacy.deadline_at_epoch is None
+
+    driver = _CapturingDriver()
+    pipeline = AutoPipeline(driver, _unused_seed_generator, store=store)
+
+    await pipeline.run(legacy)
+
+    # Recovery happened — phase walked back to INTERVIEW — and the deadline
+    # is now armed for both monotonic and epoch companions.
+    assert driver.invocations == 1
+    armed = captured["state"]
+    assert armed.deadline_at is not None
+    assert armed.deadline_at_epoch is not None
+    assert armed.deadline_at > time.monotonic()
+    assert armed.deadline_at_epoch > time.time()
+
+
+
 @pytest.mark.asyncio
 async def test_resume_after_deadline_expired_immediately_blocks(tmp_path) -> None:
     """Loading a state whose deadline already passed must transition to BLOCKED on entry."""
@@ -182,6 +379,7 @@ async def test_resume_arms_missing_legacy_deadline_before_phase_work(tmp_path) -
     loaded = store.load(state.auto_session_id)
     assert loaded.deadline_at is not None
     assert loaded.deadline_at_epoch is not None
+
 
 
 def test_arm_deadline_is_idempotent() -> None:

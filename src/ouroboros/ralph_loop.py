@@ -55,6 +55,7 @@ class RalphLoopConfig:
     max_total_seconds: float | None = None
     oscillation_window: int = DEFAULT_OSCILLATION_WINDOW
     grade_regression_window: int = DEFAULT_GRADE_REGRESSION_WINDOW
+    max_total_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +148,11 @@ class RalphLoopRunner:
             ):
                 status = "failed"
                 stop_reason = "wall_clock_exhausted"
+                # Always replace final_result. After iteration 2+ a prior
+                # successful generation would otherwise leak its action/text/meta
+                # into the terminal MCPToolResult, contradicting the new
+                # stop_reason. The synthetic result is the only authoritative
+                # record of the budget-exhausted terminal state.
                 final_result = MCPToolResult(
                     content=(
                         MCPContentItem(
@@ -205,25 +211,29 @@ class RalphLoopRunner:
                 )
                 status = "failed"
                 stop_reason = "iteration_timeout"
-                if final_result is None:
-                    final_result = MCPToolResult(
-                        content=(
-                            MCPContentItem(
-                                type=ContentType.TEXT,
-                                text=(
-                                    "Ralph iteration "
-                                    f"{iteration_index} exceeded "
-                                    f"{config.per_iteration_timeout_seconds:.0f}s timeout."
-                                ),
+                # Always replace final_result. After iteration 2+ a prior
+                # successful generation would otherwise leak its action/text/meta
+                # into the terminal MCPToolResult, contradicting the new
+                # stop_reason. The synthetic result is the only authoritative
+                # record of the timed-out terminal state.
+                final_result = MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                "Ralph iteration "
+                                f"{iteration_index} exceeded "
+                                f"{config.per_iteration_timeout_seconds:.0f}s timeout."
                             ),
                         ),
-                        is_error=True,
-                        meta={
-                            "lineage_id": config.lineage_id,
-                            "action": "iteration_timeout",
-                            "generation": None,
-                        },
-                    )
+                    ),
+                    is_error=True,
+                    meta={
+                        "lineage_id": config.lineage_id,
+                        "action": "iteration_timeout",
+                        "generation": None,
+                    },
+                )
                 break
 
             if result.is_err:
