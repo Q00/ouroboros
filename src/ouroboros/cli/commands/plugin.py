@@ -76,10 +76,24 @@ def _load_with_friendly_error(target: str) -> PluginManifest:
     try:
         return load_manifest(path)
     except PluginManifestError as exc:
+        # `load_manifest` wraps unreadable-file IO errors (chmod 000,
+        # broken symlink, transient I/O) into PluginManifestError with
+        # ``expected="readable file"``. `discover` is a diagnostic
+        # command — surface that as a friendly "manifest is unreadable"
+        # hint rather than the schema-violation phrasing, which would
+        # mislead the operator into looking for a syntax error.
+        if exc.expected == "readable file":
+            print_error(f"manifest is unreadable: {exc.path}: {exc.got}")
+            raise typer.Exit(code=1) from exc
         loc = exc.json_pointer if exc.json_pointer else "(root)"
         print_error(
             f"manifest invalid:\n  path: {exc.path}\n  at: {loc}\n  expected: {exc.expected}\n  got: {exc.got}"
         )
+        raise typer.Exit(code=1) from exc
+    except OSError as exc:
+        # Defensive: cover any `OSError` that escapes `load_manifest`
+        # without being wrapped (e.g. a future caller change).
+        print_error(f"manifest is unreadable: {path}: {exc}")
         raise typer.Exit(code=1) from exc
 
 
@@ -790,9 +804,10 @@ def discover_command(
         # First-party manifests bypass the user-facing trust prompt
         # (RFC: "First-party trust semantics"), so the "must be
         # trusted" hint is misleading for them — those scopes are
-        # already implicitly trusted at boot.
+        # advisory rather than gating, since the firewall does not
+        # consult the trust store for `source.type == "first_party"`.
         if manifest.source.type == "first_party":
-            console.print("  required scopes (implicitly trusted for first-party):")
+            console.print("  required scopes (advisory for first-party — firewall does not gate):")
         else:
             console.print("  required scopes (must be trusted before invocation):")
         for perm in required_perms:
@@ -902,8 +917,20 @@ def inspect_command(
     console.print(f"  granted_scopes: {', '.join(granted) if granted else '(none)'}")
     if record is not None and not applies:
         # Surface why the grants don't apply, naming the field that drifted.
-        reason = _subject_drift_reason(record, manifest=manifest, entry=entry)
-        console.print(f"  trust note:     stored grants are stale ({reason}); re-grant required")
+        # Version drift gets an explicit "version bump invalidated trust"
+        # phrasing so operators recognize this as the documented version-
+        # invalidation case rather than a generic subject mismatch.
+        if record.version != manifest.version:
+            console.print(
+                f"  trust note:     trust_version {record.version!r} "
+                f"invalidated trust on version bump to {manifest.version!r}; "
+                f"re-grant required"
+            )
+        else:
+            reason = _subject_drift_reason(record, manifest=manifest, entry=entry)
+            console.print(
+                f"  trust note:     stored grants are stale ({reason}); re-grant required"
+            )
     if not is_first_party:
         required_perms = [p.scope for p in manifest.permissions if p.required]
         missing = [s for s in required_perms if s not in granted]
@@ -974,7 +1001,10 @@ def list_command(
             # or filesystem error): show conservatively as "installed",
             # no granted scopes. Catching OSError matches the rest of
             # the listing's degradation policy — one bad row must not
-            # abort the entire list.
+            # abort the entire list. Without a readable manifest we
+            # can't enumerate required scopes, so `missing_required_scopes`
+            # is empty and `trust_version_stale` is False (no version to
+            # compare against).
             rows.append(
                 {
                     "name": entry.name,
@@ -982,6 +1012,8 @@ def list_command(
                     "source_kind": entry.source_kind,
                     "trust_state": "installed",
                     "granted_scopes": [],
+                    "missing_required_scopes": [],
+                    "trust_version_stale": False,
                 }
             )
             continue
@@ -990,21 +1022,33 @@ def list_command(
         # entirely. Use the ``first_party`` label so machine-readable
         # state agrees across ``list``, ``inspect``, ``_describe_trust_state``,
         # and the firewall audit events — they all use the same string
-        # for this case.
+        # for this case. Required scopes are advisory for first-party —
+        # the firewall does not gate on them, so `missing_required_scopes`
+        # is always [] (mirrors `inspect` for first-party).
         if manifest.source.type == "first_party":
+            # The firewall does not consult the trust store for
+            # first-party plugins, so neither granted nor missing scopes
+            # are meaningful here. Surface empty lists for both — the
+            # JSON view must not echo declared `required: true` scopes
+            # as if they were granted (or missing), since invocation is
+            # ungated regardless. Mirrors `inspect` for first-party.
             rows.append(
                 {
                     "name": entry.name,
                     "version": entry.version,
                     "source_kind": entry.source_kind,
                     "trust_state": "first_party",
-                    "granted_scopes": [p.scope for p in manifest.permissions if p.required],
+                    "granted_scopes": [],
+                    "missing_required_scopes": [],
+                    "trust_version_stale": False,
                 }
             )
             continue
         # For non-first-party entries, treat malformed trust state as
         # "trust unreadable" rather than crashing the listing — the
         # operator should still see every other plugin's state.
+        record = None
+        trust_version_stale = False
         try:
             record = trust.read(entry.name)
             trust_state = _describe_trust_state(
@@ -1015,9 +1059,20 @@ def list_command(
             )
             applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
             scopes = [g.scope for g in record.granted_scopes] if applies and record else []
+            # Stale-version flag: a trust file recorded against an older
+            # plugin version is invalidated by the firewall, so the JSON
+            # view zeroes its grants AND surfaces the drift so consumers
+            # can branch deterministically (e.g. prompt for re-grant).
+            if record is not None and record.version != manifest.version:
+                trust_version_stale = True
         except (ValueError, OSError):
             trust_state = "trust_unreadable"
             scopes = []
+        # Required scopes the firewall would still refuse — i.e. declared
+        # `required: true` minus what's actually granted on the current
+        # subject. Useful for `jq`-driven re-trust workflows.
+        required = {p.scope for p in manifest.permissions if p.required}
+        missing_required = sorted(required - set(scopes))
         rows.append(
             {
                 "name": entry.name,
@@ -1025,6 +1080,8 @@ def list_command(
                 "source_kind": entry.source_kind,
                 "trust_state": trust_state,
                 "granted_scopes": scopes,
+                "missing_required_scopes": missing_required,
+                "trust_version_stale": trust_version_stale,
             }
         )
 
