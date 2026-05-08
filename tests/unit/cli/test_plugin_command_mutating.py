@@ -2126,6 +2126,69 @@ def test_install_by_name_routes_local_path_for_plugin_home_manifest(
     assert "git clone failed" not in install_result.output
 
 
+def test_trust_failure_after_disable_check_keeps_disable_record(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1723.
+
+    The previous order cleared the disable record up-front, before
+    audit-log open and grant writes. A failure after that point left
+    the plugin re-enabled with a partial / missing grant set — a real
+    state-corruption path at the trust boundary. With the fix, every
+    fallible step runs first and ``clear_disable`` runs LAST, so a
+    failure leaves the plugin still disabled and the user can re-run.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    # Disable, sanity-check the disable record exists.
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    trust = TrustStore(root=paths["trust_root"])
+    assert trust.is_disabled("github-pr-ops")
+
+    # Make the grant write fail. With the new ordering, the failure
+    # must NOT clear the disable record.
+    original_grant = TrustStore.grant
+
+    def _failing_grant(self, **kwargs):  # noqa: ANN001 — pytest patch shape
+        raise OSError("disk full simulating mid-grant failure")
+
+    monkeypatch.setattr(TrustStore, "grant", _failing_grant)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:tester",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code != 0, result.output
+    # Re-read trust state with the original grant restored.
+    monkeypatch.setattr(TrustStore, "grant", original_grant)
+    assert trust.is_disabled("github-pr-ops"), (
+        "trust command failed mid-grant; the disable record MUST remain "
+        "in place so the plugin stays gated until the user re-runs"
+    )
+
+
 def test_trust_reenables_disabled_plugin_with_only_optional_permissions(
     runner: CliRunner, tmp_path: Path
 ) -> None:

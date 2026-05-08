@@ -661,16 +661,17 @@ def list_command(
             continue
         # First-party programs are implicitly trusted by the firewall
         # (RFC: "First-party trust semantics"), so skip the trust read
-        # entirely. Listing them as "trusted" matches what would
-        # actually happen at invocation, and avoids letting a corrupt
-        # trust file mislabel them.
+        # entirely. Use the ``first_party`` label so machine-readable
+        # state agrees across ``list``, ``inspect``, ``_describe_trust_state``,
+        # and the firewall audit events — they all use the same string
+        # for this case.
         if manifest.source.type == "first_party":
             rows.append(
                 {
                     "name": entry.name,
                     "version": entry.version,
                     "source_kind": entry.source_kind,
-                    "trust_state": "trusted",
+                    "trust_state": "first_party",
                     "granted_scopes": [p.scope for p in manifest.permissions if p.required],
                 }
             )
@@ -1720,16 +1721,16 @@ def trust_command(
     # Trust is bound to the install subject recorded in the lockfile.
     # Re-trusting also clears the disable record (per the RFC: "Re-enabling
     # is performed by re-running ooo plugin trust …").
+    #
+    # Ordering matters for transactional integrity: the disable record
+    # is cleared LAST, after every fallible step (audit-log open and
+    # each grant write) has succeeded. The previous order cleared
+    # disable up front, so a later grant or audit-log failure left the
+    # plugin re-enabled with a partial / missing grant set — a real
+    # state-corruption path at the trust boundary. With the new
+    # order, any failure leaves the plugin still disabled and the
+    # user can simply re-run after fixing the cause.
     was_disabled = trust.is_disabled(name)
-    trust.clear_disable(name)
-    if not scopes and was_disabled:
-        # Bare `ooo plugin trust <zero-perm-plugin>` against a disabled
-        # subject — the only state change is the cleared disable record.
-        # Surface that explicitly so the user sees something happened.
-        print_success(
-            f"Re-enabled {name} ({manifest.version}) "
-            "(no scopes to grant — manifest declares no permissions)"
-        )
 
     audit_handle = audit_log_path.open("a", encoding="utf-8") if audit_log_path else None
     try:
@@ -1777,6 +1778,20 @@ def trust_command(
     finally:
         if audit_handle is not None:
             audit_handle.close()
+
+    # Clear the disable record only after all fallible writes above
+    # have succeeded. ``clear_disable`` is idempotent and the
+    # *last* state-changing step the command makes.
+    trust.clear_disable(name)
+    if not scopes and was_disabled:
+        # Bare `ooo plugin trust <zero-perm-plugin>` (or all-optional)
+        # against a disabled subject — the only effective change is
+        # the just-cleared disable record. Surface that explicitly
+        # so the user sees something happened.
+        print_success(
+            f"Re-enabled {name} ({manifest.version}) "
+            "(no scopes to grant — manifest declares no required permissions)"
+        )
 
 
 @app.command("disable")
