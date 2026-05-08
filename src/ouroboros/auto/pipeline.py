@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 import inspect
 import threading
+import time
 from typing import Any, Protocol
 
 from ouroboros.auto.blocker_attribution import record_authoring_backend
@@ -43,6 +44,13 @@ class RunStarter(Protocol):
 
 SeedSaver = Callable[[Seed], str]
 SeedLoader = Callable[[str], Seed]
+
+# Tool-name marker recorded on ``state.last_tool_name`` whenever the top-level
+# pipeline deadline (#779) trips. Distinct from per-phase tool names so that
+# recovery decisions and surfaces can detect "deadline-expired" vs ordinary
+# per-tool blockers without scanning the error message.
+PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
+_RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 
 
 _RETRY_GUIDANCE_PHRASE = "retried once with idempotency key"
@@ -139,6 +147,24 @@ class AutoPipeline:
         )
         if self.skip_run and not state.skip_run:
             state.skip_run = True
+        # Top-level deadline check on resume (#779). When ``deadline_at`` is
+        # already set and has passed before this process even starts work,
+        # immediately transition to BLOCKED so no phase work is invoked. The
+        # message is the literal one the issue contract requires so external
+        # surfaces can distinguish a resume-expired session from a freshly
+        # tripped deadline mid-run.
+        if (
+            state.deadline_at is not None
+            and not state.is_terminal()
+            and state.is_deadline_expired()
+        ):
+            state.last_tool_name = PIPELINE_DEADLINE_TOOL_NAME
+            state.mark_blocked(
+                _RESUME_EXPIRED_MESSAGE,
+                tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+            )
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
         resume_tool_name = state.last_tool_name
         if state.seed_artifact:
             try:
@@ -185,7 +211,15 @@ class AutoPipeline:
             self._save(state)
 
         review: SeedReview | None = None
+        if self._enforce_deadline(state):
+            return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
+            # Arm the top-level pipeline deadline (#779) on the first
+            # CREATED → INTERVIEW transition so every later phase entry can
+            # compare ``time.monotonic()`` against a stable absolute target.
+            # Idempotent for resumed sessions whose deadline already armed.
+            if state.phase == AutoPhase.CREATED:
+                state.arm_deadline()
             if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
                 if not state.interview_session_id:
                     state.mark_blocked(
@@ -224,6 +258,8 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
+        if self._enforce_deadline(state):
+            return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.SEED_GENERATION:
             if state.seed_artifact:
                 try:
@@ -309,6 +345,8 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
+        if self._enforce_deadline(state):
+            return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.REVIEW:
             reviewer = self.reviewer or SeedReviewer(self.grade_gate)
             repairer = self.repairer or SeedRepairer(reviewer=reviewer)
@@ -379,6 +417,8 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review)
 
+        if self._enforce_deadline(state):
+            return self._result(state, ledger, review=review, blocker=state.last_error)
         if state.phase == AutoPhase.RUN:
             attached = self._attach_run_if_requested(state)
             if attached is not None:
@@ -595,6 +635,28 @@ class AutoPipeline:
             # timeout and no-handle paths share this same retry slot.
             self._save(state)
             retried = True
+
+    def _enforce_deadline(self, state: AutoPipelineState) -> bool:
+        """Return True when the pipeline must abort because the deadline expired.
+
+        Mutates ``state`` to ``BLOCKED`` with ``tool_name=pipeline_deadline``
+        and a ``pipeline_timeout`` error message, then persists. Callers must
+        return immediately when this returns True. No-op when the deadline is
+        unset or the state is already terminal.
+        """
+        if state.is_terminal() or state.deadline_at is None:
+            return False
+        if not state.is_deadline_expired():
+            return False
+        remaining = state.deadline_at - time.monotonic()
+        message = (
+            f"pipeline_timeout: deadline exceeded by "
+            f"{abs(remaining):.1f}s during {state.phase.value}"
+        )
+        state.last_tool_name = PIPELINE_DEADLINE_TOOL_NAME
+        state.mark_blocked(message, tool_name=PIPELINE_DEADLINE_TOOL_NAME)
+        self._save(state)
+        return True
 
     def _load_seed(self, state: AutoPipelineState, seed_path: str) -> Seed | None:
         if self.seed_loader is None:

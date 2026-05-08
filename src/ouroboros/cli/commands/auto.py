@@ -24,7 +24,14 @@ from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.provenance import resolve_provenance
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.auto.state import (
+    DEFAULT_PIPELINE_TIMEOUT_SECONDS,
+    MAX_PIPELINE_TIMEOUT_SECONDS,
+    MIN_PIPELINE_TIMEOUT_SECONDS,
+    AutoPhase,
+    AutoPipelineState,
+    AutoStore,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
@@ -141,6 +148,19 @@ def auto_command(
             help="Suppress live phase/grade/repair progress lines; only the final summary prints.",
         ),
     ] = False,
+    timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            help=(
+                "Top-level pipeline deadline in seconds. Defaults to "
+                f"{DEFAULT_PIPELINE_TIMEOUT_SECONDS:g}s (2h) for new sessions. "
+                f"Range: {MIN_PIPELINE_TIMEOUT_SECONDS:g}-{MAX_PIPELINE_TIMEOUT_SECONDS:g}. "
+                "On resume the deadline is preserved across process restarts; "
+                "passing --timeout on resume is rejected."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -161,6 +181,14 @@ def auto_command(
     if not resume and (goal is None or not goal.strip()):
         print_error("goal is required unless --resume is provided")
         raise typer.Exit(1)
+    if timeout is not None and not (
+        MIN_PIPELINE_TIMEOUT_SECONDS <= timeout <= MAX_PIPELINE_TIMEOUT_SECONDS
+    ):
+        print_error(
+            f"--timeout must be between {MIN_PIPELINE_TIMEOUT_SECONDS:g} and "
+            f"{MAX_PIPELINE_TIMEOUT_SECONDS:g} seconds"
+        )
+        raise typer.Exit(1)
     try:
         result = asyncio.run(
             _run_auto(
@@ -176,6 +204,7 @@ def auto_command(
                 attach_source=attach_source,
                 reconcile_run=reconcile_run,
                 reconcile_source=reconcile_source,
+                pipeline_timeout_seconds=timeout,
                 progress_callback=_make_progress_renderer(quiet=quiet),
             )
         )
@@ -217,6 +246,7 @@ async def _run_auto(
     attach_source: str | None = None,
     reconcile_run: bool = False,
     reconcile_source: str | None = None,
+    pipeline_timeout_seconds: float | None = None,
     progress_callback: AutoProgressCallback | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
@@ -230,6 +260,11 @@ async def _run_auto(
     if reconcile_run and not resume:
         raise ValueError("--reconcile-run requires --resume")
     if resume:
+        if pipeline_timeout_seconds is not None:
+            raise ValueError(
+                "--timeout cannot be changed on resume; the original deadline "
+                "is preserved across process restarts"
+            )
         state = store.load(resume)
         persisted_runtime = state.runtime_backend
         if persisted_runtime is None and state.opencode_mode is not None:
@@ -281,6 +316,8 @@ async def _run_auto(
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
+        if pipeline_timeout_seconds is not None:
+            state.pipeline_timeout_seconds = float(pipeline_timeout_seconds)
 
     if runtime == "opencode":
         opencode_mode = state.opencode_mode or get_opencode_mode()

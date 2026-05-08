@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 import json
 from pathlib import Path
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -58,6 +59,18 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.REPAIR.value: 90,
     AutoPhase.RUN.value: 60,
 }
+
+# Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
+# a typical product-bootstrap chain — interview ≤ 120s × 12 rounds + seed gen
+# 120s + review/repair ≤ 90s × 5 + run kick-off + ralph 10 generations × 5–15
+# min — with ~2× headroom and stays well under "user has gone home" scenarios.
+DEFAULT_PIPELINE_TIMEOUT_SECONDS: float = 7200.0
+MIN_PIPELINE_TIMEOUT_SECONDS: float = 60.0
+MAX_PIPELINE_TIMEOUT_SECONDS: float = 86400.0
+# TODO(#773): on RALPH_HANDOFF, pipeline computes
+# max_total_seconds = max(0.0, deadline_at - time.monotonic()) and forwards it
+# to ouroboros_ralph as the field added in #777. Hook lives in pipeline.py at
+# the run-handoff site once #773 introduces the RALPH_HANDOFF transition.
 
 # Allowed keys for the optional gateway-provenance metadata recorded on auto state.
 # Strict allowlist: anything not listed here is dropped during redaction so that
@@ -263,6 +276,15 @@ class AutoPipelineState:
     timeout_seconds_by_phase: dict[str, int] = field(
         default_factory=lambda: dict(DEFAULT_TIMEOUT_SECONDS_BY_PHASE)
     )
+    # Top-level pipeline deadline (Q00/ouroboros#779). The deadline is a
+    # *monotonic*-clock value (``time.monotonic() + pipeline_timeout_seconds``)
+    # to avoid wall-clock skew during a single process run, with a companion
+    # ``deadline_at_epoch`` field persisted in epoch seconds so cross-process
+    # resume can re-derive a fresh monotonic value on load. Both fields are
+    # ``None`` until the first CREATED → INTERVIEW transition arms the deadline.
+    pipeline_timeout_seconds: float = DEFAULT_PIPELINE_TIMEOUT_SECONDS
+    deadline_at: float | None = None
+    deadline_at_epoch: float | None = None
     # Optional provenance metadata supplied by an external gateway when it
     # rewrote a natural-language request into ``ooo auto`` shell command. None
     # for direct CLI invocations so legacy state files load unchanged.
@@ -280,6 +302,29 @@ class AutoPipelineState:
         if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
             return float(DEFAULT_TIMEOUT_SECONDS_BY_PHASE[phase.value])
         return float(raw)
+
+    def arm_deadline(self) -> None:
+        """Set ``deadline_at`` (monotonic) and ``deadline_at_epoch`` if unset.
+
+        Idempotent — once the deadline is armed it must not be silently
+        re-armed, otherwise resume cannot enforce a stable absolute deadline
+        across process restarts. Call this on the first ``CREATED → INTERVIEW``
+        transition (and from ``from_dict`` when neither persisted field is
+        present, to keep legacy state files honoring the new contract).
+        """
+        if self.deadline_at is not None and self.deadline_at_epoch is not None:
+            return
+        timeout = float(self.pipeline_timeout_seconds)
+        now_mono = time.monotonic()
+        now_epoch = time.time()
+        self.deadline_at = now_mono + timeout
+        self.deadline_at_epoch = now_epoch + timeout
+
+    def is_deadline_expired(self) -> bool:
+        """Return True when ``time.monotonic()`` has passed the armed deadline."""
+        if self.deadline_at is None:
+            return False
+        return time.monotonic() > self.deadline_at
 
     def transition(self, next_phase: AutoPhase, message: str, *, error: str | None = None) -> None:
         """Move to ``next_phase`` after validating the phase state machine."""
@@ -467,6 +512,13 @@ class AutoPipelineState:
         data["phase"] = self.phase.value
         data["policy"] = self.policy.value
         data["seed_origin"] = self.seed_origin.value
+        # ``deadline_at`` is a *monotonic*-clock value scoped to the writing
+        # process; it is meaningless to a future loader. Persist only the
+        # epoch companion and recompute ``deadline_at`` from it on load. The
+        # null monotonic field is still serialized so the JSON shape stays
+        # stable for callers that read state files directly.
+        if self.deadline_at is not None:
+            data["deadline_at"] = None
         return data
 
     @classmethod
@@ -490,6 +542,26 @@ class AutoPipelineState:
         payload.setdefault("auto_answer_log", [])
         payload.setdefault("seed_origin", SeedOrigin.NONE.value)
         payload.setdefault("last_authoring_backend", None)
+        payload.setdefault("pipeline_timeout_seconds", DEFAULT_PIPELINE_TIMEOUT_SECONDS)
+        payload.setdefault("deadline_at", None)
+        payload.setdefault("deadline_at_epoch", None)
+        # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
+        # a monotonic-clock value usable from this process. If the companion
+        # epoch field is present, derive ``deadline_at`` from the offset
+        # between ``time.monotonic()`` and ``time.time()`` so the absolute
+        # deadline survives a process restart. If both fields are missing
+        # (legacy state file or never-armed session), leave them None and let
+        # ``arm_deadline()`` decide when to set them.
+        epoch_value = payload.get("deadline_at_epoch")
+        if isinstance(epoch_value, int | float) and not isinstance(epoch_value, bool):
+            now_epoch = time.time()
+            now_mono = time.monotonic()
+            payload["deadline_at"] = now_mono + (float(epoch_value) - now_epoch)
+        else:
+            # An ``deadline_at`` written by a previous process is meaningless
+            # in this monotonic clock domain; drop it unless we have an epoch
+            # companion to derive it from.
+            payload["deadline_at"] = None
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -526,6 +598,27 @@ class AutoPipelineState:
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 msg = f"{field_name} must be a positive integer"
+                raise ValueError(msg)
+        if (
+            isinstance(self.pipeline_timeout_seconds, bool)
+            or not isinstance(self.pipeline_timeout_seconds, int | float)
+            or not (
+                MIN_PIPELINE_TIMEOUT_SECONDS
+                <= float(self.pipeline_timeout_seconds)
+                <= MAX_PIPELINE_TIMEOUT_SECONDS
+            )
+        ):
+            msg = (
+                "pipeline_timeout_seconds must be a number between "
+                f"{MIN_PIPELINE_TIMEOUT_SECONDS:g} and {MAX_PIPELINE_TIMEOUT_SECONDS:g}"
+            )
+            raise ValueError(msg)
+        for field_name in ("deadline_at", "deadline_at_epoch"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                msg = f"{field_name} must be a number or null"
                 raise ValueError(msg)
 
         for field_name in (

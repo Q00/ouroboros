@@ -19,7 +19,15 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability, AutoStore
+from ouroboros.auto.state import (
+    DEFAULT_PIPELINE_TIMEOUT_SECONDS,
+    MAX_PIPELINE_TIMEOUT_SECONDS,
+    MIN_PIPELINE_TIMEOUT_SECONDS,
+    AutoPhase,
+    AutoPipelineState,
+    AutoResumeCapability,
+    AutoStore,
+)
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -124,6 +132,18 @@ class AutoHandler:
                     "Source label for run handoff reconciliation",
                     required=False,
                 ),
+                MCPToolParameter(
+                    "pipeline_timeout_seconds",
+                    ToolInputType.NUMBER,
+                    (
+                        "Top-level pipeline deadline in seconds. Defaults to "
+                        f"{DEFAULT_PIPELINE_TIMEOUT_SECONDS:g}s for new sessions. "
+                        f"Range: {MIN_PIPELINE_TIMEOUT_SECONDS:g}-"
+                        f"{MAX_PIPELINE_TIMEOUT_SECONDS:g}. Cannot be changed on "
+                        "resume; the deadline is preserved across process restarts."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -162,6 +182,12 @@ class AutoHandler:
             raise ValueError("attach_* arguments require resume")
         if reconcile_run and not (isinstance(resume, str) and resume):
             raise ValueError("reconcile_run requires resume")
+        pipeline_timeout_seconds = _optional_pipeline_timeout(arguments)
+        if pipeline_timeout_seconds is not None and isinstance(resume, str) and resume:
+            raise ValueError(
+                "pipeline_timeout_seconds cannot be changed on resume; the "
+                "original deadline is preserved across process restarts"
+            )
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -188,6 +214,8 @@ class AutoHandler:
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
+            if pipeline_timeout_seconds is not None:
+                state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend
         state.opencode_mode = opencode_mode
         state.skip_run = skip_run
@@ -307,6 +335,28 @@ def _optional_text_arg(arguments: dict[str, Any], name: str) -> str | None:
         msg = f"{name} must be a non-empty string"
         raise ValueError(msg)
     return value.strip()
+
+
+def _optional_pipeline_timeout(arguments: dict[str, Any]) -> float | None:
+    """Validate the optional ``pipeline_timeout_seconds`` MCP argument.
+
+    Returns ``None`` when omitted, otherwise a float in the inclusive
+    ``[MIN_PIPELINE_TIMEOUT_SECONDS, MAX_PIPELINE_TIMEOUT_SECONDS]`` window.
+    """
+    value = arguments.get("pipeline_timeout_seconds")
+    if value in {None, ""}:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        msg = "pipeline_timeout_seconds must be a number"
+        raise ValueError(msg)
+    timeout = float(value)
+    if not (MIN_PIPELINE_TIMEOUT_SECONDS <= timeout <= MAX_PIPELINE_TIMEOUT_SECONDS):
+        msg = (
+            "pipeline_timeout_seconds must be between "
+            f"{MIN_PIPELINE_TIMEOUT_SECONDS:g} and {MAX_PIPELINE_TIMEOUT_SECONDS:g}"
+        )
+        raise ValueError(msg)
+    return timeout
 
 
 def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:
