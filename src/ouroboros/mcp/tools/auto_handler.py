@@ -248,6 +248,15 @@ class AutoHandler:
             # the same input converges to the same Seed.
             if user_preferences_supplied:
                 state.user_preferences = dict(supplied_user_preferences)
+            # Q00/ouroboros#773 (review-3): ``complete_product`` is durable
+            # session intent, not a per-invocation flag. Honor the persisted
+            # value so MCP callers that omit ``complete_product`` on resume
+            # still chain RUN → RALPH_HANDOFF for sessions that originally
+            # opted in. Mirrors the CLI policy in ``cli/commands/auto.py``.
+            if state.complete_product and not complete_product:
+                complete_product = True
+            elif complete_product and not state.complete_product:
+                state.complete_product = True
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
@@ -262,6 +271,7 @@ class AutoHandler:
             state.user_preferences = dict(supplied_user_preferences)
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
+            state.complete_product = complete_product
             if pipeline_timeout_seconds is not None:
                 state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend

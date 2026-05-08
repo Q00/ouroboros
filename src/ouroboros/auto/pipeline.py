@@ -70,6 +70,15 @@ _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 # dispatch so an insufficient top-level pipeline budget remains a pipeline
 # timeout, not a Ralph argument-validation failure.
 _MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
+# Mirrors RalphHandler.MIN_PER_ITERATION_TIMEOUT_SECONDS / DEFAULT_PER_ITERATION_TIMEOUT_SECONDS.
+# When the remaining pipeline budget is shorter than the Ralph default
+# per-iteration timeout, the auto layer caps ``per_iteration_timeout_seconds``
+# so a single ``evolve_step`` cannot block past ``deadline_at``. RalphLoopRunner
+# only checks ``max_total_seconds`` at iteration boundaries, so without this cap
+# the first iteration could still run for the full default 1800s — violating
+# the top-level pipeline deadline contract pinned by Q00/ouroboros#779.
+_MIN_RALPH_PER_ITERATION_SECONDS = 30.0
+_DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
 
 
 _RETRY_GUIDANCE_PHRASE = "retried once with idempotency key"
@@ -175,6 +184,39 @@ class AutoPipeline:
         )
         if self.skip_run and not state.skip_run:
             state.skip_run = True
+        # Q00/ouroboros#773 (review-3): ``complete_product`` is durable session
+        # intent, not a per-invocation flag. On a fresh session the constructor
+        # writes the operator's choice into the state; on resume we honor the
+        # persisted value even when the caller forgot to re-pass the flag, so
+        # a session originally started with ``--complete-product`` keeps
+        # chaining RUN → RALPH_HANDOFF after restart. Lowering is intentional:
+        # explicit ``complete_product=True`` raises the bound; absence keeps
+        # the persisted truth.
+        if self.complete_product and not state.complete_product:
+            state.complete_product = True
+        elif state.complete_product and not self.complete_product:
+            self.complete_product = True
+        # Validate the persisted Seed artifact BEFORE any other path can
+        # trigger a state-validating save. ``AutoStore.save`` re-validates the
+        # full state, so a malformed ``seed_artifact`` would otherwise raise a
+        # raw ``ValueError`` from the very first save (e.g. the legacy
+        # deadline-arm or resume-expired branches below) instead of being
+        # converted into a clean ``FAILED`` outcome by
+        # ``_mark_invalid_seed_artifact``.
+        if state.seed_artifact:
+            try:
+                Seed.from_dict(state.seed_artifact)
+            except Exception as exc:
+                _mark_invalid_seed_artifact(state, f"persisted Seed artifact is invalid: {exc}")
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
+            # Backfill legacy resumed sessions: pre-PR auto pipelines were the
+            # only writer of state.seed_artifact, so a valid persisted Seed
+            # paired with seed_origin=none can only have come from this
+            # pipeline. Inferring it once on resume keeps the new contract
+            # accurate for sessions created before this field existed.
+            if state.seed_origin is SeedOrigin.NONE:
+                state.seed_origin = SeedOrigin.AUTO_PIPELINE
         _arm_legacy_missing_deadline(state)
         # Top-level deadline check on resume (#779). When ``deadline_at`` is
         # already set and has passed before this process even starts work,
@@ -195,20 +237,6 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
         resume_tool_name = state.last_tool_name
-        if state.seed_artifact:
-            try:
-                Seed.from_dict(state.seed_artifact)
-            except Exception as exc:
-                _mark_invalid_seed_artifact(state, f"persisted Seed artifact is invalid: {exc}")
-                self._save(state)
-                return self._result(state, ledger, blocker=state.last_error)
-            # Backfill legacy resumed sessions: pre-PR auto pipelines were the
-            # only writer of state.seed_artifact, so a valid persisted Seed
-            # paired with seed_origin=none can only have come from this
-            # pipeline. Inferring it once on resume keeps the new contract
-            # accurate for sessions created before this field existed.
-            if state.seed_origin is SeedOrigin.NONE:
-                state.seed_origin = SeedOrigin.AUTO_PIPELINE
         self._save(state)
 
         if self.reconcile_run and state.phase == AutoPhase.COMPLETE:
@@ -799,6 +827,7 @@ class AutoPipeline:
         )
         self._save(state)
         max_total_seconds: float | None = None
+        per_iteration_timeout_seconds: float | None = None
         if state.deadline_at is not None:
             remaining = state.deadline_at - time.monotonic()
             if remaining < _MIN_RALPH_MAX_TOTAL_SECONDS:
@@ -817,11 +846,28 @@ class AutoPipeline:
                     run_subagent=run_subagent,
                 )
             max_total_seconds = remaining
+            # Cap per-iteration so a single ``evolve_step`` cannot block past
+            # the remaining deadline. ``RalphLoopRunner`` checks
+            # ``max_total_seconds`` only at the top of each iteration, so
+            # without this cap the first iteration could still run for the
+            # full default 1800s after the deadline expired. Floored at the
+            # Ralph minimum (30s) — when the remaining budget is itself below
+            # that floor we still cap at 30s rather than rejecting at the
+            # auto layer, since the pre-dispatch ``MIN_RALPH_MAX_TOTAL_SECONDS``
+            # check already protects against a sub-second budget. The
+            # ``max_total_seconds`` cap then aborts the loop before any
+            # follow-up iteration starts, so the worst-case overshoot is one
+            # iteration of up to 30 seconds.
+            per_iteration_timeout_seconds = max(
+                _MIN_RALPH_PER_ITERATION_SECONDS,
+                min(_DEFAULT_RALPH_PER_ITERATION_SECONDS, remaining),
+            )
         try:
             ralph_meta = await self.ralph_starter(
                 seed,
                 lineage_id=lineage_id,
                 max_total_seconds=max_total_seconds,
+                per_iteration_timeout_seconds=per_iteration_timeout_seconds,
             )
         except Exception as exc:
             state.mark_failed(f"ralph handoff failed: {exc}", tool_name="ralph_starter")

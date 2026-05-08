@@ -68,11 +68,6 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
 DEFAULT_PIPELINE_TIMEOUT_SECONDS: float = 7200.0
 MIN_PIPELINE_TIMEOUT_SECONDS: float = 60.0
 MAX_PIPELINE_TIMEOUT_SECONDS: float = 86400.0
-# TODO(#773): on RALPH_HANDOFF, pipeline computes
-# max_total_seconds = max(0.0, deadline_at - time.monotonic()) and forwards it
-# to ouroboros_ralph as the field added in #777. Hook lives in pipeline.py at
-# the run-handoff site once #773 introduces the RALPH_HANDOFF transition.
-
 # Allowed keys for the optional gateway-provenance metadata recorded on auto state.
 # Strict allowlist: anything not listed here is dropped during redaction so that
 # tokens, credentials, or raw user utterances cannot be persisted by accident.
@@ -279,6 +274,13 @@ class AutoPipelineState:
     ralph_job_id: str | None = None
     ralph_lineage_id: str | None = None
     ralph_dispatch_mode: str | None = None
+    # Q00/ouroboros#773: persisted intent for ``--complete-product`` /
+    # ``complete_product=True``. The flag is durable session state — not a
+    # per-invocation argument — so a session originally started with
+    # ``--complete-product`` keeps chaining RUN → RALPH_HANDOFF on resume even
+    # when the operator forgets to re-pass the flag. Defaults to False so
+    # legacy state files load unchanged.
+    complete_product: bool = False
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -581,6 +583,7 @@ class AutoPipelineState:
         payload.setdefault("ralph_job_id", None)
         payload.setdefault("ralph_lineage_id", None)
         payload.setdefault("ralph_dispatch_mode", None)
+        payload.setdefault("complete_product", False)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
         payload.setdefault("seed_origin", SeedOrigin.NONE.value)
@@ -786,7 +789,12 @@ class AutoPipelineState:
             if not value.strip():
                 msg = f"{field_name} must be a non-empty string or null"
                 raise ValueError(msg)
-        for field_name in ("interview_completed", "skip_run", "run_start_attempted"):
+        for field_name in (
+            "interview_completed",
+            "skip_run",
+            "run_start_attempted",
+            "complete_product",
+        ):
             if type(getattr(self, field_name)) is not bool:
                 msg = f"{field_name} must be a boolean"
                 raise ValueError(msg)

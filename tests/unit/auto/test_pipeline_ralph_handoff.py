@@ -478,3 +478,180 @@ async def test_complete_product_off_matches_legacy_shape(tmp_path) -> None:
     assert payload["ralph_job_id"] is None
     assert payload["ralph_lineage_id"] is None
     assert payload["ralph_dispatch_mode"] is None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline deadline contract — per-iteration cap (review-3 finding 1).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ralph_handoff_caps_per_iteration_at_remaining_budget(tmp_path) -> None:
+    """A short remaining budget caps ``per_iteration_timeout_seconds``.
+
+    ``RalphLoopRunner`` checks ``max_total_seconds`` only at the top of each
+    iteration. Without a per-iteration cap, the first iteration could still
+    block for the full 1800s default after the deadline expired. Pinning the
+    forwarded value here ensures the deadline contract is honored even on
+    ralph's first generation.
+    """
+    state = _state_at_run_phase(tmp_path)
+    # 60s remaining is well above the 1s minimum and 30s per-iteration floor,
+    # but well below the 1800s default — the cap must equal the remaining.
+    remaining = 60.0
+    state.deadline_at = time.monotonic() + remaining
+    state.deadline_at_epoch = time.time() + remaining
+
+    captured: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        captured["kwargs"] = kwargs
+        return {
+            "job_id": "job_ralph_capped",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    forwarded = captured["kwargs"]
+    assert forwarded["max_total_seconds"] is not None
+    assert forwarded["max_total_seconds"] <= remaining
+    # The per-iteration cap must be at most the remaining budget so a single
+    # ``evolve_step`` cannot block past ``deadline_at``.
+    assert forwarded["per_iteration_timeout_seconds"] is not None
+    assert forwarded["per_iteration_timeout_seconds"] <= remaining
+    # Floor at the Ralph handler's per-iteration minimum (30s).
+    assert forwarded["per_iteration_timeout_seconds"] >= 30.0
+
+
+@pytest.mark.asyncio
+async def test_ralph_handoff_uses_default_per_iteration_with_ample_budget(tmp_path) -> None:
+    """When remaining budget exceeds the Ralph default, no tighter cap is forwarded.
+
+    Pinning the upper bound prevents accidental over-tightening for the
+    common case (2h default deadline, RUN reached early with hours of
+    budget left): the bot's contract is to honor the deadline, not to
+    aggressively shrink the per-iteration budget below the established
+    1800s default.
+    """
+    state = _state_at_run_phase(tmp_path)
+    # Two hours remaining — well above the 1800s default.
+    state.deadline_at = time.monotonic() + 7200.0
+    state.deadline_at_epoch = time.time() + 7200.0
+
+    captured: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        captured["kwargs"] = kwargs
+        return {
+            "job_id": "job_ralph_default",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    await pipeline.run(state)
+
+    forwarded = captured["kwargs"]
+    # Remaining is much greater than 1800s, so the cap saturates at the
+    # Ralph default — never above it.
+    assert forwarded["per_iteration_timeout_seconds"] == 1800.0
+
+
+# ---------------------------------------------------------------------------
+# Persisted complete_product intent (review-3 finding 2).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pipeline_promotes_complete_product_from_persisted_state(tmp_path) -> None:
+    """A session originally started with ``complete_product=True`` keeps the
+    RUN → RALPH_HANDOFF chain on resume even if the caller forgot to re-pass
+    the flag at construction time.
+    """
+    state = _state_at_run_phase(tmp_path)
+    state.complete_product = True
+
+    captured: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        captured["kwargs"] = kwargs
+        return {
+            "job_id": "job_ralph_promoted",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    # Construct the pipeline WITHOUT complete_product=True — only the
+    # persisted state carries the intent. The pipeline must still reach the
+    # ralph handoff because the persisted intent dominates an absent flag.
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=False,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.ralph_job_id == "job_ralph_promoted"
+    assert "kwargs" in captured  # ralph_starter actually invoked
+    # The pipeline's effective complete_product reflects the persisted truth.
+    assert pipeline.complete_product is True
+
+
+def test_state_persists_complete_product_field(tmp_path) -> None:
+    """``complete_product`` must survive ``to_dict`` / ``from_dict`` round-trips.
+
+    Without persistence, a session originally started with the flag would
+    silently fall back to legacy RUN→COMPLETE behavior on resume.
+    """
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.complete_product = True
+    payload = state.to_dict()
+    assert payload["complete_product"] is True
+    restored = AutoPipelineState.from_dict(payload)
+    assert restored.complete_product is True
+
+
+def test_state_legacy_payload_defaults_complete_product_false(tmp_path) -> None:
+    """Legacy state files without ``complete_product`` must load with default False.
+
+    Pre-#773 (review-3) state files do not have the field; loading must not
+    raise and must surface the default-off semantics so existing sessions
+    keep their pre-promotion behavior.
+    """
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    payload = state.to_dict()
+    payload.pop("complete_product")
+    restored = AutoPipelineState.from_dict(payload)
+    assert restored.complete_product is False

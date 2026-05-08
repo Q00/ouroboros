@@ -318,6 +318,17 @@ async def _run_auto(
         else:
             state.max_repair_rounds = max_repair_rounds
         skip_run = skip_run or state.skip_run
+        # Q00/ouroboros#773 (review-3): ``--complete-product`` is durable
+        # session intent, not a per-invocation flag. Honor the persisted value
+        # on resume so a session originally started with ``--complete-product``
+        # keeps chaining RUN → RALPH_HANDOFF even when the operator forgets to
+        # re-pass the flag. Lowering on resume is rejected to mirror the
+        # ``--max-*-rounds`` policy: a bound that already shaped behavior must
+        # be raised explicitly, never silently tightened.
+        if state.complete_product and not complete_product:
+            complete_product = True
+        elif complete_product and not state.complete_product:
+            state.complete_product = True
     else:
         if goal is None or not goal.strip():
             raise ValueError("goal is required when not resuming")
@@ -331,6 +342,7 @@ async def _run_auto(
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
+        state.complete_product = complete_product
         if pipeline_timeout_seconds is not None:
             state.pipeline_timeout_seconds = float(pipeline_timeout_seconds)
 
