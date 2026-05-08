@@ -157,6 +157,33 @@ async def test_resume_after_deadline_expired_immediately_blocks(tmp_path) -> Non
     assert driver.invocations == 0
 
 
+@pytest.mark.asyncio
+async def test_resume_arms_missing_legacy_deadline_before_phase_work(tmp_path) -> None:
+    """Legacy non-terminal states without deadline fields must get a deadline on resume."""
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.pipeline_timeout_seconds = 60.0
+    state.transition(AutoPhase.INTERVIEW, "legacy interview state")
+    state.deadline_at = None
+    state.deadline_at_epoch = None
+    # Force an early return after the resume entry path so the assertion locks
+    # deadline arming itself, not later phase execution behavior.
+    state.seed_artifact = {"invalid": "seed"}
+
+    driver = _NeverInterviewDriver()
+    pipeline = AutoPipeline(driver, _unused_seed_generator, store=store)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "failed"
+    assert state.deadline_at is not None
+    assert state.deadline_at_epoch is not None
+    assert driver.invocations == 0
+    loaded = store.load(state.auto_session_id)
+    assert loaded.deadline_at is not None
+    assert loaded.deadline_at_epoch is not None
+
+
 def test_arm_deadline_is_idempotent() -> None:
     """Re-calling ``arm_deadline()`` must not silently shift the absolute target."""
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")

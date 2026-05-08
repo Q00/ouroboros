@@ -189,6 +189,15 @@ class AutoPipeline:
             )
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
+        if state.deadline_at is None and not state.is_terminal():
+            # Legacy states persisted before the deadline fields existed can
+            # otherwise resume forever: ``is_deadline_expired()`` returns
+            # False for ``None``. Arm a fresh absolute deadline once at resume
+            # entry so all non-terminal sessions honor the pipeline ceiling.
+            # Do not save immediately: older states may still need the
+            # resume-time validation/backfill below to sanitize legacy fields
+            # before AutoStore validation runs.
+            state.arm_deadline()
         resume_tool_name = state.last_tool_name
         if state.seed_artifact:
             try:
@@ -552,8 +561,11 @@ class AutoPipeline:
             self._save(state)
             run_meta: dict[str, Any] | None = None
             try:
+                run_kwargs: dict[str, Any] = {}
+                if _accepts_keyword(self.run_starter, "idempotency_key"):
+                    run_kwargs["idempotency_key"] = idempotency_key
                 run_meta = await asyncio.wait_for(
-                    self.run_starter(seed, idempotency_key=idempotency_key),
+                    self.run_starter(seed, **run_kwargs),
                     timeout=self.run_start_timeout_seconds,
                 )
                 if not isinstance(run_meta, dict):
@@ -692,7 +704,21 @@ class AutoPipeline:
         self._save(state)
         max_total_seconds: float | None = None
         if state.deadline_at is not None:
-            max_total_seconds = max(0.0, state.deadline_at - time.monotonic())
+            remaining = state.deadline_at - time.monotonic()
+            if remaining < 1.0:
+                state.mark_blocked(
+                    "pipeline_timeout: insufficient remaining budget for Ralph handoff",
+                    tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+                )
+                self._save(state)
+                return self._result(
+                    state,
+                    ledger,
+                    review=review,
+                    blocker=state.last_error,
+                    run_subagent=run_subagent,
+                )
+            max_total_seconds = remaining
 
         def _persist_ralph_started(started_meta: dict[str, Any]) -> None:
             """Persist the durable Ralph handle before waiting for terminal status."""
@@ -1139,6 +1165,8 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         # Without this entry a transient timeout becomes a permanent dead end.
         return AutoPhase.REVIEW
     if tool_name == "run_starter":
+        return AutoPhase.RUN
+    if tool_name == "ralph_starter":
         return AutoPhase.RUN
     return None
 

@@ -1169,6 +1169,7 @@ def build_ralph_subagent(
     project_dir: str | None = None,
     max_generations: int = 10,
     per_iteration_timeout_seconds: float | None = None,
+    max_total_seconds: float | None = None,
     oscillation_window: int | None = None,
     grade_regression_window: int | None = None,
     delegation_depth: int = 1,
@@ -1182,24 +1183,22 @@ def build_ralph_subagent(
     than enqueueing an unobservable local background job.
 
     Args:
-        per_iteration_timeout_seconds: Per-iteration wall-clock bound forwarded
-            from the MCP handler.
-
-            This is an *advisory* bound on the plugin path: the parent Python
-            MCP process cannot interrupt the OpenCode child session, so the
-            value is rendered into the subagent's prompt (with an explicit
-            stop instruction) and context dict, and the child session is
-            expected to honor it and return
-            ``stop_reason=iteration_timeout`` on expiry. A non-conforming
-            child session may still exceed the bound; hard wall-clock
-            enforcement only exists on the in-process runtime path
-            (``RalphLoopRunner``). When ``None``, the field is omitted from
-            both prompt and context (legacy shape preserved for callers that
-            don't care about the bound).
-        oscillation_window: Number of trailing iterations whose ``findings_hash``
-            must be identical (and QA still failing) before the plugin child
-            session must stop with ``stop_reason=oscillation_detected``. When
-            ``None``, the block is omitted from the prompt and context.
+        per_iteration_timeout_seconds: Advisory per-iteration wall-clock bound
+            forwarded from the MCP handler. The parent MCP process cannot
+            interrupt the OpenCode child session, so the value is rendered into
+            the prompt and context and the child is expected to return
+            ``stop_reason=iteration_timeout`` on expiry.
+        max_total_seconds: Advisory total wall-clock bound forwarded from the
+            MCP handler. The plugin child session must abort the Ralph loop once
+            total elapsed time exceeds this value and surface
+            ``stop_reason=wall_clock_exhausted`` to match the in-process public
+            contract. When ``None``, the field is omitted from prompt and
+            context.
+        oscillation_window: Number of trailing iterations whose
+            ``findings_hash`` must be identical (and QA still failing) before
+            the plugin child session must stop with
+            ``stop_reason=oscillation_detected``. When ``None``, the block is
+            omitted from the prompt and context.
         grade_regression_window: Number of trailing iterations whose non-None
             ``grade`` values must be strictly decreasing before the plugin
             child session must stop with ``stop_reason=grade_regressing``. When
@@ -1237,6 +1236,16 @@ def build_ralph_subagent(
             "from prior generation state.\n"
         )
     )
+
+    total_timeout_note = ""
+    if max_total_seconds is not None:
+        total_timeout_note = (
+            "\n## Total Loop Timeout\n"
+            f"max_total_seconds: {max_total_seconds:g}\n"
+            "Stop the Ralph loop immediately once total elapsed time exceeds "
+            f"{max_total_seconds:g} seconds; that satisfies the public "
+            "contract `stop_reason=wall_clock_exhausted`.\n"
+        )
 
     timeout_note = ""
     if per_iteration_timeout_seconds is not None:
@@ -1277,6 +1286,8 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - action is converged
 - action is failed / interrupted / exhausted / stagnated
 - max_generations is reached
+- total elapsed time exceeds max_total_seconds (when supplied) — return
+  stop_reason=wall_clock_exhausted
 - a single `evolve_step` invocation exceeds per_iteration_timeout_seconds
   (when supplied) — return stop_reason=iteration_timeout
 - the last `oscillation_window` iterations share one `findings_hash` with QA
@@ -1295,7 +1306,7 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - allow_nested_ouroboros_ralph: {str(allow_nested_ouroboros_ralph).lower()}
 - Do not call ouroboros_ralph from this child session. Run the loop directly
   by executing/evaluating one generation at a time.
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{timeout_note}{progress_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{total_timeout_note}{timeout_note}{progress_note}
 For generation 1, use the seed content when present. For later generations,
 reconstruct state from the lineage and continue without resending seed_content.
 
@@ -1317,6 +1328,8 @@ do not enqueue another background Ralph job."""
     }
     if per_iteration_timeout_seconds is not None:
         context["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds
+    if max_total_seconds is not None:
+        context["max_total_seconds"] = max_total_seconds
     if oscillation_window is not None:
         context["oscillation_window"] = oscillation_window
     if grade_regression_window is not None:

@@ -76,6 +76,7 @@ def _make_job_event(
     stop_reason: str | None = None,
     error: str | None = None,
     message: str | None = None,
+    result_meta: dict[str, Any] | None = None,
 ) -> BaseEvent:
     payload: dict[str, Any] = {
         "links": {"lineage_id": lineage_id},
@@ -89,6 +90,8 @@ def _make_job_event(
         payload["error"] = error
     if message is not None:
         payload["message"] = message
+    if result_meta is not None:
+        payload["result_meta"] = result_meta
     return BaseEvent(
         type=event_type,
         aggregate_type="job",
@@ -133,6 +136,23 @@ def test_happy_path_qa_passed_completes_auto(tmp_path) -> None:
     assert ralph["stop_reason"] == "qa passed"
     assert ralph["current_generation"] == 4
     assert ralph["lineage_id"] == state.ralph_lineage_id
+
+
+def test_terminal_result_meta_stop_reason_preferred_over_payload_status(tmp_path) -> None:
+    """JobManager terminal events keep Ralph stop_reason in result_meta."""
+    state = _state_at_ralph_handoff(tmp_path)
+    event = _make_job_event(
+        "mcp.job.completed",
+        job_id=state.ralph_job_id,
+        lineage_id=state.ralph_lineage_id,
+        status=JobStatus.COMPLETED.value,
+        result_meta={"stop_reason": "qa passed"},
+    )
+
+    assert apply_event(state, event) is True
+
+    assert state.ralph_job_status == JobStatus.COMPLETED.value
+    assert state.ralph_stop_reason == "qa passed"
 
 
 # ---------------------------------------------------------------------------

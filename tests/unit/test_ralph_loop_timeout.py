@@ -221,16 +221,16 @@ async def test_ralph_handler_rejects_non_finite_per_iteration_timeout(
 
 
 @pytest.mark.asyncio
-async def test_plugin_dispatch_forwards_per_iteration_timeout_seconds(
+async def test_plugin_dispatch_forwards_iteration_and_total_timeouts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plugin-mode dispatch must forward per_iteration_timeout_seconds.
+    """Plugin-mode dispatch must forward iteration and total timeout budgets.
 
-    Wiring lock for #784 review-1: when ``should_dispatch_via_plugin`` returns
-    True, the produced ``_subagent`` payload context must include
-    ``per_iteration_timeout_seconds``. Otherwise the public stop-reason
-    contract (``iteration_timeout``) is silently dropped on the plugin path
-    and the child session can hang indefinitely.
+    Wiring lock for #784/#777: when ``should_dispatch_via_plugin`` returns
+    True, the produced ``_subagent`` payload context must include both
+    ``per_iteration_timeout_seconds`` and ``max_total_seconds``. Otherwise the
+    public stop-reason contracts are silently dropped on the plugin path and
+    the child session can hang indefinitely.
     """
     import json as _json
 
@@ -258,6 +258,7 @@ async def test_plugin_dispatch_forwards_per_iteration_timeout_seconds(
             "seed_content": "goal: ship",
             "max_generations": 3,
             "per_iteration_timeout_seconds": 1234,
+            "max_total_seconds": 4321,
         }
     )
 
@@ -267,5 +268,8 @@ async def test_plugin_dispatch_forwards_per_iteration_timeout_seconds(
     sub = body["_subagent"]
     assert sub["tool_name"] == "ouroboros_ralph"
     assert sub["context"]["per_iteration_timeout_seconds"] == 1234
+    assert sub["context"]["max_total_seconds"] == 4321
     assert "per_iteration_timeout_seconds: 1234" in sub["prompt"]
+    assert "max_total_seconds: 4321" in sub["prompt"]
     assert "stop_reason=iteration_timeout" in sub["prompt"]
+    assert "stop_reason=wall_clock_exhausted" in sub["prompt"]

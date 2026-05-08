@@ -107,11 +107,20 @@ def _project_event(event: BaseEvent) -> _RalphEventReading | None:
     payload = event.data if isinstance(event.data, dict) else {}
     raw_status = payload.get("status")
     status = raw_status if isinstance(raw_status, str) and raw_status else None
+    result_meta = payload.get("result_meta")
+    if not isinstance(result_meta, dict):
+        result_meta = {}
     stop_reason: str | None = None
-    if isinstance(payload.get("stop_reason"), str) and payload["stop_reason"]:
+    meta_stop_reason = result_meta.get("stop_reason")
+    if isinstance(meta_stop_reason, str) and meta_stop_reason:
+        stop_reason = meta_stop_reason
+    elif isinstance(payload.get("stop_reason"), str) and payload["stop_reason"]:
         stop_reason = payload["stop_reason"]
     error: str | None = None
-    if isinstance(payload.get("error"), str) and payload["error"]:
+    meta_error = result_meta.get("error")
+    if isinstance(meta_error, str) and meta_error:
+        error = meta_error
+    elif isinstance(payload.get("error"), str) and payload["error"]:
         error = payload["error"]
     is_terminal = event.type in {
         "mcp.job.completed",

@@ -9,6 +9,7 @@ pre-#773 result shape.
 from __future__ import annotations
 
 from dataclasses import asdict
+import time
 from typing import Any
 
 import pytest
@@ -17,8 +18,10 @@ from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import (
     _RALPH_BLOCKED_STOP_REASONS,
+    PIPELINE_DEADLINE_TOOL_NAME,
     AutoPipeline,
     AutoPipelineResult,
+    _recoverable_phase_for_tool,
 )
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
@@ -432,3 +435,36 @@ async def test_complete_product_off_matches_legacy_shape(tmp_path) -> None:
     assert payload["ralph_job_id"] is None
     assert payload["ralph_lineage_id"] is None
     assert payload["ralph_dispatch_mode"] is None
+
+
+def test_ralph_starter_blocker_is_recoverable_to_run() -> None:
+    """Ralph budget blockers must not become resume dead-ends."""
+    assert _recoverable_phase_for_tool("ralph_starter") is AutoPhase.RUN
+
+
+@pytest.mark.asyncio
+async def test_ralph_handoff_blocks_before_invalid_subsecond_total_budget(tmp_path) -> None:
+    """Do not call ouroboros_ralph with max_total_seconds below its 1s floor."""
+    state = _state_at_run_phase(tmp_path)
+    state.deadline_at = time.monotonic() + 0.05
+    state.deadline_at_epoch = time.time() + 0.05
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("ralph_starter must not be invoked with subsecond budget")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert state.last_error is not None
+    assert "pipeline_timeout" in state.last_error
