@@ -7,6 +7,7 @@ longer have to own the multi-generation loop in prompt/skill pseudo-code.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import math
 from typing import Any
 
@@ -41,7 +42,11 @@ from ouroboros.ralph_loop import (
 MAX_RALPH_GENERATIONS = 10
 MIN_PER_ITERATION_TIMEOUT_SECONDS = 30.0
 MAX_PER_ITERATION_TIMEOUT_SECONDS = 7200.0
+MIN_MAX_TOTAL_SECONDS = 1.0
+MAX_MAX_TOTAL_SECONDS = 86400.0
 MIN_PROGRESS_WINDOW = 2  # smallest window where strict-decrease / repeat checks are meaningful
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -140,6 +145,21 @@ class RalphHandler:
                     ),
                     required=False,
                     default=DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
+                ),
+                MCPToolParameter(
+                    name="max_total_seconds",
+                    type=ToolInputType.NUMBER,
+                    description=(
+                        "Total wall-clock budget for the entire Ralph loop in "
+                        "seconds. Checked at the top of every iteration BEFORE "
+                        "launching evolve_step; on exhaustion the loop stops "
+                        "with stop_reason='wall_clock_exhausted'. When omitted, "
+                        "a derived ceiling of "
+                        "max_generations * per_iteration_timeout_seconds is "
+                        "auto-applied (with a WARNING log) for standalone "
+                        "callers. Range: 1-86400."
+                    ),
+                    required=False,
                 ),
                 MCPToolParameter(
                     name="oscillation_window",
@@ -245,6 +265,49 @@ class RalphHandler:
                 )
             )
 
+        raw_max_total_seconds = arguments.get("max_total_seconds")
+        max_total_seconds: float | None
+        if raw_max_total_seconds is None:
+            max_total_seconds = None
+        else:
+            try:
+                max_total_seconds = float(raw_max_total_seconds)
+            except (TypeError, ValueError):
+                return Result.err(
+                    MCPToolError(
+                        "max_total_seconds must be a number",
+                        tool_name="ouroboros_ralph",
+                    )
+                )
+            if not math.isfinite(max_total_seconds):
+                return Result.err(
+                    MCPToolError(
+                        "max_total_seconds must be a finite number",
+                        tool_name="ouroboros_ralph",
+                    )
+                )
+            if (
+                max_total_seconds < MIN_MAX_TOTAL_SECONDS
+                or max_total_seconds > MAX_MAX_TOTAL_SECONDS
+            ):
+                return Result.err(
+                    MCPToolError(
+                        "max_total_seconds must be between "
+                        f"{MIN_MAX_TOTAL_SECONDS:g} and "
+                        f"{MAX_MAX_TOTAL_SECONDS:g}",
+                        tool_name="ouroboros_ralph",
+                    )
+                )
+
+        if max_total_seconds is None:
+            derived = float(max_generations) * per_iteration_timeout_seconds
+            logger.warning(
+                "max_total_seconds not provided; auto-applying derived ceiling "
+                "of %ss based on max_generations × per_iteration_timeout_seconds",
+                f"{derived:g}",
+            )
+            max_total_seconds = derived
+
         oscillation_window_result = _coerce_window(
             arguments.get("oscillation_window", DEFAULT_OSCILLATION_WINDOW),
             field_name="oscillation_window",
@@ -297,6 +360,7 @@ class RalphHandler:
             project_dir=arguments.get("project_dir"),
             max_generations=max_generations,
             per_iteration_timeout_seconds=per_iteration_timeout_seconds,
+            max_total_seconds=max_total_seconds,
             oscillation_window=oscillation_window,
             grade_regression_window=grade_regression_window,
         )
@@ -311,6 +375,7 @@ class RalphHandler:
                 project_dir=config.project_dir,
                 max_generations=config.max_generations,
                 per_iteration_timeout_seconds=config.per_iteration_timeout_seconds,
+                max_total_seconds=config.max_total_seconds,
                 oscillation_window=config.oscillation_window,
                 grade_regression_window=config.grade_regression_window,
             )

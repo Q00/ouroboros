@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import json
+import time
 from typing import Any, Protocol
 
 from ouroboros.core.types import Result
@@ -51,6 +52,7 @@ class RalphLoopConfig:
     project_dir: str | None = None
     max_generations: int = 10
     per_iteration_timeout_seconds: float = DEFAULT_PER_ITERATION_TIMEOUT_SECONDS
+    max_total_seconds: float | None = None
     oscillation_window: int = DEFAULT_OSCILLATION_WINDOW
     grade_regression_window: int = DEFAULT_GRADE_REGRESSION_WINDOW
 
@@ -136,8 +138,35 @@ class RalphLoopRunner:
         seed_content = config.seed_content
         stop_reason = "max_generations reached"
         status = "completed"
+        loop_start_monotonic = time.monotonic()
 
         for iteration_index in range(1, config.max_generations + 1):
+            if (
+                config.max_total_seconds is not None
+                and time.monotonic() - loop_start_monotonic >= config.max_total_seconds
+            ):
+                status = "failed"
+                stop_reason = "wall_clock_exhausted"
+                final_result = MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                "Ralph loop wall-clock budget exhausted before "
+                                f"iteration {iteration_index} could start "
+                                f"(max_total_seconds={config.max_total_seconds:g})."
+                            ),
+                        ),
+                    ),
+                    is_error=True,
+                    meta={
+                        "lineage_id": config.lineage_id,
+                        "action": "wall_clock_exhausted",
+                        "generation": None,
+                    },
+                )
+                break
+
             arguments: dict[str, Any] = {
                 "lineage_id": config.lineage_id,
                 "execute": config.execute,
