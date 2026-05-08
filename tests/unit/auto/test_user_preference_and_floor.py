@@ -76,14 +76,10 @@ def _seed(*, ambiguity_score: float = 0.05) -> Seed:
         ontology_schema=OntologySchema(
             name="CliTask",
             description="CLI task ontology",
-            fields=(
-                OntologyField(name="command", field_type="string", description="Command"),
-            ),
+            fields=(OntologyField(name="command", field_type="string", description="Command"),),
         ),
         evaluation_principles=(
-            EvaluationPrinciple(
-                name="testability", description="Observable behavior", weight=1.0
-            ),
+            EvaluationPrinciple(name="testability", description="Observable behavior", weight=1.0),
         ),
         exit_conditions=(
             ExitCondition(
@@ -263,9 +259,7 @@ def test_answerer_upgrades_default_runtime_answer_to_user_preference() -> None:
         user_preferences={"runtime_context": "Python 3.14 with uv"},
     )
 
-    answer = AutoAnswerer().answer(
-        "Which runtime and framework should we use?", ledger, context
-    )
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
 
     assert answer.source == AutoAnswerSource.USER_PREFERENCE
     assert answer.confidence == 0.83
@@ -287,9 +281,7 @@ def test_answerer_repo_fact_beats_user_preference_for_runtime() -> None:
         user_preferences={"runtime_context": "Rust with Cargo"},
     )
 
-    answer = AutoAnswerer().answer(
-        "Which runtime and framework should we use?", ledger, context
-    )
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
 
     assert answer.source == AutoAnswerSource.REPO_FACT
     assert "Python 3.12" in answer.text
@@ -302,9 +294,7 @@ def test_answerer_user_preference_log_format() -> None:
         user_preferences={"runtime_context": "Python 3.14 with uv"},
     )
 
-    answer = AutoAnswerer().answer(
-        "Which runtime and framework should we use?", ledger, context
-    )
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
 
     assert answer.prefixed_text == "[from-auto][user_preference] Python 3.14 with uv"
 
@@ -316,9 +306,7 @@ def test_answerer_no_upgrade_without_matching_preference() -> None:
         user_preferences={"non_goals": "no analytics"},
     )
 
-    answer = AutoAnswerer().answer(
-        "Which runtime and framework should we use?", ledger, context
-    )
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
 
     # Falls back to EXISTING_CONVENTION default, NOT user_preference
     assert answer.source != AutoAnswerSource.USER_PREFERENCE
@@ -330,9 +318,7 @@ def test_answerer_skips_empty_user_preference_values() -> None:
         user_preferences={"runtime_context": "   "},  # whitespace-only ignored
     )
 
-    answer = AutoAnswerer().answer(
-        "Which runtime and framework should we use?", ledger, context
-    )
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
 
     assert answer.source != AutoAnswerSource.USER_PREFERENCE
 
@@ -427,9 +413,7 @@ def _ready_ledger(goal: str, *, evidence_backed: bool) -> SeedDraftLedger:
                 value=value,
                 source=source,
                 confidence=0.85,
-                status=(
-                    LedgerStatus.CONFIRMED if evidence_backed else LedgerStatus.DEFAULTED
-                ),
+                status=(LedgerStatus.CONFIRMED if evidence_backed else LedgerStatus.DEFAULTED),
             ),
         )
     return ledger
@@ -626,9 +610,7 @@ def test_user_preference_for_safe_runtime_question_is_unaffected_by_gate() -> No
         user_preferences={"runtime_context": "Python 3.14 with uv"},
     )
 
-    answer = AutoAnswerer().answer(
-        "Which runtime and framework should we use?", ledger, context
-    )
+    answer = AutoAnswerer().answer("Which runtime and framework should we use?", ledger, context)
 
     assert answer.source == AutoAnswerSource.USER_PREFERENCE
     assert answer.text == "Python 3.14 with uv"

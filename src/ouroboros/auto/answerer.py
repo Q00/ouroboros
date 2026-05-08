@@ -184,9 +184,7 @@ class AutoAnswerer:
         # Try a USER_PREFERENCE upgrade for upgradable answers (CONSERVATIVE_DEFAULT
         # / ASSUMPTION sources only). Stronger sources (REPO_FACT,
         # EXISTING_CONVENTION, NON_GOAL, USER_GOAL) are preserved as-is.
-        answer = _maybe_apply_user_preference(
-            answer, _section_hints_for_intents(intents), context
-        )
+        answer = _maybe_apply_user_preference(answer, _section_hints_for_intents(intents), context)
 
         # When the chosen route produced a non-grounded fallback (ASSUMPTION,
         # EXISTING_CONVENTION, CONSERVATIVE_DEFAULT) for a question that the
@@ -261,9 +259,7 @@ class AutoAnswerer:
             )
         if section in {"acceptance_criteria", "verification_plan"}:
             return _maybe_apply_user_preference(
-                self._verification_answer(
-                    "Which command output verifies the acceptance criteria?"
-                ),
+                self._verification_answer("Which command output verifies the acceptance criteria?"),
                 (section,),
                 context,
             )
