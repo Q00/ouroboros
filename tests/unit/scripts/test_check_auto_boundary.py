@@ -287,19 +287,18 @@ def test_clean_auto_dir_with_anchors_passes(
     assert rc == 0
 
 
-def test_symlink_directory_under_scan_root_is_skipped(
+def test_symlink_directory_resolving_outside_repo_is_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A symlinked directory under the scan root must not pull files
-    from outside the boundary into the scan.
+    """A symlinked directory that resolves OUTSIDE the repo must not
+    pull files into the scan.
 
-    Without ``is_symlink()`` filtering, ``Path.rglob`` happily descends
-    into a directory symlink and pulls every ``*.py`` under the link
-    target into the scan. A symlink farm such as
-    ``src/ouroboros/auto/external -> ../../vendor/sdk`` would then
-    produce false-positive failures on files we deliberately did not
-    police, training reviewers to add spurious allowlist markers to
-    vendored code.
+    The boundary the guard cares about is "does this file still resolve
+    inside the repo?", not "is this path a symlink?". A symlink farm
+    such as ``src/ouroboros/auto/external -> /home/user/vendor/sdk``
+    would otherwise make ``Path.rglob`` descend into the link target
+    and produce false-positive failures on vendored code we
+    deliberately did not police.
     """
     module = _load_module()
     fake_repo = tmp_path / "repo"
@@ -321,20 +320,16 @@ def test_symlink_directory_under_scan_root_is_skipped(
 
     _isolate(module, monkeypatch, fake_repo)
     rc = module.main()
-    assert rc == 0, (
-        "scan should not descend through the symlink and should not fail "
-        "on files outside the scan boundary"
-    )
+    assert rc == 0, "scan should skip files whose resolved path is outside REPO_ROOT"
 
 
-def test_symlinked_python_file_under_scan_root_is_skipped(
+def test_symlinked_python_file_resolving_outside_repo_is_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A symlinked ``*.py`` file under the scan root is also skipped.
-
-    Same boundary contract as the directory-symlink case above, applied
-    to a single-file symlink (``auto/legacy.py -> ../../vendor/sdk.py``).
-    """
+    """A symlinked ``*.py`` file whose target lives outside the repo is
+    skipped — same out-of-repo boundary as the directory-symlink case
+    above, applied to a single-file symlink such as
+    ``auto/legacy.py -> /usr/local/vendor/sdk.py``."""
     module = _load_module()
     fake_repo = tmp_path / "repo"
     auto_dir = fake_repo / "src" / "ouroboros" / "auto"
@@ -350,7 +345,76 @@ def test_symlinked_python_file_under_scan_root_is_skipped(
 
     _isolate(module, monkeypatch, fake_repo)
     rc = module.main()
-    assert rc == 0, "single-file symlink must not pull external file into scan"
+    assert rc == 0, "single-file symlink resolving outside REPO_ROOT must not be scanned"
+
+
+def test_in_repo_symlink_clean_target_still_scanned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An in-repo symlink (target still resolves inside the repo) must
+    remain in the scan set.
+
+    Pins the contract boundary the bot review on PR #797 flagged: the
+    earlier ``is_symlink()``-based filter turned every in-repo symlink
+    into an unscanned blind spot, even though Python imports the
+    symlinked file normally and a contributor could quietly stash
+    domain-specific code behind such a link. The fix anchors the
+    exclusion on "resolved target escapes REPO_ROOT", not on path
+    type.
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    auto_dir = fake_repo / "src" / "ouroboros" / "auto"
+    auto_dir.mkdir(parents=True)
+    cli_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "auto.py").write_text("# clean\n")
+
+    # In-repo destination — the scan target file lives elsewhere in the
+    # repo, but is reachable through the auto/ symlink.
+    shared = fake_repo / "src" / "ouroboros" / "shared"
+    shared.mkdir(parents=True)
+    (shared / "legacy.py").write_text("# clean\n")
+    (auto_dir / "legacy.py").symlink_to(shared / "legacy.py")
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 0, "in-repo symlink to clean file must not regress the scan"
+
+
+def test_in_repo_symlink_dirty_target_is_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An in-repo symlink whose target carries a forbidden keyword MUST
+    be caught — the resolved path is in-repo, so it is part of the
+    boundary contract.
+
+    This is the exact regression class the bot review on PR #797
+    described: ``auto/legacy.py -> ../shared/has_github.py`` would have
+    been silently skipped under the prior is-symlink filter, allowing a
+    contributor to launder domain code behind a symlink.
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    auto_dir = fake_repo / "src" / "ouroboros" / "auto"
+    auto_dir.mkdir(parents=True)
+    cli_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "auto.py").write_text("# clean\n")
+
+    shared = fake_repo / "src" / "ouroboros" / "shared"
+    shared.mkdir(parents=True)
+    (shared / "leaked.py").write_text("class GitHubAdapter:\n    pass\n")
+    # In-repo symlink that lives under SCAN_DIRS — Python would import
+    # this file normally, so the guard MUST police it.
+    (auto_dir / "leaked.py").symlink_to(shared / "leaked.py")
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 1, (
+        "an in-repo symlink whose target contains a forbidden token must be "
+        "caught — the boundary is REPO_ROOT, not symlink-or-not"
+    )
 
 
 def test_keyword_in_docstring_of_watched_file_is_caught(

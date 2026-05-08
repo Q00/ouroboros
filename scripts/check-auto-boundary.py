@@ -209,38 +209,44 @@ def _resolve_scan_targets() -> tuple[list[Path], list[str]]:
     targets: list[Path] = []
     seen: set[Path] = set()
 
+    repo_root_resolved = REPO_ROOT.resolve()
     for d in SCAN_DIRS:
         root = REPO_ROOT / d
         if root.is_dir():
             for p in sorted(root.rglob("*.py")):
-                # Path.rglob follows symlinks by default. A symlink farm
-                # under SCAN_DIRS (e.g. ``src/ouroboros/auto/external ->
-                # ../../vendor/sdk``) would silently pull every ``*.py``
-                # under the link target into the scan, producing false
-                # positives for code we explicitly chose not to police —
-                # and training reviewers to add spurious allowlist markers
-                # to vendored files. Skip any symlink (file or directory
-                # link) so the scan stays anchored to in-tree files.
-                if p.is_symlink():
+                # ``Path.rglob`` follows symlinks by default. The risk a
+                # symlink farm introduces is *escape from the repo*: a
+                # link such as ``src/ouroboros/auto/external ->
+                # /home/user/vendor/sdk`` pulls every ``*.py`` under the
+                # link target into the scan, producing false positives
+                # for code we deliberately did not police.
+                #
+                # The meaningful architectural boundary here is "does
+                # this file still resolve inside the repo?", not "is
+                # this path a symlink?". A symlink that points to
+                # *another in-repo file* is just an implementation
+                # detail (``src/ouroboros/auto/legacy.py ->
+                # ../shared/legacy.py``) — Python imports it normally,
+                # so the boundary guard must scan it normally too.
+                # Earlier revisions skipped every symlink unconditionally
+                # and turned in-repo links into unscanned blind spots,
+                # weakening the guard's contract (Q00/ouroboros#797
+                # review feedback).
+                try:
+                    resolved = p.resolve(strict=False)
+                except OSError:  # broken symlink — treat as escape
                     continue
-                # Also skip files whose any parent on the scan path is a
-                # symlink: ``rglob`` traverses symlinked directories, and
-                # only the directory entry itself shows up as a symlink —
-                # the leaf ``*.py`` it descends into does not. Walk up
-                # from the file to ``root`` and reject if any intermediate
-                # directory is a symlink.
-                walked = p.parent
-                via_symlink = False
-                while walked != root and walked.parent != walked:
-                    if walked.is_symlink():
-                        via_symlink = True
-                        break
-                    walked = walked.parent
-                if via_symlink:
+                try:
+                    resolved.relative_to(repo_root_resolved)
+                except ValueError:
+                    # Resolved path is outside REPO_ROOT → either a
+                    # symlink to an external file, or a symlinked
+                    # directory whose target lives outside the repo.
+                    # Either way the file is not "in-repo code" and
+                    # must not be policed by the boundary guard.
                     continue
-                rp = p.resolve()
-                if rp not in seen:
-                    seen.add(rp)
+                if resolved not in seen:
+                    seen.add(resolved)
                     targets.append(p)
 
     for rel in SCAN_EXTRA_FILES:
