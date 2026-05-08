@@ -1336,7 +1336,38 @@ def _select_plugins(
     catalog: list[CatalogEntry],
     requested: list[str] | None,
 ) -> list[CatalogEntry]:
-    """Return catalog entries matching `requested`, or prompt interactively."""
+    """Return catalog entries matching `requested`, or prompt interactively.
+
+    A repository may legitimately host multiple subdirectories whose
+    manifests declare the same ``name`` (a refactor in flight, a
+    reorganized monorepo, an accidentally-duplicated subtree). Silently
+    collapsing those into a single ``name -> entry`` dict would let
+    ``ooo plugin add ... --plugin <name>`` install whichever entry
+    happened to win the dict overwrite — a wrong-artifact install with
+    no ambiguity error. Detect duplicates before any selection runs and
+    refuse with a friendly hint that lists the conflicting paths.
+    """
+    seen: dict[str, list[CatalogEntry]] = {}
+    for entry in catalog:
+        seen.setdefault(entry.manifest.name, []).append(entry)
+    duplicates = {n: ents for n, ents in seen.items() if len(ents) > 1}
+    if duplicates:
+        # Stable, alphabetised diagnostic so reruns produce the same
+        # error text — operators script remediation against this.
+        details = []
+        for name in sorted(duplicates):
+            paths = sorted(str(e.plugin_dir) for e in duplicates[name])
+            details.append(f"  {name!r} declared at: {paths}")
+        joined = "\n".join(details)
+        print_error(
+            "catalog has plugins declaring duplicate `name` fields; refusing "
+            "to install because the dispatcher would silently pick one "
+            "subdirectory and shadow the others:\n"
+            f"{joined}\n"
+            "Resolve by renaming the duplicate manifests or removing the "
+            "stale subtree, then re-run."
+        )
+        raise typer.Exit(code=1)
     by_name = {entry.manifest.name: entry for entry in catalog}
 
     if requested:
@@ -2198,6 +2229,25 @@ def _install_named_from_url(
         raise typer.Exit(code=1) from exc
 
     catalog = _enumerate_catalog(clone_dest)
+    # Detect duplicate manifest names BEFORE the dict comprehension
+    # collapses them silently. Identical to the guard in
+    # ``_select_plugins`` — a remote repo with two subtrees declaring
+    # the same name would otherwise install whichever entry happened
+    # to win the overwrite, masking the actual artifact behind a
+    # name lookup.
+    seen: dict[str, list[CatalogEntry]] = {}
+    for entry in catalog:
+        seen.setdefault(entry.manifest.name, []).append(entry)
+    duplicates = {n: ents for n, ents in seen.items() if len(ents) > 1}
+    if duplicates and name in duplicates:
+        paths = sorted(str(e.plugin_dir) for e in duplicates[name])
+        print_error(
+            f"repository at {repo_url} declares plugin name {name!r} in "
+            f"multiple subtrees: {paths}. Refusing to install because the "
+            "dispatcher would silently pick one and shadow the others. "
+            "Resolve in the upstream repo, then re-run."
+        )
+        raise typer.Exit(code=1)
     by_name = {entry.manifest.name: entry for entry in catalog}
     if name not in by_name:
         print_error(
@@ -2679,9 +2729,35 @@ def remove_command(
     # for the plugin's install subject"). Wrap so a corrupt trust
     # file produces a recovery hint rather than a traceback in the
     # exact command operators run to repair plugin state.
+    #
+    # The full lockfile-mutation through plugin_home cleanup runs
+    # inside ``lock.transaction()`` so the operation is atomic
+    # against concurrent ``install``. Without the transaction
+    # window, a concurrent ``install`` could race in between
+    # ``lock.remove()`` and ``shutil.rmtree(plugin_home)``: it would
+    # re-add the lockfile entry and recreate the plugin home, and
+    # the still-running ``remove`` would then delete the freshly-
+    # installed bytes — leaving the lockfile pointing at a missing
+    # directory. Holding the file lock through the rmtree closes
+    # that window.
+    plugin_home_status = "plugin home"
     try:
-        lock.remove(name)
-        trust.wipe_subject(name)
+        with lock.transaction():
+            lock.remove(name)
+            trust.wipe_subject(name)
+            if plugin_home.is_dir():
+                try:
+                    shutil.rmtree(plugin_home)
+                except OSError as exc:
+                    # Bookkeeping state is already consistent
+                    # (lockfile + trust both say uninstalled), so the
+                    # plugin cannot be invoked. Surface the cleanup
+                    # failure so the user can remove the leftover
+                    # directory manually, but don't fail the command.
+                    plugin_home_status = (
+                        f"plugin home (BYTES NOT REMOVED: {plugin_home} — "
+                        f"{type(exc).__name__}: {exc}; remove manually)"
+                    )
     except (ValueError, OSError) as exc:
         print_error(
             f"could not finalize remove for {name!r}: {exc}. "
@@ -2690,21 +2766,6 @@ def remove_command(
             f"{name}` after the underlying issue is fixed."
         )
         raise typer.Exit(code=1) from exc
-
-    plugin_home_status = "plugin home"
-    if plugin_home.is_dir():
-        try:
-            shutil.rmtree(plugin_home)
-        except OSError as exc:
-            # Bookkeeping state is already consistent (lockfile +
-            # trust both say uninstalled), so the plugin cannot be
-            # invoked. Surface the cleanup failure so the user can
-            # remove the leftover directory manually, but don't fail
-            # the command.
-            plugin_home_status = (
-                f"plugin home (BYTES NOT REMOVED: {plugin_home} — "
-                f"{type(exc).__name__}: {exc}; remove manually)"
-            )
 
     print_success(
         f"Removed {name} (lockfile entry + trust file + disable record + {plugin_home_status})"

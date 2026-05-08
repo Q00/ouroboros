@@ -113,6 +113,14 @@ class Lockfile:
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or DEFAULT_LOCKFILE_PATH
+        # Re-entrancy guard for ``transaction()``. When set, nested
+        # ``add()``/``remove()`` calls skip re-acquiring the file lock
+        # (fcntl.flock on different fds for the same file blocks
+        # within a single process). Lifecycle stays single-threaded
+        # under ``transaction()`` — the flag is per-instance and
+        # deliberately not thread-safe; the file lock itself is the
+        # cross-process serialization mechanism.
+        self._in_transaction = False
 
     def _ensure_dir(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,7 +235,17 @@ class Lockfile:
         POSIX-only. Falls through gracefully on platforms without fcntl
         (the file is still atomically replaced via os.replace, which gives
         last-writer-wins semantics — acceptable for non-concurrent use).
+
+        Re-entrant within a process when wrapped by ``transaction()``:
+        nested calls observe ``_in_transaction`` and yield without
+        attempting a second ``flock()`` (which would deadlock against
+        the outer caller's lock on a fresh fd).
         """
+        if self._in_transaction:
+            # The transaction owner already holds the OS-level lock;
+            # treat nested ``add``/``remove`` as plain in-process work.
+            yield
+            return
         self._ensure_dir()
         try:
             import fcntl
@@ -241,6 +259,26 @@ class Lockfile:
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Hold the lockfile's exclusive flock across a multi-step
+        operation. Use this when a caller needs to atomically combine
+        a lockfile mutation with related on-disk work (e.g. ``remove``
+        deleting the plugin home after ``Lockfile.remove``) and must
+        prevent a concurrent ``install`` from racing in between.
+
+        Inside the ``with`` block, ``self.add()`` and ``self.remove()``
+        skip re-acquiring the file lock (re-entrancy guard); the
+        atomic file replace is still performed per-call.
+        """
+        with self._file_lock():
+            assert not self._in_transaction, "Lockfile.transaction() is not nestable"
+            self._in_transaction = True
+            try:
+                yield
+            finally:
+                self._in_transaction = False
 
     def add(self, entry: LockEntry) -> None:
         """Add or replace an entry. Holds the file lock for the duration."""

@@ -25,6 +25,7 @@ terminal so they see what the plugin produced.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import secrets
 import sys
@@ -40,6 +41,37 @@ from ouroboros.plugin.userlevel_registry import (
     RegistryError,
     UserLevelProgramRegistry,
 )
+
+# Environment-variable overrides for the lockfile and trust root.
+#
+# The manager subcommands (``ooo plugin add|install|trust|disable|remove``)
+# accept ``--lockfile`` and ``--trust-root`` so an operator can target a
+# non-default install location (alternate user, sandboxed test rig, an
+# isolated profile under a project directory). Without a matching surface
+# on the runtime dispatcher, those installs are write-only — the manager
+# wrote the entry, but ``ooo <plugin>`` cannot find it because dispatch
+# was hard-wired to ``DEFAULT_LOCKFILE_PATH`` / ``DEFAULT_TRUST_ROOT``.
+# That broke the override surface end-to-end.
+#
+# Click commands built lazily by the typer fallback do not have a clean
+# place to thread CLI flags (the dispatcher is invoked positionally as
+# ``ooo <plugin> <command> [args...]``, so adding ``--lockfile`` here
+# would collide with the plugin's own argv namespace). Use environment
+# variables instead — operators can ``OUROBOROS_PLUGIN_LOCKFILE=...
+# ooo <plugin> ...`` to point dispatch at the same paths used during
+# install. CI rigs and test fixtures plumb the same env var.
+_LOCKFILE_ENV = "OUROBOROS_PLUGIN_LOCKFILE"
+_TRUST_ROOT_ENV = "OUROBOROS_PLUGIN_TRUST_ROOT"
+
+
+def _resolve_lockfile_path() -> Path:
+    override = os.environ.get(_LOCKFILE_ENV)
+    return Path(override).expanduser() if override else DEFAULT_LOCKFILE_PATH
+
+
+def _resolve_trust_root() -> Path:
+    override = os.environ.get(_TRUST_ROOT_ENV)
+    return Path(override).expanduser() if override else DEFAULT_TRUST_ROOT
 
 
 def _build_registry_from_lockfile(
@@ -101,12 +133,14 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
     - lockfile readable but no entry matches ``cmd_name`` → return
       ``None`` (real "unknown command").
     """
-    if not DEFAULT_LOCKFILE_PATH.exists():
+    lockfile_path = _resolve_lockfile_path()
+    trust_root = _resolve_trust_root()
+    if not lockfile_path.exists():
         # No plugins installed at all. Let typer surface the standard
         # "unknown command" hint.
         return None
     try:
-        registry, entries, corrupt = _build_registry_from_lockfile(DEFAULT_LOCKFILE_PATH)
+        registry, entries, corrupt = _build_registry_from_lockfile(lockfile_path)
     except (OSError, ValueError) as exc:
         # Lockfile present but corrupt — surface the corruption
         # directly. Hiding this as "no such command" makes a real
@@ -121,7 +155,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
         @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
         def _broken_lockfile(argv: tuple[str, ...]) -> None:  # noqa: ARG001 — argv ignored
             print_error(
-                f"plugin lockfile is unreadable ({DEFAULT_LOCKFILE_PATH}): "
+                f"plugin lockfile is unreadable ({lockfile_path}): "
                 f"{captured}. "
                 f"Inspect or replace the file (`ooo plugin list --lockfile "
                 f"<path>` accepts an override), then retry."
@@ -183,7 +217,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
             )
             raise click.exceptions.Exit(code=1)
 
-        trust = TrustStore(root=DEFAULT_TRUST_ROOT)
+        trust = TrustStore(root=trust_root)
         # The dispatcher is now a primary user-facing invocation path,
         # so a malformed `trust.json` / `disabled.json` MUST produce a
         # controlled refusal here instead of a traceback. Surface a
@@ -200,7 +234,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
             print_error(
                 f"trust state for {program.name!r} is unreadable: {exc}. "
                 f"Run `ooo plugin inspect {program.name}` for details, or "
-                f"remove the offending file under {DEFAULT_TRUST_ROOT}."
+                f"remove the offending file under {trust_root}."
             )
             raise click.exceptions.Exit(code=1) from exc
         plugin_home = Path(entry.plugin_home).expanduser()

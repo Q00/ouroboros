@@ -388,3 +388,70 @@ def test_dispatch_surfaces_corrupt_manifest_instead_of_unknown_command(
     assert "ouroboros.plugin.json" in compact, result.output
     assert "ooopluginremovegithub-pr-ops" in compact, result.output
     assert "Traceback" not in result.output
+
+
+def test_dispatch_honors_env_overrides_for_lockfile_and_trust_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime dispatcher MUST honor the same lockfile / trust-root
+    overrides that the manager subcommands accept via ``--lockfile`` and
+    ``--trust-root``. Without this, a plugin installed under a non-default
+    profile path is write-only: the manager can record it, but
+    ``ooo <plugin>`` can't find it because dispatch is hard-wired to
+    ``DEFAULT_LOCKFILE_PATH`` / ``DEFAULT_TRUST_ROOT``. Operators expose
+    the same paths to dispatch via the env vars
+    ``OUROBOROS_PLUGIN_LOCKFILE`` and ``OUROBOROS_PLUGIN_TRUST_ROOT``.
+
+    This test pins the contract: with the default paths empty (no
+    plugin installed there) and the env vars pointing at an alternate
+    install location, ``build_plugin_dispatch_command`` MUST resolve
+    against the alternate paths.
+    """
+    # 1. Stub default paths to a different empty location so the
+    #    dispatcher's "no lockfile" fast-path would otherwise fire.
+    empty_default = tmp_path / "default"
+    empty_default.mkdir()
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin_dispatch.DEFAULT_LOCKFILE_PATH",
+        empty_default / "plugins.lock",
+    )
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin_dispatch.DEFAULT_TRUST_ROOT",
+        empty_default / "trust",
+    )
+
+    # 2. Install the reference plugin at an entirely separate location
+    #    that defaults are unaware of — only the env vars know it.
+    alt_root = tmp_path / "alt"
+    alt_root.mkdir()
+    alt_lockfile = alt_root / "plugins.lock"
+    alt_trust = alt_root / "trust"
+    alt_homes = alt_root / "homes"
+    alt_homes.mkdir()
+    plugin_home = _stage_installed_plugin(
+        home_root=alt_homes,
+        lockfile_path=alt_lockfile,
+        trust_root=alt_trust,
+    )
+    monkeypatch.setenv("OUROBOROS_PLUGIN_LOCKFILE", str(alt_lockfile))
+    monkeypatch.setenv("OUROBOROS_PLUGIN_TRUST_ROOT", str(alt_trust))
+
+    # 3. Dispatch resolves the plugin via the env-supplied paths even
+    #    though the default lockfile is empty.
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None, (
+        "dispatch must consult OUROBOROS_PLUGIN_LOCKFILE / "
+        "OUROBOROS_PLUGIN_TRUST_ROOT, not the global defaults"
+    )
+
+    # 4. Sanity: removing the env vars and pointing dispatch back at
+    #    the empty default makes the resolution fail (returns None for
+    #    typer's "no such command" hint) — confirms the override is
+    #    what supplied the resolution above, not stale global state.
+    monkeypatch.delenv("OUROBOROS_PLUGIN_LOCKFILE")
+    monkeypatch.delenv("OUROBOROS_PLUGIN_TRUST_ROOT")
+    cmd_after = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd_after is None
+    # Touch ``plugin_home`` so the staging side-effect is acknowledged.
+    assert plugin_home.exists()

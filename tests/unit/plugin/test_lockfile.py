@@ -150,3 +150,56 @@ def test_concurrent_writes_do_not_corrupt(tmp_path: Path) -> None:
     assert {e.name for e in entries.values()} == {
         f"{prefix}-{i}" for prefix in ("p1", "p2") for i in range(5)
     }
+
+
+def test_transaction_allows_nested_add_and_remove(tmp_path: Path) -> None:
+    """``Lockfile.transaction()`` holds the file lock across a multi-step
+    operation so the caller can combine a lockfile mutation with related
+    on-disk work atomically. Inside the ``with`` block, ``add()`` and
+    ``remove()`` MUST NOT re-acquire the flock (that would deadlock on
+    POSIX where a second ``flock()`` on a different fd against the same
+    file blocks). Verifies the re-entrancy guard.
+    """
+    lock = Lockfile(tmp_path / "plugins.lock")
+    with lock.transaction():
+        lock.add(_make_entry("github-pr-ops"))
+        lock.add(_make_entry("other-plugin"))
+        # The transactional remove of one of the entries should also
+        # complete without deadlocking on the outer flock.
+        removed = lock.remove("other-plugin")
+        assert removed is True
+
+    # Outside the transaction the file lock is released and a fresh
+    # ``read()`` sees the persisted state.
+    entries = Lockfile(tmp_path / "plugins.lock").read()
+    assert set(entries) == {"github-pr-ops"}
+
+
+def test_transaction_serializes_with_external_flock(tmp_path: Path) -> None:
+    """A second process MUST block while another holds ``transaction()``.
+    This guards the contract that ``remove`` / multi-step lifecycles
+    can rely on the lock to suppress concurrent ``install``.
+    """
+    import fcntl
+    import time
+
+    lock = Lockfile(tmp_path / "plugins.lock")
+    lock.add(_make_entry("github-pr-ops"))
+    lock_path = (tmp_path / "plugins.lock").with_suffix(".lock.lock")
+
+    with lock.transaction():
+        # Acquiring a non-blocking exclusive flock from a separate fd
+        # MUST fail because the transaction owner is holding the lock.
+        with lock_path.open("w") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # Once we exit the transaction, the same non-blocking acquire
+    # succeeds (proves the lock is released, not leaked).
+    with lock_path.open("w") as handle:
+        # Should not raise.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    # Touch ``time`` so the import is used (keeps the test self-
+    # contained without relying on a real sleep window — the
+    # contract is exclusivity, not timing).
+    _ = time.monotonic()

@@ -127,6 +127,50 @@ def test_add_local_path_with_plugin_flag(runner: CliRunner, tmp_path: Path) -> N
     assert (paths["plugin_home_root"] / "github-pr-ops" / "ouroboros.plugin.json").is_file()
 
 
+def test_add_duplicate_manifest_names_in_catalog_refused(runner: CliRunner, tmp_path: Path) -> None:
+    """A repository may legitimately host more than one subdirectory
+    whose manifest declares the same ``name`` (a refactor in flight, an
+    accidentally-duplicated subtree, a monorepo reorganization). The
+    previous catalog selector keyed off ``manifest.name`` in a dict
+    comprehension and silently kept whichever entry overwrote last —
+    a wrong-artifact install with no ambiguity error. Detect the
+    collision before any selection runs and refuse with a hint that
+    lists the conflicting paths.
+    """
+    repo_root = tmp_path / "repo"
+    plugins_dir = repo_root / "plugins"
+    # Two distinct subdirectories whose manifests declare the same
+    # name. ``_make_repo_layout`` keys on ``manifest["name"]``, so
+    # construct the layout manually.
+    for subdir in ("github-pr-ops-a", "github-pr-ops-b"):
+        plugin_dir = plugins_dir / subdir
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+
+    paths = _common_paths(tmp_path)
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    # Stable phrase the operator can grep for.
+    assert "duplicate `name`" in result.output
+    # Both colliding paths surfaced for remediation.
+    assert "github-pr-ops-a" in result.output
+    assert "github-pr-ops-b" in result.output
+    # Crucially: nothing was installed.
+    assert not paths["lockfile"].exists() or Lockfile(paths["lockfile"]).read() == {}
+
+
 def test_add_unknown_plugin_in_catalog_errors(runner: CliRunner, tmp_path: Path) -> None:
     """Requesting a plugin not in the catalog produces a clear error."""
     repo_root = tmp_path / "repo"
