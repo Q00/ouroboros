@@ -359,11 +359,13 @@ class AutoInterviewDriver:
         return len(open_after) < len(open_before) and set(open_after).issubset(open_before)
 
     def _is_repeated_default_answer(self, answer: AutoAnswer, ledger: SeedDraftLedger) -> bool:
-        if answer.source not in {
-            AutoAnswerSource.CONSERVATIVE_DEFAULT,
-            AutoAnswerSource.ASSUMPTION,
-            AutoAnswerSource.EXISTING_CONVENTION,
-        }:
+        # Only the catch-all generic-default route counts as a "repeated
+        # generic fallback". Feature-specific helpers (acceptance, runtime,
+        # IO/actor, verification, non-goal, product behavior) may also use
+        # ``CONSERVATIVE_DEFAULT`` as their answer source but should not be
+        # treated as fallback answers — repeated specific follow-ups stay
+        # preserved instead of being swapped for an unrelated gap fill.
+        if not answer.generic_default:
             return False
         proposed = _normalize_answer_text(answer.prefixed_text)
         return any(

@@ -1171,6 +1171,41 @@ async def test_interview_driver_preserves_specific_acceptance_answers_with_open_
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_preserves_repeated_specific_acceptance_answer(
+    tmp_path,
+) -> None:
+    """A specific feature/acceptance prompt asked twice while other sections are
+    still open should still be answered specifically each time, not silently
+    replaced by a gap-targeted fallback.
+    """
+    answers: list[str] = []
+    repeated_question = "What acceptance criteria should the search feature satisfy?"
+    rounds = {"n": 0}
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(repeated_question, "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        rounds["n"] += 1
+        if rounds["n"] >= 2:
+            return InterviewTurn("Anything else?", session_id, completed=True)
+        return InterviewTurn(repeated_question, session_id)
+
+    state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=4
+    )
+
+    await driver.run(state, ledger)
+
+    assert len(answers) >= 2, answers
+    assert "search feature" in answers[0].lower()
+    assert "search feature" in answers[1].lower()
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_blocks_blank_goal_before_gap_defaults(tmp_path) -> None:
     answers: list[str] = []
 

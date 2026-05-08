@@ -75,6 +75,13 @@ class AutoAnswer:
     assumptions: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     blocker: AutoBlocker | None = None
+    # True only when the answer came from the catch-all generic-default route
+    # (``_default_answer``). Feature-specific helpers
+    # (e.g. ``_feature_acceptance_answer``, ``_runtime_answer``) leave this
+    # ``False`` even when their ``source`` is ``CONSERVATIVE_DEFAULT``, so the
+    # interview driver can preserve repeated specific follow-ups instead of
+    # treating them as repeated generic fallbacks.
+    generic_default: bool = False
 
     @property
     def prefixed_text(self) -> str:
@@ -486,7 +493,13 @@ class AutoAnswerer:
                 ),
             ),
         ]
-        return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
+        return AutoAnswer(
+            value,
+            AutoAnswerSource.CONSERVATIVE_DEFAULT,
+            0.82,
+            updates,
+            generic_default=True,
+        )
 
 
 def _is_verification_question(lowered: str) -> bool:
