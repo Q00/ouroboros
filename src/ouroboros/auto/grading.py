@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from ouroboros.auto.gap_detector import GapDetector
-from ouroboros.auto.ledger import LedgerSource, LedgerStatus, SeedDraftLedger
+from ouroboros.auto.ledger import REQUIRED_SECTIONS, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.core.seed import Seed
 
 
@@ -357,6 +357,33 @@ def _is_observable(value: str) -> bool:
         r"\b(http\s+)?status\s+2\d\d\b",
     )
     return any(re.search(pattern, lowered) for pattern in observable_patterns)
+
+
+def deterministic_floor(ledger: SeedDraftLedger) -> float:
+    """Return a code-computable lower bound for ``ambiguity_score``.
+
+    The auto pipeline calls this with the converged interview ledger and uses
+    ``max(llm_reported_score, deterministic_floor(ledger))`` so the LLM cannot
+    under-report ambiguity below what code can objectively measure: how many
+    required sections remain open, how many entries are flagged as conflicting,
+    and what fraction of resolved sections rest on assumption/inference only.
+
+    Formula:
+
+    - ``0.05`` per open required section (gap pressure)
+    - ``0.10`` per active CONFLICTING entry (contradiction pressure)
+    - ``0.05 * (assumption_only_sections / total_required)`` (evidence dilution)
+
+    Result is clamped to ``[0.0, 1.0]``.
+    """
+    summary = ledger.summary()
+    open_gap_count = len(summary.get("open_gaps", ()))
+    conflicting_count = ledger.count_active_conflicting_entries()
+    assumption_only_count = len(summary.get("assumption_only_sections", ()))
+    total_required = len(REQUIRED_SECTIONS)
+    assumption_ratio = assumption_only_count / total_required if total_required else 0.0
+    floor = 0.05 * open_gap_count + 0.10 * conflicting_count + 0.05 * assumption_ratio
+    return min(1.0, max(0.0, floor))
 
 
 def _high_risk_assumption_count(ledger: SeedDraftLedger) -> int:

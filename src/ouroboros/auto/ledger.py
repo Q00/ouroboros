@@ -14,6 +14,7 @@ class LedgerSource(StrEnum):
     USER_GOAL = "user_goal"
     REPO_FACT = "repo_fact"
     EXISTING_CONVENTION = "existing_convention"
+    USER_PREFERENCE = "user_preference"
     CONSERVATIVE_DEFAULT = "conservative_default"
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
@@ -59,6 +60,7 @@ _EVIDENCE_BACKED_SOURCES: frozenset[LedgerSource] = frozenset(
         LedgerSource.USER_GOAL,
         LedgerSource.REPO_FACT,
         LedgerSource.EXISTING_CONVENTION,
+        LedgerSource.USER_PREFERENCE,
         LedgerSource.NON_GOAL,
     }
 )
@@ -314,6 +316,20 @@ class SeedDraftLedger:
     def is_seed_ready(self) -> bool:
         """Return True when no required section is missing/conflicting/blocked."""
         return not self.open_gaps()
+
+    def count_active_conflicting_entries(self) -> int:
+        """Return the count of entries currently flagged as CONFLICTING.
+
+        Used by the deterministic_floor computation in :mod:`grading` so the
+        A-grade gate can see objective conflict pressure even when the LLM
+        under-reports ``ambiguity_score``.
+        """
+        return sum(
+            1
+            for section in self.sections.values()
+            for entry in section.entries
+            if entry.status == LedgerStatus.CONFLICTING
+        )
 
     def assumptions(self) -> list[str]:
         """Return assumption entry values."""

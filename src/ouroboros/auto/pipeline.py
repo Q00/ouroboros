@@ -11,7 +11,7 @@ import time
 from typing import Any, Protocol
 
 from ouroboros.auto.blocker_attribution import record_authoring_backend
-from ouroboros.auto.grading import GradeGate
+from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
@@ -320,6 +320,19 @@ class AutoPipeline:
                     if not isinstance(seed, Seed):
                         msg = f"seed generator returned {type(seed).__name__}, expected Seed"
                         raise TypeError(msg)
+                    # Apply deterministic floor: the LLM-derived ambiguity_score
+                    # cannot fall below what code can objectively measure from the
+                    # ledger (open gaps, conflicting entries, assumption-only
+                    # sections). Seals self-rationalization at the A-grade gate.
+                    floor = deterministic_floor(ledger)
+                    if floor > seed.metadata.ambiguity_score:
+                        seed = seed.model_copy(
+                            update={
+                                "metadata": seed.metadata.model_copy(
+                                    update={"ambiguity_score": floor}
+                                ),
+                            }
+                        )
                     state.seed_id = seed.metadata.seed_id
                     state.seed_artifact = seed.to_dict()
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
