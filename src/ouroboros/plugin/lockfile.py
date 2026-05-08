@@ -120,21 +120,64 @@ class Lockfile:
     def read(self) -> dict[str, LockEntry]:
         """Read the lockfile, returning entries keyed by plugin name.
 
-        Returns an empty dict if the file does not exist.
-        Raises ValueError if the schema_version is unsupported.
+        Returns an empty dict if the file does not exist. Raises
+        ``ValueError`` for any structurally-invalid lockfile
+        (unsupported schema_version, malformed TOML, missing required
+        per-entry fields, wrong shape). The CLI's lockfile-read
+        wrapper catches ``ValueError``/``OSError`` and surfaces a
+        recovery hint, so every shape of corruption MUST land in
+        ``ValueError`` rather than escaping as ``KeyError`` /
+        ``TypeError`` from the ``raw["name"]`` / ``raw["version"]`` /
+        etc. lookups below — otherwise the operator-facing repair
+        commands (``trust``, ``disable``, ``remove``, ``inspect``,
+        ``list``) would traceback on a parseable-but-wrong lockfile.
         """
         if not self.path.is_file():
             return {}
-        with self.path.open("rb") as handle:
-            data = tomllib.load(handle)
+        try:
+            with self.path.open("rb") as handle:
+                data = tomllib.load(handle)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"lockfile {self.path} is not valid TOML: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"lockfile {self.path} is not a TOML table")
         version = data.get("schema_version")
         if version != LOCKFILE_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported lockfile schema_version {version!r}; "
                 f"expected {LOCKFILE_SCHEMA_VERSION!r}"
             )
+        plugin_section = data.get("plugin", [])
+        if not isinstance(plugin_section, list):
+            raise ValueError(
+                f"lockfile {self.path} has a non-list `plugin` section "
+                f"(got {type(plugin_section).__name__})"
+            )
         result: dict[str, LockEntry] = {}
-        for raw in data.get("plugin", []):
+        required_fields = (
+            "name",
+            "version",
+            "source_kind",
+            "manifest_checksum",
+            "installed_at",
+            "plugin_home",
+        )
+        for index, raw in enumerate(plugin_section):
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    f"lockfile {self.path}: plugin[{index}] is not a TOML table "
+                    f"(got {type(raw).__name__})"
+                )
+            for field in required_fields:
+                if field not in raw:
+                    raise ValueError(
+                        f"lockfile {self.path}: plugin[{index}] is missing required field {field!r}"
+                    )
+                if not isinstance(raw[field], str):
+                    raise ValueError(
+                        f"lockfile {self.path}: plugin[{index}].{field} is not a string "
+                        f"(got {type(raw[field]).__name__})"
+                    )
             entry = LockEntry(
                 name=raw["name"],
                 version=raw["version"],

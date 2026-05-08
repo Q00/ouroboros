@@ -13,6 +13,7 @@ Anti-patterns explicitly rejected:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import datetime
 import hashlib
@@ -209,6 +210,11 @@ def _describe_trust_state(
 def _atomic_replace_dir(src: Path, dest: Path) -> None:
     """Copy `src` over `dest` atomically-as-possible.
 
+    See ``_atomic_install_with_rollback`` for the install-time variant
+    that DOES NOT delete the backup until the caller's follow-up work
+    (typically the lockfile write) has also succeeded — preventing
+    split-brain when the post-replace lockfile commit fails.
+
     Strategy:
       1. Copy `src` into a sibling staging directory. If this fails, no
          change to `dest`.
@@ -264,6 +270,76 @@ def _atomic_replace_dir(src: Path, dest: Path) -> None:
 
     # Step 4: cleanup backup. Failure here is non-fatal — the new install
     # is already in place.
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+@contextmanager
+def _atomic_install_with_rollback(src: Path, dest: Path):
+    """Atomic ``src``→``dest`` replace whose backup survives the caller block.
+
+    The plain ``_atomic_replace_dir`` is fine for read-only setups, but
+    the install pipeline has a transactional dependency: after the new
+    bytes are in ``dest``, the caller still needs to add a lockfile
+    entry. If that lockfile write fails (corrupt file, EROFS, EDQUOT,
+    etc.), the previous helper had already deleted the backup —
+    leaving a split-brain state where ``dest`` holds the new bytes but
+    no lockfile entry references them, and the prior install is
+    irrecoverable.
+
+    Used as a context manager: the caller's follow-up work runs INSIDE
+    the ``with`` block. If the block raises, we restore the backup
+    over ``dest`` and re-raise. If it returns cleanly, we drop the
+    backup. ``dest`` carries the new bytes during the block (matching
+    the previous behavior so digest verification in the follow-up
+    sees the post-replace tree).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    suffix = secrets.token_hex(6)
+    staging = dest.with_name(f"{dest.name}.staging-{suffix}")
+    backup = dest.with_name(f"{dest.name}.bak-{suffix}")
+
+    try:
+        shutil.copytree(src, staging, symlinks=True)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    backup_used = False
+    try:
+        if dest.exists():
+            os.rename(dest, backup)
+            backup_used = True
+        os.rename(staging, dest)
+    except Exception:
+        if backup_used and not dest.exists() and backup.exists():
+            try:
+                os.rename(backup, dest)
+            except OSError:
+                pass
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    try:
+        yield
+    except Exception:
+        # Caller's follow-up failed (typically a lockfile write).
+        # Roll back to the prior install: drop the new bytes, restore
+        # the backup. The original exception propagates so the caller
+        # surfaces the friendly recovery hint.
+        try:
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            if backup_used and backup.exists():
+                os.rename(backup, dest)
+        finally:
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+        raise
+
+    # Caller's follow-up succeeded — drop the backup.
     if backup.exists():
         shutil.rmtree(backup, ignore_errors=True)
 
@@ -1343,6 +1419,14 @@ def add_command(
         )
         raise typer.Exit(code=1) from exc
 
+    # Pre-flight lockfile health check. ``_install_one`` will write
+    # to the lockfile after the bytes are swapped into ``plugin_home``;
+    # surfacing a corrupt-or-unwritable lockfile here means we abort
+    # BEFORE mutating any plugin home, not after. The transactional
+    # ``_atomic_install_with_rollback`` below additionally restores
+    # the prior install if the post-swap write still fails.
+    _read_lock_or_exit(lock)
+
     installed: list[str] = []
     for entry in selected:
         manifest = entry.manifest
@@ -1375,22 +1459,31 @@ def add_command(
         # the old install gone, the new bytes on disk, and no lockfile
         # entry to reflect either.
         artifact_digest = canonical_tree_hash(source_dir)
-        # Atomic install: prior plugin home survives any copy failure.
-        # We DO NOT invalidate trust before this step — if the copy
-        # fails, the user should still own the unchanged install with
-        # its prior grants intact.
-        _atomic_replace_dir(source_dir, plugin_home)
-        _install_one(
-            manifest=manifest,
-            plugin_home=plugin_home,
-            lock=lock,
-            source_kind=source_kind,
-            repository=repository,
-            git_sha=git_sha,
-            source_type=manifest_source_type,
-            source_identity=plugin_source_identity,
-            artifact_digest=artifact_digest,
-        )
+        # Atomic install with rollback: keep the prior plugin_home
+        # in a sibling backup until the lockfile write succeeds. If
+        # ``_install_one`` raises (corrupt lockfile, ENOSPC,
+        # permissions, etc.), the backup is restored over plugin_home
+        # so the user does NOT lose the previously-installed bytes.
+        try:
+            with _atomic_install_with_rollback(source_dir, plugin_home):
+                _install_one(
+                    manifest=manifest,
+                    plugin_home=plugin_home,
+                    lock=lock,
+                    source_kind=source_kind,
+                    repository=repository,
+                    git_sha=git_sha,
+                    source_type=manifest_source_type,
+                    source_identity=plugin_source_identity,
+                    artifact_digest=artifact_digest,
+                )
+        except (ValueError, OSError) as exc:
+            print_error(
+                f"could not commit install for {manifest.name!r}: {exc}. "
+                f"The prior install (if any) was restored. Inspect the "
+                f"lockfile at {lock.path}, then re-run the install."
+            )
+            raise typer.Exit(code=1) from exc
         # Catalog registration: record the source so `install <name>`
         # can find it later. The recorded ``source_identity`` MUST match
         # the lockfile's per-plugin ``source_identity``; otherwise a
@@ -1652,6 +1745,9 @@ def _install_from_local_directory(
         raise typer.Exit(code=1) from exc
     # Reject before touching the filesystem.
     _refuse_first_party_external_install(manifest)
+    # Pre-flight lockfile health: surface a corrupt lockfile before
+    # we mutate plugin_home.
+    _read_lock_or_exit(lock)
 
     plugin_home = plugin_home_root / manifest.name
     # Hash the SOURCE bytes first so a digest-time failure (escaping
@@ -1659,10 +1755,6 @@ def _install_from_local_directory(
     # renamed away. The hash is content-addressable so the post-replace
     # tree has the same digest.
     artifact_digest = canonical_tree_hash(src)
-    # Atomic install: a failed copy must leave the prior install (and
-    # its trust grants) untouched. Trust is only invalidated AFTER the
-    # new subject is committed to disk and the lockfile.
-    _atomic_replace_dir(src, plugin_home)
     source_identity = str(src)
     # Per the RFC ("Trust identity"), the persisted ``source_type`` is
     # the manifest's declared semantic source, not the install
@@ -1673,17 +1765,28 @@ def _install_from_local_directory(
     # invocation blocked.
     manifest_source_type = manifest.source.type
 
-    _install_one(
-        manifest=manifest,
-        plugin_home=plugin_home,
-        lock=lock,
-        source_kind="local",
-        repository=None,
-        git_sha=None,
-        source_type=manifest_source_type,
-        source_identity=source_identity,
-        artifact_digest=artifact_digest,
-    )
+    # Atomic install with rollback: prior plugin_home is restored if
+    # the lockfile commit below fails (data-loss avoidance).
+    try:
+        with _atomic_install_with_rollback(src, plugin_home):
+            _install_one(
+                manifest=manifest,
+                plugin_home=plugin_home,
+                lock=lock,
+                source_kind="local",
+                repository=None,
+                git_sha=None,
+                source_type=manifest_source_type,
+                source_identity=source_identity,
+                artifact_digest=artifact_digest,
+            )
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"could not commit install for {manifest.name!r}: {exc}. "
+            f"The prior install (if any) was restored. Inspect the "
+            f"lockfile at {lock.path}, then re-run the install."
+        )
+        raise typer.Exit(code=1) from exc
     catalog_state.register(
         source_type=manifest_source_type,
         source_identity=source_identity,
@@ -1746,27 +1849,37 @@ def _install_named_from_local_path(
         )
         raise typer.Exit(code=1)
     _refuse_first_party_external_install(manifest)
+    # Pre-flight lockfile health.
+    _read_lock_or_exit(lock)
 
     plugin_home = plugin_home_root / manifest.name
     # Hash source bytes first; abort before mutating ``plugin_home``
     # if the tree contains an unsupported entry.
     artifact_digest = canonical_tree_hash(candidate_root)
-    _atomic_replace_dir(candidate_root, plugin_home)
     source_identity = str(candidate_root.resolve())
     # See `_install_from_local_directory` — persist manifest's source
     # type, not transport.
     manifest_source_type = manifest.source.type
-    _install_one(
-        manifest=manifest,
-        plugin_home=plugin_home,
-        lock=lock,
-        source_kind="local",
-        repository=None,
-        git_sha=None,
-        source_type=manifest_source_type,
-        source_identity=source_identity,
-        artifact_digest=artifact_digest,
-    )
+    try:
+        with _atomic_install_with_rollback(candidate_root, plugin_home):
+            _install_one(
+                manifest=manifest,
+                plugin_home=plugin_home,
+                lock=lock,
+                source_kind="local",
+                repository=None,
+                git_sha=None,
+                source_type=manifest_source_type,
+                source_identity=source_identity,
+                artifact_digest=artifact_digest,
+            )
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"could not commit install for {manifest.name!r}: {exc}. "
+            f"The prior install (if any) was restored. Inspect the "
+            f"lockfile at {lock.path}, then re-run the install."
+        )
+        raise typer.Exit(code=1) from exc
     catalog_state.register(
         source_type=manifest_source_type,
         source_identity=source_identity,
@@ -1823,28 +1936,38 @@ def _install_named_from_url(
     manifest = catalog_entry.manifest
     # Use the actual on-disk directory, not ``plugins/<manifest.name>``.
     source_dir = catalog_entry.plugin_dir
+    # Pre-flight lockfile health.
+    _read_lock_or_exit(lock)
     plugin_home = plugin_home_root / manifest.name
     # Hash source bytes first; abort before mutating ``plugin_home``
     # if the tree contains an unsupported entry.
     artifact_digest = canonical_tree_hash(source_dir)
-    _atomic_replace_dir(source_dir, plugin_home)
     source_identity = normalize_repo_url(repo_url)
     # See `_install_from_local_directory` — persist manifest's source
     # type, not transport. Cloning from a URL does not by itself imply
     # ``source.type == plugin_home``; the manifest's declared value is
     # what the firewall keys against.
     manifest_source_type = manifest.source.type
-    _install_one(
-        manifest=manifest,
-        plugin_home=plugin_home,
-        lock=lock,
-        source_kind="git",
-        repository=repo_url,
-        git_sha=git_sha,
-        source_type=manifest_source_type,
-        source_identity=source_identity,
-        artifact_digest=artifact_digest,
-    )
+    try:
+        with _atomic_install_with_rollback(source_dir, plugin_home):
+            _install_one(
+                manifest=manifest,
+                plugin_home=plugin_home,
+                lock=lock,
+                source_kind="git",
+                repository=repo_url,
+                git_sha=git_sha,
+                source_type=manifest_source_type,
+                source_identity=source_identity,
+                artifact_digest=artifact_digest,
+            )
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"could not commit install for {manifest.name!r}: {exc}. "
+            f"The prior install (if any) was restored. Inspect the "
+            f"lockfile at {lock.path}, then re-run the install."
+        )
+        raise typer.Exit(code=1) from exc
     catalog_state.register(
         source_type=manifest_source_type,
         source_identity=source_identity,
@@ -2065,8 +2188,24 @@ def trust_command(
 
     # Clear the disable record only after all fallible writes above
     # have succeeded. ``clear_disable`` is idempotent and the
-    # *last* state-changing step the command makes.
-    trust.clear_disable(name)
+    # *last* state-changing step the command makes. Wrap so a
+    # filesystem failure (permissions, etc.) on ``unlink(disabled.json)``
+    # does NOT crash after the user has already seen ``Granted: ...``
+    # — that left a partial-commit at the trust boundary where the
+    # trust file looked updated while the plugin was still disabled.
+    # The recovery hint instructs the user to re-run ``trust`` after
+    # repairing the underlying filesystem condition.
+    try:
+        trust.clear_disable(name)
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"grants for {name!r} were written, but clearing the disable "
+            f"record failed: {exc}. The plugin remains disabled until "
+            f"`ooo plugin disable {name}` is unwound — re-run "
+            f"`ooo plugin trust {name} ...` after the underlying "
+            f"filesystem issue is fixed."
+        )
+        raise typer.Exit(code=1) from exc
     if not scopes and was_disabled:
         # Bare `ooo plugin trust <zero-perm-plugin>` (or all-optional)
         # against a disabled subject — the only effective change is

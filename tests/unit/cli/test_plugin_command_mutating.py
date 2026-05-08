@@ -2777,6 +2777,172 @@ def test_install_warns_when_trust_file_is_corrupt_but_completes(
     assert entries["github-pr-ops"].version == "0.2.0"
 
 
+def test_install_rolls_back_plugin_home_on_lockfile_write_failure(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1754.
+
+    The install pipeline used to swap ``plugin_home`` into place
+    BEFORE attempting the lockfile write. If the lockfile write
+    failed, the prior install was irrecoverable while the lockfile
+    still pointed at the old subject. With
+    ``_atomic_install_with_rollback``, a failed lockfile commit
+    restores the prior bytes over ``plugin_home``.
+    """
+    paths = _common_paths(tmp_path)
+
+    prior_src = tmp_path / "prior"
+    prior_src.mkdir()
+    (prior_src / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    sentinel_marker = "PRIOR_INSTALL_BYTES"
+    (prior_src / "marker.txt").write_text(sentinel_marker)
+    install_prior = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(prior_src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert install_prior.exit_code == 0, install_prior.output
+    plugin_home = paths["plugin_home_root"] / REFERENCE_MANIFEST["name"]
+    assert (plugin_home / "marker.txt").read_text() == sentinel_marker
+
+    new_src = tmp_path / "new"
+    new_src.mkdir()
+    new_manifest = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (new_src / "ouroboros.plugin.json").write_text(json.dumps(new_manifest))
+    (new_src / "marker.txt").write_text("NEW_INSTALL_BYTES")
+
+    from ouroboros.plugin.lockfile import Lockfile as _Lockfile
+
+    real_add = _Lockfile.add
+
+    def _failing_add(self, entry):  # noqa: ANN001
+        raise OSError("synthetic: lockfile write blocked (EROFS)")
+
+    monkeypatch.setattr(_Lockfile, "add", _failing_add)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(new_src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    monkeypatch.setattr(_Lockfile, "add", real_add)
+
+    assert result.exit_code != 0, result.output
+    plain = " ".join(result.output.split())
+    assert "could not commit install" in plain or "lockfile" in plain.lower(), plain
+    assert "Traceback" not in result.output
+    # Rollback restored the prior install bytes.
+    assert (plugin_home / "marker.txt").read_text() == sentinel_marker, (
+        "the rollback failed to restore the prior plugin home"
+    )
+
+
+def test_trust_friendly_error_on_clear_disable_failure(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:2069.
+
+    ``trust.clear_disable`` is the LAST step of ``trust``. The
+    previous code ran it outside any error handling, so an unlink
+    failure crashed AFTER the user had already seen ``Granted: ...``
+    — leaving a partial-commit at the trust boundary where the trust
+    file looked updated while the plugin remained disabled.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+
+    def _failing_clear_disable(self, name):  # noqa: ANN001
+        raise OSError("synthetic: cannot unlink disabled.json (EACCES)")
+
+    monkeypatch.setattr(TrustStore, "clear_disable", _failing_clear_disable)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code != 0, result.output
+    plain = " ".join(result.output.split())
+    assert "clearing the disable record" in plain, plain
+    assert "Traceback" not in result.output
+
+
+def test_trust_friendly_error_on_structurally_corrupt_lockfile(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:279.
+
+    ``Lockfile.read()`` previously did unchecked ``raw["name"]``,
+    ``raw["version"]``, etc. A parseable-but-structurally-corrupt
+    ``plugins.lock`` (TOML table missing required fields) raised
+    ``KeyError`` rather than ``ValueError`` — escaping the wrappers
+    in ``trust``/``disable``/``remove``/``inspect``/``list`` and
+    producing a raw traceback. Loader now validates per-entry shape.
+    """
+    paths = _common_paths(tmp_path)
+    paths["lockfile"].parent.mkdir(parents=True, exist_ok=True)
+    # Valid TOML, valid schema_version, but the [[plugin]] entry is
+    # missing every required field.
+    paths["lockfile"].write_text(
+        'schema_version = "0.1"\n\n[[plugin]]\nsomething_else = "ignored"\n'
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "lockfile is unreadable" in plain, plain
+    assert "Traceback" not in result.output
+
+
 def test_trust_failure_after_disable_check_keeps_disable_record(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
