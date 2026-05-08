@@ -584,10 +584,17 @@ class GenerateSeedHandler:
         # Fall-through: real in-process seed generation (subprocess / non-opencode runtimes).
 
         try:
-            # Use injected or create services
+            # Use injected or create services.
+            # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use
+            # block emitted by the model would consume the only allowed turn
+            # and the SDK then raises ``Reached maximum number of turns (1)``
+            # before a final text response can stream. See issue #781.
             llm_adapter = self.llm_adapter or create_llm_adapter(
                 backend=self.llm_backend,
                 max_turns=1,
+                allowed_tools=[]
+                if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+                else None,
             )
             interview_engine = self.interview_engine or InterviewEngine(
                 llm_adapter=llm_adapter,

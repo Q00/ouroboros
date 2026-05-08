@@ -2109,6 +2109,7 @@ class TestOrchestratorRunner:
             cli_path=None,
             cwd="/tmp/project",
             max_turns=1,
+            allowed_tools=[],
         )
         dependency_analyzer_cls.assert_called_once_with(llm_adapter=llm_adapter)
 
@@ -2146,6 +2147,7 @@ class TestOrchestratorRunner:
             cli_path="/tmp/real-codex",
             cwd="/tmp/project",
             max_turns=1,
+            allowed_tools=[],
         )
 
     def test_build_dependency_analyzer_uses_public_llm_backend_property(
@@ -2182,6 +2184,7 @@ class TestOrchestratorRunner:
             cli_path=None,
             cwd="/tmp/project",
             max_turns=1,
+            allowed_tools=[],
         )
 
     def test_build_dependency_analyzer_falls_back_to_runtime_backend_when_llm_backend_none(
@@ -2217,6 +2220,7 @@ class TestOrchestratorRunner:
             cli_path=None,
             cwd="/tmp/project",
             max_turns=1,
+            allowed_tools=[],
         )
 
     def test_build_dependency_analyzer_catches_expected_exceptions(

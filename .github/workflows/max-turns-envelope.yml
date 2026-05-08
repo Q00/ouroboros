@@ -1,0 +1,24 @@
+name: max-turns-envelope
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  enforce-envelope:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Enforce max_turns=1 -> allowed_tools=[] pairing (#781)
+        run: python3 scripts/check-max-turns-envelope.py

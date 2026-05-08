@@ -1217,10 +1217,24 @@ def create_ouroboros_server(
     # Create shared LLM adapter for interview/seed paths.
     # Evaluation constructs its own adapter with higher max_turns — see
     # EvaluateHandler.handle in mcp/tools/evaluation_handlers.py.
+    # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use block
+    # emitted by the model would consume the only allowed turn and the SDK
+    # then raises ``Reached maximum number of turns (1)`` before a final
+    # text response can stream. See issue #781.
+    from ouroboros.backends import backend_supports_tool_envelope
+    from ouroboros.providers import resolve_llm_backend
+
+    # Inlined as a direct ``[] if cond else None`` literal (rather than a
+    # Name binding) so the static guard at scripts/check-max-turns-envelope.py
+    # can verify the envelope without resolving Name references — see PR
+    # #786 review-1: AST-walk Name resolution is order- and scope-unsafe.
     llm_adapter = create_llm_adapter(
         backend=llm_backend,
         max_turns=1,
         cwd=effective_cwd,
+        allowed_tools=(
+            [] if backend_supports_tool_envelope(resolve_llm_backend(llm_backend)) else None
+        ),
     )
 
     # Create or use provided EventStore
@@ -1257,10 +1271,14 @@ def create_ouroboros_server(
     from ouroboros.verification.verifier import SpecVerifier
 
     def fresh_llm_adapter():
+        # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
         return create_llm_adapter(
             backend=llm_backend if llm_backend is not None else None,
             max_turns=1,
             cwd=effective_cwd,
+            allowed_tools=(
+                [] if backend_supports_tool_envelope(resolve_llm_backend(llm_backend)) else None
+            ),
         )
 
     wonder_engine = WonderEngine(
