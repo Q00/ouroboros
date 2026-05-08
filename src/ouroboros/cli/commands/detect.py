@@ -19,6 +19,7 @@ from typing import Annotated
 
 import typer
 
+from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.cli.formatters.panels import (
     print_error,
     print_info,
@@ -30,7 +31,7 @@ from ouroboros.evaluation.detector import (
     has_mechanical_toml,
     toml_path,
 )
-from ouroboros.providers.factory import create_llm_adapter
+from ouroboros.providers.factory import create_llm_adapter, resolve_llm_backend
 
 app = typer.Typer(
     name="detect",
@@ -73,7 +74,14 @@ def detect(
         raise typer.Exit(code=0)
 
     try:
-        adapter = create_llm_adapter(backend=backend, max_turns=1)
+        # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
+        adapter = create_llm_adapter(
+            backend=backend,
+            max_turns=1,
+            allowed_tools=(
+                [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 — surface any factory failure to user
         print_error(f"Could not initialize LLM adapter: {exc}")
         raise typer.Exit(code=1) from exc

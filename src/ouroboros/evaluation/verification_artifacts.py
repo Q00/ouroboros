@@ -98,13 +98,22 @@ async def _auto_detect_mechanical_toml(
     adapter = llm_adapter
     if adapter is None:
         try:
-            from ouroboros.providers.factory import create_llm_adapter
+            from ouroboros.backends import backend_supports_tool_envelope
+            from ouroboros.providers.factory import create_llm_adapter, resolve_llm_backend
 
             # Build the default adapter *against the same backend* so the
             # subsequent ``ensure_mechanical_toml(..., backend=...)`` call is
             # not routed through a provider that cannot consume the sentinel
             # model ("default") returned for Codex / OpenCode backends.
-            adapter = create_llm_adapter(backend=llm_backend, max_turns=1)
+            #
+            # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
+            adapter = create_llm_adapter(
+                backend=llm_backend,
+                max_turns=1,
+                allowed_tools=(
+                    [] if backend_supports_tool_envelope(resolve_llm_backend(llm_backend)) else None
+                ),
+            )
         except Exception:  # noqa: BLE001 — adapter construction must never break QA
             return
     try:

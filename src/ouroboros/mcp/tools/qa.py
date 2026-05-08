@@ -18,6 +18,7 @@ import uuid
 
 import structlog
 
+from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.config import get_qa_model
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
@@ -37,7 +38,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.providers import create_llm_adapter
+from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
@@ -573,9 +574,16 @@ class QAHandler:
                 Message(role=MessageRole.USER, content=user_prompt),
             ]
 
+            # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use
+            # block emitted by the model would consume the only allowed turn
+            # and the SDK then raises ``Reached maximum number of turns (1)``
+            # before a final text response can stream. See issue #781.
             llm_adapter = self.llm_adapter or create_llm_adapter(
                 backend=self.llm_backend,
                 max_turns=1,
+                allowed_tools=[]
+                if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+                else None,
             )
             config = CompletionConfig(
                 model=get_qa_model(self.llm_backend),
