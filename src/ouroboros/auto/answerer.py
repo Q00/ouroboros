@@ -544,7 +544,13 @@ _INTENT_CUES: Mapping[QuestionIntent, tuple[str, ...]] = {
         "verification",
         "validate",
         "validation",
-        "test",
+        # NB: ``"test"`` is intentionally NOT in this list — bare substring
+        # matching of ``"test"`` would silently route unrelated questions
+        # like ``"Should users contest charges?"`` or ``"What is the latest
+        # output path?"`` into ``_verification_answer()``.  ``\btests?\b``
+        # already lives in ``_is_verification_question`` and uses regex
+        # word boundaries, so the verification path keeps full coverage of
+        # genuine "test"/"tests" questions without the false-positive risk.
         "definition of done",
         "done criteria",
         "how know it works",
@@ -695,8 +701,31 @@ def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
     return frozenset(intents)
 
 
+# Regex for cues composed only of plain ASCII letters (a–z), spaces, hyphens,
+# or apostrophes.  ASCII-letter cues are matched with regex word boundaries so
+# that broad nouns/verbs like ``"test"`` or ``"verify"`` cannot silently
+# substring-match unrelated words like ``"contest"``, ``"latest"``,
+# ``"protest"``, ``"attestations"``, or ``"overify"``.  Cues that contain
+# accented Latin or CJK characters fall through to plain substring matching
+# because Python's ``\b`` is undefined around CJK characters and the
+# multilingual cues we use are distinctive enough phrases (e.g. ``"cómo
+# verific"``, ``"검증"``).
+_ASCII_LATIN_CUE_RE = re.compile(r"^[a-z'\- ]+$")
+
+
+def _cue_matches(cue: str, lowered: str) -> bool:
+    if not _ASCII_LATIN_CUE_RE.match(cue):
+        return cue in lowered
+    if " " in cue or "-" in cue:
+        # Multi-word / hyphenated phrases: substring is safe because the
+        # phrase shape itself acts as the boundary (e.g. ``"out of scope"``,
+        # ``"definition of done"``).
+        return cue in lowered
+    return bool(re.search(rf"\b{re.escape(cue)}\b", lowered))
+
+
 def _contains_intent_cue(lowered: str, intent: QuestionIntent) -> bool:
-    return any(cue in lowered for cue in _INTENT_CUES[intent])
+    return any(_cue_matches(cue, lowered) for cue in _INTENT_CUES[intent])
 
 
 _IO_NOUN_CUES: tuple[str, ...] = (
@@ -711,10 +740,15 @@ _IO_NOUN_CUES: tuple[str, ...] = (
     "salida",
     "salidas",
     "entrée",
+    "entrées",
     "entree",
+    "entrees",
     "sortie",
+    "sorties",
     "eingabe",
+    "eingaben",
     "ausgabe",
+    "ausgaben",
     "입력",
     "출력",
     "入力",
@@ -769,7 +803,9 @@ _ACTOR_NOUN_CUES: tuple[str, ...] = (
     "actor",
     "actors",
     "persona",
+    "personas",
     "stakeholder",
+    "stakeholders",
     "usuario",
     "usuarios",
     "utilisateur",
@@ -815,14 +851,14 @@ _ACTOR_QUESTION_CUES: tuple[str, ...] = (
 
 
 def _has_io_cue_with_flow_shape(lowered: str) -> bool:
-    if not any(cue in lowered for cue in _IO_NOUN_CUES):
+    if not any(_cue_matches(cue, lowered) for cue in _IO_NOUN_CUES):
         return False
     return any(re.search(pattern, lowered) for pattern in _IO_FLOW_SHAPE_PATTERNS)
 
 
 def _has_actor_cue_with_question_shape(lowered: str) -> bool:
-    return any(cue in lowered for cue in _ACTOR_NOUN_CUES) and any(
-        cue in lowered for cue in _ACTOR_QUESTION_CUES
+    return any(_cue_matches(cue, lowered) for cue in _ACTOR_NOUN_CUES) and any(
+        _cue_matches(cue, lowered) for cue in _ACTOR_QUESTION_CUES
     )
 
 
@@ -921,13 +957,19 @@ _MULTILINGUAL_PRODUCT_BEHAVIOR_PATTERNS: tuple[str, ...] = (
     r"envoyer|exporter|t[ée]l[ée]charger|voir|consulter|acc[ée]der|approuver|"
     r"rejeter|annuler|assigner|notifier|configurer|afficher|stocker|enregistrer|"
     r"lire)\b",
-    # German: können/kann/dürfen/darf/sollen/soll/müssen/muss + mutation verb
-    r"\b(k[öo]nnen|kann|d[üu]rfen|darf|sollen|soll|sollte|sollten|m[üu]ssen|"
-    r"muss|m[üu]sste|m[üu]ssten)\b"
-    r"[^?]*?\b(l[öo]schen|entfernen|erstellen|anlegen|bearbeiten|aktualisieren|"
-    r"senden|exportieren|herunterladen|anzeigen|sehen|zugreifen|genehmigen|"
-    r"ablehnen|stornieren|zuweisen|benachrichtigen|konfigurieren|generieren|"
-    r"speichern|lesen)\b",
+    # German: können/kann/dürfen/darf/sollen/soll/müssen/muss + mutation verb.
+    # Accepts both umlauted (``dürfen``, ``löschen``) and the conventional
+    # ASCII transliterations (``duerfen``, ``loeschen``) so questions written
+    # without umlauts (common when typed on non-DE keyboards) still classify
+    # as product behavior.  Without the ASCII alternates,
+    # ``"Welche Benutzer duerfen Branches loeschen?"`` would silently fall to
+    # ACTOR_IO and inject ``actors``/``inputs``/``outputs``.
+    r"\b(k(?:[öo]|oe)nnen|kann|d(?:[üu]|ue)rfen|darf|sollen|soll|sollte|sollten|"
+    r"m(?:[üu]|ue)ssen|muss|m(?:[üu]|ue)sste|m(?:[üu]|ue)ssten)\b"
+    r"[^?]*?\b(l(?:[öo]|oe)schen|entfernen|erstellen|anlegen|bearbeiten|"
+    r"aktualisieren|senden|exportieren|herunterladen|anzeigen|sehen|zugreifen|"
+    r"genehmigen|ablehnen|stornieren|zuweisen|benachrichtigen|konfigurieren|"
+    r"generieren|speichern|lesen)\b",
     # Korean: action noun + Korean verb-formation morpheme (하|할|되|돼|됨|
     # 됩|됐|할까|하나|하지|되나|되어야) + (later) a permission/modal cue.
     # Anchoring on the verb morpheme prevents noun substrings like ``저장``

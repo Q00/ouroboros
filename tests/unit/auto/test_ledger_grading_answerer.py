@@ -680,6 +680,45 @@ def test_auto_answerer_multilingual_permission_questions_route_to_product_behavi
         assert "outputs" not in updated_sections, question
 
 
+def test_auto_answerer_substring_cues_do_not_misroute_unrelated_words() -> None:
+    """Bare ASCII substring cues (e.g. ``"test"``) must not match unrelated
+    words (``"contest"``, ``"latest"``, ``"protest"``, ``"attestations"``).
+    Flagged by ouroboros-agent on commit 52a9ee7 as a silent verification
+    misrouting regression.  Cue matching now uses regex word boundaries for
+    ASCII Latin cues.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Should users contest charges?",
+        "What is the latest output path?",
+        "How are protest votes counted?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "verification_plan" not in updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_german_ascii_transliteration_routes_to_product_behavior() -> None:
+    """German ASCII transliterations (``duerfen``/``loeschen``) must be treated
+    the same as their umlauted forms.  Flagged by ouroboros-agent on commit
+    52a9ee7 as a realistic silent-misrouting gap because most German keyboards
+    on dev workstations type ``ue``/``ae``/``oe`` rather than ``ü``/``ä``/``ö``.
+    """
+    answerer = AutoAnswerer()
+    answer = answerer.answer(
+        "Welche Benutzer duerfen Branches loeschen?",
+        SeedDraftLedger.from_goal("Build a CLI"),
+    )
+    updated_sections = {section for section, _entry in answer.ledger_updates}
+    assert answer.blocker is None
+    assert {"constraints", "acceptance_criteria"} <= updated_sections
+    assert "actors" not in updated_sections
+    assert "inputs" not in updated_sections
+    assert "outputs" not in updated_sections
+
+
 def test_auto_answerer_property_lookup_cues_do_not_misroute_to_intent_handlers() -> None:
     """Broad cue substrings (``input``, ``output``, ``repository``, ``architecture``)
     must not by themselves trigger ACTOR_IO or RUNTIME_CONTEXT routing.  These
