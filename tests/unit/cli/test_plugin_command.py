@@ -367,6 +367,119 @@ def test_inspect_stale_version_reports_installed(runner: CliRunner, tmp_path: Pa
     assert "github:read" in result.output
 
 
+def test_inspect_legacy_unbound_record_reports_installed(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:100 — a
+    pre-RFC trust record (blank ``source_type`` / ``source_identity`` /
+    ``artifact_digest``) MUST NOT read as ``trusted`` from
+    ``inspect`` / ``list`` once the lockfile entry has the new subject
+    columns populated. The dispatcher and firewall already refuse such
+    a record on invocation; the read-only views must agree, otherwise
+    operators see ``trusted`` for a plugin that will be blocked at
+    runtime — exactly the contract mismatch this PR is eliminating.
+    """
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            # Lockfile entry has populated subject columns — the new
+            # contract path.
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest="sha256:" + "a" * 64,
+        )
+    )
+    # Pre-RFC trust grant: only `version` + `scope`, no subject columns.
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "trust_state:    installed" in result.output
+    # The legacy grant must NOT be echoed as effective: the firewall
+    # would refuse it, and `inspect` must agree with the gate. Rich
+    # decorates the "(none)" label with ANSI bold codes; assert the
+    # tokens individually so the test stays robust to terminal style.
+    assert "granted_scopes:" in result.output
+    assert "none" in result.output
+    assert "missing scopes: github:read" in result.output
+
+
+def test_list_json_legacy_unbound_record_reports_installed(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Same contract as `test_inspect_legacy_unbound_record_reports_installed`
+    but for `list --json` output: a pre-RFC trust record must NOT
+    surface as `trusted` with non-empty `granted_scopes` once the
+    lockfile entry has the new subject columns populated.
+    """
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest="sha256:" + "a" * 64,
+        )
+    )
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--json",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 1
+    row = data[0]
+    assert row["trust_state"] == "installed"
+    assert row["granted_scopes"] == []
+    assert row["missing_required_scopes"] == ["github:read"]
+
+
 def test_inspect_first_party_ignores_corrupt_trust_file(runner: CliRunner, tmp_path: Path) -> None:
     """Regression: a leftover/corrupt `trust.json` for a first-party
     plugin must NOT make `inspect` fail. The firewall ignores the
