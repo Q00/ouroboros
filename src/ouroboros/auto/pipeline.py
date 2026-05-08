@@ -450,12 +450,22 @@ class AutoPipeline:
             state.run_handoff_guidance is not None
             and _RETRY_GUIDANCE_PHRASE in state.run_handoff_guidance
         ) or (
-            # Symmetric guard for the non-timeout retry-exception path:
-            # ``unknown_retry_failed`` is set when the retry attempt raised a
-            # non-TimeoutError exception. ``run_start_attempted`` stays True
-            # so a follow-up pipeline.run() must short-circuit here instead
-            # of calling run_starter a third time.
-            bool(state.run_start_attempted) and state.run_handoff_status == "unknown_retry_failed"
+            # Conservative non-retryable guard. Covers two cases:
+            #   1. Pre-#787 sessions persisted before ``run_handoff_status``
+            #      existed: ``AutoPipelineState.from_dict`` defaults the
+            #      field to ``None`` on load. Such a session resumed with
+            #      ``run_start_attempted=True`` cannot prove which retry
+            #      slot is still safe, so the conservative pre-#787
+            #      behavior is preserved (block instead of dispatching a
+            #      duplicate enqueue).
+            #   2. Mid-call crash before ``_mark_unknown_run_handoff`` ran
+            #      (loop sets ``run_start_attempted=True`` and saves before
+            #      calling ``run_starter``).
+            #   3. Symmetric guard for the non-timeout retry-exception
+            #      path: ``unknown_retry_failed`` lands here too because
+            #      it's not a retryable status.
+            bool(state.run_start_attempted)
+            and state.run_handoff_status not in {"unknown_no_handle", "unknown_timeout"}
         )
         if prior_retry_exhausted:
             blocker_text = state.last_error or state.run_handoff_guidance

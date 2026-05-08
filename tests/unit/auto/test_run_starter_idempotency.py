@@ -228,6 +228,52 @@ async def test_retry_raises_non_timeout_marks_exhausted_and_blocks_resume(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_resume_legacy_session_with_run_start_attempted_does_not_dispatch(
+    tmp_path,
+) -> None:
+    """Pre-#787 sessions persisted with ``run_start_attempted=True`` and
+    no ``run_handoff_status`` field (defaults to ``None`` on load) must
+    NOT call ``run_starter`` on resume. The new bounded retry replaces a
+    pre-PR duplicate-prevention guard; a legacy session has no recorded
+    handoff status, so the only safe behavior is to block conservatively
+    instead of dispatching a fresh attempt that could duplicate a server-
+    side enqueue (Q00/ouroboros#787 review-2 BLOCKING-1).
+    """
+
+    calls: list[str] = []
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
+        calls.append(idempotency_key)
+        return {"job_id": "should_not_be_called", "execution_id": "should_not_be_called"}
+
+    state = _primed_run_state(tmp_path)
+    # Simulate a pre-#787 session: an attempt was made but the new status
+    # field was never persisted (load defaults it to None).
+    state.run_start_attempted = True
+    state.run_handoff_status = None
+    state.run_handoff_guidance = None
+
+    pipeline = AutoPipeline(
+        AutoInterviewDriver(
+            FunctionInterviewBackend(_unused_start, _unused_answer),
+            store=AutoStore(tmp_path),
+        ),
+        _unused_seed_generator,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == "run_starter"
+    assert calls == [], (
+        f"legacy resume must not invoke run_starter; got {len(calls)} call(s) "
+        "(pre-#787 sessions cannot prove which retry slot is still safe)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_both_calls_fail_pipeline_blocks_with_documented_phrase(tmp_path) -> None:
     """Scenario 3: both attempts fail -> BLOCKED with the documented retry phrase."""
 

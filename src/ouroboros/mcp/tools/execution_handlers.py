@@ -930,6 +930,14 @@ class StartExecuteSeedHandler:
         # ``_subagent`` envelope without triggering a second
         # subagent_dispatched event.  Keyed by idempotency_key.
         self._idempotency_plugin_payload: dict[str, dict[str, Any]] = {}
+        # Per-key serialization lock so two concurrent handle() calls with
+        # the same idempotency_key dedupe correctly. Without this, both
+        # callers can miss the cache (entries are written *after* dispatch)
+        # and each enqueues a fresh execution. ``dict.setdefault`` is
+        # atomic in single-threaded asyncio so the lock-creation path is
+        # race-free; the lock is held across the cache check + dispatch +
+        # cache write so the second caller observes a populated cache.
+        self._idempotency_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -962,6 +970,25 @@ class StartExecuteSeedHandler:
         )
 
     async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        # Serialize concurrent calls with the same idempotency_key so the
+        # check-cache / dispatch / write-cache sequence is atomic per key.
+        # Without this, two in-flight requests can both miss the cache and
+        # each enqueue a fresh execution, breaking the "second call with
+        # the same key does not enqueue" contract. ``setdefault`` is
+        # atomic in single-threaded asyncio (no ``await`` between the
+        # ``in`` check and insert), so lock-creation is race-free.
+        raw_key_outer = arguments.get("idempotency_key")
+        idem_key_outer = raw_key_outer.strip() if isinstance(raw_key_outer, str) else ""
+        if idem_key_outer:
+            lock = self._idempotency_locks.setdefault(idem_key_outer, asyncio.Lock())
+            async with lock:
+                return await self._handle_inner(arguments)
+        return await self._handle_inner(arguments)
+
+    async def _handle_inner(
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
