@@ -484,6 +484,9 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "job_id": "job_1",
         "run_session_id": "session_1",
         "pending_question": "Which runtime should be used?",
+        "ledger_provenance": {},
+        "evidence_backed_sections": [],
+        "assumption_only_sections": [],
     }
 
 
@@ -1608,8 +1611,12 @@ def test_print_result_renders_seed_origin_line() -> None:
     assert "Seed origin: auto_pipeline" in output
 
 
-def test_mcp_format_result_renders_seed_origin_line() -> None:
-    """The MCP text body must surface the seed_origin field too."""
+def test_format_result_keeps_evidence_provenance_out_of_user_text() -> None:
+    """Detailed provenance should live in MCP meta, not in the human-readable body.
+
+    The user-facing text stays simple (status/phase/grade/seed_path/etc.); rich
+    provenance breakdown is consumed by clients via ``MCPToolResult.meta``.
+    """
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.mcp.tools.auto_handler import _format_result
 
@@ -1624,7 +1631,9 @@ def test_mcp_format_result_renders_seed_origin_line() -> None:
 
     text = _format_result(result)
 
-    assert "Seed origin: auto_pipeline" in text
+    assert "Evidence:" not in text
+    assert "evidence-backed" not in text
+    assert "assumption-only" not in text
 
 
 @pytest.mark.asyncio
@@ -1870,3 +1879,82 @@ async def test_auto_pipeline_marks_seed_origin_after_seed_generation(tmp_path) -
 
     assert state.seed_origin is SeedOrigin.AUTO_PIPELINE
     assert result.seed_origin == "auto_pipeline"
+
+
+def test_format_result_omits_evidence_block_when_unknown() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _format_result
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_test",
+        phase="complete",
+    )
+
+    text = _format_result(result)
+
+    assert "Evidence:" not in text
+    assert "evidence-backed" not in text
+    assert "assumption-only" not in text
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_meta_exposes_ledger_provenance_breakdown(monkeypatch) -> None:
+    async def fake_run(self, arguments):  # noqa: ARG001
+        from ouroboros.auto.pipeline import AutoPipelineResult
+
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+            ledger_provenance={
+                "user_goal": ("goal", "actors"),
+                "repo_fact": ("runtime_context",),
+                "conservative_default": ("constraints",),
+            },
+            evidence_backed_sections=("actors", "goal", "runtime_context"),
+            assumption_only_sections=("constraints",),
+        )
+
+    monkeypatch.setattr(AutoHandler, "_run", fake_run)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI"})
+
+    assert result.is_ok
+    meta = result.value.meta
+    assert meta["ledger_provenance"] == {
+        "user_goal": ["goal", "actors"],
+        "repo_fact": ["runtime_context"],
+        "conservative_default": ["constraints"],
+    }
+    assert meta["evidence_backed_sections"] == ["actors", "goal", "runtime_context"]
+    assert meta["assumption_only_sections"] == ["constraints"]
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_meta_always_emits_provenance_keys_when_empty(monkeypatch) -> None:
+    """Empty provenance must still surface as ``[]``/``{}``, not be omitted.
+
+    The contract distinguishes "computed and empty" from "field not provided",
+    so MCP clients can treat absence of these keys as a protocol error rather
+    than silently degrading to defaults.
+    """
+
+    async def fake_run(self, arguments):  # noqa: ARG001
+        from ouroboros.auto.pipeline import AutoPipelineResult
+
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+        )
+
+    monkeypatch.setattr(AutoHandler, "_run", fake_run)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI"})
+
+    assert result.is_ok
+    meta = result.value.meta
+    assert meta["ledger_provenance"] == {}
+    assert meta["evidence_backed_sections"] == []
+    assert meta["assumption_only_sections"] == []

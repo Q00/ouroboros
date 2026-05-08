@@ -47,6 +47,40 @@ REQUIRED_SECTIONS = (
 )
 
 
+# Invariant: a section is "evidence-backed" only when its resolution is
+# anchored in something the user said, something we read off the repo, an
+# existing convention we can point to, or an explicit user-stated non-goal.
+# INFERENCE entries are model-derived guesses (not anchored in any of the
+# above) and therefore land in ``assumption_only_sections`` — the whole point
+# of this surface is to let MCP clients distinguish trustable evidence from
+# speculative content, so inferred reasoning must not be presented as grounded.
+_EVIDENCE_BACKED_SOURCES: frozenset[LedgerSource] = frozenset(
+    {
+        LedgerSource.USER_GOAL,
+        LedgerSource.REPO_FACT,
+        LedgerSource.EXISTING_CONVENTION,
+        LedgerSource.NON_GOAL,
+    }
+)
+
+_INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
+    {
+        LedgerStatus.WEAK,
+        LedgerStatus.CONFLICTING,
+        LedgerStatus.BLOCKED,
+    }
+)
+
+
+_RESOLVED_STATUSES: frozenset[LedgerStatus] = frozenset(
+    {
+        LedgerStatus.CONFIRMED,
+        LedgerStatus.DEFAULTED,
+        LedgerStatus.INFERRED,
+    }
+)
+
+
 @dataclass(slots=True)
 class LedgerEntry:
     """A single machine-readable fact in the Seed Draft Ledger."""
@@ -292,6 +326,23 @@ class SeedDraftLedger:
     def summary(self) -> dict[str, Any]:
         """Return a bounded summary suitable for CLI/MCP output."""
         statuses = self.section_statuses()
+        # Only resolved sections (CONFIRMED/DEFAULTED/INFERRED) appear in the
+        # provenance surface.  Sections that are still MISSING/WEAK/CONFLICTING/
+        # BLOCKED at the aggregate level are reported via ``open_gaps`` instead,
+        # so a section with a defaulted entry plus a later blocker is not
+        # misrepresented as grounded in either the raw provenance map or the
+        # derived evidence/assumption classification.
+        resolved_sections = {
+            name for name, status in statuses.items() if status in _RESOLVED_STATUSES
+        }
+        provenance = self._provenance_index(resolved_sections)
+        evidence_backed_set = {
+            section
+            for source in _EVIDENCE_BACKED_SOURCES
+            for section in provenance.get(source.value, ())
+        }
+        evidence_backed = sorted(evidence_backed_set)
+        assumption_only = sorted(resolved_sections - evidence_backed_set)
         return {
             "complete_sections": [
                 name
@@ -313,7 +364,28 @@ class SeedDraftLedger:
                 for entry in section.entries
                 if entry.key.startswith("risk.")
             ],
+            "provenance": provenance,
+            "evidence_backed_sections": evidence_backed,
+            "assumption_only_sections": assumption_only,
         }
+
+    def _provenance_index(self, resolved_sections: set[str]) -> dict[str, list[str]]:
+        """Group resolved section names by ledger source for #640 surface visibility.
+
+        ``resolved_sections`` is the set of sections whose aggregate status is
+        CONFIRMED/DEFAULTED/INFERRED.  Sections still in
+        MISSING/WEAK/CONFLICTING/BLOCKED are excluded so the surface never
+        attributes a source to a section the ledger reports as unresolved.
+        """
+        index: dict[str, set[str]] = {source.value: set() for source in LedgerSource}
+        for section in self.sections.values():
+            if section.name not in resolved_sections:
+                continue
+            for entry in section.entries:
+                if entry.status in _INACTIVE_STATUSES:
+                    continue
+                index[entry.source.value].add(section.name)
+        return {key: sorted(values) for key, values in index.items() if values}
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the ledger."""
