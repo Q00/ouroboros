@@ -268,6 +268,45 @@ def _atomic_replace_dir(src: Path, dest: Path) -> None:
         shutil.rmtree(backup, ignore_errors=True)
 
 
+def _read_lock_or_exit(lock: Lockfile) -> dict:
+    """Read the lockfile, surfacing parse/IO failures as a controlled exit.
+
+    Mirrors the wrapper used by ``inspect``/``list``: a malformed
+    ``plugins.lock`` MUST produce a one-line recovery hint, not a raw
+    traceback in the very commands operators use to repair plugin
+    state. Returns the lockfile's name → ``LockEntry`` map on success.
+    """
+    try:
+        return lock.read()
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"lockfile is unreadable ({lock.path}): {exc}. "
+            f"Inspect or replace the file, or pass --lockfile to point "
+            f"at a known-good copy."
+        )
+        raise typer.Exit(code=1) from exc
+
+
+def _safe_read_trust(trust: TrustStore, name: str) -> tuple[object | None, str | None]:
+    """Read a trust record, returning ``(record, error_message)``.
+
+    The trust file is operator-editable and can drift into a corrupt
+    state independently of the lockfile / plugin bytes. ``trust.read``
+    raises ``ValueError`` on schema/JSON failures and ``OSError`` on
+    filesystem failures; both must NOT surface as raw tracebacks in
+    state-mutating commands. Returning the failure as a string lets
+    callers decide whether to abort (e.g. ``trust``: refuse to grant
+    while the file is unreadable) or continue with a controlled
+    warning (e.g. post-install trust invalidation: lockfile is
+    already updated, so a "couldn't reset trust automatically" hint
+    plus a recovery instruction is the right shape).
+    """
+    try:
+        return trust.read(name), None
+    except (ValueError, OSError) as exc:
+        return None, str(exc)
+
+
 def _maybe_invalidate_trust_for_subject_change(
     *,
     name: str,
@@ -288,8 +327,26 @@ def _maybe_invalidate_trust_for_subject_change(
     prior entry) because callers run this AFTER `_install_one` has
     updated the lockfile. The trust file remains the authoritative
     pointer to the subject that was last consented to.
+
+    A corrupt ``trust.json`` MUST NOT abort the install with a raw
+    traceback at this late stage. The lockfile + plugin home are
+    already updated; the right shape is a controlled warning that
+    names the recovery action (``ooo plugin trust``) and lets the
+    install command exit cleanly. The firewall already fails closed
+    on subject mismatch as defense-in-depth, so leaving a
+    not-yet-reset trust file in place keeps the plugin gated until
+    the user re-grants — same end-state the auto-reset would have
+    produced.
     """
-    record = trust.read(name)
+    record, err = _safe_read_trust(trust, name)
+    if err is not None:
+        console.print(
+            f"  [yellow]warning[/]: trust file for {name!r} is unreadable "
+            f"({err}); auto-reset skipped. Re-grant scopes via "
+            f"`ooo plugin trust {name} --scope <...>` after fixing the file. "
+            f"The firewall blocks invocation until trust is re-granted."
+        )
+        return
     if record is None:
         return
     if (
@@ -301,13 +358,21 @@ def _maybe_invalidate_trust_for_subject_change(
         and (not record.artifact_digest or record.artifact_digest == new_artifact_digest)
     ):
         return
-    trust.reset_for_subject_change(
-        name,
-        new_version=new_version,
-        new_source_type=new_source_type,
-        new_source_identity=new_source_identity,
-        new_artifact_digest=new_artifact_digest,
-    )
+    try:
+        trust.reset_for_subject_change(
+            name,
+            new_version=new_version,
+            new_source_type=new_source_type,
+            new_source_identity=new_source_identity,
+            new_artifact_digest=new_artifact_digest,
+        )
+    except (ValueError, OSError) as exc:
+        console.print(
+            f"  [yellow]warning[/]: could not reset trust for {name!r} after "
+            f"subject change ({exc}); re-grant scopes via "
+            f"`ooo plugin trust {name} --scope <...>`. The firewall blocks "
+            f"invocation until trust is re-granted."
+        )
 
 
 # Retained for callers that only know the version (no install-subject
@@ -318,10 +383,24 @@ def _maybe_invalidate_trust_for_version_bump(
     new_version: str,
     trust: TrustStore,
 ) -> None:
-    record = trust.read(name)
+    record, err = _safe_read_trust(trust, name)
+    if err is not None:
+        console.print(
+            f"  [yellow]warning[/]: trust file for {name!r} is unreadable "
+            f"({err}); auto-reset skipped. Re-grant scopes via "
+            f"`ooo plugin trust {name} --scope <...>`."
+        )
+        return
     if record is None or record.version == new_version:
         return
-    trust.reset_for_version_bump(name, new_version)
+    try:
+        trust.reset_for_version_bump(name, new_version)
+    except (ValueError, OSError) as exc:
+        console.print(
+            f"  [yellow]warning[/]: could not reset trust for {name!r} after "
+            f"version bump ({exc}); re-grant scopes via "
+            f"`ooo plugin trust {name} --scope <...>`."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1840,7 +1919,7 @@ def trust_command(
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
-    entries = lock.read()
+    entries = _read_lock_or_exit(lock)
     entry = entries.get(name)
     if entry is None:
         print_error(f"{name!r} is not installed; nothing to trust")
@@ -1913,20 +1992,42 @@ def trust_command(
     # state-corruption path at the trust boundary. With the new
     # order, any failure leaves the plugin still disabled and the
     # user can simply re-run after fixing the cause.
-    was_disabled = trust.is_disabled(name)
+    #
+    # Wrap the trust-store reads/writes so a corrupt ``trust.json`` /
+    # ``disabled.json`` produces a one-line recovery hint pointing at
+    # the offending file rather than a raw traceback. ``trust`` is
+    # one of the commands operators run to repair plugin state, so it
+    # MUST surface that state's own corruption clearly.
+    try:
+        was_disabled = trust.is_disabled(name)
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"trust state for {name!r} is unreadable: {exc}. "
+            f"Inspect or remove the offending file under {trust.root}, "
+            f"then re-run `ooo plugin trust {name} --scope <...>`."
+        )
+        raise typer.Exit(code=1) from exc
 
     audit_handle = audit_log_path.open("a", encoding="utf-8") if audit_log_path else None
     try:
         for scope in scopes:
-            record = trust.grant(
-                plugin=name,
-                version=entry.version,
-                scope=scope,
-                granted_by=granted_by,
-                source_type=entry.source_type,
-                source_identity=entry.source_identity,
-                artifact_digest=entry.artifact_digest,
-            )
+            try:
+                record = trust.grant(
+                    plugin=name,
+                    version=entry.version,
+                    scope=scope,
+                    granted_by=granted_by,
+                    source_type=entry.source_type,
+                    source_identity=entry.source_identity,
+                    artifact_digest=entry.artifact_digest,
+                )
+            except (ValueError, OSError) as exc:
+                print_error(
+                    f"could not write trust grant for {name!r}: {exc}. "
+                    f"Inspect the trust file at {trust.root / name}, then "
+                    f"re-run `ooo plugin trust {name} --scope <...>`."
+                )
+                raise typer.Exit(code=1) from exc
             print_success(f"Granted: {scope} ({len(record.granted_scopes)} total scope(s))")
 
             # Emit plugin.trusted via the ledger adapter shape.
@@ -2003,7 +2104,7 @@ def disable_command(
     ``ooo plugin trust …``, which is the re-enable path.
     """
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
-    entries = lock.read()
+    entries = _read_lock_or_exit(lock)
     if name not in entries:
         print_error(f"{name!r} is not installed")
         raise typer.Exit(code=1)
@@ -2012,13 +2113,25 @@ def disable_command(
     # under a non-default root are actually removed (not silently left
     # behind).
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
-    trust.write_disable(
-        name,
-        source_type=entry.source_type
-        or ("plugin_home" if entry.source_kind == "git" else "local_path"),
-        source_identity=entry.source_identity or (entry.repository or entry.plugin_home),
-    )
-    trust.remove(name)
+    # Wrap the trust-store mutations so a corrupt ``trust.json`` /
+    # ``disabled.json`` (the state ``disable`` itself manages) produces
+    # a recovery hint instead of a raw traceback in the very command
+    # operators run to repair that state.
+    try:
+        trust.write_disable(
+            name,
+            source_type=entry.source_type
+            or ("plugin_home" if entry.source_kind == "git" else "local_path"),
+            source_identity=entry.source_identity or (entry.repository or entry.plugin_home),
+        )
+        trust.remove(name)
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"could not update trust state for {name!r}: {exc}. "
+            f"Inspect the files under {trust.root / name}, then re-run "
+            f"`ooo plugin disable {name}`."
+        )
+        raise typer.Exit(code=1) from exc
     print_success(f"Disabled {name} (re-grant scopes to re-enable)")
 
 
@@ -2042,7 +2155,7 @@ def remove_command(
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
-    entries = lock.read()
+    entries = _read_lock_or_exit(lock)
     entry = entries.get(name)
     if entry is None:
         print_error(f"{name!r} is not installed")
@@ -2067,9 +2180,20 @@ def remove_command(
     #
     # `wipe_subject` removes both the trust file and the disable
     # record (per the RFC: "remove ALSO deletes any disable record
-    # for the plugin's install subject").
-    trust.wipe_subject(name)
-    lock.remove(name)
+    # for the plugin's install subject"). Wrap so a corrupt trust
+    # file produces a recovery hint rather than a traceback in the
+    # exact command operators run to repair plugin state.
+    try:
+        trust.wipe_subject(name)
+        lock.remove(name)
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"could not finalize remove for {name!r}: {exc}. "
+            f"Inspect the trust files under {trust.root / name} and the "
+            f"lockfile at {lock.path}, then re-run `ooo plugin remove "
+            f"{name}` after the underlying issue is fixed."
+        )
+        raise typer.Exit(code=1) from exc
 
     plugin_home_status = "plugin home"
     if plugin_home.is_dir():

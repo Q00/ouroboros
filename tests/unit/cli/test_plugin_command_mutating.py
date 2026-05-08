@@ -2606,6 +2606,177 @@ def test_add_uses_actual_plugin_dir_when_folder_name_disagrees_with_manifest(
     )
 
 
+def test_trust_friendly_error_on_corrupt_lockfile(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1843.
+
+    ``trust`` is one of the commands operators run to repair plugin
+    state, so a malformed ``plugins.lock`` MUST surface a one-line
+    recovery hint — not a raw traceback from ``lock.read()``.
+    """
+    paths = _common_paths(tmp_path)
+    paths["lockfile"].parent.mkdir(parents=True, exist_ok=True)
+    paths["lockfile"].write_text("not = valid = toml = at = all = +++")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "lockfile is unreadable" in plain, plain
+    assert "Traceback" not in result.output
+
+
+def test_disable_friendly_error_on_corrupt_lockfile(runner: CliRunner, tmp_path: Path) -> None:
+    """Sibling regression: ``disable`` MUST surface a friendly
+    recovery hint when ``plugins.lock`` is corrupt, not a traceback.
+    """
+    paths = _common_paths(tmp_path)
+    paths["lockfile"].parent.mkdir(parents=True, exist_ok=True)
+    paths["lockfile"].write_text("not = valid = toml = at = all = +++")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "lockfile is unreadable" in plain, plain
+    assert "Traceback" not in result.output
+
+
+def test_remove_friendly_error_on_corrupt_lockfile(runner: CliRunner, tmp_path: Path) -> None:
+    """Sibling regression: ``remove`` MUST surface a friendly
+    recovery hint when ``plugins.lock`` is corrupt, not a traceback.
+    """
+    paths = _common_paths(tmp_path)
+    paths["lockfile"].parent.mkdir(parents=True, exist_ok=True)
+    paths["lockfile"].write_text("not = valid = toml = at = all = +++")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "remove",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "lockfile is unreadable" in plain, plain
+    assert "Traceback" not in result.output
+
+
+def test_trust_friendly_error_on_corrupt_trust_file(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1843.
+
+    ``trust.is_disabled`` / ``trust.grant`` read the trust file from
+    disk; a malformed ``trust.json`` must surface a recovery hint
+    pointing at the offending file, not a raw traceback.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    # Corrupt the trust file post-install.
+    trust_file = paths["trust_root"] / "github-pr-ops" / "trust.json"
+    trust_file.parent.mkdir(parents=True, exist_ok=True)
+    trust_file.write_text("{ malformed json")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    # Recovery hint names trust state and points at the trust root.
+    assert "trust state" in plain or "trust grant" in plain, plain
+    assert "Traceback" not in result.output
+
+
+def test_install_warns_when_trust_file_is_corrupt_but_completes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:292.
+
+    The post-install ``_maybe_invalidate_trust_for_subject_change``
+    call previously did ``trust.read()`` with no try/except. If
+    ``trust.json`` was malformed, the install aborted AFTER the new
+    plugin home + lockfile were written — leaving a half-applied
+    state with no recovery message.
+
+    With the fix, a corrupt trust file produces a yellow warning that
+    names the recovery action; the lockfile + plugin home stay
+    consistent, and the firewall blocks invocation until trust is
+    re-granted (matching the auto-reset's end state).
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+
+    # Corrupt the trust file, then re-install at a NEW version so the
+    # post-install path tries to read trust to decide on invalidation.
+    trust_file = paths["trust_root"] / "github-pr-ops" / "trust.json"
+    trust_file.parent.mkdir(parents=True, exist_ok=True)
+    trust_file.write_text("{ malformed json")
+
+    new_src = tmp_path / "v2"
+    new_src.mkdir()
+    new_manifest = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (new_src / "ouroboros.plugin.json").write_text(json.dumps(new_manifest))
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(new_src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # Install completes even though trust is unreadable.
+    assert result.exit_code == 0, result.output
+    plain = " ".join(result.output.split())
+    # Yellow warning surfaced (not a traceback).
+    assert "trust file" in plain and "unreadable" in plain, plain
+    assert "Traceback" not in result.output
+    # Lockfile reflects the new install (the post-install warning
+    # didn't roll back the just-written state).
+    entries = Lockfile(paths["lockfile"]).read()
+    assert entries["github-pr-ops"].version == "0.2.0"
+
+
 def test_trust_failure_after_disable_check_keeps_disable_record(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
