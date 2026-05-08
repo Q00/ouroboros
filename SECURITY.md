@@ -68,3 +68,37 @@ should be aware of the following security considerations:
 This security policy covers the `ouroboros-ai` Python package and its
 official documentation. Third-party plugins, runtime backends, and
 downstream integrations are outside the scope of this policy.
+
+## Installation Channel
+
+Official installation channels for Ouroboros:
+
+- **PyPI** -- `ouroboros-ai`, installable via `pipx`, `uv tool`, or `pip`.
+- **GitHub repository** -- `https://github.com/Q00/ouroboros`. The
+  `scripts/install.sh` one-liner installer is hosted here and is also
+  advertised in `README.md`. It auto-detects an available CLI runtime and
+  registers the MCP server, which is why it remains the default Quick Start
+  path.
+- **uv** -- when uv is required, prefer package-manager installs
+  (`pipx install uv`, `pip install --user uv`, `brew install uv`) before
+  falling back to the vendor one-liner (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+  Both `scripts/install.sh` and `skills/setup/SKILL.md` surface these
+  alternatives so users in policy-restricted environments are not forced
+  through pipe-to-shell.
+
+If you operate in an environment that prohibits piping remote scripts to
+a shell, use the PyPI path (`pipx install ouroboros-ai` then
+`ouroboros setup`) -- it produces the same final configuration.
+
+## Bulk-Disclosure Scanner Policy
+
+Automated scanners that bulk-file pattern-matched findings (for example,
+`curl | sh` detectors) **should still follow the private reporting
+channel above before opening a public issue**, even for low-confidence
+matches. This gives maintainers a chance to triage, deduplicate, and
+respond before the report becomes externally indexable.
+
+Conventional installer patterns shared with peer tooling (rustup, uv,
+Homebrew, Deno, Bun, etc.) are treated as *Medium / hardening* at most
+under the severity ladder above; they are not classified as *Critical*
+solely because they match a `curl | sh` pattern.

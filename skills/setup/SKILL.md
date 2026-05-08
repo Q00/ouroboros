@@ -176,10 +176,15 @@ pipx list 2>/dev/null | grep -q ouroboros && echo "PIPX" || echo "NOT_PIPX"
   ```
   If `DEPS_MISSING`: `python3 -m pip install ouroboros-ai[claude]`
 
-If deps are missing and the user doesn't want to fix manually, recommend uvx:
+If deps are missing and the user doesn't want to fix manually, recommend uv. Prefer
+package-manager paths over the vendor pipe-to-shell when the user's environment supports
+them (pipx > pip > brew > vendor one-liner):
 ```
-Or install uvx (recommended — handles deps automatically):
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+Or install uv (recommended — handles deps automatically). Any one of:
+  pipx install uv
+  pip install --user uv
+  brew install uv          # macOS / Linuxbrew
+  curl -LsSf https://astral.sh/uv/install.sh | sh   # vendor one-liner (last resort)
 Then re-run: ooo setup
 ```
 
@@ -189,8 +194,12 @@ Then re-run: ooo setup
 ```
 Ouroboros requires uvx (recommended) or the ouroboros package installed.
 
-Quick install (< 1 minute):
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+Quick install (< 1 minute) — install uv via any of:
+  pipx install uv
+  pip install --user uv
+  brew install uv          # macOS / Linuxbrew
+  curl -LsSf https://astral.sh/uv/install.sh | sh   # vendor one-liner (last resort)
+Then:
   uv python install 3.12
 
 Then re-run: ooo setup

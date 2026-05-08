@@ -112,7 +112,11 @@ if [ "$HAS_UV" = false ]; then
       echo "Error: pipx requires Python >=${MIN_PYTHON} but none was found."
       echo ""
       echo "Install Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
-      echo "Or switch to uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh"
+      echo "Or install uv (recommended). Pick whichever fits your environment:"
+      echo "  pipx install uv"
+      echo "  pip install --user uv"
+      echo "  brew install uv          # macOS / Linuxbrew"
+      echo "  curl -LsSf https://astral.sh/uv/install.sh | sh   # vendor one-liner"
       exit 1
     fi
     echo "  Python: $($PYTHON --version)"
@@ -128,7 +132,11 @@ if [ "$HAS_UV" = false ]; then
       echo "Error: No installer found (uv, pipx) and Python >=${MIN_PYTHON} not available."
       echo ""
       echo "Install one of:"
-      echo "  • uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh"
+      echo "  • uv (recommended). Pick whichever fits your environment:"
+      echo "      pipx install uv"
+      echo "      pip install --user uv"
+      echo "      brew install uv          # macOS / Linuxbrew"
+      echo "      curl -LsSf https://astral.sh/uv/install.sh | sh   # vendor one-liner"
       echo "  • Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
       exit 1
     fi
