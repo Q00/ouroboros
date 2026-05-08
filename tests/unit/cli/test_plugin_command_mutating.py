@@ -351,6 +351,89 @@ def test_remove_drops_lockfile_trust_and_plugin_home(runner: CliRunner, tmp_path
     assert not (paths["plugin_home_root"] / "github-pr-ops").exists()
 
 
+def test_remove_lockfile_failure_preserves_installed_state(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If lockfile removal fails, `remove` must not clear trust/disable state.
+
+    The lockfile is the source of truth for installation. A failed
+    lockfile commit means the plugin is still installed, so trust grants,
+    disable records, and plugin bytes must all remain in place.
+    """
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    (plugin_dir / "marker.txt").write_text("installed")
+    paths = _common_paths(tmp_path)
+
+    installed = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert installed.exit_code == 0, installed.output
+    entry = Lockfile(paths["lockfile"]).read()["github-pr-ops"]
+    trust = TrustStore(root=paths["trust_root"])
+    trust.grant(
+        plugin="github-pr-ops",
+        version=entry.version,
+        scope="github:read",
+        granted_by="user:test",
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+        artifact_digest=entry.artifact_digest,
+    )
+    trust.write_disable(
+        "github-pr-ops",
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+        disabled_by="user:test",
+    )
+
+    def _fail_write_atomic(*_args, **_kwargs):
+        raise OSError("simulated lockfile write failure")
+
+    monkeypatch.setattr(
+        "ouroboros.plugin.lockfile.Lockfile._write_atomic",
+        _fail_write_atomic,
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "remove",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "could not finalize remove" in result.output
+
+    assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+    assert (paths["plugin_home_root"] / "github-pr-ops" / "marker.txt").read_text() == "installed"
+    after_trust = trust.read("github-pr-ops")
+    assert after_trust is not None
+    assert any(g.scope == "github:read" for g in after_trust.granted_scopes)
+    assert trust.is_disabled_for_subject(
+        "github-pr-ops",
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+    )
+    assert trust.read_disable("github-pr-ops") is not None
+
+
 def test_install_failure_preserves_existing_trust_grants(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

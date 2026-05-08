@@ -2547,15 +2547,14 @@ def remove_command(
         plugin_home = plugin_home_root.expanduser() / name
     else:
         plugin_home = Path(entry.plugin_home).expanduser()
-    # Order matters: mutate the durable bookkeeping state (lockfile +
-    # trust + disable records) BEFORE touching the on-disk plugin
-    # bytes. The lockfile is the source of truth for "is this plugin
-    # installed?", so once `lock.remove()` succeeds the firewall
-    # treats the plugin as gone — which means leftover bytes (if the
-    # subsequent `rmtree` were to fail) cannot be invoked. The
-    # opposite order ran the bytes-removal first, leaving a window
-    # where a `wipe_subject` / `lock.remove` failure produced a
-    # split-brain: bytes gone but lockfile still claimed installed.
+    # Order matters: mutate the source of truth for "installed" before
+    # clearing trust / disable state, and clear both before touching
+    # on-disk plugin bytes. Once `lock.remove()` succeeds the firewall
+    # treats the plugin as gone — which means leftover trust/disable
+    # records or bytes (if later cleanup fails) cannot silently change
+    # the behavior of an installed plugin. The opposite order can wipe
+    # trust/disable state while a lockfile write failure leaves the
+    # plugin installed, silently re-enabling or untrusting it.
     #
     # `wipe_subject` removes both the trust file and the disable
     # record (per the RFC: "remove ALSO deletes any disable record
@@ -2563,8 +2562,8 @@ def remove_command(
     # file produces a recovery hint rather than a traceback in the
     # exact command operators run to repair plugin state.
     try:
-        trust.wipe_subject(name)
         lock.remove(name)
+        trust.wipe_subject(name)
     except (ValueError, OSError) as exc:
         print_error(
             f"could not finalize remove for {name!r}: {exc}. "
