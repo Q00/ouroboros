@@ -112,7 +112,15 @@ class TestBuildSubagentPayload:
             context={"key": "val"},
         )
         d = p.to_dict()
-        assert set(d.keys()) == {"tool_name", "title", "agent", "prompt", "model", "context"}
+        assert set(d.keys()) == {
+            "tool_name",
+            "title",
+            "agent",
+            "prompt",
+            "model",
+            "context",
+            "timeout",
+        }
         assert d["tool_name"] == "ouroboros_qa"
 
     def test_to_dict_omits_none_model(self) -> None:
@@ -125,6 +133,8 @@ class TestBuildSubagentPayload:
         d = p.to_dict()
         assert "model" in d
         assert d["model"] is None
+        assert "timeout" in d
+        assert d["timeout"] is None
 
     def test_prompt_cannot_be_empty(self) -> None:
         with pytest.raises(ValueError, match="prompt"):
@@ -270,6 +280,14 @@ class TestBuildRalphSubagent:
         )
 
         assert payload.context["per_iteration_timeout_seconds"] == 900
+        assert payload.timeout == {
+            "timeout_ms": 900_000,
+            "stop_reason": "iteration_timeout",
+            "source": "per_iteration_timeout_seconds",
+            "behavior": "min_positive_budget",
+            "per_iteration_timeout_seconds": 900.0,
+            "max_total_seconds": None,
+        }
         assert "per_iteration_timeout_seconds: 900" in payload.prompt
         assert "stop_reason=iteration_timeout" in payload.prompt
         assert "exceeds 900 seconds" in payload.prompt
@@ -311,6 +329,27 @@ class TestBuildRalphSubagent:
         assert "max_total_seconds: 1500" in payload.prompt
         assert "stop_reason=wall_clock_exhausted" in payload.prompt
         assert "1500 seconds" in payload.prompt
+
+    def test_ralph_timeout_metadata_uses_conservative_min_budget(self) -> None:
+        payload = build_ralph_subagent(
+            lineage_id="lin-min-budget",
+            seed_content="goal: ship",
+            max_generations=3,
+            per_iteration_timeout_seconds=300,
+            max_total_seconds=1800,
+        )
+
+        assert payload.timeout == {
+            "timeout_ms": 300_000,
+            "stop_reason": "iteration_timeout",
+            "source": "per_iteration_timeout_seconds",
+            "behavior": "min_positive_budget",
+            "per_iteration_timeout_seconds": 300.0,
+            "max_total_seconds": 1800.0,
+        }
+        result = build_subagent_result(payload)
+        parsed = json.loads(result.value.content[0].text)
+        assert parsed["_subagent"]["timeout"] == payload.timeout
 
     def test_serializes_seed_content_as_json_data(self) -> None:
         payload = build_ralph_subagent(

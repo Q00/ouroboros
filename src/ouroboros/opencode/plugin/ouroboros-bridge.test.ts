@@ -18,6 +18,7 @@ import {
   base,
   build,
   buildEnvelope,
+  childTimeout,
   cfg,
   childOutput,
   dupe,
@@ -29,9 +30,11 @@ import {
   notify,
   num,
   parse,
+  parseChildTimeout,
   rand62,
   readText,
   stamp,
+  timeoutMessage,
 } from "./ouroboros-bridge.ts"
 import {
   _resolveMid,
@@ -39,6 +42,7 @@ import {
   _patch,
   _PATCH_RETRIES,
   _RESOLVE_RETRIES,
+  _sleep,
 } from "./ouroboros-bridge.ts"
 
 const ENV_BACKUP = { ...process.env }
@@ -213,6 +217,40 @@ describe("build", () => {
     expect(s!.agent).toBe("hacker")
   })
 
+  test("parses structural timeout metadata", () => {
+    const s = build({
+      tool_name: "ouroboros_ralph",
+      title: "Ralph",
+      agent: "general",
+      prompt: "run",
+      timeout: {
+        timeout_ms: 300_000,
+        stop_reason: "iteration_timeout",
+        source: "per_iteration_timeout_seconds",
+        behavior: "min_positive_budget",
+        per_iteration_timeout_seconds: 300,
+        max_total_seconds: 1800,
+      },
+    }, 0)
+    expect(s!.timeout).toEqual({
+      timeoutMs: 300_000,
+      stopReason: "iteration_timeout",
+      source: "per_iteration_timeout_seconds",
+      behavior: "min_positive_budget",
+      perIterationTimeoutSeconds: 300,
+      maxTotalSeconds: 1800,
+    })
+  })
+
+  test("ignores malformed timeout metadata", () => {
+    const s = build({
+      tool_name: "ouroboros_ralph",
+      prompt: "run",
+      timeout: { timeout_ms: 0, stop_reason: "wall_clock_exhausted" },
+    }, 0)
+    expect(s!.timeout).toBeUndefined()
+  })
+
   test("rejects non-object", () => {
     expect(build(null, 0)).toBeNull()
     expect(build(42, 0)).toBeNull()
@@ -339,6 +377,57 @@ describe("parse", () => {
     const out = parse(raw)
     expect(out.subs.length).toBe(1)
     expect(out.responseShape).toEqual({ job_id: "job_789" })
+  })
+})
+
+describe("child timeout helpers", () => {
+  test("parseChildTimeout accepts Ralph stop reasons", () => {
+    expect(parseChildTimeout({
+      timeout_ms: 1_000,
+      stop_reason: "wall_clock_exhausted",
+      source: "max_total_seconds",
+    })).toEqual({
+      timeoutMs: 1_000,
+      stopReason: "wall_clock_exhausted",
+      source: "max_total_seconds",
+      behavior: undefined,
+      perIterationTimeoutSeconds: undefined,
+      maxTotalSeconds: undefined,
+    })
+  })
+
+  test("parseChildTimeout rejects unknown stop reasons", () => {
+    expect(parseChildTimeout({
+      timeout_ms: 1_000,
+      stop_reason: "timeout",
+      source: "x",
+    })).toBeUndefined()
+  })
+
+  test("childTimeout falls back to global default", () => {
+    const timeout = childTimeout({
+      tool: "ouroboros_qa",
+      title: "QA",
+      agent: "general",
+      prompt: "p",
+      truncated: false,
+      hash: "h",
+    })
+    expect(timeout.timeoutMs).toBeGreaterThan(0)
+    expect(timeout.stopReason).toBe("child_timeout")
+  })
+
+  test("timeoutMessage distinguishes public Ralph stop reasons", () => {
+    expect(timeoutMessage({
+      timeoutMs: 10,
+      stopReason: "iteration_timeout",
+      source: "per_iteration_timeout_seconds",
+    })).toContain("stop_reason=iteration_timeout")
+    expect(timeoutMessage({
+      timeoutMs: 10,
+      stopReason: "wall_clock_exhausted",
+      source: "max_total_seconds",
+    })).toContain("stop_reason=wall_clock_exhausted")
   })
 })
 
@@ -768,5 +857,49 @@ describe("_dispatch — child session lifecycle", () => {
 
     expect(isRalphOwnedSession("grandchild_123")).toBe(true)
     expect(isNestedRalphDispatch("grandchild_123", [{ ...sub, tool: "ouroboros_ralph" }])).toBe(true)
+  })
+
+  test("aborts child and patches semantic Ralph iteration timeout", async () => {
+    const patchBodies: any[] = []
+    let abortCalled = false
+    const cli = mockCli({
+      create: async () => ({ data: { id: "child_timeout" } }),
+      prompt: async (_a: unknown) => {
+        const signal = (_a as { signal: AbortSignal }).signal
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true })
+        })
+      },
+      abort: async () => {
+        abortCalled = true
+        return {}
+      },
+    })
+    const b = mockBase(async (a: unknown) => {
+      patchBodies.push((a as { body: unknown }).body)
+      return {}
+    })
+    const sub = {
+      tool: "ouroboros_ralph",
+      title: "Ralph",
+      prompt: "run",
+      agent: "general",
+      truncated: false,
+      hash: "h",
+      timeout: {
+        timeoutMs: 1,
+        stopReason: "iteration_timeout",
+        source: "per_iteration_timeout_seconds",
+      },
+    }
+
+    await _dispatch(cli as never, b as never, "pid", "mid", sub as never)
+    for (let i = 0; i < 20 && patchBodies.length < 2; i++) await _sleep(5)
+
+    expect(abortCalled).toBe(true)
+    const errorPatch = patchBodies.find((body) => body?.state?.status === "error")
+    expect(errorPatch.state.error).toContain("stop_reason=iteration_timeout")
+    expect(errorPatch.state.metadata.stop_reason).toBe("iteration_timeout")
+    expect(errorPatch.state.metadata.timeout_source).toBe("per_iteration_timeout_seconds")
   })
 })

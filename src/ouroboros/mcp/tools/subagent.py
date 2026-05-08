@@ -25,6 +25,7 @@ Payload structure:
             "prompt": str,      # full prompt for subagent LLM
             "model": str|None,  # optional model override hint
             "context": dict,    # original tool args for round-trip
+            "timeout": dict|None, # optional structural child timeout budget
         }
     }
 """
@@ -71,6 +72,7 @@ class SubagentPayload:
     agent: str = "general"
     model: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    timeout: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to plain dict for JSON transport in MCPToolResult.meta."""
@@ -81,6 +83,7 @@ class SubagentPayload:
             "prompt": self.prompt,
             "model": self.model,
             "context": self.context,
+            "timeout": self.timeout,
         }
 
 
@@ -97,6 +100,7 @@ def build_subagent_payload(
     agent: str = "general",
     model: str | None = None,
     context: dict[str, Any] | None = None,
+    timeout: dict[str, Any] | None = None,
 ) -> SubagentPayload:
     """Build a SubagentPayload with validation.
 
@@ -107,6 +111,7 @@ def build_subagent_payload(
         agent: OpenCode subagent type. Default "general".
         model: Optional model override hint for the subagent.
         context: Original tool arguments for bridge round-trip.
+        timeout: Optional bridge-enforced child timeout metadata.
 
     Returns:
         Validated SubagentPayload.
@@ -128,7 +133,54 @@ def build_subagent_payload(
         agent=agent,
         model=model,
         context=context or {},
+        timeout=timeout,
     )
+
+
+def _positive_number(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return numeric
+
+
+def _ralph_timeout_metadata(
+    *,
+    per_iteration_timeout_seconds: float | None,
+    max_total_seconds: float | None,
+) -> dict[str, Any] | None:
+    """Build bridge-enforced timeout metadata for plugin-mode Ralph.
+
+    The plugin has one OpenCode child session for the full Ralph loop, not a
+    Python-owned per-generation runner. To preserve the public timeout
+    contract, the child gets the conservative minimum positive budget: total
+    wall-clock caps the whole child, and per-iteration timeout also caps an
+    unresponsive single child generation.
+    """
+    per_iteration = _positive_number(per_iteration_timeout_seconds)
+    max_total = _positive_number(max_total_seconds)
+    candidates: list[tuple[str, str, float]] = []
+    if max_total is not None:
+        candidates.append(("max_total_seconds", "wall_clock_exhausted", max_total))
+    if per_iteration is not None:
+        candidates.append(("per_iteration_timeout_seconds", "iteration_timeout", per_iteration))
+    if not candidates:
+        return None
+
+    source, stop_reason, seconds = min(candidates, key=lambda item: item[2])
+    return {
+        "timeout_ms": max(1, int(seconds * 1000)),
+        "stop_reason": stop_reason,
+        "source": source,
+        "behavior": "min_positive_budget",
+        "per_iteration_timeout_seconds": per_iteration,
+        "max_total_seconds": max_total,
+    }
 
 
 def build_subagent_result(
@@ -1368,4 +1420,8 @@ do not enqueue another background Ralph job."""
         title="Ralph: full loop",
         prompt=prompt,
         context=context,
+        timeout=_ralph_timeout_metadata(
+            per_iteration_timeout_seconds=per_iteration_timeout_seconds,
+            max_total_seconds=max_total_seconds,
+        ),
     )
