@@ -671,7 +671,10 @@ def test_auto_answerer_multilingual_permission_questions_route_to_product_behavi
         assert answer.blocker is None, question
         # Product-behavior contract is preserved (constraints + acceptance) and
         # actor/IO assumptions are NOT injected.
-        assert {"constraints", "acceptance_criteria"} <= updated_sections, (question, updated_sections)
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
         assert "actors" not in updated_sections, question
         assert "inputs" not in updated_sections, question
         assert "outputs" not in updated_sections, question

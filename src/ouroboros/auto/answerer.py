@@ -979,9 +979,7 @@ def _has_product_behavior_intent(lowered: str) -> bool:
     """
     if _is_product_behavior_question(lowered):
         return True
-    return any(
-        re.search(pattern, lowered) for pattern in _MULTILINGUAL_PRODUCT_BEHAVIOR_PATTERNS
-    )
+    return any(re.search(pattern, lowered) for pattern in _MULTILINGUAL_PRODUCT_BEHAVIOR_PATTERNS)
 
 
 def _is_verification_question(lowered: str) -> bool:
