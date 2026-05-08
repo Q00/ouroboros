@@ -580,7 +580,13 @@ _INTENT_CUES: Mapping[QuestionIntent, tuple[str, ...]] = {
     QuestionIntent.ACCEPTANCE_CRITERIA: (
         "acceptance criteria",
         "acceptance criterion",
-        "acceptance",
+        # NB: bare ``"acceptance"`` is intentionally NOT a cue — it would
+        # silently match property/status questions like ``"What is the
+        # acceptance status?"`` and route them through
+        # ``_feature_acceptance_answer()``.  ``_is_feature_acceptance_question``
+        # already covers genuine English acceptance-criteria questions via a
+        # ``\b(acceptance|criteria)\b`` pre-filter combined with stronger
+        # shape checks, so we don't need a bare cue for English coverage.
         "success criteria",
         "completion criteria",
         "criterios de aceptación",
@@ -815,6 +821,8 @@ _IO_FLOW_SHAPE_PATTERNS: tuple[str, ...] = (
 _ACTOR_NOUN_CUES: tuple[str, ...] = (
     "actor",
     "actors",
+    "user",
+    "users",
     "persona",
     "personas",
     "stakeholder",

@@ -700,6 +700,45 @@ def test_auto_answerer_cjk_property_lookup_does_not_misroute_to_runtime() -> Non
         assert "runtime_context" not in updated_sections, (question, updated_sections)
 
 
+def test_auto_answerer_english_user_actor_questions_route_to_actor_io() -> None:
+    """Common English actor questions like ``"Who is the primary user?"`` and
+    ``"Which user is the primary user?"`` must populate ``actors`` /
+    ``inputs`` / ``outputs``.  Flagged by ouroboros-agent on commit f59d4e7
+    after the actor cue list previously omitted ``user``/``users``.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Who is the primary user?",
+        "Which user is the primary user?",
+        "Who is the end user?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert {"actors", "inputs", "outputs"} <= updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_acceptance_status_does_not_misroute_to_acceptance_route() -> None:
+    """Bare ``"acceptance"`` substring must not classify property/status
+    questions like ``"What is the acceptance status?"`` as
+    ``ACCEPTANCE_CRITERIA``.  Flagged by ouroboros-agent on commit f59d4e7 —
+    same false-positive class as ``output`` / ``repository`` substring
+    matches.
+    """
+    answerer = AutoAnswerer()
+    answer = answerer.answer(
+        "What is the acceptance status?",
+        SeedDraftLedger.from_goal("Build a CLI"),
+    )
+    updated_sections = {section for section, _entry in answer.ledger_updates}
+    assert answer.blocker is None
+    # Must fall through to the conservative default — no acceptance /
+    # verification ledger sections written, no actor/IO injection.
+    assert "acceptance_criteria" not in updated_sections, updated_sections
+    assert "verification_plan" not in updated_sections, updated_sections
+
+
 def test_auto_answerer_meta_verify_questions_stay_on_verification_route() -> None:
     """Meta-verification questions like ``"Should we verify users can reset
     passwords?"`` and ``"How should we validate admins can log in?"`` share
