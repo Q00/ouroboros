@@ -204,6 +204,18 @@ def _describe_trust_state(
     record = trust_store.read(manifest.name)
     if record is None or record.version != manifest.version:
         return "installed"
+    # Legacy/unbound records cannot be reported as "trusted" under the
+    # post-RFC subject contract: the firewall refuses them once the
+    # dispatcher plumbs the install subject (see
+    # ``firewall._record_matches_subject``). Mirror that here so
+    # ``inspect`` / ``list`` agree with the actual enforcement path —
+    # otherwise operators see "trusted" while invocation is in fact
+    # blocked. The check only fires when the caller plumbs an expected
+    # subject column (production CLI), so legacy CLI tests that pass
+    # ``expected_*=None`` keep their version-only behavior.
+    if expected_source_identity is not None or expected_artifact_digest is not None:
+        if not record.source_type or not record.source_identity or not record.artifact_digest:
+            return "installed"
     if record.source_type and record.source_type != manifest.source.type:
         return "installed"
     if expected_source_identity is not None and record.source_identity:

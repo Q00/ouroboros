@@ -263,6 +263,54 @@ TWO_REQUIRED_MANIFEST: dict = {
 }
 
 
+def test_describe_trust_state_refuses_legacy_record_when_subject_plumbed(
+    tmp_path: Path,
+) -> None:
+    """Regression for the contract-divergence the firewall change in
+    this PR would otherwise create: the firewall now refuses a
+    pre-RFC trust record (blank ``source_type`` / ``source_identity``
+    / ``artifact_digest``) once the dispatcher plumbs the install
+    subject, but ``ooo plugin inspect`` / ``ooo plugin list``
+    delegate to ``_describe_trust_state`` which used to accept the
+    same legacy record as ``"trusted"``. Operators would then see a
+    trusted plugin that the firewall actually blocks. Mirror the
+    firewall predicate here so the diagnostic surface agrees with
+    the runtime gate.
+    """
+    from ouroboros.cli.commands.plugin import _describe_trust_state
+    from ouroboros.plugin.manifest import load_manifest
+
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    manifest = load_manifest(plugin_home / "ouroboros.plugin.json")
+    trust_root = tmp_path / "trust"
+    # Pre-RFC grant: only `version` + `scope` recorded.
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    # Subject NOT plumbed: legacy version-only contract still applies
+    # so the helper says "trusted" (firewall unit tests rely on this
+    # backwards-compatible path).
+    state_no_subject = _describe_trust_state(manifest, TrustStore(root=trust_root))
+    assert state_no_subject == "trusted"
+
+    # Subject plumbed: the production CLI path. The legacy record
+    # cannot prove it was granted for THIS install subject, so the
+    # helper degrades to ``"installed"`` — matching the firewall's
+    # ``_record_matches_subject`` refusal.
+    state_with_subject = _describe_trust_state(
+        manifest,
+        TrustStore(root=trust_root),
+        expected_source_identity=str(plugin_home),
+        expected_artifact_digest="sha256:" + "a" * 64,
+    )
+    assert state_with_subject == "installed"
+
+
 def test_inspect_partial_trust_reports_installed_not_trusted(
     runner: CliRunner, tmp_path: Path
 ) -> None:

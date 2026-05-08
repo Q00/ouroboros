@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from ouroboros.plugin.firewall import (
     invoke_plugin,
 )
@@ -700,6 +702,49 @@ def test_digest_fails_closed_on_escaping_symlink(tmp_path: Path) -> None:
     assert types == ["plugin.failed"]
     assert events[0]["result"]["status"] == "trust_subject_changed"
     assert events[0]["provenance"]["exception_type"] == "EscapingSymlinkError"
+
+
+def test_digest_fails_closed_on_unsupported_file_type(tmp_path: Path) -> None:
+    """``canonical_tree_hash`` raises ``UnsupportedFileTypeError`` for
+    devices, FIFOs, and sockets inside the plugin tree. The firewall
+    MUST fail closed with ``trust_subject_changed`` and a tampered-
+    home provenance reason rather than letting the exception escape.
+    """
+    import os
+    import sys
+
+    if sys.platform.startswith("win"):
+        pytest.skip("FIFO requires POSIX")
+
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    plugin_home = tmp_path / "ph_fifo"
+    plugin_home.mkdir()
+    (plugin_home / "ouroboros.plugin.json").write_text("{}")
+    fifo_path = plugin_home / "stub.fifo"
+    os.mkfifo(fifo_path)
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-fifo",
+        plugin_home=plugin_home,
+        expected_artifact_digest="sha256:" + "0" * 64,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+    assert events[0]["provenance"]["exception_type"] == "UnsupportedFileTypeError"
 
 
 def test_disable_record_blocks_independently_of_trust(tmp_path: Path) -> None:
