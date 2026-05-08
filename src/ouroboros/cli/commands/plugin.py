@@ -422,6 +422,28 @@ class CatalogRegistry:
                             f"catalogs[{index}].plugins[{plugin_index}] is not a string "
                             f"(got {type(name).__name__})"
                         )
+            # ``ooo plugin install <name>`` does ``s["source_type"]`` and
+            # ``s["source_identity"]`` (see ``install_command`` resolve
+            # block) and ``find_sources_for()`` returns these dicts as
+            # ``sources`` directly. A catalog file that omits either
+            # field — or supplies a non-string — would pass the outer
+            # JSON-object check and crash later with ``KeyError`` /
+            # ``TypeError`` instead of the friendly recovery hint this
+            # path is supposed to provide.
+            for required_field in ("source_type", "source_identity"):
+                if required_field not in entry:
+                    raise ValueError(
+                        f"plugin catalog state at {self.state_path}: "
+                        f"catalogs[{index}] is missing required field "
+                        f"{required_field!r}"
+                    )
+                value = entry[required_field]
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"plugin catalog state at {self.state_path}: "
+                        f"catalogs[{index}].{required_field} is not a string "
+                        f"(got {type(value).__name__})"
+                    )
         return payload
 
     def _save(self, payload: dict) -> None:
@@ -932,11 +954,29 @@ def _enumerate_catalog(repo_root: Path) -> list[PluginManifest]:
         if not manifest_path.is_file():
             continue
         try:
-            manifests.append(load_manifest(manifest_path))
+            candidate = load_manifest(manifest_path)
         except PluginManifestError as exc:
             loc = exc.json_pointer or "(root)"
             msg = exc.args[0] if exc.args else "invalid manifest"
             skipped.append((entry.name, f"{loc}: {msg}"))
+            continue
+        # Skip ``first_party`` manifests up-front so they neither appear
+        # in the interactive multi-select nor flow into ``_install_one``.
+        # The trust-bypass semantic the firewall grants ``first_party``
+        # is reserved for plugins bundled with ouroboros itself; an
+        # external repo claiming that type would let a malicious
+        # manifest skip the user-facing trust flow entirely.
+        if candidate.source.type == "first_party":
+            skipped.append(
+                (
+                    entry.name,
+                    'manifest declares `source.type = "first_party"` (reserved '
+                    "for plugins bundled with ouroboros; not installable from "
+                    "an external source)",
+                )
+            )
+            continue
+        manifests.append(candidate)
     for dir_name, reason in skipped:
         console.print(f"  [yellow]skip[/]: {dir_name}: invalid manifest ({reason})")
     if not manifests:
@@ -997,6 +1037,31 @@ def _manifest_checksum(plugin_home: Path) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def _refuse_first_party_external_install(manifest: PluginManifest) -> None:
+    """Reject an external install that claims ``source.type == "first_party"``.
+
+    The firewall skips the trust gate for ``first_party`` manifests
+    (`src/ouroboros/plugin/firewall.py`, "First-party trust semantics" —
+    bundled programs are implicitly trusted at boot). That semantic only
+    holds for plugins shipped with ouroboros itself; allowing arbitrary
+    user-installed plugins to declare the same ``source.type`` would let
+    a malicious manifest fetched from a repo or local path bypass the
+    user-facing trust flow entirely. The CLI install paths
+    (``ooo plugin add`` / ``install``) are external installs by
+    definition, so a ``first_party`` claim here is always invalid.
+    """
+    if manifest.source.type == "first_party":
+        print_error(
+            f"manifest for {manifest.name!r} declares "
+            f'`source.type = "first_party"`, which is reserved for plugins '
+            f"bundled with ouroboros itself. External installs (`ooo plugin "
+            f"add` / `install`) cannot grant first-party trust semantics; "
+            f"the manifest must declare `source.type` as `local_path` or "
+            f"`plugin_home` to be installable."
+        )
+        raise typer.Exit(code=1)
+
+
 def _install_one(
     *,
     manifest: PluginManifest,
@@ -1017,10 +1082,20 @@ def _install_one(
     from a different source.
 
     Refuses the install if the manifest's ``name`` collides with a
-    reserved top-level command — that check happens BEFORE the lockfile
-    is touched so a rejected install never produces a half-applied state.
+    reserved top-level command, OR if the manifest claims
+    ``source.type == "first_party"`` (privilege escalation guard — see
+    ``_refuse_first_party_external_install``). Both checks happen BEFORE
+    the lockfile is touched so a rejected install never produces a
+    half-applied state.
     """
     _refuse_reserved_name(manifest.name)
+    # Defense in depth: every external install path also calls the
+    # first-party guard right after manifest load (so the rejection
+    # happens before we touch the filesystem). Re-checking here means a
+    # future caller that forgets the early guard cannot persist a
+    # ``first_party`` lockfile entry — the firewall's trust-bypass
+    # semantic stays bound to genuinely-bundled programs.
+    _refuse_first_party_external_install(manifest)
     entry = LockEntry(
         name=manifest.name,
         version=manifest.version,
@@ -1455,6 +1530,8 @@ def _install_from_local_directory(
             f"{exc.json_pointer or '(root)'}: {exc.args[0] if exc.args else ''}"
         )
         raise typer.Exit(code=1) from exc
+    # Reject before touching the filesystem.
+    _refuse_first_party_external_install(manifest)
 
     plugin_home = plugin_home_root / manifest.name
     # Atomic install: a failed copy must leave the prior install (and
@@ -1544,6 +1621,7 @@ def _install_named_from_local_path(
             "to avoid silent name aliasing."
         )
         raise typer.Exit(code=1)
+    _refuse_first_party_external_install(manifest)
 
     plugin_home = plugin_home_root / manifest.name
     _atomic_replace_dir(candidate_root, plugin_home)

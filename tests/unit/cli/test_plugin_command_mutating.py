@@ -2136,30 +2136,37 @@ def test_inspect_first_party_does_not_report_missing_scopes(
     boot). ``ooo plugin inspect`` MUST NOT report them as having
     missing scopes — that misleads operators about invocability and
     contradicts what the firewall actually does.
+
+    External installs reject ``source.type == "first_party"`` (the
+    privilege-escalation guard added on the same PR), so this test
+    stages the lockfile + plugin home directly instead of using the
+    ``install`` CLI — first-party plugins are bundled with ouroboros
+    and are not user-installable by design.
     """
+    from ouroboros.plugin.lockfile import LockEntry
+
     paths = _common_paths(tmp_path)
-    src = tmp_path / "src"
-    src.mkdir()
+    plugin_home = paths["plugin_home_root"] / "github-pr-ops"
+    plugin_home.mkdir(parents=True, exist_ok=True)
     manifest = json.loads(json.dumps(REFERENCE_MANIFEST))
     manifest["source"] = {"type": "first_party"}
-    # Keep a required permission to make the regression load-bearing:
-    # the previous ``inspect`` would have shown "missing scopes" for it.
-    (src / "ouroboros.plugin.json").write_text(json.dumps(manifest))
+    (plugin_home / "ouroboros.plugin.json").write_text(json.dumps(manifest))
 
-    install_result = runner.invoke(
-        plugin_app,
-        [
-            "install",
-            str(src),
-            "--lockfile",
-            str(paths["lockfile"]),
-            "--plugin-home-root",
-            str(paths["plugin_home_root"]),
-            "--trust-root",
-            str(paths["trust_root"]),
-        ],
+    Lockfile(paths["lockfile"]).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0" * 8,
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="first_party",
+            source_identity="bundled:github-pr-ops",
+            artifact_digest="sha256:" + "a" * 64,
+        )
     )
-    assert install_result.exit_code == 0, install_result.output
 
     inspect_result = runner.invoke(
         plugin_app,
@@ -2324,6 +2331,137 @@ def test_add_friendly_error_on_non_string_plugin_name_in_catalog(
     plain = " ".join(result.output.split())
     assert "plugins" in plain, plain
     assert "Traceback" not in result.output
+
+
+def test_add_friendly_error_on_missing_source_type_in_catalog(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:397.
+
+    Inner-shape validation must also reach the ``source_type`` and
+    ``source_identity`` keys: a parseable file like
+    ``{"catalogs":[{"plugins":["github-pr-ops"]}]}`` would otherwise
+    pass the new preflight and crash inside ``install_command`` with
+    raw ``KeyError`` when it does ``s["source_type"]``.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    _make_repo_layout(repo, [REFERENCE_MANIFEST])
+
+    catalog_state = tmp_path / "plugin-catalogs.json"
+    catalog_state.write_text(
+        json.dumps(
+            {
+                "catalogs": [
+                    {
+                        # Missing both "source_type" and "source_identity".
+                        "plugins": ["github-pr-ops"],
+                    }
+                ]
+            }
+        )
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "source_type" in plain or "missing required field" in plain, plain
+    assert "Traceback" not in result.output
+
+
+def test_add_rejects_external_first_party_manifest(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1171.
+
+    The firewall skips the trust gate whenever
+    ``manifest.source.type == "first_party"``. That semantic is
+    reserved for plugins bundled with ouroboros itself; allowing
+    ``ooo plugin add`` to persist a ``first_party`` source type from
+    an arbitrary external repo would let any plugin author bypass the
+    user-facing trust flow entirely (privilege escalation). The CLI
+    install paths must reject such manifests before any filesystem
+    mutation.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    malicious = {**REFERENCE_MANIFEST, "source": {"type": "first_party"}}
+    _make_repo_layout(repo, [malicious])
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # The malicious manifest is filtered out of the discoverable
+    # catalog (yellow `skip:` warning). With no other plugins to
+    # install, ``add`` exits with a "no valid manifests" error rather
+    # than producing a lockfile entry — privilege escalation blocked.
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "first_party" in plain, plain
+    # Crucially, no install state was persisted.
+    assert not paths["lockfile"].exists() or Lockfile(paths["lockfile"]).read() == {}, plain
+
+
+def test_install_dir_rejects_external_first_party_manifest(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Sibling regression for the BLOCKING finding on plugin.py:1171.
+
+    The single-plugin ``install <plugin-dir>`` form must also reject
+    external ``first_party`` manifests. Since this path skips the
+    catalog-level filter, the rejection happens at the manifest-load
+    site (and ``_install_one`` re-checks as defense-in-depth).
+    """
+    paths = _common_paths(tmp_path)
+    plugin_dir = tmp_path / "single-plugin"
+    plugin_dir.mkdir()
+    malicious = {**REFERENCE_MANIFEST, "source": {"type": "first_party"}}
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(malicious))
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "first_party" in plain, plain
+    # No install state was persisted.
+    assert not paths["lockfile"].exists() or Lockfile(paths["lockfile"]).read() == {}
 
 
 def test_trust_failure_after_disable_check_keeps_disable_record(
