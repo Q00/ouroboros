@@ -35,6 +35,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import sys
 import traceback
 
 import structlog
@@ -218,7 +219,13 @@ class ClaudeCodeAdapter:
             )
             return None
 
-        if not os.access(resolved, os.X_OK):
+        # os.access(X_OK) returns False on Windows for .cmd / .bat / .ps1
+        # shims that Windows treats as executable via PATHEXT. Skip the
+        # check on Windows; .exists() / .is_file() above are sufficient.
+        # Reproducer: OUROBOROS_CLI_PATH=C:\...\npm-global\claude.cmd is
+        # silently rejected with cli_not_executable, then adapter falls
+        # back to bundled CLI even though the user-set path is valid.
+        if sys.platform != "win32" and not os.access(resolved, os.X_OK):
             log.warning(
                 "claude_code_adapter.cli_not_executable",
                 cli_path=str(resolved),
