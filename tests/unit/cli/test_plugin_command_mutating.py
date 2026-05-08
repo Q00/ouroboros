@@ -840,9 +840,7 @@ def _install_reference_plugin(
     )
 
 
-def test_install_records_artifact_digest_in_lockfile(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_install_records_artifact_digest_in_lockfile(runner: CliRunner, tmp_path: Path) -> None:
     """The lockfile must record the canonical tree hash + source identity
     so the firewall can detect code substitution per the RFC.
     """
@@ -960,9 +958,7 @@ def test_install_same_version_different_source_invalidates_trust(
     )
 
 
-def test_install_named_with_from_local_path(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_install_named_with_from_local_path(runner: CliRunner, tmp_path: Path) -> None:
     """RFC qualified form: `install <name> --from <local-path>` is the
     register-on-first-use entrypoint for local_path sources.
     """
@@ -994,8 +990,7 @@ def test_install_named_with_from_local_path(
     payload = json.loads(catalog_state.read_text())
     catalogs = payload["catalogs"]
     assert any(
-        c["source_type"] == "local_path" and "github-pr-ops" in c["plugins"]
-        for c in catalogs
+        c["source_type"] == "local_path" and "github-pr-ops" in c["plugins"] for c in catalogs
     )
 
 
@@ -1035,9 +1030,7 @@ def test_install_named_default_form_with_no_known_catalog_errors(
     assert "--from" in flat
 
 
-def test_disable_writes_record_persisting_across_install(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_disable_writes_record_persisting_across_install(runner: CliRunner, tmp_path: Path) -> None:
     """RFC: a disable record is keyed by (name, source.type, source_identity)
     without artifact_digest, so it survives upgrades (and any reinstall
     that lands the same source identity).

@@ -309,9 +309,7 @@ class CatalogRegistry:
         """Return every catalog entry that exposes ``plugin_name``."""
         data = self._load()
         return [
-            entry
-            for entry in data.get("catalogs", [])
-            if plugin_name in entry.get("plugins", [])
+            entry for entry in data.get("catalogs", []) if plugin_name in entry.get("plugins", [])
         ]
 
     def find_by_identity(
@@ -826,9 +824,7 @@ def add_command(
         catalog_state.register(
             source_type=source_type,
             source_identity=(
-                normalize_repo_url(target)
-                if source_kind == "git"
-                else str(repo_root.resolve())
+                normalize_repo_url(target) if source_kind == "git" else str(repo_root.resolve())
             ),
             plugin_name=manifest.name,
         )
@@ -981,9 +977,7 @@ def install_command(
             return
         from_path = Path(from_source).expanduser()
         if not from_path.is_absolute():
-            print_error(
-                f"--from <local-path> must be an absolute path, got: {from_source}"
-            )
+            print_error(f"--from <local-path> must be an absolute path, got: {from_source}")
             raise typer.Exit(code=1)
         if not from_path.is_dir():
             print_error(f"--from path is not a directory: {from_path}")
@@ -1008,9 +1002,7 @@ def install_command(
         )
         raise typer.Exit(code=1)
     if len(sources) > 1:
-        listing = "\n  ".join(
-            f"- {s['source_type']}: {s['source_identity']}" for s in sources
-        )
+        listing = "\n  ".join(f"- {s['source_type']}: {s['source_identity']}" for s in sources)
         print_error(
             f"plugin name {target!r} is ambiguous across {len(sources)} known "
             f"catalogs:\n  {listing}\nRe-run with --from <repo-url|local-path> "
@@ -1205,8 +1197,7 @@ def _install_named_from_url(
     by_name = {m.name: m for m in catalog}
     if name not in by_name:
         print_error(
-            f"plugin {name!r} not found in catalog at {repo_url} "
-            f"(available: {sorted(by_name)})"
+            f"plugin {name!r} not found in catalog at {repo_url} (available: {sorted(by_name)})"
         )
         raise typer.Exit(code=1)
     manifest = by_name[name]
@@ -1382,7 +1373,8 @@ def disable_command(
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
     trust.write_disable(
         name,
-        source_type=entry.source_type or ("plugin_home" if entry.source_kind == "git" else "local_path"),
+        source_type=entry.source_type
+        or ("plugin_home" if entry.source_kind == "git" else "local_path"),
         source_identity=entry.source_identity or (entry.repository or entry.plugin_home),
     )
     trust.remove(name)
@@ -1432,9 +1424,7 @@ def remove_command(
     trust.wipe_subject(name)
     lock.remove(name)
 
-    print_success(
-        f"Removed {name} (lockfile entry + trust file + disable record + plugin home)"
-    )
+    print_success(f"Removed {name} (lockfile entry + trust file + disable record + plugin home)")
 
 
 __all__ = [

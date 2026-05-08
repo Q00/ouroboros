@@ -132,7 +132,10 @@ def _record_matches_subject(
     if trust_record.source_type and trust_record.source_type != manifest.source.type:
         return False
     if expected_source_identity is not None:
-        if trust_record.source_identity and trust_record.source_identity != expected_source_identity:
+        if (
+            trust_record.source_identity
+            and trust_record.source_identity != expected_source_identity
+        ):
             return False
     if expected_artifact_digest is not None:
         if (
