@@ -1510,8 +1510,10 @@ def add_command(
     """
     _reject_subdirectory_form(target)
 
-    cache_root = cache_root or Path.home() / ".ouroboros" / "cache"
-    plugin_home_root = plugin_home_root or Path.home() / ".ouroboros" / "plugins"
+    cache_root = (cache_root or Path.home() / ".ouroboros" / "cache").expanduser().resolve()
+    plugin_home_root = (
+        (plugin_home_root or Path.home() / ".ouroboros" / "plugins").expanduser().resolve()
+    )
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
 
@@ -1798,8 +1800,10 @@ def install_command(
       ``ooo plugin discover`` / pre-RFC scripts. The argument must be
       an existing directory containing ``ouroboros.plugin.json``.
     """
-    plugin_home_root = plugin_home_root or Path.home() / ".ouroboros" / "plugins"
-    cache_root = cache_root or Path.home() / ".ouroboros" / "cache"
+    plugin_home_root = (
+        (plugin_home_root or Path.home() / ".ouroboros" / "plugins").expanduser().resolve()
+    )
+    cache_root = (cache_root or Path.home() / ".ouroboros" / "cache").expanduser().resolve()
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
     catalog_state = CatalogRegistry(
@@ -2349,7 +2353,7 @@ def trust_command(
             try:
                 record = trust.grant(
                     plugin=name,
-                    version=entry.version,
+                    version=manifest.version,
                     scope=scope,
                     granted_by=granted_by,
                     source_type=entry.source_type,
@@ -2374,7 +2378,7 @@ def trust_command(
                 ),
                 "plugin": {
                     "name": name,
-                    "version": entry.version,
+                    "version": manifest.version,
                     "source_type": event_source_type,
                 },
                 "command": {
@@ -2497,13 +2501,34 @@ def disable_command(
     # a recovery hint instead of a raw traceback in the very command
     # operators run to repair that state.
     try:
+        removed_trust = trust.remove(name)
+        if not removed_trust:
+            # Disabling an already-untrusted plugin is valid: the disable
+            # record is an independent revocation signal. However, when
+            # the caller supplies the wrong trust root while a grant exists
+            # in the command's adjacent/default trust store, success would
+            # be a dangerous lie: the runtime's real grant remains intact
+            # and the new disabled.json is written in a location dispatch
+            # will never consult. Detect that false-success shape before
+            # writing any state in the wrong root.
+            candidate_roots = {DEFAULT_TRUST_ROOT, lock.path.parent / "trust"}
+            for candidate_root in candidate_roots:
+                candidate_root = candidate_root.expanduser()
+                if candidate_root == trust.root.expanduser():
+                    continue
+                if (candidate_root / name / "trust.json").is_file():
+                    print_error(
+                        f"no trust grant for {name!r} exists under {trust.root}, "
+                        f"but a grant exists under {candidate_root}; pass the "
+                        "same --trust-root used for the grant before disabling."
+                    )
+                    raise typer.Exit(code=1)
         trust.write_disable(
             name,
             source_type=entry.source_type
             or ("plugin_home" if entry.source_kind == "git" else "local_path"),
             source_identity=entry.source_identity or (entry.repository or entry.plugin_home),
         )
-        trust.remove(name)
     except (ValueError, OSError) as exc:
         print_error(
             f"could not update trust state for {name!r}: {exc}. "

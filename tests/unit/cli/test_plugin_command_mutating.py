@@ -171,6 +171,71 @@ def test_install_local_directory(runner: CliRunner, tmp_path: Path) -> None:
     assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
 
 
+def test_add_persists_absolute_plugin_home_for_relative_root(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Relative --plugin-home-root must not create cwd-dependent lock rows."""
+    repo_root = tmp_path / "repo"
+    _make_repo_layout(repo_root, [REFERENCE_MANIFEST])
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    lockfile = tmp_path / "plugins.lock"
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(lockfile),
+            "--plugin-home-root",
+            "relative-homes",
+            "--catalog-state",
+            str(tmp_path / "catalog.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    plugin_home = Path(Lockfile(lockfile).read()["github-pr-ops"].plugin_home)
+    assert plugin_home.is_absolute()
+    assert plugin_home == cwd / "relative-homes" / "github-pr-ops"
+
+
+def test_install_persists_absolute_plugin_home_for_relative_root(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy direct install also normalizes relative home roots."""
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    lockfile = tmp_path / "plugins.lock"
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(lockfile),
+            "--plugin-home-root",
+            "relative-homes",
+            "--catalog-state",
+            str(tmp_path / "catalog.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    plugin_home = Path(Lockfile(lockfile).read()["github-pr-ops"].plugin_home)
+    assert plugin_home.is_absolute()
+    assert plugin_home == cwd / "relative-homes" / "github-pr-ops"
+
+
 def test_install_invalid_manifest_errors(runner: CliRunner, tmp_path: Path) -> None:
     """Installing a directory with an invalid manifest fails with the JSON Pointer."""
     plugin_dir = tmp_path / "bad"
@@ -251,6 +316,60 @@ def test_trust_grants_scope_and_writes_event(runner: CliRunner, tmp_path: Path) 
     assert payload["provenance"]["granted_scope"] == "github:read"
 
 
+def test_trust_uses_installed_manifest_version_when_lockfile_drifted(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Trust records must match the manifest version the firewall will load.
+
+    A stale lockfile version should not make `ooo plugin trust` print success
+    while persisting a grant the runtime rejects as version drift.
+    """
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    paths = _common_paths(tmp_path)
+    installed = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert installed.exit_code == 0, installed.output
+
+    installed_manifest = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (paths["plugin_home_root"] / "github-pr-ops" / "ouroboros.plugin.json").write_text(
+        json.dumps(installed_manifest)
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(paths["audit_log"]),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert record is not None
+    assert record.version == "0.2.0"
+    payload = json.loads(paths["audit_log"].read_text().splitlines()[0])["payload"]
+    assert payload["plugin"]["version"] == "0.2.0"
+
+
 def test_trust_uninstalled_plugin_errors(runner: CliRunner, tmp_path: Path) -> None:
     """Trusting a non-existent plugin errors before any trust file is written."""
     paths = _common_paths(tmp_path)
@@ -298,7 +417,14 @@ def test_disable_wipes_trust_grants(runner: CliRunner, tmp_path: Path) -> None:
     # Disable.
     result = runner.invoke(
         plugin_app,
-        ["disable", "github-pr-ops", "--lockfile", str(paths["lockfile"])],
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
     )
     assert result.exit_code == 0, result.output
     # Lockfile entry preserved.
@@ -762,6 +888,55 @@ def test_disable_honors_trust_root_override(runner: CliRunner, tmp_path: Path) -
     assert result.exit_code == 0, result.output
     assert not (paths["trust_root"] / "github-pr-ops" / "trust.json").exists()
     assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+
+
+def test_disable_wrong_trust_root_refuses_false_success(runner: CliRunner, tmp_path: Path) -> None:
+    """`disable` must not write a disable record in the wrong trust root.
+
+    If the caller points at a root that has no grant for the plugin,
+    reporting success would diverge from the runtime trust store that still
+    contains the real grant.
+    """
+    paths = _common_paths(tmp_path)
+    wrong_root = tmp_path / "wrong-trust"
+    plugin_dir = tmp_path / "src"
+    plugin_dir.mkdir()
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    installed = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert installed.exit_code == 0, installed.output
+    TrustStore(root=paths["trust_root"]).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(wrong_root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "no trust grant" in result.output
+    assert (paths["trust_root"] / "github-pr-ops" / "trust.json").is_file()
+    assert not (wrong_root / "github-pr-ops" / "disabled.json").exists()
 
 
 def test_add_normalizes_git_plus_https_url(
