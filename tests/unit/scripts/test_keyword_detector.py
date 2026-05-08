@@ -142,6 +142,36 @@ class TestDetectKeywords:
         result = detect_keywords("ooo resume")
         assert result["suggested_skill"] != "/ouroboros:resume-session"
 
+    def test_ooo_resume_session_does_not_collide_with_hyphen_extension(self):
+        """Regression: ``ooo resume-session-extra`` (a future hypothetical
+        sibling command, or a typo) used to falsely route to
+        ``/ouroboros:resume-session`` because ``\\b`` triggers on every
+        word/non-word transition — including the boundary between
+        ``session`` and the trailing ``-``. The tightened end-boundary
+        rejects a hyphen as a valid token terminator, so longer
+        hyphenated identifiers cannot silently masquerade as the
+        canonical command.
+        """
+        result = detect_keywords("ooo resume-session-extra --all")
+        assert result["suggested_skill"] != "/ouroboros:resume-session", (
+            "ooo resume-session-extra must not collapse onto resume-session"
+        )
+
+    def test_ooo_resume_session_with_trailing_punctuation_still_matches(self):
+        """Sanity: trailing non-hyphen punctuation (space, ``.``, ``:``,
+        newline, end-of-string) still terminates the match cleanly."""
+        for text in (
+            "ooo resume-session",
+            "ooo resume-session ",
+            "ooo resume-session.",
+            "ooo resume-session: please",
+            "ooo resume-session\nfollow-up",
+        ):
+            result = detect_keywords(text)
+            assert result["suggested_skill"] == "/ouroboros:resume-session", (
+                f"resume-session should still match for {text!r}"
+            )
+
 
 class TestSetupBypass:
     """qa skill has a no-MCP fallback, so it must bypass the setup gate."""
