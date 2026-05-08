@@ -142,11 +142,19 @@ def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
     """
     if not finalization.defaulted_sections:
         return ""
+    # The leading line is recognised as an interview-completion signal by
+    # ``GenerateSeedHandler`` (matches ``_INTERVIEW_COMPLETION_PHRASES``:
+    # "mark the interview complete" / "ready for seed generation"). That
+    # tells the production interview handler to close the session in the
+    # same turn — so the persisted transcript does not gain a trailing
+    # unanswered question while auto state declares the interview done.
     lines = [
-        f"{_AUTO_ANSWER_PREFIX}{_SAFE_DEFAULT_SYNTHESIS_TAG} Auto safe-default "
-        "synthesis (max interview rounds reached). The following conservative "
-        "assumptions close the remaining required Seed sections; treat them as "
-        "auditable defaults that may be revised if a stricter answer is required.",
+        f"{_AUTO_ANSWER_PREFIX}{_SAFE_DEFAULT_SYNTHESIS_TAG} "
+        "Mark the interview complete and hand off for seed generation. "
+        "Auto safe-default synthesis (max interview rounds reached). "
+        "The following conservative assumptions close the remaining required "
+        "Seed sections; treat them as auditable defaults that may be revised "
+        "if a stricter answer is required.",
     ]
     for section in finalization.defaulted_sections:
         spec = _SAFE_DEFAULTS.get(section)

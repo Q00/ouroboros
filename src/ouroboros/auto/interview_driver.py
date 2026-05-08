@@ -472,6 +472,23 @@ class AutoInterviewDriver:
             synthesis,
         )
         state.ledger = ledger.to_dict()
+        # The synthesis text contains a completion signal recognised by the
+        # production interview handler ("mark the interview complete / hand
+        # off for seed generation"). If the backend honoured it the turn
+        # comes back with seed_ready/completed and the persisted transcript
+        # is closed. If it did not, the transcript still has a trailing
+        # unanswered question — finalising auto state at that point would
+        # leave seed generation reading a transcript that disagrees with
+        # the auto pipeline, so we block instead.
+        if not (synthesis_turn.seed_ready or synthesis_turn.completed):
+            blocker = (
+                "interview backend did not honour the safe-default completion "
+                "signal; transcript would still contain an unanswered question."
+            )
+            state.mark_blocked(blocker, tool_name="interview.answer")
+            record_authoring_backend(state)
+            self._save(state)
+            return blocker
         return None
 
     async def _with_timeout(

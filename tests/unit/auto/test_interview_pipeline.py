@@ -224,6 +224,11 @@ async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_pat
 
     async def answer(session_id: str, text: str) -> InterviewTurn:
         answer_calls.append((session_id, text))
+        # Mirror the production interview handler: a synthesis answer that
+        # carries the "mark the interview complete" completion signal
+        # closes the transcript on the same turn.
+        if "mark the interview complete" in text.lower():
+            return InterviewTurn("", session_id, seed_ready=True, completed=True)
         return InterviewTurn("What else?", session_id, seed_ready=False)
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -249,12 +254,10 @@ async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_pat
     # Synthesis must be persisted to the interview transcript so the seed
     # generator (which reads the transcript) sees the same assumptions the
     # ledger now records — guards against the ledger/transcript split-brain.
-    assert any(
-        "safe-default synthesis" in text.lower() for _sid, text in answer_calls
-    ), "expected safe-default synthesis to be pushed through backend.answer"
     synthesis_text = next(
         text for _sid, text in answer_calls if "safe-default synthesis" in text.lower()
     )
+    assert "mark the interview complete" in synthesis_text.lower()
     assert "actors" in synthesis_text
     assert any(
         "safe-default" in item.get("answer", "").lower() for item in ledger.question_history
@@ -290,6 +293,40 @@ async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
     assert "safe-default synthesis" in (result.blocker or "").lower()
+    assert state.interview_completed is False
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_when_backend_ignores_synthesis_completion_signal(
+    tmp_path,
+) -> None:
+    # The synthesis text carries a "mark the interview complete" signal; if
+    # a backend ignores it and keeps asking questions, the persisted
+    # transcript would diverge from auto state. The driver must block
+    # rather than declaring seed_ready against a still-open transcript.
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        # Always return another question with seed_ready=False, regardless
+        # of the answer text — simulating a backend that does not honour
+        # the completion signal.
+        return InterviewTurn("Anything else?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    assert "completion signal" in (result.blocker or "").lower()
     assert state.interview_completed is False
 
 
