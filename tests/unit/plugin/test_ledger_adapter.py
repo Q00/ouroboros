@@ -107,6 +107,34 @@ def test_round_trip_for_all_seven_event_types() -> None:
         assert env["event_type"] == event_type
 
 
+def test_unwrap_returned_value_is_isolated_from_envelope() -> None:
+    """Mutating the unwrapped audit event must not corrupt the envelope.
+
+    `wrap_plugin_event` deep-copies on the way in (line 125 of
+    ``ledger_adapter.py``); the inverse must also deep-copy on the way out.
+    If ``unwrap_plugin_event`` returned only ``dict(payload)`` (shallow),
+    a caller writing ``result["plugin"]["name"] = "X"`` would mutate the
+    live envelope still referenced by the event store, corrupting the
+    audit log without any visible API surface to detect it.
+    """
+    ev = _audit_event("plugin.completed")
+    env = wrap_plugin_event(ev, correlation_id="x")
+    unwrapped = unwrap_plugin_event(env)
+
+    # Mutate every nested container the audit event has.
+    unwrapped["plugin"]["name"] = "MUTATED-PLUGIN-NAME"
+    unwrapped["command"]["argv"].append("--injected")
+    unwrapped["capabilities_used"].append("fs.write")
+    unwrapped["result"]["status"] = "MUTATED-STATUS"
+
+    # The envelope's payload must be unchanged.
+    payload = env["payload"]
+    assert payload["plugin"]["name"] != "MUTATED-PLUGIN-NAME"
+    assert "--injected" not in payload["command"].get("argv", [])
+    assert "fs.write" not in payload["capabilities_used"]
+    assert payload["result"]["status"] != "MUTATED-STATUS"
+
+
 def test_unwrap_rejects_non_plugin_envelope() -> None:
     """Envelope with the wrong aggregate_type is rejected."""
     fake = {

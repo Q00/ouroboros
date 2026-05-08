@@ -150,7 +150,12 @@ def unwrap_plugin_event(envelope: dict) -> dict:
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("envelope payload is missing or not a dict")
-    return dict(payload)
+    # Deep copy to mirror ``wrap_plugin_event``'s defensive copy on the way
+    # in. ``dict(payload)`` is a shallow copy: mutating any nested dict on
+    # the returned value (e.g. ``result["plugin"]["name"] = "X"``) would
+    # write through to the live envelope still referenced by the event
+    # store, silently corrupting the audit log.
+    return copy.deepcopy(payload)
 
 
 def make_event_sink(
