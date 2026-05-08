@@ -558,6 +558,47 @@ def test_safe_default_allows_benign_production_mentions(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        # Fullwidth Latin block (U+FF21..U+FF5A) — visually identical to
+        # ASCII for end users and routinely produced by IMEs that round-trip
+        # through CJK keyboards. Without NFKC normalization the
+        # ``\b(deploy|production|...)\b`` regex bank would not see these
+        # forms and the unsafe-context gate would silently mark a production
+        # cutover as safe-defaultable.
+        "ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ this Friday",
+        "ｒｅｌｅａｓｅ version 2 to ｐｒｏｄ",
+        # Compatibility ligature (U+FB01 ``ﬁ``) is a less common but legal
+        # NFKC variant of ``fi``; pair it with a real production-action
+        # verb to lock in normalization on the verb side.
+        "ﬁnalize ｄｅｐｌｏｙ to production tomorrow",
+    ],
+)
+def test_safe_default_blocks_unicode_compat_production_actions(goal: str) -> None:
+    """Fullwidth/ligature Unicode must not bypass the unsafe-context regex bank.
+
+    Without ``unicodedata.normalize('NFKC', context)`` before the
+    ``re.search`` calls in ``_unsafe_context_reason``, the goal
+    ``ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ`` returns ``None`` (no unsafe
+    reason), letting the safe-default policy auto-default a session that
+    actually authorizes a production deploy.
+    """
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert not result.completed, (
+        f"NFKC-equivalent goal {goal!r} authorizes a production action; finalization must block"
+    )
+    assert any("external side effect" in gap.lower() for gap in result.unsafe_gaps)
+    assert not ledger.is_seed_ready()
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "Deploy the new service to production for the launch event",
         "Release version 2 to prod after the freeze",
         "Push live the cutover migration on Friday",

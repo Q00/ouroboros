@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import unicodedata
 
 from ouroboros.auto.ledger import (
     LedgerEntry,
@@ -263,14 +264,24 @@ def _unsafe_context_reason(
     "non-goals are credentials and production deployment" as active unsafe
     scope would invert the user's intent.
     """
-    context = "\n".join(
-        value
-        for value in (
-            goal,
-            *_unsafe_ledger_values(ledger),
-            *_interview_answers(ledger),
-        )
-        if value.strip()
+    # NFKC compatibility decomposition collapses fullwidth/half-width Latin,
+    # ligatures and other compatibility variants onto their canonical ASCII
+    # form, so the unsafe-context regex bank cannot be silently bypassed by
+    # text such as ``ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ`` (fullwidth Latin
+    # block, U+FF21..U+FF5A) or ``ﬁnalize`` (the ``fi`` ligature U+FB01).
+    # Without the normalization step ``\b(deploy|production|...)\b`` would
+    # not match those forms, defeating the gate's purpose.
+    context = unicodedata.normalize(
+        "NFKC",
+        "\n".join(
+            value
+            for value in (
+                goal,
+                *_unsafe_ledger_values(ledger),
+                *_interview_answers(ledger),
+            )
+            if value.strip()
+        ),
     ).lower()
     context = _strip_negated_clauses(context)
     for reason, pattern in _UNSAFE_CONTEXT_PATTERNS:
