@@ -1574,15 +1574,18 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
         # topics it must be gated like any other fallback. A REPO_FACT-backed
         # runtime answer (full ``runtime_context`` supplied) is unaffected.
         AutoAnswerSource.EXISTING_CONVENTION,
-        # USER_PREFERENCE answers carry user-supplied text verbatim. A
-        # caller-supplied preference must not bypass the safety gate for
-        # regulated topics (credentials, payments, legal/medical, destructive
-        # production actions). For those questions the gate either re-routes
-        # to ``_product_behavior_answer`` or raises a BLOCKER, the same
-        # treatment EXISTING_CONVENTION receives. Concretely: a user
-        # preference of "store passwords in plaintext" for a credential
-        # question must NOT silently land in the ledger as a grounded answer.
-        AutoAnswerSource.USER_PREFERENCE,
+        # USER_PREFERENCE is intentionally NOT in this set:
+        # ``_maybe_apply_user_preference`` already runs the risky-fallback
+        # gate at upgrade time (against both the question text and the
+        # converged goal), so by the time an answer carries
+        # source=USER_PREFERENCE it has already passed the same policy a
+        # CONSERVATIVE_DEFAULT/ASSUMPTION/EXISTING_CONVENTION answer would
+        # face here. Including USER_PREFERENCE in this set was wrong because
+        # the safe-product re-route at the routing-block tail would drop the
+        # user's value for allowlisted regulated-product questions (e.g.
+        # "Should the app export PII reports?"), silently replacing the
+        # caller-supplied preference with the generic
+        # ``_product_behavior_answer`` template. See PR #811 review feedback.
     }
 )
 

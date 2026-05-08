@@ -702,6 +702,48 @@ def test_answer_gap_with_safe_goal_still_upgrades_user_preference() -> None:
     assert answer.text == "Run pytest with --strict markers"
 
 
+def test_user_preference_preserved_for_safe_regulated_product_question() -> None:
+    """Regression guard: when a question is on the SAFE-product allowlist
+    (e.g. 'Should the app export PII reports?'), the user's preference must
+    NOT be dropped by the routing-block safe-product re-route. Earlier
+    iterations of this PR added USER_PREFERENCE to _RISKY_FALLBACK_SOURCES,
+    which silently collapsed the caller-supplied value back into the
+    generic _product_behavior_answer template. The helper itself now
+    enforces the safety policy at upgrade time, so post-upgrade USER_PREFERENCE
+    answers must reach the caller verbatim."""
+    ledger = SeedDraftLedger.from_goal("Build a privacy dashboard")
+    context = AutoAnswerContext(
+        user_preferences={
+            "constraints": "Use the in-house compliance review queue for all exports"
+        },
+    )
+
+    answer = AutoAnswerer().answer("Should the app export PII reports?", ledger, context)
+
+    assert answer.source == AutoAnswerSource.USER_PREFERENCE
+    assert "in-house compliance review queue" in answer.text
+
+
+def test_user_preference_safe_account_deletion_question_preserved() -> None:
+    """Second negative control on a different safe-product allowlist
+    pattern (account/branch deletion permissions). The regulated noun is
+    in the question, but the safe-allowlist marks it as a feature question,
+    not a compliance-policy decision. USER_PREFERENCE must survive."""
+    ledger = SeedDraftLedger.from_goal("Build a user account dashboard")
+    context = AutoAnswerContext(
+        user_preferences={
+            "constraints": "Soft-delete accounts and queue hard-delete for the nightly job"
+        },
+    )
+
+    answer = AutoAnswerer().answer(
+        "Should users be able to delete their own accounts?", ledger, context
+    )
+
+    assert answer.source == AutoAnswerSource.USER_PREFERENCE
+    assert "Soft-delete" in answer.text
+
+
 # ---------------------------------------------------------------------------
 # Determinism: section hint order must not depend on hash randomization
 # ---------------------------------------------------------------------------
