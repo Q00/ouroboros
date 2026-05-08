@@ -625,9 +625,15 @@ def invoke_plugin(
     cmd_template = manifest.entrypoint.command
     cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
     runner = subprocess_runner or subprocess.run
+    # Capture stdout/stderr as **bytes** rather than asking subprocess
+    # to decode them. The firewall only ever stores a sha256 hash of
+    # those streams (the RFC's bounded-payload contract), so we do
+    # not need a Unicode str here. Asking for ``text=True`` would
+    # surface ``UnicodeDecodeError`` from a plugin that writes
+    # non-UTF-8 bytes — and that exception would escape the firewall,
+    # skipping the required terminal ``plugin.failed`` event.
     run_kwargs: dict = {
         "capture_output": True,
-        "text": True,
         "check": False,
     }
     if plugin_home is not None:
@@ -687,10 +693,26 @@ def invoke_plugin(
             events=tuple(emitted),
         )
 
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
-    stdout_hash = hashlib.sha256(stdout.encode("utf-8")).hexdigest()
-    stderr_hash = hashlib.sha256(stderr.encode("utf-8")).hexdigest()
+    # Coerce stdout/stderr to bytes for hashing, regardless of whether
+    # the runner returned ``bytes`` (real subprocess.run without
+    # ``text=True``) or ``str`` (test fakes that pre-decode).
+    # ``surrogateescape`` round-trips arbitrary byte sequences through
+    # str without raising, matching how Python decodes filesystem paths.
+    def _to_bytes(value: object) -> bytes:
+        if value is None:
+            return b""
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            return value.encode("utf-8", errors="surrogateescape")
+        # Defensive: any other type is treated as empty so we never
+        # crash on an unexpected runner return shape.
+        return b""
+
+    stdout_bytes = _to_bytes(completed.stdout)
+    stderr_bytes = _to_bytes(completed.stderr)
+    stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
+    stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
 
     # 6. Terminal event: completed or failed.
     if completed.returncode == 0:

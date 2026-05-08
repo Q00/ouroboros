@@ -656,6 +656,56 @@ def test_subprocess_invoked_with_plugin_home_as_cwd(tmp_path: Path) -> None:
     assert seen_cwds == [str(tmp_path)], seen_cwds
 
 
+def test_subprocess_non_utf8_output_does_not_crash_firewall(tmp_path: Path) -> None:
+    """A plugin that writes non-UTF-8 bytes to stdout/stderr must NOT
+    propagate a UnicodeDecodeError out of `invoke_plugin`. The firewall
+    captures bytes (no implicit decode) so arbitrary plugin output is
+    handled — only the sha256 hash reaches the ledger anyway.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:628.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _bytes_runner(argv, *args, **kwargs):
+        # Lone surrogate in stdout (invalid UTF-8 sequence \x80\xff)
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=b"valid\x80\xff prefix and \xc0\xc0 invalid\n",
+            stderr=b"\xfe\xfe also bad\n",
+        )
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-bytes",
+        subprocess_runner=_bytes_runner,
+    )
+    # Firewall returns a structured success even with bytes output.
+    assert result.status == "success"
+    assert result.stdout_sha256 is not None
+    assert result.stderr_sha256 is not None
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.completed"]
+    # No raw bytes leak into events (only the hash).
+    completed = events[-1]
+    assert completed["provenance"]["stdout_sha256"] == result.stdout_sha256
+    serialized = json.dumps(events)
+    # Hex bytes must not appear in the event text.
+    for forbidden in ("\\x80", "\\xff", "\\xfe", "\\xc0"):
+        assert forbidden not in serialized, forbidden
+
+
 def test_subprocess_permission_error_emits_failed_with_exit_126(tmp_path: Path) -> None:
     """Per the RFC, the firewall MUST always emit a terminal
     `plugin.failed` event for a launch failure. Previously only

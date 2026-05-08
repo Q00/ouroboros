@@ -1235,6 +1235,77 @@ def test_list_reflects_disabled_state(runner: CliRunner, tmp_path: Path) -> None
     assert rows[0]["trust_state"] == "disabled"
 
 
+def test_list_drops_scopes_when_record_no_longer_matches_subject(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """When the lockfile-recorded artifact_digest drifts from the trust
+    record's digest, `list --json` must show ``granted_scopes: []`` for
+    that row — otherwise the trust_state ("installed") and the scopes
+    list (still showing old grants) contradict each other.
+
+    Regression catch for the bot's follow-up on plugin.py:436.
+    """
+    from ouroboros.plugin.lockfile import LockEntry, Lockfile
+
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # Force lockfile-recorded digest to drift away from the trust
+    # record's digest (simulating in-place edit of installed bytes
+    # caught at next install).
+    lock = Lockfile(paths["lockfile"])
+    entry = lock.read()["github-pr-ops"]
+    drifted = LockEntry(
+        name=entry.name,
+        version=entry.version,
+        source_kind=entry.source_kind,
+        repository=entry.repository,
+        git_sha=entry.git_sha,
+        manifest_checksum=entry.manifest_checksum,
+        installed_at=entry.installed_at,
+        plugin_home=entry.plugin_home,
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+        artifact_digest=("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+    )
+    lock.add(drifted)
+    listed = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--json",
+        ],
+    )
+    assert listed.exit_code == 0, listed.output
+    rows = json.loads(listed.stdout)
+    assert rows[0]["trust_state"] == "installed"
+    # Critical: scopes list is empty too, not stale grants from the
+    # trust file.
+    assert rows[0]["granted_scopes"] == [], (
+        f"granted_scopes must reflect the same subject check as "
+        f"trust_state; got {rows[0]['granted_scopes']!r}"
+    )
+
+
 def test_list_reflects_subject_drift_as_installed(runner: CliRunner, tmp_path: Path) -> None:
     """If the lockfile-recorded artifact_digest no longer matches the
     trust record's digest (e.g. an in-place edit happened after grant

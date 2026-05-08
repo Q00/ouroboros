@@ -80,6 +80,69 @@ def _load_with_friendly_error(target: str) -> PluginManifest:
         raise typer.Exit(code=1) from exc
 
 
+def _record_applies_to_subject(
+    record,
+    *,
+    manifest: PluginManifest,
+    entry: LockEntry,
+) -> bool:
+    """True iff the trust record matches the install subject the
+    firewall would key on. Mirrors ``firewall._record_matches_subject``
+    so the CLI displays scopes only when invocation would honor them.
+
+    Empty fields on the record are tolerated (legacy / pre-RFC trust
+    files) so existing callers don't lose their grant display, but any
+    populated field that disagrees with the lockfile entry voids the
+    application.
+    """
+    if record is None:
+        return False
+    if record.version != manifest.version:
+        return False
+    if record.source_type and record.source_type != manifest.source.type:
+        return False
+    if record.source_identity and entry.source_identity:
+        if record.source_identity != entry.source_identity:
+            return False
+    if record.artifact_digest and entry.artifact_digest:
+        if record.artifact_digest != entry.artifact_digest:
+            return False
+    return True
+
+
+def _subject_drift_reason(
+    record,
+    *,
+    manifest: PluginManifest,
+    entry: LockEntry,
+) -> str:
+    """Return a short human-readable reason explaining why a trust record
+    no longer applies to the current install subject. Used by `inspect`
+    to surface WHY stale grants are not displayed.
+    """
+    if record is None:
+        return "no record"
+    if record.version != manifest.version:
+        return f"version drift: record={record.version!r} installed={manifest.version!r}"
+    if record.source_type and record.source_type != manifest.source.type:
+        return (
+            f"source.type drift: record={record.source_type!r} installed={manifest.source.type!r}"
+        )
+    if (
+        record.source_identity
+        and entry.source_identity
+        and record.source_identity != entry.source_identity
+    ):
+        return "source_identity drift (different install source)"
+    if (
+        record.artifact_digest
+        and entry.artifact_digest
+        and record.artifact_digest != entry.artifact_digest
+    ):
+        return "artifact_digest drift (installed bytes changed since grant)"
+    return "subject changed"
+
+
 def _trust_state_label(
     manifest: PluginManifest,
     trust_store: TrustStore,
@@ -430,11 +493,15 @@ def inspect_command(
         raise typer.Exit(code=1) from exc
 
     record = trust.read(name)
-    # A trust record whose version no longer matches the installed manifest
-    # is treated as if no scopes were granted — version bumps invalidate
-    # prior trust per Q00/ouroboros-plugins#9 Q4.
-    record_is_current = record is not None and record.version == manifest.version
-    granted = [g.scope for g in record.granted_scopes] if record_is_current and record else []
+    # A trust record applies to the displayed scopes only when its full
+    # install subject matches the lockfile entry: version,
+    # source.type, source_identity, and artifact_digest. Otherwise the
+    # firewall would refuse the grant at invocation time, and showing
+    # the stale scopes would mislead the user about what is actually
+    # honored. ``_record_applies_to_subject`` mirrors the firewall's
+    # ``_record_matches_subject`` predicate.
+    applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
+    granted = [g.scope for g in record.granted_scopes] if applies and record else []
 
     print_info(f"{manifest.name} {manifest.version} ({entry.source_kind})")
     console.print(f"  installed_at:   {entry.installed_at}")
@@ -447,11 +514,10 @@ def inspect_command(
         f"  trust_state:    {_trust_state_label(manifest, trust, expected_source_identity=entry.source_identity or None, expected_artifact_digest=entry.artifact_digest or None)}"
     )
     console.print(f"  granted_scopes: {', '.join(granted) if granted else '(none)'}")
-    if record is not None and not record_is_current:
-        console.print(
-            f"  trust note:     stored grants are for version {record.version!r} "
-            f"(stale — version bump cleared them; re-grant required)"
-        )
+    if record is not None and not applies:
+        # Surface why the grants don't apply, naming the field that drifted.
+        reason = _subject_drift_reason(record, manifest=manifest, entry=entry)
+        console.print(f"  trust note:     stored grants are stale ({reason}); re-grant required")
     required_perms = [p.scope for p in manifest.permissions if p.required]
     missing = [s for s in required_perms if s not in granted]
     if missing:
@@ -493,10 +559,12 @@ def list_command(
     rows = []
     for entry in sorted(entries.values(), key=lambda e: e.name):
         record = trust.read(entry.name)
-        # Per Q4 lock: a record whose version no longer matches the
-        # installed manifest is treated as if no scopes were granted.
-        record_is_current = record is not None and record.version == entry.version
-        scopes = [g.scope for g in record.granted_scopes] if record_is_current and record else []
+        # Per the locked RFC, a record only applies to the install
+        # subject if every field of (version, source.type,
+        # source_identity, artifact_digest) matches. Same-version
+        # source/digest drift makes the firewall refuse the grant, so
+        # the displayed scopes must reflect that — otherwise the
+        # state label and the scope list contradict each other.
         # Compute the displayed trust state through the same predicate
         # the firewall uses, so list/inspect/firewall agree on the
         # invariant: "trusted" iff invocation will not be blocked on
@@ -510,6 +578,8 @@ def list_command(
                 expected_source_identity=entry.source_identity or None,
                 expected_artifact_digest=entry.artifact_digest or None,
             )
+            applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
+            scopes = [g.scope for g in record.granted_scopes] if applies and record else []
         except PluginManifestError:
             # Manifest unreadable post-install (e.g. external mutation):
             # show conservatively as "installed", no granted scopes.
