@@ -889,7 +889,23 @@ class ExecuteSeedHandler(BridgeAwareMixin):
 
 @dataclass
 class StartExecuteSeedHandler:
-    """Start a seed execution asynchronously and return a job ID immediately."""
+    """Start a seed execution asynchronously and return a job ID immediately.
+
+    Idempotency contract (Q00/ouroboros#774):
+
+    Callers may pass an ``idempotency_key`` argument. The handler maintains
+    an in-memory ``dict[str, ExecutionMeta]`` keyed by ``idempotency_key``.
+    On a second call with the same key, the handler returns the original
+    execution metadata (``job_id`` / ``session_id`` / ``execution_id``) and
+    does NOT enqueue a new background execution. Different keys produce
+    independent executions.
+
+    **Non-goal**: persistence across server restarts. The map TTL is the
+    process lifetime; on restart the key map is empty and a duplicate
+    request *can* enqueue a new execution. This is an intentional scope
+    bound — auto-side state recovery on the same restart will surface
+    the duplicate. See the issue for the full rationale.
+    """
 
     execute_handler: ExecuteSeedHandler | None = field(default=None, repr=False)
     event_store: EventStore | None = field(default=None, repr=False)
@@ -905,6 +921,10 @@ class StartExecuteSeedHandler:
             agent_runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
         )
+        # Process-lifetime idempotency map: idempotency_key -> tool result
+        # meta dict. Entries are added once on first call and reused on
+        # subsequent calls with the same key.
+        self._idempotency_meta: dict[str, dict[str, Any]] = {}
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -920,13 +940,48 @@ class StartExecuteSeedHandler:
                 "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
-            parameters=ExecuteSeedHandler().definition.parameters,
+            parameters=(
+                *ExecuteSeedHandler().definition.parameters,
+                MCPToolParameter(
+                    name="idempotency_key",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Optional process-local idempotency key. A second call with the same "
+                        "key returns the same execution metadata and does NOT enqueue a new "
+                        "execution. Map TTL is process lifetime — not persistent across "
+                        "server restarts."
+                    ),
+                    required=False,
+                ),
+            ),
         )
 
     async def handle(
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
+        # Idempotency short-circuit: if this exact key was previously
+        # served, return the same metadata without enqueuing another
+        # execution. The map is process-local; see class docstring.
+        raw_key = arguments.get("idempotency_key")
+        idempotency_key = raw_key.strip() if isinstance(raw_key, str) else ""
+        if idempotency_key and idempotency_key in self._idempotency_meta:
+            cached_meta = dict(self._idempotency_meta[idempotency_key])
+            text = (
+                "Replayed prior background execution via idempotency key.\n\n"
+                f"Idempotency Key: {idempotency_key}\n"
+                f"Job ID: {cached_meta.get('job_id') or 'pending'}\n"
+                f"Session ID: {cached_meta.get('session_id') or 'pending'}\n"
+                f"Execution ID: {cached_meta.get('execution_id') or 'pending'}\n"
+            )
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                    is_error=False,
+                    meta=cached_meta,
+                )
+            )
+
         cwd_result = ExecuteSeedHandler._resolve_dispatch_cwd_result(
             arguments.get("cwd"), tool_name="ouroboros_start_execute_seed"
         )
@@ -1098,18 +1153,21 @@ class StartExecuteSeedHandler:
             "Use ouroboros_ac_tree_hud(session_id, cursor) for live progress and "
             "ouroboros_job_result(job_id) for the final output."
         )
+        meta: dict[str, Any] = {
+            "job_id": snapshot.job_id,
+            "session_id": snapshot.links.session_id,
+            "execution_id": snapshot.links.execution_id,
+            "status": snapshot.status.value,
+            "cursor": snapshot.cursor,
+            "runtime_backend": runtime_backend,
+            "llm_backend": llm_backend,
+        }
+        if idempotency_key:
+            self._idempotency_meta[idempotency_key] = dict(meta)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=False,
-                meta={
-                    "job_id": snapshot.job_id,
-                    "session_id": snapshot.links.session_id,
-                    "execution_id": snapshot.links.execution_id,
-                    "status": snapshot.status.value,
-                    "cursor": snapshot.cursor,
-                    "runtime_backend": runtime_backend,
-                    "llm_backend": llm_backend,
-                },
+                meta=meta,
             )
         )

@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 import inspect
 import threading
-from typing import Any
+from typing import Any, Protocol
 
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.grading import GradeGate
@@ -27,9 +27,25 @@ from ouroboros.auto.state import (
 from ouroboros.core.seed import Seed
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
-RunStarter = Callable[[Seed], Awaitable[dict[str, Any]]]
+
+
+class RunStarter(Protocol):
+    """Protocol for run-starter callables.
+
+    Implementations accept an optional ``idempotency_key`` so the auto
+    pipeline can safely retry a single run-start attempt without enqueuing
+    a duplicate execution server-side. The key is populated from
+    ``state.auto_session_id`` by ``AutoPipeline.run``.
+    """
+
+    async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, Any]: ...
+
+
 SeedSaver = Callable[[Seed], str]
 SeedLoader = Callable[[str], Seed]
+
+
+_RETRY_GUIDANCE_PHRASE = "retried once with idempotency key"
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,15 +397,6 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review)
-            if state.run_start_attempted:
-                _mark_unknown_run_handoff(state)
-                state.mark_blocked(
-                    state.run_handoff_guidance
-                    or "Run start status is unknown; refusing to start a duplicate execution",
-                    tool_name="run_starter",
-                )
-                self._save(state)
-                return self._result(state, ledger, review=review, blocker=state.last_error)
             if not _grade_meets_required(state.last_grade, state.required_grade):
                 state.mark_blocked(
                     f"Cannot start execution without a persisted grade meeting {state.required_grade}",
@@ -426,51 +433,127 @@ class AutoPipeline:
                 f"starting execution for grade {state.last_grade or state.required_grade} Seed",
             )
             self._save(state)
-        state.run_start_attempted = True
-        self._save(state)
-        try:
-            run_meta = await asyncio.wait_for(
-                self.run_starter(seed), timeout=self.run_start_timeout_seconds
-            )
-            if not isinstance(run_meta, dict):
-                msg = f"run starter returned {type(run_meta).__name__}, expected dict"
-                raise TypeError(msg)
-            state.job_id = _optional_str(run_meta.get("job_id"))
-            state.execution_id = _optional_str(run_meta.get("execution_id"))
-        except TimeoutError as exc:
-            _mark_unknown_run_handoff(state, status="unknown_timeout")
-            state.mark_blocked(
-                f"run start timed out after {self.run_start_timeout_seconds:.0f}s",
-                tool_name="run_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=str(exc) or state.last_error)
-        except Exception as exc:
-            state.run_start_attempted = False
-            state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-        state.run_session_id = _optional_str(run_meta.get("session_id"))
-        run_subagent = (
-            run_meta.get("_subagent") if isinstance(run_meta.get("_subagent"), dict) else None
+        # The run starter is invoked at most twice per session lifetime:
+        # once for the initial attempt, and once on retry if the first
+        # attempt timed out or returned no durable tracking handle. Both
+        # calls share the same idempotency_key (state.auto_session_id) so
+        # the server-side handler returns the same execution metadata
+        # rather than enqueuing a duplicate. See Q00/ouroboros#774.
+        #
+        # If a previous pipeline.run() already exhausted the bounded
+        # retry (state.last_error carries the documented retry phrase),
+        # do NOT call the run starter a third time — the in-process
+        # idempotency map cannot rule out a duplicate enqueue past two
+        # attempts on the same session.
+        idempotency_key = state.auto_session_id
+        prior_retry_exhausted = (
+            state.run_handoff_guidance is not None
+            and _RETRY_GUIDANCE_PHRASE in state.run_handoff_guidance
         )
-        state.run_subagent = run_subagent or {}
-        if not any((state.job_id, state.execution_id, state.run_session_id)):
-            _mark_unknown_run_handoff(state)
+        if prior_retry_exhausted:
+            blocker_text = state.last_error or state.run_handoff_guidance
             state.mark_blocked(
-                state.run_handoff_guidance or "Run starter returned no tracking handle",
-                tool_name="run_starter",
+                blocker_text or "run starter retry already exhausted", tool_name="run_starter"
             )
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
-        state.run_handoff_status = "started"
-        state.run_handoff_guidance = None
-        state.transition(
-            AutoPhase.COMPLETE,
-            f"execution started for grade {state.last_grade or state.required_grade} Seed",
-        )
-        self._save(state)
-        return self._result(state, ledger, review=review, run_subagent=run_subagent)
+        # If we resume into RUN with a persisted unknown handoff
+        # (``run_start_attempted=True`` plus an ``unknown_*`` status), the
+        # first iteration of this loop *is* the retry — the prior
+        # pipeline.run() call already used the initial attempt slot.
+        retried = bool(state.run_start_attempted) and state.run_handoff_status in {
+            "unknown_no_handle",
+            "unknown_timeout",
+        }
+        attempted_at_entry = state.run_start_attempted
+        while True:
+            state.run_start_attempted = True
+            self._save(state)
+            run_meta: dict[str, Any] | None = None
+            try:
+                run_meta = await asyncio.wait_for(
+                    self.run_starter(seed, idempotency_key=idempotency_key),
+                    timeout=self.run_start_timeout_seconds,
+                )
+                if not isinstance(run_meta, dict):
+                    msg = f"run starter returned {type(run_meta).__name__}, expected dict"
+                    raise TypeError(msg)
+            except TimeoutError as exc:
+                _mark_unknown_run_handoff(state, status="unknown_timeout")
+                if retried:
+                    state.run_handoff_guidance = (
+                        f"{state.run_handoff_guidance or ''} "
+                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}"
+                    ).strip()
+                    state.mark_blocked(
+                        f"run start timed out after {self.run_start_timeout_seconds:.0f}s; "
+                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}",
+                        tool_name="run_starter",
+                    )
+                    self._save(state)
+                    return self._result(
+                        state,
+                        ledger,
+                        review=review,
+                        blocker=state.last_error or str(exc),
+                    )
+            except Exception as exc:
+                # Non-timeout errors are not retried — the contract is to
+                # bound retries on *unknown* handoffs only. Reset the
+                # attempt flag so the caller can re-invoke after fixing
+                # the underlying error (preserves prior behavior).
+                if not retried:
+                    state.run_start_attempted = attempted_at_entry
+                state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+
+            if run_meta is not None:
+                state.job_id = _optional_str(run_meta.get("job_id"))
+                state.execution_id = _optional_str(run_meta.get("execution_id"))
+                state.run_session_id = _optional_str(run_meta.get("session_id"))
+                run_subagent = (
+                    run_meta.get("_subagent")
+                    if isinstance(run_meta.get("_subagent"), dict)
+                    else None
+                )
+                state.run_subagent = run_subagent or {}
+                if any((state.job_id, state.execution_id, state.run_session_id)):
+                    state.run_handoff_status = "started"
+                    state.run_handoff_guidance = None
+                    state.transition(
+                        AutoPhase.COMPLETE,
+                        f"execution started for grade "
+                        f"{state.last_grade or state.required_grade} Seed",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, review=review, run_subagent=run_subagent)
+                # No durable handle surfaced — treat as unknown handoff.
+                _mark_unknown_run_handoff(state)
+
+            if retried:
+                # Retry exhausted on no-handle path (timed_out path returned
+                # earlier). Block with the documented retry phrase and
+                # persist it onto run_handoff_guidance so a later resume
+                # can detect that the bound is already spent.
+                guidance = state.run_handoff_guidance or "Run starter returned no tracking handle"
+                state.run_handoff_guidance = (
+                    f"{guidance} {_RETRY_GUIDANCE_PHRASE} {idempotency_key}"
+                ).strip()
+                state.mark_blocked(
+                    f"{guidance} {_RETRY_GUIDANCE_PHRASE} {idempotency_key}",
+                    tool_name="run_starter",
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+
+            # First attempt landed in an unknown handoff (timeout or
+            # no-handle). Persist the unknown status, then retry exactly
+            # once with the same idempotency_key so the server-side
+            # handler can short-circuit any duplicate enqueue. Both
+            # timeout and no-handle paths share this same retry slot.
+            self._save(state)
+            retried = True
 
     def _load_seed(self, state: AutoPipelineState, seed_path: str) -> Seed | None:
         if self.seed_loader is None:

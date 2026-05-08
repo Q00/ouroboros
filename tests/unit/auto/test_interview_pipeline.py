@@ -1088,7 +1088,7 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed(ac=("The CLI should be easy and user-friendly",))
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         return {"job_id": "job_1", "execution_id": "exec_1", "session_id": "session_1"}
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -1408,7 +1408,7 @@ async def test_pipeline_run_starter_error_marks_failed(tmp_path) -> None:
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise RuntimeError("runner exploded")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -1562,7 +1562,9 @@ async def test_pipeline_resumes_completed_interview_without_reanswering(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_pipeline_refuses_duplicate_unknown_run_resume(tmp_path) -> None:
+async def test_pipeline_resume_retries_unknown_run_handoff_once(tmp_path) -> None:
+    """Resuming a session with an unknown handoff retries the run starter exactly once."""
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("run resume should not restart interview")
 
@@ -1572,26 +1574,32 @@ async def test_pipeline_refuses_duplicate_unknown_run_resume(tmp_path) -> None:
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("run resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
-        raise AssertionError("unknown run resume should not start another run")
+    keys: list[str] = []
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
+        keys.append(idempotency_key)
+        return {"job_id": "job_after_retry", "execution_id": "exec_after_retry"}
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
     state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed")
     state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
     state.run_start_attempted = True
+    state.run_handoff_status = "unknown_no_handle"
     driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
     pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
-    assert result.run_handoff_status == "unknown_no_handle"
-    assert "duplicate execution" in (result.blocker or "")
-    assert "will not start another run automatically" in (result.run_handoff_guidance or "")
-    assert state.run_handoff_status == "unknown_no_handle"
+    assert result.status == "complete"
+    assert result.job_id == "job_after_retry"
+    assert keys == [state.auto_session_id]
 
 
 @pytest.mark.asyncio
@@ -1605,7 +1613,7 @@ async def test_pipeline_blocks_run_start_without_tracking_handle(tmp_path) -> No
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         return {"job_id": None, "execution_id": None}
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -1621,6 +1629,8 @@ async def test_pipeline_blocks_run_start_without_tracking_handle(tmp_path) -> No
 
     assert result.status == "blocked"
     assert "tracking handle" in (result.blocker or "")
+    # Both attempts returned no handle -> the documented retry phrase is on the blocker.
+    assert "retried once with idempotency key" in (result.blocker or "")
     assert state.phase == AutoPhase.BLOCKED
 
 
@@ -1635,7 +1645,7 @@ async def test_pipeline_resumes_run_with_persisted_handle_without_restarting(tmp
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("run resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("persisted run handle should not start another run")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2011,7 +2021,7 @@ async def test_pipeline_marks_malformed_run_starter_result_failed(tmp_path) -> N
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
-    async def run_seed(seed: Seed):  # noqa: ANN202, ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = ""):  # noqa: ANN202, ARG001
         return ["not", "metadata"]
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2031,7 +2041,9 @@ async def test_pipeline_marks_malformed_run_starter_result_failed(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_pipeline_blocks_duplicate_run_after_start_timeout(tmp_path) -> None:
+async def test_pipeline_resume_completes_after_first_run_timeout(tmp_path) -> None:
+    """First call times out; resume retries once with the same idempotency key."""
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -2042,10 +2054,12 @@ async def test_pipeline_blocks_duplicate_run_after_start_timeout(tmp_path) -> No
         raise AssertionError("resume should not regenerate seed")
 
     calls = 0
+    keys: list[str] = []
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         nonlocal calls
         calls += 1
+        keys.append(idempotency_key)
         await asyncio.sleep(0.05)
         return {"job_id": "job_after_timeout", "execution_id": "exec_after_timeout"}
 
@@ -2072,18 +2086,26 @@ async def test_pipeline_blocks_duplicate_run_after_start_timeout(tmp_path) -> No
     pipeline.run_start_timeout_seconds = 1
     second = await pipeline.run(state)
 
+    # First pipeline.run() invokes the run starter twice (initial + the
+    # bounded retry); both time out under the 1ms budget so it blocks
+    # with the documented retry guidance phrase.
     assert first.status == "blocked"
     assert first.run_handoff_status == "unknown_timeout"
-    assert "may still have created an execution" in (first.run_handoff_guidance or "")
+    assert "retried once with idempotency key" in (first.blocker or "")
     assert state.run_start_attempted is True
+    # Resume after the bounded retry has already been exhausted must
+    # NOT call the run starter again — the in-process idempotency map
+    # cannot rule out a duplicate enqueue past two attempts.
     assert second.status == "blocked"
-    assert second.run_handoff_status == "unknown_timeout"
-    assert "duplicate execution" in (second.blocker or "")
-    assert calls == 1
+    assert "retried once with idempotency key" in (second.blocker or "")
+    assert calls == 2
+    assert all(key == state.auto_session_id for key in keys)
 
 
 @pytest.mark.asyncio
-async def test_pipeline_refuses_retry_after_malformed_run_starter_metadata(tmp_path) -> None:
+async def test_pipeline_retries_after_no_handle_on_first_attempt(tmp_path) -> None:
+    """First run-starter call returns no handle; bounded retry succeeds."""
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -2094,10 +2116,12 @@ async def test_pipeline_refuses_retry_after_malformed_run_starter_metadata(tmp_p
         raise AssertionError("resume should not regenerate seed")
 
     calls = 0
+    keys: list[str] = []
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         nonlocal calls
         calls += 1
+        keys.append(idempotency_key)
         if calls == 1:
             return {}
         return {"job_id": "job_after_retry", "execution_id": "exec_after_retry"}
@@ -2116,16 +2140,13 @@ async def test_pipeline_refuses_retry_after_malformed_run_starter_metadata(tmp_p
     pipeline = AutoPipeline(driver, generate_seed, run_starter=run_seed, store=AutoStore(tmp_path))
 
     first = await pipeline.run(state)
-    second = await pipeline.run(state)
 
-    assert first.status == "blocked"
-    assert first.run_handoff_status == "unknown_no_handle"
-    assert "will not start another run automatically" in (first.run_handoff_guidance or "")
+    # The bounded retry resolved the no-handle outcome inside a single run().
+    assert first.status == "complete"
+    assert first.execution_id == "exec_after_retry"
     assert state.run_start_attempted is True
-    assert second.status == "blocked"
-    assert second.run_handoff_status == "unknown_no_handle"
-    assert second.job_id is None
-    assert calls == 1
+    assert calls == 2
+    assert keys == [state.auto_session_id, state.auto_session_id]
 
 
 @pytest.mark.asyncio
@@ -2239,7 +2260,7 @@ async def test_pipeline_resumes_prepared_run_before_first_attempt(tmp_path) -> N
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("run resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         return {"job_id": "job_after_resume", "execution_id": "exec_after_resume"}
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2338,7 +2359,7 @@ async def test_pipeline_run_resume_rechecks_persisted_ledger_before_execution(tm
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("run resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("unresolved ledger must not start execution")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2369,7 +2390,7 @@ async def test_pipeline_refuses_run_resume_without_a_grade(tmp_path) -> None:
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("run resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("non-A run resume must not start execution")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2417,7 +2438,9 @@ async def test_pipeline_seed_generation_resume_requires_interview_session_id(tmp
 
 
 @pytest.mark.asyncio
-async def test_pipeline_refuses_blocked_run_start_replay_from_seed_path(tmp_path) -> None:
+async def test_pipeline_retry_after_blocked_run_start_replay_from_seed_path(tmp_path) -> None:
+    """Resuming a blocked run-start session retries the run starter once."""
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -2427,8 +2450,11 @@ async def test_pipeline_refuses_blocked_run_start_replay_from_seed_path(tmp_path
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("unknown run resume should not generate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
-        raise AssertionError("ambiguous run start resume should not start another run")
+    keys: list[str] = []
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
+        keys.append(idempotency_key)
+        return {"job_id": "job_after_replay", "execution_id": "exec_after_replay"}
 
     seed = _seed()
     seed_path = str(tmp_path / "seed.yaml")
@@ -2442,6 +2468,7 @@ async def test_pipeline_refuses_blocked_run_start_replay_from_seed_path(tmp_path
     state.transition(AutoPhase.SEED_GENERATION, "seed")
     state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
+    state.run_handoff_status = "unknown_timeout"
     state.mark_blocked("run start timed out", tool_name="run_starter")
     state.run_start_attempted = True
     driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
@@ -2457,9 +2484,9 @@ async def test_pipeline_refuses_blocked_run_start_replay_from_seed_path(tmp_path
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
-    assert "duplicate execution" in (result.blocker or "")
-    assert result.job_id is None
+    assert result.status == "complete"
+    assert result.job_id == "job_after_replay"
+    assert keys == [state.auto_session_id]
 
 
 @pytest.mark.asyncio
@@ -2506,7 +2533,7 @@ async def test_pipeline_replays_persisted_run_subagent_after_complete_resume(tmp
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
-    async def run_seed(seed: Seed) -> dict[str, object]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:  # noqa: ARG001
         return {
             "session_id": "session_1",
             "_subagent": {"tool_name": "ouroboros_execute_seed", "context": {"seed": "x"}},
@@ -2799,7 +2826,7 @@ async def test_pipeline_run_resume_requires_may_run_even_when_required_grade_is_
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("run resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("B-grade Seed with may_run=false must not start execution")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2830,7 +2857,7 @@ async def test_pipeline_run_resume_rejects_grade_b_when_required_grade_a(tmp_pat
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("run resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("grade B must not run when required grade is A")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2978,7 +3005,7 @@ async def test_resume_after_interview_max_rounds_can_continue_when_bound_raised(
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         return {"job_id": "job_resume", "execution_id": "exec_resume", "session_id": "ses_resume"}
 
     pipeline = AutoPipeline(
@@ -3006,7 +3033,7 @@ async def test_pipeline_attaches_run_handle_after_unknown_handoff_without_restar
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("attach-only resume must not start another run")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -3094,7 +3121,7 @@ async def test_pipeline_records_unsupported_reconciliation_without_restart(tmp_p
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("reconcile-only resume must not start another run")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -3268,7 +3295,7 @@ async def test_pipeline_attach_clears_stale_reconciliation_metadata(tmp_path) ->
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         raise AssertionError("resume should not regenerate seed")
 
-    async def run_seed(seed: Seed) -> dict[str, str | None]:  # noqa: ARG001
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
         raise AssertionError("attach must not start another run")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))

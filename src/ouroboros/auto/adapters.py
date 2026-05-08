@@ -136,12 +136,15 @@ class HandlerRunStarter:
         self.handler = handler
         self.cwd = cwd
 
-    async def __call__(self, seed: Seed) -> dict[str, object]:
+    async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )
+        arguments: dict[str, object] = {"seed_content": seed_yaml, "cwd": self.cwd}
+        if idempotency_key:
+            arguments["idempotency_key"] = idempotency_key
         result = _unwrap(
-            await self.handler.handle({"seed_content": seed_yaml, "cwd": self.cwd}),
+            await self.handler.handle(arguments),
             tool_name="ouroboros_start_execute_seed",
         )
         meta = result.meta or {}
