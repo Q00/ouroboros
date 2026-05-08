@@ -5,8 +5,8 @@ These helpers mirror the production guard at
 drift from the canonical CI-enforced semantics.
 
 Per Q00/ouroboros#781, every ``max_turns=1`` adapter call site MUST
-co-locate ``allowed_tools=[]`` (or the conditional ``[] if cond else None``
-form, in either branch). See PR #786 review-2 for the dedup rationale.
+co-locate ``allowed_tools=[]`` (or the canonical conditional ``[] if cond else None``
+form). See PR #786 review-2 for the dedup rationale.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ def has_empty_allowed_tools(call: ast.Call) -> bool:
 
         * ``allowed_tools=[]``
         * ``allowed_tools=[] if cond else None``  (empty list in body)
-        * ``allowed_tools=None if cond else []``  (empty list in orelse)
         * ``allowed_tools=([] if cond else None)`` (parenthesised IfExp)
 
     Rejects all other forms (``Name`` reference, function call,
@@ -52,8 +51,11 @@ def has_empty_allowed_tools(call: ast.Call) -> bool:
         value = kw.value
         if _is_empty_list(value):
             return True
-        if isinstance(value, ast.IfExp) and (
-            _is_empty_list(value.body) or _is_empty_list(value.orelse)
+        if (
+            isinstance(value, ast.IfExp)
+            and _is_empty_list(value.body)
+            and isinstance(value.orelse, ast.Constant)
+            and value.orelse.value is None
         ):
             return True
     return False

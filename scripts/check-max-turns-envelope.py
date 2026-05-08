@@ -57,17 +57,21 @@ def _is_empty_list(node: ast.expr) -> bool:
 
 
 def _ifexp_resolves_to_empty_list(node: ast.expr) -> bool:
-    """``[] if cond else None`` (or symmetric forms) — at least one branch is ``[]``."""
+    """``[] if cond else None`` only — the supported-backend branch must close."""
     if not isinstance(node, ast.IfExp):
         return False
-    return _is_empty_list(node.body) or _is_empty_list(node.orelse)
+    return (
+        _is_empty_list(node.body)
+        and isinstance(node.orelse, ast.Constant)
+        and node.orelse.value is None
+    )
 
 
 def _value_is_empty_envelope(value: ast.expr) -> bool:
     """Approach A — strict literal-only acceptance (PR #786 review).
 
-    Only a direct ``[]`` literal, or an ``IfExp`` where at least one branch
-    is a direct ``[]`` literal, counts as an empty envelope. Any other form
+    Only a direct ``[]`` literal, or an ``IfExp`` of the canonical
+    ``[] if cond else None`` shape, counts as an empty envelope. Any other form
     (``Name`` reference, function call, attribute access, comprehension,
     starred expansion) is rejected. Resolving ``Name`` bindings via AST
     walk is order- and scope-unsafe — see the rejection notes in this

@@ -78,6 +78,23 @@ def test_parenthesized_ifexp_with_empty_list_branch_accepted(guard) -> None:
     assert _scan_source(guard, src) == []
 
 
+def test_inverted_ifexp_rejected(guard) -> None:
+    """Do not accept the unsafe orientation for the canonical backend gate.
+
+    ``None if backend_supports_tool_envelope(...) else []`` leaves supported
+    backends without a closed envelope, which is exactly the future
+    regression this guard must prevent.
+    """
+    src = (
+        "create_llm_adapter(\n"
+        "    max_turns=1,\n"
+        "    allowed_tools=None if backend_supports_tool_envelope(backend) else [],\n"
+        ")\n"
+    )
+    findings = _scan_source(guard, src)
+    assert findings, f"expected guard to reject inverted conditional, got {findings!r}"
+
+
 # ---------------------------------------------------------------------------
 # Negatives — the bot's BLOCKING reproductions and friends.
 # Each case asserts the strict guard now rejects the form. Under the
