@@ -680,6 +680,28 @@ def test_auto_answerer_multilingual_permission_questions_route_to_product_behavi
         assert "outputs" not in updated_sections, question
 
 
+def test_auto_answerer_broad_design_cues_do_not_misroute_to_runtime() -> None:
+    """Broad design nouns (``architecture``, ``estructura``, ``cadre``) plus a
+    generic selection verb must NOT be classified as runtime intent.  The
+    previous cue list paired ``estructura`` with selection verbs like
+    ``usamos`` and silently routed design questions such as
+    ``¿Qué estructura usamos para los datos?`` into ``_runtime_answer()``.
+    Flagged by ouroboros-agent on commit 0230bab.  Cues are now anchored to
+    repository-/runtime-specific phrases only.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "¿Qué estructura usamos para los datos?",
+        "Quelle architecture utilisons-nous pour le rapport?",
+        "What architecture should the report use?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "runtime_context" not in updated_sections, (question, updated_sections)
+
+
 def test_auto_answerer_substring_cues_do_not_misroute_unrelated_words() -> None:
     """Bare ASCII substring cues (e.g. ``"test"``) must not match unrelated
     words (``"contest"``, ``"latest"``, ``"protest"``, ``"attestations"``).

@@ -628,6 +628,14 @@ _INTENT_CUES: Mapping[QuestionIntent, tuple[str, ...]] = {
         "输出",
         "輸出",
     ),
+    # Runtime cues must be repository-/runtime-specific.  Broad design
+    # nouns like ``architecture`` / ``estructura`` / ``cadre`` were removed
+    # because they leak into product/design questions
+    # (e.g. ``¿Qué estructura usamos para los datos?``) once paired with a
+    # generic selection verb and silently mutate ``runtime_context`` /
+    # ``constraints`` ledger entries.  Phrase-level variants like
+    # ``estructura del proyecto`` and ``project structure`` stay because
+    # the phrase itself is anchored to the project's runtime contract.
     QuestionIntent.RUNTIME_CONTEXT: (
         "runtime",
         "stack",
@@ -637,13 +645,10 @@ _INTENT_CUES: Mapping[QuestionIntent, tuple[str, ...]] = {
         "package manager",
         "project structure",
         "project runtime",
-        "architecture",
         "estructura del proyecto",
         "repositorio",
-        "estructura",
         "référentiel",
         "referentiel",
-        "cadre",
         "gestionnaire de paquets",
         "projektstruktur",
         "laufzeit",
