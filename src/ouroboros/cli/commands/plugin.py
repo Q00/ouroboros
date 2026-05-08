@@ -47,6 +47,7 @@ from ouroboros.plugin.manifest import (
     load_manifest,
 )
 from ouroboros.plugin.trust_store import DEFAULT_TRUST_ROOT, TrustStore
+from ouroboros.plugin.userlevel_registry import RegistryError, UserLevelProgramRegistry
 
 app = typer.Typer(
     name="plugin",
@@ -1294,6 +1295,64 @@ def _refuse_first_party_external_install(manifest: PluginManifest) -> None:
         raise typer.Exit(code=1)
 
 
+def _refuse_userlevel_collision(manifest: PluginManifest, lock: Lockfile) -> None:
+    """Reject installs that would collide with an already-installed plugin's
+    namespace, plugin name, or command names.
+
+    ``plugin_dispatch._build_registry_from_lockfile()`` builds the
+    runtime ``UserLevelProgramRegistry`` from the lockfile and silently
+    ``continue``s past entries whose ``register()`` raises
+    ``RegistryError`` for a cross-plugin collision (per the locked
+    "first registration wins" rule). Without an install-time guard,
+    a colliding manifest gets persisted to the lockfile but is
+    perpetually unreachable at runtime — the install reports success
+    and ``ooo <name>`` reports "no such command", an unrecoverable
+    contract gap.
+
+    Mirror the runtime registry's resolution: build a registry from
+    every already-installed manifest (skipping any whose on-disk
+    manifest is corrupt — dispatch surfaces that separately) and try
+    a ``register(... replace=True)`` of the new manifest. The replace
+    flag means a same-name reinstall is exempt from collision (its
+    prior namespace/command slots are released first), so this guard
+    only fires on genuine cross-plugin collisions. Surface the
+    failure BEFORE ``lock.add()`` so a rejected install never leaves
+    a half-applied lockfile entry.
+    """
+    registry = UserLevelProgramRegistry()
+    for entry in lock.read().values():
+        if entry.name == manifest.name:
+            # The plugin we are (re)installing — its own slots are
+            # released by ``replace=True`` below, so it does not
+            # contribute a self-collision.
+            continue
+        manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
+        try:
+            existing_manifest = load_manifest(manifest_path)
+        except (PluginManifestError, OSError):
+            # Corrupt or missing on-disk manifest for an installed
+            # plugin: dispatch surfaces this separately as a
+            # registration skip. Don't let it block unrelated installs.
+            continue
+        try:
+            registry.register(existing_manifest, replace=True)
+        except RegistryError:
+            # Existing-vs-existing collision (e.g., from a prior
+            # buggy install). Not this install's problem to surface
+            # here — keep walking so the new manifest's own collisions
+            # still get caught against whichever entries did register.
+            continue
+    try:
+        registry.register(manifest, replace=True)
+    except RegistryError as exc:
+        print_error(
+            f"refusing to install {manifest.name!r}: {exc}. "
+            f"Pick a different name/namespace/command, or remove the "
+            f"colliding plugin first (`ooo plugin remove <name>`)."
+        )
+        raise typer.Exit(code=1) from exc
+
+
 def _install_one(
     *,
     manifest: PluginManifest,
@@ -1316,7 +1375,10 @@ def _install_one(
     Refuses the install if the manifest's ``name`` collides with a
     reserved top-level command, OR if the manifest claims
     ``source.type == "first_party"`` (privilege escalation guard — see
-    ``_refuse_first_party_external_install``). Both checks happen BEFORE
+    ``_refuse_first_party_external_install``), OR if the manifest's
+    namespace / plugin name / command names would collide with an
+    already-installed plugin (UserLevel registry guard — see
+    ``_refuse_userlevel_collision``). All three checks happen BEFORE
     the lockfile is touched so a rejected install never produces a
     half-applied state.
     """
@@ -1328,6 +1390,10 @@ def _install_one(
     # ``first_party`` lockfile entry — the firewall's trust-bypass
     # semantic stays bound to genuinely-bundled programs.
     _refuse_first_party_external_install(manifest)
+    # Cross-plugin namespace/command collision guard: aligns the install
+    # contract with the runtime dispatch registry so a "successful"
+    # install can never be silently unreachable.
+    _refuse_userlevel_collision(manifest, lock)
     entry = LockEntry(
         name=manifest.name,
         version=manifest.version,
@@ -2284,10 +2350,38 @@ def trust_command(
                 correlation_id=f"trust-{name}-{scope}",
             )
             if audit_handle is not None:
-                audit_handle.write(json.dumps(envelope) + "\n")
+                # Audit-log writes can fail mid-stream (disk full, broken
+                # pipe, NFS error). Without a guard, an OSError after the
+                # grant is already persisted leaves the command in a
+                # partial-commit state: the trust file IS updated and
+                # ``Granted: ...`` IS already printed, but the operator
+                # gets a raw traceback and no recovery hint. Surface the
+                # failure with the same controlled-exit shape used by
+                # every other state-file failure in this command — the
+                # grant survives, the operator can audit-log-replay
+                # later if the path comes back.
+                try:
+                    audit_handle.write(json.dumps(envelope) + "\n")
+                except OSError as exc:
+                    print_error(
+                        f"trust grant for {name!r} ({scope}) was written, but "
+                        f"the audit-log write to {audit_log_path} failed: "
+                        f"{exc}. Inspect filesystem state (disk space, "
+                        f"permissions) and re-run `ooo plugin trust {name} "
+                        f"--scope <...>` to re-emit the audit event."
+                    )
+                    raise typer.Exit(code=1) from exc
     finally:
         if audit_handle is not None:
-            audit_handle.close()
+            try:
+                audit_handle.close()
+            except OSError:
+                # Close failures on append-mode logs are not actionable
+                # past this point — every grant has already been
+                # persisted and the OS will reclaim the descriptor on
+                # process exit. Don't shadow the caller's success path
+                # with a teardown failure.
+                pass
 
     # Clear the disable record only after all fallible writes above
     # have succeeded. ``clear_disable`` is idempotent and the

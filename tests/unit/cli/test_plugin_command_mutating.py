@@ -3465,3 +3465,197 @@ def test_inspect_friendly_error_on_corrupt_disabled_json(runner: CliRunner, tmp_
     )
     # The command MUST surface a controlled error, NOT a raw traceback.
     assert "Traceback" not in result.output, result.output
+
+
+def test_install_refuses_namespace_collision_with_already_installed_plugin(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1323.
+
+    ``plugin_dispatch._build_registry_from_lockfile`` silently ``continue``s
+    past ``UserLevelProgramRegistry.register()`` failures (per the locked
+    "first registration wins" rule). Without an install-time guard, a
+    plugin whose namespace/command/name collides with an already-installed
+    one persists to the lockfile but is unreachable at runtime — install
+    reports success and ``ooo <name>`` reports "no such command". The
+    fix surfaces the collision BEFORE the lockfile is written.
+    """
+    paths = _common_paths(tmp_path)
+
+    # Install plugin A (namespace `github-pr`, command `review`).
+    a_dir = tmp_path / "plugin-a"
+    _install_reference_plugin(runner, plugin_dir=a_dir, paths=paths)
+
+    # Build plugin B with a *different* plugin name but the SAME namespace.
+    # The runtime registry would refuse this with RegistryError; the
+    # dispatcher would silently skip it. The install MUST refuse it
+    # BEFORE the lockfile is written.
+    b_manifest = json.loads(json.dumps(REFERENCE_MANIFEST))
+    b_manifest["name"] = "github-pr-ops-rival"
+    b_manifest["source"] = {"type": "local_path", "path": "plugin-b"}
+    # Same namespace as A (`github-pr`) but a different command name to
+    # isolate the collision to the namespace axis.
+    b_manifest["commands"] = [
+        {
+            "namespace": "github-pr",
+            "name": "summarize",
+            "summary": "Conflicting plugin: same namespace as A.",
+            "usage": "ooo github-pr summarize",
+            "risk": "read_only",
+            "requires_confirmation": False,
+        }
+    ]
+    b_dir = tmp_path / "plugin-b"
+    b_dir.mkdir()
+    (b_dir / "ouroboros.plugin.json").write_text(json.dumps(b_manifest))
+
+    # Snapshot lockfile state so we can prove it was NOT mutated by the
+    # rejected install.
+    lock_before = Lockfile(paths["lockfile"]).read()
+    assert "github-pr-ops" in lock_before
+    assert "github-pr-ops-rival" not in lock_before
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(b_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # Install MUST be rejected with a controlled exit, NOT a traceback.
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "refusing to install" in plain
+    assert "Traceback" not in result.output
+
+    # Lockfile MUST be unchanged — the colliding plugin was never persisted.
+    lock_after = Lockfile(paths["lockfile"]).read()
+    assert "github-pr-ops-rival" not in lock_after, (
+        "lockfile must not record a plugin whose namespace/command/name "
+        "collides with an already-installed one — dispatch would skip it"
+    )
+    assert lock_before == lock_after
+
+
+def test_install_allows_same_name_reinstall_at_new_version(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Same-name reinstall (e.g. version bump) MUST NOT be blocked by the
+    new collision guard — the runtime registry releases the prior
+    plugin's namespace/command slots before the replacement registers,
+    so a same-name install is exempt from cross-plugin collision.
+    """
+    paths = _common_paths(tmp_path)
+    a_dir = tmp_path / "plugin-a"
+    _install_reference_plugin(runner, plugin_dir=a_dir, paths=paths)
+
+    bumped = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bumped["version"] = "0.2.0"
+    a_dir_v2 = tmp_path / "plugin-a-v2"
+    a_dir_v2.mkdir()
+    (a_dir_v2 / "ouroboros.plugin.json").write_text(json.dumps(bumped))
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(a_dir_v2),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    entries = Lockfile(paths["lockfile"]).read()
+    assert entries["github-pr-ops"].version == "0.2.0"
+
+
+def test_trust_friendly_error_on_audit_log_write_failure(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's follow-up on plugin.py:2286.
+
+    ``trust_command`` previously guarded ``--audit-log`` open failures
+    but not write failures. An ``OSError`` mid-write (disk full,
+    broken pipe, NFS error) escaped as a raw traceback AFTER the trust
+    grant was already persisted — exactly the partial-commit shape the
+    rest of the command is hardened against. The fix wraps the write
+    in a typer.Exit(1) with a recovery hint that names the audit log
+    path.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+
+    # Stub Path.open for the audit-log path so write() raises.
+    audit_log = paths["audit_log"]
+    audit_log.parent.mkdir(parents=True, exist_ok=True)
+    audit_log.touch()  # parent and file exist so the OPEN succeeds
+
+    real_path_open = Path.open
+
+    class _FailingHandle:
+        def __init__(self, real):  # noqa: ANN001
+            self._real = real
+
+        def write(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise OSError("synthetic: ENOSPC writing audit log")
+
+        def flush(self):
+            return self._real.flush()
+
+        def close(self):
+            return self._real.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):  # noqa: ANN002
+            self.close()
+
+    def _fake_open(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if str(self) == str(audit_log):
+            return _FailingHandle(real_path_open(self, *args, **kwargs))
+        return real_path_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _fake_open)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:tester",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(audit_log),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    # Strip ANSI codes + Rich panel borders before matching (the message
+    # wraps inside a panel and the assertion would otherwise depend on
+    # terminal width).
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    for ch in ("│", "╭", "╮", "╰", "╯", "─"):
+        plain = plain.replace(ch, " ")
+    plain = " ".join(plain.split())
+    assert "audit-log write" in plain
+    assert "failed" in plain
+    assert "Traceback" not in result.output
