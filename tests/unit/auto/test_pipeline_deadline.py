@@ -128,6 +128,50 @@ def test_state_save_load_roundtrip_preserves_deadline(tmp_path) -> None:
     assert abs(loaded_remaining - original_remaining) < 0.1
 
 
+def _legacy_state_payload_for_phase(phase: AutoPhase, tmp_path) -> dict:
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    if phase in {
+        AutoPhase.INTERVIEW,
+        AutoPhase.SEED_GENERATION,
+        AutoPhase.REVIEW,
+        AutoPhase.RUN,
+    }:
+        state.transition(AutoPhase.INTERVIEW, "interview")
+    if phase in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
+        state.transition(AutoPhase.SEED_GENERATION, "seed")
+    if phase in {AutoPhase.REVIEW, AutoPhase.RUN}:
+        state.transition(AutoPhase.REVIEW, "review")
+    if phase is AutoPhase.RUN:
+        state.transition(AutoPhase.RUN, "run")
+
+    payload = state.to_dict()
+    payload.pop("deadline_at", None)
+    payload.pop("deadline_at_epoch", None)
+    return payload
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        AutoPhase.INTERVIEW,
+        AutoPhase.SEED_GENERATION,
+        AutoPhase.REVIEW,
+        AutoPhase.RUN,
+    ],
+)
+def test_legacy_active_state_load_arms_missing_deadline(tmp_path, phase: AutoPhase) -> None:
+    """Legacy active auto states without deadline fields must resume with a deadline."""
+    payload = _legacy_state_payload_for_phase(phase, tmp_path)
+
+    loaded = AutoPipelineState.from_dict(payload)
+
+    assert loaded.phase is phase
+    assert loaded.deadline_at is not None
+    assert loaded.deadline_at_epoch is not None
+    assert loaded.deadline_at > time.monotonic()
+    assert loaded.deadline_at_epoch > time.time()
+
+
 @pytest.mark.asyncio
 async def test_resume_after_deadline_expired_immediately_blocks(tmp_path) -> None:
     """Loading a state whose deadline already passed must transition to BLOCKED on entry."""

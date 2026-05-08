@@ -1222,6 +1222,10 @@ def build_ralph_subagent(
             check the cumulative wall-clock elapsed since the loop started
             BEFORE launching each iteration and surface
             ``stop_reason=wall_clock_exhausted`` to the parent on exhaustion.
+            On the plugin path, ``max_total_seconds`` is *also* the only true
+            whole-session ceiling that drives the bridge's session-kill timer
+            (see ``_ralph_timeout_metadata``); the per-iteration bound is
+            advisory because the bridge cannot reset its timer per iteration.
             When ``None``, the field is omitted from both prompt and context
             (legacy shape preserved for callers that don't care about the
             bound).

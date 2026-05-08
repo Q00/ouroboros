@@ -575,6 +575,13 @@ class AutoPipelineState:
             msg = f"seed_origin must be one of {[item.value for item in SeedOrigin]}"
             raise ValueError(msg) from exc
         state = cls(**payload)
+        if (
+            state.phase not in TERMINAL_PHASES
+            and state.phase is not AutoPhase.CREATED
+            and state.deadline_at is None
+            and state.deadline_at_epoch is None
+        ):
+            state.arm_deadline()
         state._validate_loaded()
         return state
 
