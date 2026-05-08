@@ -283,23 +283,50 @@ def _qa_passed(meta: dict[str, Any]) -> bool:
 
 
 def _extract_findings_hash(meta: dict[str, Any]) -> str | None:
-    """Compute (or pass through) a deterministic hash of evolve_step findings."""
+    """Compute (or pass through) a deterministic hash of evolve_step findings.
+
+    Source priority:
+
+    1. ``meta["findings"]`` (a list) is hashed verbatim. Synthetic test
+       harnesses use this path.
+    2. ``meta["findings_hash"]`` (a non-empty string) passes through unchanged.
+       Producers can supply a precomputed hash to avoid re-serialization.
+    3. ``meta["qa"]["differences"]`` and ``meta["qa"]["suggestions"]`` (lists)
+       are combined into a stable mapping and hashed. The default
+       ``EvolveStepHandler`` does not synthesize a top-level ``findings``
+       field, so deriving the fingerprint from the QA verdict body is the
+       only way oscillation detection can fire on the real in-process loop
+       (issue #788 review-2).
+    """
     findings = meta.get("findings")
     if isinstance(findings, list):
-        try:
-            serialized = json.dumps(
-                findings,
-                sort_keys=True,
-                default=str,
-                ensure_ascii=False,
-            )
-        except (TypeError, ValueError):
-            return None
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        return _hash_findings_payload(findings)
     precomputed = meta.get("findings_hash")
     if isinstance(precomputed, str) and precomputed:
         return precomputed
+    qa = meta.get("qa")
+    if isinstance(qa, dict):
+        diffs = qa.get("differences")
+        suggestions = qa.get("suggestions")
+        diffs_list = diffs if isinstance(diffs, list) else None
+        suggestions_list = suggestions if isinstance(suggestions, list) else None
+        if diffs_list is not None or suggestions_list is not None:
+            return _hash_findings_payload(
+                {
+                    "differences": diffs_list or [],
+                    "suggestions": suggestions_list or [],
+                }
+            )
     return None
+
+
+def _hash_findings_payload(payload: Any) -> str | None:
+    """Stable JSON-then-sha256 hash for a findings payload."""
+    try:
+        serialized = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _extract_grade(meta: dict[str, Any]) -> float | None:

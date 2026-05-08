@@ -41,6 +41,7 @@ from ouroboros.ralph_loop import (
 MAX_RALPH_GENERATIONS = 10
 MIN_PER_ITERATION_TIMEOUT_SECONDS = 30.0
 MAX_PER_ITERATION_TIMEOUT_SECONDS = 7200.0
+MIN_PROGRESS_WINDOW = 2  # smallest window where strict-decrease / repeat checks are meaningful
 
 
 @dataclass
@@ -147,7 +148,9 @@ class RalphHandler:
                         "Number of trailing iterations whose findings_hash must "
                         "match (and QA must not have passed) to stop with "
                         "stop_reason='oscillation_detected'. Default: 3. "
-                        f"Range: 1-{MAX_RALPH_GENERATIONS}."
+                        f"Range: {MIN_PROGRESS_WINDOW}-{MAX_RALPH_GENERATIONS}. "
+                        "Values < 2 are rejected because a single iteration "
+                        "cannot oscillate with itself."
                     ),
                     required=False,
                     default=DEFAULT_OSCILLATION_WINDOW,
@@ -159,7 +162,9 @@ class RalphHandler:
                         "Number of trailing iterations whose non-None grades must "
                         "strictly decrease to stop with "
                         "stop_reason='grade_regressing'. Default: 2. "
-                        f"Range: 1-{MAX_RALPH_GENERATIONS}."
+                        f"Range: {MIN_PROGRESS_WINDOW}-{MAX_RALPH_GENERATIONS}. "
+                        "Values < 2 are rejected because strict-decrease "
+                        "requires at least two grades to compare."
                     ),
                     required=False,
                     default=DEFAULT_GRADE_REGRESSION_WINDOW,
@@ -249,10 +254,11 @@ class RalphHandler:
                     tool_name="ouroboros_ralph",
                 )
             )
-        if oscillation_window < 1 or oscillation_window > MAX_RALPH_GENERATIONS:
+        if oscillation_window < MIN_PROGRESS_WINDOW or oscillation_window > MAX_RALPH_GENERATIONS:
             return Result.err(
                 MCPToolError(
-                    f"oscillation_window must be between 1 and {MAX_RALPH_GENERATIONS}",
+                    "oscillation_window must be between "
+                    f"{MIN_PROGRESS_WINDOW} and {MAX_RALPH_GENERATIONS}",
                     tool_name="ouroboros_ralph",
                 )
             )
@@ -268,10 +274,14 @@ class RalphHandler:
                     tool_name="ouroboros_ralph",
                 )
             )
-        if grade_regression_window < 1 or grade_regression_window > MAX_RALPH_GENERATIONS:
+        if (
+            grade_regression_window < MIN_PROGRESS_WINDOW
+            or grade_regression_window > MAX_RALPH_GENERATIONS
+        ):
             return Result.err(
                 MCPToolError(
-                    f"grade_regression_window must be between 1 and {MAX_RALPH_GENERATIONS}",
+                    "grade_regression_window must be between "
+                    f"{MIN_PROGRESS_WINDOW} and {MAX_RALPH_GENERATIONS}",
                     tool_name="ouroboros_ralph",
                 )
             )
