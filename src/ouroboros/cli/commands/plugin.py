@@ -936,6 +936,30 @@ def inspect_command(
         applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
         granted = [g.scope for g in record.granted_scopes] if applies and record else []
 
+    # ``_describe_trust_state`` re-reads the trust file AND consults
+    # the disable record (``is_disabled_for_subject`` /
+    # ``is_disabled``). A corrupt ``disabled.json`` would raise
+    # ``ValueError``/``OSError`` past the earlier ``trust.read`` guard,
+    # producing a raw traceback in the very diagnostic command
+    # operators run to repair plugin state. Wrap the call in the same
+    # friendly-error idiom as the trust read above so ``inspect`` gives
+    # one consistent recovery hint regardless of which state file is
+    # malformed.
+    try:
+        trust_state = _describe_trust_state(
+            manifest,
+            trust,
+            expected_source_identity=entry.source_identity or None,
+            expected_artifact_digest=entry.artifact_digest or None,
+        )
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"trust state for {name!r} is unreadable: {exc}. "
+            f"Inspect or remove the offending file under {trust.root / name}, "
+            f"or pass --trust-root to point at a known-good copy."
+        )
+        raise typer.Exit(code=1) from exc
+
     print_info(f"{manifest.name} {manifest.version} ({entry.source_kind})")
     console.print(f"  installed_at:   {entry.installed_at}")
     console.print(f"  plugin_home:    {entry.plugin_home}")
@@ -943,9 +967,7 @@ def inspect_command(
         console.print(f"  repository:     {entry.repository}")
     if entry.git_sha:
         console.print(f"  git_sha:        {entry.git_sha}")
-    console.print(
-        f"  trust_state:    {_describe_trust_state(manifest, trust, expected_source_identity=entry.source_identity or None, expected_artifact_digest=entry.artifact_digest or None)}"
-    )
+    console.print(f"  trust_state:    {trust_state}")
     console.print(f"  granted_scopes: {', '.join(granted) if granted else '(none)'}")
     if record is not None and not applies:
         # Surface why the grants don't apply, naming the field that drifted.
@@ -1346,6 +1368,35 @@ def _enumerate_catalog(repo_root: Path) -> list[CatalogEntry]:
         console.print(f"  [yellow]skip[/]: {dir_name}: invalid manifest ({reason})")
     if not entries:
         print_error(f"no valid manifests found under {plugins_dir}")
+        raise typer.Exit(code=1)
+    # Reject ambiguous catalogs up-front. Downstream resolution paths
+    # (``_select_plugins``, ``_install_named_from_url``, the local
+    # ``plugins/*`` scan) all key by ``manifest.name`` and would
+    # silently install whichever directory sorts first/last when two
+    # entries declare the same name. Failing here means the bytes the
+    # user installs depend on an explicit choice (rename one of the
+    # subdirectories' manifests, drop the duplicate, or install from a
+    # path that contains only one of them) rather than directory
+    # ordering.
+    by_name: dict[str, CatalogEntry] = {}
+    duplicates: dict[str, list[str]] = {}
+    for entry in entries:
+        if entry.manifest.name in by_name:
+            duplicates.setdefault(
+                entry.manifest.name, [by_name[entry.manifest.name].plugin_dir.name]
+            )
+            duplicates[entry.manifest.name].append(entry.plugin_dir.name)
+        else:
+            by_name[entry.manifest.name] = entry
+    if duplicates:
+        details = ", ".join(
+            f"{name!r} declared by {sorted(dirs)}" for name, dirs in sorted(duplicates.items())
+        )
+        print_error(
+            f"ambiguous catalog under {plugins_dir}: multiple manifests declare "
+            f"the same plugin name ({details}). Rename or remove duplicates "
+            f"so each plugin name resolves to exactly one directory."
+        )
         raise typer.Exit(code=1)
     return entries
 

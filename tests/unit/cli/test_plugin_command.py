@@ -480,6 +480,59 @@ def test_list_json_legacy_unbound_record_reports_installed(
     assert row["missing_required_scopes"] == ["github:read"]
 
 
+def test_inspect_corrupt_disable_file_reports_friendly_error(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:946 —
+    ``inspect`` previously only wrapped ``trust.read()``, but
+    ``_describe_trust_state`` also consults the disable record via
+    ``is_disabled_for_subject`` / ``is_disabled``. A malformed
+    ``disabled.json`` would raise ``ValueError`` past the trust read
+    guard and produce a raw traceback in the very diagnostic command
+    operators run to repair plugin state.
+    """
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            # Populated subject columns so `_describe_trust_state`
+            # routes through `is_disabled_for_subject` → `read_disable`,
+            # which DOES parse the file and surface JSONDecodeError.
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest="sha256:" + "a" * 64,
+        )
+    )
+    # Plant a malformed disabled.json so `is_disabled_for_subject` raises.
+    bad_disable_dir = trust_root / "github-pr-ops"
+    bad_disable_dir.mkdir(parents=True)
+    (bad_disable_dir / "disabled.json").write_text("{not valid json")
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "trust state" in result.output and "unreadable" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_inspect_first_party_ignores_corrupt_trust_file(runner: CliRunner, tmp_path: Path) -> None:
     """Regression: a leftover/corrupt `trust.json` for a first-party
     plugin must NOT make `inspect` fail. The firewall ignores the

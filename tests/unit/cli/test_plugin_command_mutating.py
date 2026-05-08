@@ -1223,6 +1223,49 @@ def test_install_invalidates_legacy_trust_record(runner: CliRunner, tmp_path: Pa
     )
 
 
+def test_add_rejects_ambiguous_catalog_with_duplicate_manifest_names(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1358 —
+    two manifests inside the same source declaring the same plugin
+    name must produce an explicit "ambiguous catalog" error rather
+    than silently installing whichever subdirectory sorts last/first.
+    Downstream resolution paths key by ``manifest.name`` and would
+    otherwise let directory ordering decide which bytes the user gets.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "repo"
+    plugins = repo / "plugins"
+    plugins.mkdir(parents=True)
+    # Two distinct subdirectories, both declaring `name: "github-pr-ops"`.
+    for subdir in ("one", "two"):
+        d = plugins / subdir
+        d.mkdir()
+        (d / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    catalog_state = tmp_path / "catalog-state.json"
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo.resolve()),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "ambiguous catalog" in result.output
+    assert "github-pr-ops" in result.output
+    # Lockfile must remain empty — nothing got installed under either
+    # of the conflicting subdirectories.
+    assert (
+        not paths["lockfile"].exists() or "github-pr-ops" not in Lockfile(paths["lockfile"]).read()
+    )
+
+
 def test_install_named_from_local_catalog_dirname_differs_from_manifest_name(
     runner: CliRunner, tmp_path: Path
 ) -> None:
