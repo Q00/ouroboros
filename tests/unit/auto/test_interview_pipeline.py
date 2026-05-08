@@ -311,6 +311,75 @@ async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_
     assert state.pending_question is None
 
 
+def test_revert_safe_default_entries_preserves_user_keys_with_matching_suffix() -> None:
+    """Regression: rollback must NOT remove a non-policy entry whose key
+    coincidentally ends with ``.safe_default_finalization``.
+
+    The earlier ``entry.key.endswith(".safe_default_finalization")`` filter
+    would delete a user/answerer-authored ledger entry whose key just
+    happens to share that suffix (for example, an answerer-synthesized
+    constraint key ``constraints.my.safe_default_finalization``).
+    Only the canonical key written by ``finalize_safe_defaultable_gaps``
+    (``{section}.safe_default_finalization``) should be removed on rollback.
+    """
+    from ouroboros.auto.interview_driver import _revert_safe_default_entries
+    from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus
+
+    ledger = SeedDraftLedger.from_goal("Build a small CLI")
+
+    # 1. The canonical safe-default policy entry — must be removed.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.safe_default_finalization",
+            value="defaulted",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+            rationale="policy",
+            evidence=("provenance",),
+        ),
+    )
+    # 2. A user-authored entry that ends with the same suffix but is NOT
+    #    the canonical policy key. Must SURVIVE the rollback.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.my.safe_default_finalization",
+            value="user-specified constraint",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.95,
+            status=LedgerStatus.CONFIRMED,
+            rationale="user said so",
+            evidence=("interview answer",),
+        ),
+    )
+    # 3. An unrelated entry that does not match the suffix at all.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.other",
+            value="unrelated",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+            rationale="control",
+            evidence=("control",),
+        ),
+    )
+
+    _revert_safe_default_entries(ledger, ("constraints",))
+
+    remaining_keys = {entry.key for entry in ledger.sections["constraints"].entries}
+    assert "constraints.safe_default_finalization" not in remaining_keys, (
+        "the canonical safe-default policy entry MUST be removed on rollback"
+    )
+    assert "constraints.my.safe_default_finalization" in remaining_keys, (
+        "a user-authored entry whose key shares the suffix MUST survive rollback"
+    )
+    assert "constraints.other" in remaining_keys
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_finalizes_when_backend_requires_two_completion_signals(
     tmp_path,

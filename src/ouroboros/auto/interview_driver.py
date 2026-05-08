@@ -646,11 +646,20 @@ def _revert_safe_default_entries(
         section = ledger.sections.get(section_name)
         if section is None:
             continue
-        section.entries = [
-            entry
-            for entry in section.entries
-            if not entry.key.endswith(".safe_default_finalization")
-        ]
+        # Match the EXACT key the safe-default policy writes
+        # (``{section}.safe_default_finalization``) instead of any key
+        # that happens to end with the suffix. The earlier
+        # ``endswith(...)`` form would also delete a user-authored
+        # entry whose key coincidentally ended in
+        # ``.safe_default_finalization`` — for example, an answerer-
+        # synthesized constraint key
+        # ``constraints.my.safe_default_finalization``. The
+        # ``finalize_safe_defaultable_gaps`` writer is the SOLE
+        # producer of the canonical key shape, so an exact equality
+        # check is both correct (matches every entry the policy
+        # wrote) and safer (matches only those entries).
+        canonical_key = f"{section_name}.safe_default_finalization"
+        section.entries = [entry for entry in section.entries if entry.key != canonical_key]
 
 
 def _generate_interview_id() -> str:
