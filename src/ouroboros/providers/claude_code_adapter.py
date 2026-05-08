@@ -820,14 +820,43 @@ class ClaudeCodeAdapter:
             from claude_agent_sdk._errors import MessageParseError as _MPE
 
             gen = query(prompt=prompt, options=options).__aiter__()
+            consecutive_parse_errors = 0
+            # Bound the parse-error skip loop. If every message coming back
+            # is unparseable (e.g. SDK / CLI version skew introducing a new
+            # message type the SDK doesn't model yet), the original loop
+            # would spin forever pinning a worker with no application-level
+            # signal. 50 consecutive parse errors with no other message
+            # type indicates a stuck stream, not transient unknown messages.
+            PARSE_ERROR_LIMIT = 50
+
             while True:
                 try:
-                    yield await gen.__anext__()
+                    msg = await gen.__anext__()
                 except _MPE as parse_err:
-                    log.debug("claude_code_adapter.skipping_unknown_message", error=str(parse_err))
+                    consecutive_parse_errors += 1
+                    if consecutive_parse_errors >= PARSE_ERROR_LIMIT:
+                        log.warning(
+                            "claude_code_adapter.parse_error_limit_exceeded",
+                            limit=PARSE_ERROR_LIMIT,
+                            last_error=str(parse_err),
+                        )
+                        raise ProviderError(
+                            f"MCP stream stuck: {PARSE_ERROR_LIMIT} consecutive "
+                            f"MessageParseError events with no other message type "
+                            f"— likely SDK / CLI version skew. Last error: "
+                            f"{parse_err}"
+                        ) from parse_err
+                    log.debug(
+                        "claude_code_adapter.skipping_unknown_message",
+                        error=str(parse_err),
+                        consecutive=consecutive_parse_errors,
+                    )
                     continue
                 except StopAsyncIteration:
                     break
+                else:
+                    consecutive_parse_errors = 0
+                    yield msg
 
         try:
             async for sdk_message in _safe_query():
