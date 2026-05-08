@@ -592,7 +592,38 @@ class ClaudeCodeAdapter:
         #
         # Strategy: Block dangerous tools explicitly, allow everything else
         # This enables MCP tools (mcp__*) and read-only built-in tools
-        dangerous_tools = ["Write", "Edit", "Bash", "Task", "NotebookEdit"]
+        #
+        # The list MUST include UI / orchestration tools that block headless
+        # requests waiting for user input. If a model invokes one of these in
+        # a non-interactive context (no UI to receive the response), the
+        # request hangs at max_turns and the parent SDK call returns no
+        # usable text — surfacing as a misleading "Command failed exit 1"
+        # because no AssistantMessage TextBlock is ever emitted.
+        dangerous_tools = [
+            # File-mutating builtins
+            "Write",
+            "Edit",
+            "Bash",
+            "Task",
+            "NotebookEdit",
+            # UI / orchestration tools — block in headless contexts
+            "AskUserQuestion",
+            "ExitPlanMode",
+            "EnterPlanMode",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ScheduleWakeup",
+            "PushNotification",
+            "RemoteTrigger",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Skill",
+            "ToolSearch",
+            "Monitor",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+        ]
 
         # If allowed_tools is explicitly set (even empty []), compute disallowed
         # from it (strict mode). None = permissive (only block dangerous).
