@@ -246,6 +246,12 @@ class AutoAnswerer:
                 confidence=1.0,
                 blocker=blocker,
             )
+        # answer_gap replaces the user's actual question with a synthetic
+        # generic prompt, which would otherwise erase the original risky
+        # context from the safety gate. Pull the converged goal from the
+        # ledger and pass it to the helper so a regulated/destructive task
+        # cannot smuggle a USER_PREFERENCE past the gate via gap-filling.
+        goal_text = _latest_resolved_goal(ledger)
         if section in {"actors", "inputs", "outputs"}:
             gap_question = "Who are the actors, inputs, and outputs for this task?"
             return _maybe_apply_user_preference(
@@ -253,6 +259,7 @@ class AutoAnswerer:
                 (section,),
                 context,
                 question=gap_question,
+                goal_text=goal_text,
             )
         if section in {"constraints", "failure_modes"}:
             gap_question = "What conservative constraints and failure modes should bound this MVP?"
@@ -261,6 +268,7 @@ class AutoAnswerer:
                 (section,),
                 context,
                 question=gap_question,
+                goal_text=goal_text,
             )
         if section == "non_goals":
             # NON_GOAL source is not upgradable; preference will be ignored here
@@ -275,6 +283,7 @@ class AutoAnswerer:
                 (section,),
                 context,
                 question=gap_question,
+                goal_text=goal_text,
             )
         if section == "runtime_context":
             gap_question = "Which runtime stack, repo, and project patterns should be used?"
@@ -283,6 +292,7 @@ class AutoAnswerer:
                 ("runtime_context",),
                 context,
                 question=gap_question,
+                goal_text=goal_text,
             )
         blocker = AutoBlocker(
             reason=f"unsupported ledger gap section: {section}",
@@ -1640,6 +1650,7 @@ def _maybe_apply_user_preference(
     *,
     question: str = "",
     lowered: str = "",
+    goal_text: str = "",
 ) -> AutoAnswer:
     """Replace an upgradable answer with a USER_PREFERENCE-tagged answer.
 
@@ -1651,16 +1662,18 @@ def _maybe_apply_user_preference(
     - ``context.user_preferences`` has a non-empty value for one of the
       provided ``section_hints``
     - ``answer.blocker`` is None
-    - the question is **not** flagged as a risky-fallback topic (regulated
-      personal data, destructive bulk operations, etc.). On early-return
-      answer paths (``VERIFICATION`` / ``ACCEPTANCE_CRITERIA`` / ``answer_gap``)
+    - **neither** the question **nor** ``goal_text`` is flagged as a
+      risky-fallback topic (regulated personal data, destructive bulk
+      operations, etc.). On early-return answer paths
+      (``VERIFICATION`` / ``ACCEPTANCE_CRITERIA``) and on ``answer_gap``,
       the routing-block safety gate never runs, so a caller-supplied
-      preference for ``verification_plan`` or ``acceptance_criteria`` could
-      otherwise smuggle a regulated answer into the ledger as a confirmed
-      ``USER_PREFERENCE`` entry. The helper short-circuits to a BLOCKER answer
-      in that case so the same policy fires regardless of which call site
-      requested the upgrade. The blocker mirrors the routing-block path
-      (``_RISKY_FALLBACK_SOURCES`` re-route).
+      preference could otherwise smuggle a regulated answer into the ledger
+      as a confirmed ``USER_PREFERENCE`` entry. ``answer_gap`` additionally
+      replaces the user's actual question with a generic synthetic prompt,
+      so the helper also inspects ``goal_text`` (the converged interview
+      goal) — preserving the risky-topic signal that a synthetic prompt
+      would otherwise erase. When either text matches a risky pattern the
+      helper short-circuits to a BLOCKER answer.
 
     The first matching section wins. The new answer carries the user's value
     verbatim and tags the corresponding ledger entry with
@@ -1677,6 +1690,7 @@ def _maybe_apply_user_preference(
     # Compute the lowered form lazily — most call sites pass it; ``answer_gap``
     # and any future caller can rely on the inline normalisation here.
     lowered_q = lowered or (_normalize_question(question) if question else "")
+    lowered_goal = _normalize_question(goal_text) if goal_text else ""
     for section in section_hints:
         raw_value = context.user_preferences.get(section)
         if not isinstance(raw_value, str):
@@ -1685,21 +1699,25 @@ def _maybe_apply_user_preference(
         if not value:
             continue
         # Safety gate: a caller-supplied preference must not bypass the
-        # risky-fallback policy. If the question matches a regulated /
-        # destructive-bulk pattern, the upgrade is rejected here so the
-        # behaviour is identical across early-return and routing-block paths.
+        # risky-fallback policy. Inspect BOTH the current question and the
+        # converged goal text so synthetic gap-fill prompts (which erase the
+        # original risky context) cannot smuggle a confirmed USER_PREFERENCE
+        # past the gate.
+        risky_blocker: AutoBlocker | None = None
         if lowered_q and question:
             risky_blocker = _risky_fallback_blocker_for(question, lowered_q)
-            if risky_blocker is not None:
-                return AutoAnswer(
-                    text=(
-                        "Cannot safely decide automatically with a generic default: "
-                        f"{risky_blocker.reason}"
-                    ),
-                    source=AutoAnswerSource.BLOCKER,
-                    confidence=1.0,
-                    blocker=risky_blocker,
-                )
+        if risky_blocker is None and lowered_goal and goal_text:
+            risky_blocker = _risky_fallback_blocker_for(goal_text, lowered_goal)
+        if risky_blocker is not None:
+            return AutoAnswer(
+                text=(
+                    "Cannot safely decide automatically with a generic default: "
+                    f"{risky_blocker.reason}"
+                ),
+                source=AutoAnswerSource.BLOCKER,
+                confidence=1.0,
+                blocker=risky_blocker,
+            )
         preserved = [
             (other_section, other_entry)
             for other_section, other_entry in answer.ledger_updates

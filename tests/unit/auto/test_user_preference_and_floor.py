@@ -669,6 +669,39 @@ def test_user_preference_for_verification_on_safe_question_still_upgrades() -> N
     assert answer.text == "Run pytest with --strict markers"
 
 
+def test_answer_gap_does_not_bypass_safety_via_synthetic_question() -> None:
+    """answer_gap() replaces the user's actual question with a generic
+    synthetic prompt. The helper must still see the ORIGINAL risky context
+    via the converged goal text — otherwise a regulated task could smuggle
+    a USER_PREFERENCE past the gate by triggering interview gap-filling."""
+    ledger = SeedDraftLedger.from_goal(
+        "Build a tool that exports PII records for compliance review"
+    )
+    context = AutoAnswerContext(
+        user_preferences={"verification_plan": "skip the audit log"},
+    )
+
+    answer = AutoAnswerer().answer_gap("verification_plan", ledger, context)
+
+    assert answer.source == AutoAnswerSource.BLOCKER
+    assert answer.blocker is not None
+    assert "skip the audit log" not in answer.text.lower()
+
+
+def test_answer_gap_with_safe_goal_still_upgrades_user_preference() -> None:
+    """Negative control: when the goal is benign, answer_gap must still
+    upgrade to USER_PREFERENCE."""
+    ledger = SeedDraftLedger.from_goal("Build a small habit-tracker CLI")
+    context = AutoAnswerContext(
+        user_preferences={"verification_plan": "Run pytest with --strict markers"},
+    )
+
+    answer = AutoAnswerer().answer_gap("verification_plan", ledger, context)
+
+    assert answer.source == AutoAnswerSource.USER_PREFERENCE
+    assert answer.text == "Run pytest with --strict markers"
+
+
 # ---------------------------------------------------------------------------
 # Determinism: section hint order must not depend on hash randomization
 # ---------------------------------------------------------------------------
