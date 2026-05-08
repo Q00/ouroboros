@@ -67,6 +67,27 @@ def _source_type_for_event(manifest: PluginManifest) -> str:
     return manifest.source.type
 
 
+def _argv_summary(argv: list[str]) -> dict:
+    """Compute a bounded fingerprint of argv for the audit envelope.
+
+    Returns ``{argc, byte_length, sha256}``. Hashing uses NUL as the
+    element separator so two different argv lists with the same
+    concatenation cannot collide
+    (``["ab", "cd"]`` vs ``["abcd"]``). ``byte_length`` excludes the
+    separators so the number reflects the operator-visible payload
+    size. The full argv field stays in the envelope unchanged in this
+    step — the summary is added alongside so we can size the real
+    distribution before deciding on any cap or spill policy.
+    """
+    parts = [s.encode("utf-8", errors="replace") for s in argv]
+    digest = hashlib.sha256(b"\x00".join(parts)).hexdigest()
+    return {
+        "argc": len(argv),
+        "byte_length": sum(len(p) for p in parts),
+        "sha256": digest,
+    }
+
+
 def _event_envelope(
     *,
     event_type: str,
@@ -84,6 +105,7 @@ def _event_envelope(
     cmd: dict = {"namespace": namespace, "name": command_name}
     if argv is not None:
         cmd["argv"] = list(argv)
+        cmd["argv_summary"] = _argv_summary(argv)
     event: dict = {
         "schema_version": SCHEMA_VERSION,
         "event_type": event_type,

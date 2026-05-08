@@ -59,6 +59,17 @@
         "argv": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "argv_summary": {
+          "type": "object",
+          "description": "Bounded fingerprint of argv added in step 1 of the audit-fidelity plan. Lets operators size the actual distribution before any cap is chosen and lets consumers correlate identical invocations by sha without dragging the full payload through the index. The argv field itself is unchanged in this step.",
+          "required": ["argc", "byte_length", "sha256"],
+          "additionalProperties": false,
+          "properties": {
+            "argc": { "type": "integer", "minimum": 0 },
+            "byte_length": { "type": "integer", "minimum": 0 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
         }
       }
     },
