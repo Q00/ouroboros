@@ -280,14 +280,10 @@ class TestBuildRalphSubagent:
         )
 
         assert payload.context["per_iteration_timeout_seconds"] == 900
-        assert payload.timeout == {
-            "timeout_ms": 900_000,
-            "stop_reason": "iteration_timeout",
-            "source": "per_iteration_timeout_seconds",
-            "behavior": "min_positive_budget",
-            "per_iteration_timeout_seconds": 900.0,
-            "max_total_seconds": None,
-        }
+        # Per-iteration alone never drives the bridge's session-kill timer:
+        # the bridge cannot reset per iteration, so without a max_total
+        # ceiling there is no honest whole-session budget to enforce.
+        assert payload.timeout is None
         assert "per_iteration_timeout_seconds: 900" in payload.prompt
         assert "stop_reason=iteration_timeout" in payload.prompt
         assert "exceeds 900 seconds" in payload.prompt
@@ -326,24 +322,43 @@ class TestBuildRalphSubagent:
         )
 
         assert payload.context["max_total_seconds"] == 1500
+        # max_total_seconds is the only true whole-session ceiling, so it
+        # alone drives the bridge timer (#790 review-3).
+        assert payload.timeout == {
+            "timeout_ms": 1_500_000,
+            "stop_reason": "wall_clock_exhausted",
+            "source": "max_total_seconds",
+            "behavior": "session_ceiling_only",
+            "per_iteration_timeout_seconds": None,
+            "max_total_seconds": 1500.0,
+        }
         assert "max_total_seconds: 1500" in payload.prompt
         assert "stop_reason=wall_clock_exhausted" in payload.prompt
         assert "1500 seconds" in payload.prompt
 
-    def test_ralph_timeout_metadata_uses_conservative_min_budget(self) -> None:
+    def test_ralph_timeout_metadata_uses_max_total_only(self) -> None:
+        """Per-iteration must NOT cap the bridge timer when both are set.
+
+        Regression guard for #790 review-3: a healthy multi-iteration plugin
+        run with ``per_iteration < max_total`` was being aborted at the
+        per-iteration boundary because the bridge timer was set to the min of
+        the two. The bridge can only enforce a single session-wide ceiling,
+        so ``max_total_seconds`` must drive the timer alone; per_iteration
+        survives only as advisory metadata for in-child enforcement.
+        """
         payload = build_ralph_subagent(
-            lineage_id="lin-min-budget",
+            lineage_id="lin-multi-iter",
             seed_content="goal: ship",
-            max_generations=3,
+            max_generations=6,
             per_iteration_timeout_seconds=300,
             max_total_seconds=1800,
         )
 
         assert payload.timeout == {
-            "timeout_ms": 300_000,
-            "stop_reason": "iteration_timeout",
-            "source": "per_iteration_timeout_seconds",
-            "behavior": "min_positive_budget",
+            "timeout_ms": 1_800_000,
+            "stop_reason": "wall_clock_exhausted",
+            "source": "max_total_seconds",
+            "behavior": "session_ceiling_only",
             "per_iteration_timeout_seconds": 300.0,
             "max_total_seconds": 1800.0,
         }

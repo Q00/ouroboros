@@ -156,28 +156,31 @@ def _ralph_timeout_metadata(
 ) -> dict[str, Any] | None:
     """Build bridge-enforced timeout metadata for plugin-mode Ralph.
 
-    The plugin has one OpenCode child session for the full Ralph loop, not a
-    Python-owned per-generation runner. To preserve the public timeout
-    contract, the child gets the conservative minimum positive budget: total
-    wall-clock caps the whole child, and per-iteration timeout also caps an
-    unresponsive single child generation.
+    The OpenCode bridge owns one session-scoped abort timer per child; it has
+    no per-iteration reset hook because the bridge cannot observe iteration
+    boundaries inside the foreign child session. The bridge timer must
+    therefore represent a *whole-session ceiling only*, driven exclusively by
+    ``max_total_seconds``. Mapping ``per_iteration_timeout_seconds`` onto the
+    same timer (e.g. via ``min(per_iteration, max_total)``) would silently
+    abort healthy multi-iteration runs at the per-iteration budget, even when
+    no single generation hung — see #790 review-3.
+
+    Per-iteration semantics still travel to the child via the prompt and
+    ``context["per_iteration_timeout_seconds"]`` for in-child self-enforcement;
+    the value is also echoed in this metadata for observability, but it does
+    NOT influence ``timeout_ms`` or ``stop_reason``. When ``max_total_seconds``
+    is None there is no whole-session ceiling to enforce, so no metadata is
+    emitted (the bridge falls back to its environment-default child timeout).
     """
     per_iteration = _positive_number(per_iteration_timeout_seconds)
     max_total = _positive_number(max_total_seconds)
-    candidates: list[tuple[str, str, float]] = []
-    if max_total is not None:
-        candidates.append(("max_total_seconds", "wall_clock_exhausted", max_total))
-    if per_iteration is not None:
-        candidates.append(("per_iteration_timeout_seconds", "iteration_timeout", per_iteration))
-    if not candidates:
+    if max_total is None:
         return None
-
-    source, stop_reason, seconds = min(candidates, key=lambda item: item[2])
     return {
-        "timeout_ms": max(1, int(seconds * 1000)),
-        "stop_reason": stop_reason,
-        "source": source,
-        "behavior": "min_positive_budget",
+        "timeout_ms": max(1, int(max_total * 1000)),
+        "stop_reason": "wall_clock_exhausted",
+        "source": "max_total_seconds",
+        "behavior": "session_ceiling_only",
         "per_iteration_timeout_seconds": per_iteration,
         "max_total_seconds": max_total,
     }
