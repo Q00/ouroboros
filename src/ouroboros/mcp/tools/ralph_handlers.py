@@ -124,9 +124,16 @@ class RalphHandler:
                     name="per_iteration_timeout_seconds",
                     type=ToolInputType.NUMBER,
                     description=(
-                        "Per-iteration wall-clock timeout in seconds. If a single "
-                        "evolve_step generation exceeds this, the loop stops with "
-                        "stop_reason='iteration_timeout'. Default: 1800. Range: 30-7200."
+                        "Per-iteration wall-clock bound in seconds. In-process "
+                        "runtime: hard-enforced via asyncio.timeout, the loop "
+                        "stops with stop_reason='iteration_timeout' on expiry. "
+                        "OpenCode plugin runtime: advisory bound advertised to "
+                        "the child session via prompt + subagent context — the "
+                        "child is expected to honor it and return "
+                        "stop_reason='iteration_timeout', but the parent MCP "
+                        "process cannot interrupt the child, so a non-conforming "
+                        "child session may still exceed this bound. "
+                        "Default: 1800. Range: 30-7200."
                     ),
                     required=False,
                     default=DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,

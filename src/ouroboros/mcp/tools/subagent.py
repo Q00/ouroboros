@@ -1181,11 +1181,19 @@ def build_ralph_subagent(
 
     Args:
         per_iteration_timeout_seconds: Per-iteration wall-clock bound forwarded
-            from the MCP handler. The plugin child session must abort any
-            single ``evolve_step`` invocation that exceeds this many seconds
-            and surface ``stop_reason=iteration_timeout`` to the parent. When
-            ``None``, the field is omitted from prompt and context (legacy
-            shape preserved for callers that don't care about the bound).
+            from the MCP handler.
+
+            This is an *advisory* bound on the plugin path: the parent Python
+            MCP process cannot interrupt the OpenCode child session, so the
+            value is rendered into the subagent's prompt (with an explicit
+            stop instruction) and context dict, and the child session is
+            expected to honor it and return
+            ``stop_reason=iteration_timeout`` on expiry. A non-conforming
+            child session may still exceed the bound; hard wall-clock
+            enforcement only exists on the in-process runtime path
+            (``RalphLoopRunner``). When ``None``, the field is omitted from
+            both prompt and context (legacy shape preserved for callers that
+            don't care about the bound).
     """
     seed_note = ""
     if seed_content is not None:
