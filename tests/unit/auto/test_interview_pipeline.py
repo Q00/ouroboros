@@ -1131,6 +1131,46 @@ async def test_interview_driver_uses_gap_answers_when_generic_defaults_repeat(tm
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_preserves_specific_acceptance_answers_with_open_gaps(
+    tmp_path,
+) -> None:
+    answers: list[str] = []
+    questions = iter(
+        [
+            "What acceptance criteria should the search feature satisfy?",
+            "What acceptance criteria should the export feature satisfy?",
+        ]
+    )
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(next(questions), "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        try:
+            next_q = next(questions)
+        except StopIteration:
+            return InterviewTurn("Anything else?", session_id, completed=True)
+        return InterviewTurn(next_q, session_id)
+
+    state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=4
+    )
+
+    await driver.run(state, ledger)
+
+    # Both specific feature/acceptance prompts should produce feature-specific
+    # answers even though other required ledger sections (e.g. actors,
+    # runtime_context) remain open. The driver must not replace them with
+    # gap-targeted fallbacks.
+    assert len(answers) >= 2, answers
+    assert "search feature" in answers[0].lower()
+    assert "export feature" in answers[1].lower()
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_blocks_blank_goal_before_gap_defaults(tmp_path) -> None:
     answers: list[str] = []
 

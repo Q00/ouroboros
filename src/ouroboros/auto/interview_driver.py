@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import inspect
+import re
 from typing import Protocol
 from uuid import uuid4
 
@@ -280,10 +281,11 @@ class AutoInterviewDriver:
             return answer
         gaps = self.gap_detector.detect(ledger)
         first_gap = gaps[0]
-        if first_gap.section == "goal" or first_gap.state in {
-            LedgerStatus.CONFLICTING,
-            LedgerStatus.BLOCKED,
-        }:
+
+        # `goal` can never be filled by an auto-default — it must come from the
+        # user. Block immediately so callers don't send placeholder text to the
+        # backend.
+        if first_gap.section == "goal":
             blocker = AutoBlocker(reason=first_gap.message, question=question)
             return AutoAnswer(
                 text=f"Cannot safely decide automatically: {first_gap.message}",
@@ -291,10 +293,34 @@ class AutoInterviewDriver:
                 confidence=1.0,
                 blocker=blocker,
             )
-        if self._answer_reduces_open_gaps(question, answer, ledger, open_before) and not (
-            self._is_repeated_default_answer(answer, ledger)
+
+        # Steering only kicks in when the answer is a repeated generic fallback
+        # or the prompt is broad enough that gap-targeted steering is helpful.
+        # Backend-specific answers (e.g. an acceptance follow-up) are preserved
+        # even if they don't reduce the required-gap set this turn.
+        is_repeated_default = self._is_repeated_default_answer(answer, ledger)
+        is_broad_prompt = _can_steer_with_gap_prompt(question)
+        if not (is_repeated_default or is_broad_prompt):
+            return answer
+
+        # Same-turn repair: a current answer that actually reduces required
+        # gaps — including a CONFLICTING/BLOCKED one — is allowed through
+        # before we raise a hard blocker. This lets the driver recover from
+        # persisted ledger conflicts when the next prompt yields a correcting
+        # answer.
+        if not is_repeated_default and self._answer_reduces_open_gaps(
+            question, answer, ledger, open_before
         ):
             return answer
+
+        if first_gap.state in {LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}:
+            blocker = AutoBlocker(reason=first_gap.message, question=question)
+            return AutoAnswer(
+                text=f"Cannot safely decide automatically: {first_gap.message}",
+                source=AutoAnswerSource.BLOCKER,
+                confidence=1.0,
+                blocker=blocker,
+            )
 
         gap_answer = self.answerer.answer_gap(first_gap.section, ledger, context)
         if gap_answer.blocker is not None:
@@ -477,6 +503,17 @@ class FunctionInterviewBackend:
 def _generate_interview_id() -> str:
     """Return a unique interview id matching the engine's plugin format."""
     return f"interview_{uuid4().hex[:16]}"
+
+
+_BROAD_PROMPT_RE = re.compile(
+    r"\b(what else|anything else|additional context|more context|"
+    r"what should we know|clarify further)\b"
+)
+
+
+def _can_steer_with_gap_prompt(question: str) -> bool:
+    """Return True when ``question`` is broad enough to benefit from gap-targeted steering."""
+    return bool(_BROAD_PROMPT_RE.search(question.lower()))
 
 
 _AUTO_ANSWER_LOG_LIMIT = 25
