@@ -643,7 +643,18 @@ class ClaudeCodeAdapter:
                 "TodoWrite",
                 "LS",
             ]
-            disallowed = [t for t in all_tools if t not in self._allowed_tools]
+            # Union with dangerous_tools so UI-blocking tools are denied
+            # even when the caller passes a strict allow list. Without this,
+            # a strict caller passing allowed_tools=["Read","Glob","Grep"]
+            # would still expose AskUserQuestion etc., re-introducing the
+            # headless deadlock the dangerous_tools list is meant to prevent.
+            disallowed = sorted(
+                {
+                    t
+                    for t in (all_tools + dangerous_tools)
+                    if t not in self._allowed_tools
+                }
+            )
         else:
             disallowed = dangerous_tools
 
