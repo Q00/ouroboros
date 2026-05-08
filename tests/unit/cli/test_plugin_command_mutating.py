@@ -2943,6 +2943,141 @@ def test_trust_friendly_error_on_structurally_corrupt_lockfile(
     assert "Traceback" not in result.output
 
 
+def test_trust_friendly_error_on_structurally_corrupt_trust_file(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on trust_store.py:165.
+
+    ``TrustStore.read()`` previously did unchecked ``data["plugin"]``
+    / ``data["version"]`` / ``g["scope"]`` lookups. A parseable JSON
+    file missing those keys would raise ``KeyError`` instead of
+    ``ValueError`` — escaping the wrappers in
+    ``trust``/``inspect``/``list``/dispatch and producing a raw
+    traceback.
+
+    The fix validates per-record shape and raises ``ValueError`` for
+    any structural drift so the wrappers catch it.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    # Write a parseable JSON file missing every required field.
+    trust_file = paths["trust_root"] / "github-pr-ops" / "trust.json"
+    trust_file.parent.mkdir(parents=True, exist_ok=True)
+    trust_file.write_text(json.dumps({"schema_version": "0.1"}))
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code != 0, result.output
+    plain = " ".join(result.output.split())
+    # Friendly recovery hint surfaced; no traceback.
+    assert "trust" in plain.lower(), plain
+    assert "Traceback" not in result.output
+
+
+def test_install_friendly_error_on_escaping_symlink(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1461.
+
+    ``canonical_tree_hash`` raises ``EscapingSymlinkError``
+    (subclass of ``ValueError``) when the source tree contains a
+    symlink targeting outside its root. The previous code computed
+    the digest BEFORE the install try/except, so this surfaced as a
+    raw traceback. The digest is now inside the try block so it
+    surfaces as a controlled install failure.
+    """
+    paths = _common_paths(tmp_path)
+    plugin_dir = tmp_path / "evil-plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    # Plant an escaping symlink that points outside the plugin tree.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("forbidden")
+    (plugin_dir / "evil-link").symlink_to(outside)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code != 0, result.output
+    assert "Traceback" not in result.output, result.output
+    # Lockfile was never written.
+    assert not paths["lockfile"].exists() or Lockfile(paths["lockfile"]).read() == {}
+
+
+def test_install_warns_when_catalog_register_fails(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1498.
+
+    Catalog registration runs AFTER the plugin home + lockfile are
+    committed. The previous code left ``catalog_state.register()``
+    unguarded, so an OSError on the catalog write crashed AFTER the
+    install was already on disk — turning a successful install into
+    a partial-commit error path. The fix surfaces the failure as a
+    yellow warning so the install is still reported as successful
+    (it actually IS — only the resolution-cache convenience is
+    missing).
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+
+    import ouroboros.cli.commands.plugin as plugin_module
+
+    real_register = plugin_module.CatalogRegistry.register
+
+    def _failing_register(self, **kwargs):  # noqa: ANN001
+        raise OSError("synthetic: cannot write plugin-catalogs.json (EACCES)")
+
+    monkeypatch.setattr(plugin_module.CatalogRegistry, "register", _failing_register)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    monkeypatch.setattr(plugin_module.CatalogRegistry, "register", real_register)
+
+    # Install succeeds (lockfile + plugin home are committed)…
+    assert result.exit_code == 0, result.output
+    plain = " ".join(result.output.split())
+    # …and catalog-registration failure surfaces as a warning.
+    assert "catalog registration failed" in plain, plain
+    assert "Traceback" not in result.output
+    # Lockfile was written.
+    entries = Lockfile(paths["lockfile"]).read()
+    assert "github-pr-ops" in entries
+
+
 def test_trust_failure_after_disable_check_keeps_disable_record(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

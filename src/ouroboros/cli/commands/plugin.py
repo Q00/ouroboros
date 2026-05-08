@@ -344,6 +344,40 @@ def _atomic_install_with_rollback(src: Path, dest: Path):
         shutil.rmtree(backup, ignore_errors=True)
 
 
+def _register_catalog_or_warn(
+    catalog_state: CatalogRegistry,
+    *,
+    source_type: str,
+    source_identity: str,
+    plugin_name: str,
+) -> None:
+    """Register the (source, plugin) pair in the catalog, warning on failure.
+
+    Catalog registration runs AFTER ``_install_one`` has committed the
+    plugin home + lockfile entry. The catalog is a resolution-cache
+    convenience used by ``ooo plugin install <name>`` (no ``--from``)
+    — losing the entry does NOT make the plugin uninvokable, just
+    requires the user to re-pass ``--from`` until the catalog is
+    repaired. So a write failure here is a warning, not a hard
+    error: hard-failing AFTER the install was committed would
+    contradict the just-printed ``Installed: ...`` and turn a
+    successful install into a partial-commit error path.
+    """
+    try:
+        catalog_state.register(
+            source_type=source_type,
+            source_identity=source_identity,
+            plugin_name=plugin_name,
+        )
+    except (ValueError, OSError) as exc:
+        console.print(
+            f"  [yellow]warning[/]: install of {plugin_name!r} succeeded but "
+            f"catalog registration failed ({exc}); future "
+            f"`ooo plugin install {plugin_name}` will need an explicit "
+            f"`--from` flag until {catalog_state.state_path} is repaired."
+        )
+
+
 def _read_lock_or_exit(lock: Lockfile) -> dict:
     """Read the lockfile, surfacing parse/IO failures as a controlled exit.
 
@@ -1450,21 +1484,22 @@ def add_command(
         # what the manifest says, so the firewall keeps a single
         # consistent identity for it.
         manifest_source_type = manifest.source.type
-        # Compute the canonical tree hash of the SOURCE bytes BEFORE
-        # mutating ``plugin_home``. ``canonical_tree_hash`` is
-        # content-addressable, so the post-replace tree has the same
-        # digest, but a hash failure here (escaping symlink, unsupported
-        # entry, etc.) must abort BEFORE the prior install is renamed
-        # away — otherwise the user is left in a split-brain state with
-        # the old install gone, the new bytes on disk, and no lockfile
-        # entry to reflect either.
-        artifact_digest = canonical_tree_hash(source_dir)
-        # Atomic install with rollback: keep the prior plugin_home
-        # in a sibling backup until the lockfile write succeeds. If
-        # ``_install_one`` raises (corrupt lockfile, ENOSPC,
-        # permissions, etc.), the backup is restored over plugin_home
-        # so the user does NOT lose the previously-installed bytes.
+        # Atomic install with rollback. The whole install transaction
+        # — digest computation (which can refuse the source tree),
+        # plugin_home swap, and lockfile commit — is wrapped so any
+        # failure surfaces a controlled error and the prior install
+        # (if any) is restored. ``EscapingSymlinkError`` and
+        # ``UnsupportedFileTypeError`` from ``canonical_tree_hash``
+        # are ``ValueError`` subclasses, so they are caught here too.
         try:
+            # Compute the canonical tree hash of the SOURCE bytes
+            # BEFORE mutating ``plugin_home``. content-addressable, so
+            # the post-replace tree has the same digest, but a hash
+            # failure must abort before the prior install is renamed
+            # away — otherwise the user is left in a split-brain
+            # state with the old install gone, the new bytes on
+            # disk, and no lockfile entry to reflect either.
+            artifact_digest = canonical_tree_hash(source_dir)
             with _atomic_install_with_rollback(source_dir, plugin_home):
                 _install_one(
                     manifest=manifest,
@@ -1481,7 +1516,8 @@ def add_command(
             print_error(
                 f"could not commit install for {manifest.name!r}: {exc}. "
                 f"The prior install (if any) was restored. Inspect the "
-                f"lockfile at {lock.path}, then re-run the install."
+                f"source tree and the lockfile at {lock.path}, then "
+                f"re-run the install."
             )
             raise typer.Exit(code=1) from exc
         # Catalog registration: record the source so `install <name>`
@@ -1495,7 +1531,8 @@ def add_command(
         # repo-root identities are the same normalized URL; for local
         # paths we record the per-plugin path so the catalog and the
         # lockfile agree.
-        catalog_state.register(
+        _register_catalog_or_warn(
+            catalog_state,
             source_type=manifest_source_type,
             source_identity=plugin_source_identity,
             plugin_name=manifest.name,
@@ -1750,11 +1787,6 @@ def _install_from_local_directory(
     _read_lock_or_exit(lock)
 
     plugin_home = plugin_home_root / manifest.name
-    # Hash the SOURCE bytes first so a digest-time failure (escaping
-    # symlink, unsupported entry) aborts before the prior install is
-    # renamed away. The hash is content-addressable so the post-replace
-    # tree has the same digest.
-    artifact_digest = canonical_tree_hash(src)
     source_identity = str(src)
     # Per the RFC ("Trust identity"), the persisted ``source_type`` is
     # the manifest's declared semantic source, not the install
@@ -1765,9 +1797,11 @@ def _install_from_local_directory(
     # invocation blocked.
     manifest_source_type = manifest.source.type
 
-    # Atomic install with rollback: prior plugin_home is restored if
-    # the lockfile commit below fails (data-loss avoidance).
+    # Atomic install with rollback: digest compute, plugin_home swap,
+    # and lockfile commit are wrapped together. Any failure surfaces
+    # a controlled error; the prior install is restored.
     try:
+        artifact_digest = canonical_tree_hash(src)
         with _atomic_install_with_rollback(src, plugin_home):
             _install_one(
                 manifest=manifest,
@@ -1784,10 +1818,12 @@ def _install_from_local_directory(
         print_error(
             f"could not commit install for {manifest.name!r}: {exc}. "
             f"The prior install (if any) was restored. Inspect the "
-            f"lockfile at {lock.path}, then re-run the install."
+            f"source tree and the lockfile at {lock.path}, then "
+            f"re-run the install."
         )
         raise typer.Exit(code=1) from exc
-    catalog_state.register(
+    _register_catalog_or_warn(
+        catalog_state,
         source_type=manifest_source_type,
         source_identity=source_identity,
         plugin_name=manifest.name,
@@ -1853,14 +1889,13 @@ def _install_named_from_local_path(
     _read_lock_or_exit(lock)
 
     plugin_home = plugin_home_root / manifest.name
-    # Hash source bytes first; abort before mutating ``plugin_home``
-    # if the tree contains an unsupported entry.
-    artifact_digest = canonical_tree_hash(candidate_root)
     source_identity = str(candidate_root.resolve())
     # See `_install_from_local_directory` — persist manifest's source
     # type, not transport.
     manifest_source_type = manifest.source.type
     try:
+        # Digest, plugin_home swap, lockfile commit — all wrapped.
+        artifact_digest = canonical_tree_hash(candidate_root)
         with _atomic_install_with_rollback(candidate_root, plugin_home):
             _install_one(
                 manifest=manifest,
@@ -1877,10 +1912,12 @@ def _install_named_from_local_path(
         print_error(
             f"could not commit install for {manifest.name!r}: {exc}. "
             f"The prior install (if any) was restored. Inspect the "
-            f"lockfile at {lock.path}, then re-run the install."
+            f"source tree and the lockfile at {lock.path}, then "
+            f"re-run the install."
         )
         raise typer.Exit(code=1) from exc
-    catalog_state.register(
+    _register_catalog_or_warn(
+        catalog_state,
         source_type=manifest_source_type,
         source_identity=source_identity,
         plugin_name=manifest.name,
@@ -1939,9 +1976,6 @@ def _install_named_from_url(
     # Pre-flight lockfile health.
     _read_lock_or_exit(lock)
     plugin_home = plugin_home_root / manifest.name
-    # Hash source bytes first; abort before mutating ``plugin_home``
-    # if the tree contains an unsupported entry.
-    artifact_digest = canonical_tree_hash(source_dir)
     source_identity = normalize_repo_url(repo_url)
     # See `_install_from_local_directory` — persist manifest's source
     # type, not transport. Cloning from a URL does not by itself imply
@@ -1949,6 +1983,8 @@ def _install_named_from_url(
     # what the firewall keys against.
     manifest_source_type = manifest.source.type
     try:
+        # Digest, plugin_home swap, lockfile commit — all wrapped.
+        artifact_digest = canonical_tree_hash(source_dir)
         with _atomic_install_with_rollback(source_dir, plugin_home):
             _install_one(
                 manifest=manifest,
@@ -1965,10 +2001,12 @@ def _install_named_from_url(
         print_error(
             f"could not commit install for {manifest.name!r}: {exc}. "
             f"The prior install (if any) was restored. Inspect the "
-            f"lockfile at {lock.path}, then re-run the install."
+            f"source tree and the lockfile at {lock.path}, then "
+            f"re-run the install."
         )
         raise typer.Exit(code=1) from exc
-    catalog_state.register(
+    _register_catalog_or_warn(
+        catalog_state,
         source_type=manifest_source_type,
         source_identity=source_identity,
         plugin_name=manifest.name,

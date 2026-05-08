@@ -149,30 +149,79 @@ class TrustStore:
         return self.root / plugin / "disabled.json"
 
     def read(self, plugin: str) -> TrustRecord | None:
-        """Read the trust record for `plugin`, or None if not present."""
+        """Read the trust record for `plugin`, or None if not present.
+
+        Raises ``ValueError`` for any structurally-invalid trust file
+        (malformed JSON, unsupported schema_version, missing required
+        fields, wrong-typed values). The CLI's trust-state wrappers
+        catch ``ValueError`` / ``OSError`` and surface a friendly
+        recovery hint, so every shape of corruption MUST land in
+        ``ValueError`` rather than escaping as ``KeyError`` /
+        ``TypeError`` from the ``data["plugin"]`` / ``g["scope"]`` /
+        etc. lookups below — otherwise the operator-facing repair
+        commands (``trust``, ``inspect``, ``list``, dispatch) would
+        traceback on a parseable-but-wrong trust file.
+        """
         _validate_plugin_name(plugin)
         path = self._path(plugin)
         if not path.is_file():
             return None
-        with path.open(encoding="utf-8") as handle:
-            data = json.load(handle)
+        try:
+            with path.open(encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"trust file {path} is not valid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"trust file {path} is not a JSON object")
         version = data.get("schema_version")
         if version != TRUST_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported trust file schema_version {version!r}; "
                 f"expected {TRUST_SCHEMA_VERSION!r}"
             )
-        return TrustRecord(
-            plugin=data["plugin"],
-            version=data["version"],
-            granted_scopes=tuple(
+        for required in ("plugin", "version"):
+            if required not in data:
+                raise ValueError(f"trust file {path} is missing required field {required!r}")
+            if not isinstance(data[required], str):
+                raise ValueError(
+                    f"trust file {path}: {required!r} is not a string "
+                    f"(got {type(data[required]).__name__})"
+                )
+        granted_raw = data.get("granted_scopes", [])
+        if not isinstance(granted_raw, list):
+            raise ValueError(
+                f"trust file {path}: 'granted_scopes' is not a list "
+                f"(got {type(granted_raw).__name__})"
+            )
+        granted: list[GrantedScope] = []
+        for index, g in enumerate(granted_raw):
+            if not isinstance(g, dict):
+                raise ValueError(
+                    f"trust file {path}: granted_scopes[{index}] is not a JSON object "
+                    f"(got {type(g).__name__})"
+                )
+            for field in ("scope", "granted_at", "granted_by"):
+                if field not in g:
+                    raise ValueError(
+                        f"trust file {path}: granted_scopes[{index}] is missing "
+                        f"required field {field!r}"
+                    )
+                if not isinstance(g[field], str):
+                    raise ValueError(
+                        f"trust file {path}: granted_scopes[{index}].{field} is not a string "
+                        f"(got {type(g[field]).__name__})"
+                    )
+            granted.append(
                 GrantedScope(
                     scope=g["scope"],
                     granted_at=g["granted_at"],
                     granted_by=g["granted_by"],
                 )
-                for g in data.get("granted_scopes", [])
-            ),
+            )
+        return TrustRecord(
+            plugin=data["plugin"],
+            version=data["version"],
+            granted_scopes=tuple(granted),
             source_type=data.get("source_type", ""),
             source_identity=data.get("source_identity", ""),
             artifact_digest=data.get("artifact_digest", ""),
