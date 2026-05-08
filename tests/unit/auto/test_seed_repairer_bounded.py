@@ -22,7 +22,7 @@ from ouroboros.auto.interview_driver import (
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
-from ouroboros.auto.seed_repairer import SeedRepairer
+from ouroboros.auto.seed_repairer import RepairCancelled, SeedRepairer
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
@@ -404,6 +404,22 @@ async def test_pipeline_blocks_when_repair_phase_exceeds_timeout(tmp_path) -> No
     assert sleepy.thread_finished.wait(timeout=timeout * 4), (
         "sleepy reviewer thread never finished — orphan thread leak"
     )
+
+    # Cooperative cancellation: after the timeout fires the pipeline sets a
+    # cancel signal on the repairer, so when the in-flight reviewer call
+    # returns, the loop must NOT launch another ``reviewer.review`` (which
+    # would sleep another ``timeout * 2`` seconds and burn another LLM call's
+    # worth of budget — the exact failure called out in PR #785 review-3).
+    # Give the worker thread a beat to reach the next iteration boundary.
+    deadline_no_extra_calls = time.monotonic() + 1.0
+    while time.monotonic() < deadline_no_extra_calls:
+        if sleepy.calls > 1:
+            break
+        time.sleep(0.05)
+    assert sleepy.calls == 1, (
+        f"reviewer was called {sleepy.calls} times after wait_for timed out; "
+        "cooperative cancellation did not stop the loop at the iteration boundary"
+    )
     # Allow the asyncio default executor a beat to mark the worker idle, then
     # confirm the thread count did not balloon past the post-return baseline.
     deadline = time.monotonic() + 2.0
@@ -515,3 +531,58 @@ async def test_resume_recovers_session_blocked_by_repair_timeout(tmp_path) -> No
     assert state.last_grade == "A"
     assert state.findings == []
     assert resumed.status == AutoPhase.COMPLETE.value
+
+
+# ---------------------------------------------------------------------------
+# AC: ``converge`` honors a cancel signal at iteration boundaries.
+# Regression for PR #785 review-3: the repair-phase ``asyncio.wait_for`` only
+# releases the awaiter; without a cooperative signal, the loop kept calling
+# ``reviewer.review`` after the timeout, burning more LLM cost than the
+# advertised budget. ``cancel_event`` makes the loop exit at the next
+# checkpoint instead of starting another review/repair iteration.
+# ---------------------------------------------------------------------------
+
+
+def test_converge_raises_when_cancel_event_set_before_call() -> None:
+    reviewer = _AlwaysVagueReviewer()
+    repairer = SeedRepairer(reviewer=reviewer)
+    seed = _seed()
+
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(RepairCancelled):
+        repairer.converge(seed, cancel_event=cancel)
+    # Reviewer never invoked: the very first checkpoint fires before any
+    # reviewer call so no LLM cost is spent on a pre-cancelled run.
+    assert reviewer.calls == 0
+
+
+def test_converge_stops_at_iteration_boundary_when_cancelled_mid_loop() -> None:
+    """Setting the cancel event between iterations stops the loop at the next boundary.
+
+    The reviewer is wrapped to set the cancel signal after its first call.
+    Without cooperative cancellation the loop would keep iterating up to
+    ``max_iterations``; with it, the loop must exit before the second
+    ``reviewer.review`` invocation.
+    """
+    cancel = threading.Event()
+
+    class _CancelOnFirstCallReviewer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> SeedReview:  # noqa: ARG002 — protocol shape
+            self.calls += 1
+            cancel.set()
+            return _vague_review(message=f"cancel-on-first {self.calls}")
+
+    reviewer = _CancelOnFirstCallReviewer()
+    repairer = SeedRepairer(reviewer=reviewer, max_iterations=5)
+    seed = _seed()
+
+    with pytest.raises(RepairCancelled):
+        repairer.converge(seed, cancel_event=cancel)
+    # Exactly one reviewer call: the initial review, after which the cancel
+    # checkpoint at the top of the loop body fires before the second call.
+    assert reviewer.calls == 1

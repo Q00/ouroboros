@@ -5,12 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import re
+import threading
 from uuid import uuid4
 
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.core.seed import Seed
+
+
+class RepairCancelled(Exception):
+    """Raised when the converge loop observes a set cancel signal.
+
+    The repair phase timeout in ``AutoPipeline.run`` cannot interrupt a
+    synchronous ``reviewer.review()`` call mid-execution, but it can stop the
+    loop from launching *another* review/repair iteration once the in-flight
+    call returns. This sentinel travels back through ``asyncio.to_thread``
+    and is intentionally distinct from ``TimeoutError`` (which the awaiter
+    already raised) so log analysis can tell "stopped at iteration boundary"
+    apart from "still hung in reviewer.review()".
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +150,11 @@ class SeedRepairer:
         )
 
     def converge(
-        self, seed: Seed, *, ledger: SeedDraftLedger | None = None
+        self,
+        seed: Seed,
+        *,
+        ledger: SeedDraftLedger | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[Seed, SeedReview, list[RepairResult]]:
         """Review/repair until A-grade or bounded stop.
 
@@ -153,12 +171,31 @@ class SeedRepairer:
         ``state.last_grade`` / ``state.findings`` from this review, so a stale
         review here would block a seed that the final allowed repair actually
         fixed (PR #785 review-1).
+
+        ``cancel_event`` enables cooperative cancellation by the pipeline's
+        repair-phase ``asyncio.wait_for``. ``wait_for`` only releases the
+        awaiting coroutine; it cannot interrupt a synchronous reviewer call
+        running in the worker thread. If the event is set, this method
+        raises :class:`RepairCancelled` at the next iteration boundary so no
+        *further* ``reviewer.review`` calls run after the budget expires.
+        The currently in-flight reviewer call still finishes naturally — that
+        is a non-cancellable C/IO boundary in CPython — but the loop will not
+        consume another review's worth of LLM time/cost (PR #785 review-3).
         """
         history: list[RepairResult] = []
         previous_high_fingerprints: set[str] = set()
         current = seed
+
+        def _check_cancelled() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RepairCancelled(
+                    "repair phase cancelled by pipeline timeout before next reviewer call"
+                )
+
+        _check_cancelled()
         review = self.reviewer.review(current, ledger=ledger)
         for _ in range(self.max_iterations):
+            _check_cancelled()
             if review.grade_result.grade == SeedGrade.A and review.may_run:
                 return current, review, history
             high = {
@@ -173,12 +210,15 @@ class SeedRepairer:
                 # Bound hit *after* a successful repair: the cached ``review``
                 # still describes the previous (pre-repair) seed. Re-review
                 # ``current`` once so the returned pair is consistent.
+                _check_cancelled()
                 review = self.reviewer.review(current, ledger=ledger)
                 return current, review, history
             if high and high == previous_high_fingerprints:
+                _check_cancelled()
                 review = self.reviewer.review(current, ledger=ledger)
                 return current, review, history
             previous_high_fingerprints = high
+            _check_cancelled()
             review = self.reviewer.review(current, ledger=ledger)
         return current, review, history
 
