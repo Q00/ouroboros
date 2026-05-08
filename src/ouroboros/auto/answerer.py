@@ -941,6 +941,48 @@ def _has_runtime_selection_shape(lowered: str) -> bool:
     return any(re.search(pattern, lowered) for pattern in _RUNTIME_SELECTION_SHAPE_PATTERNS)
 
 
+# Bare direct-lookup runtime shapes for non-English languages.  English
+# direct-lookup ("What runtime?", "Which framework?") is already handled by
+# ``_is_runtime_context_question``; without an equivalent multilingual layer
+# bare lookups like ``"¿Qué framework?"``, ``"Quel framework ?"``,
+# ``"Welches Framework?"``, ``"ランタイムは何ですか?"``, ``"框架是什么？"``,
+# and ``"런타임은 무엇인가요?"`` would fall through to ``_default_answer()``.
+# Each pattern is anchored on a runtime cue plus a direct-lookup
+# interrogative ("what is X" / "which X" / "X 무엇" / "X は何" / "X 是什么")
+# so design / property questions like ``"¿Qué estructura usamos para los
+# datos?"`` (which we already drop ``estructura`` from runtime cues for) and
+# ``"What is the repository status?"`` (English, doesn't match the
+# multilingual interrogatives) keep their conservative-default routing.
+_RUNTIME_DIRECT_LOOKUP_PATTERNS: tuple[str, ...] = (
+    # Spanish / French / German: interrogative + optional copula/article +
+    # runtime cue.  The pattern is anchored to the start of the question
+    # and ends shortly after the cue (only ``?`` and whitespace allowed
+    # at the tail), so longer status questions don't match.
+    r"^\s*¿?\s*(qu[éeè]|cu[áa]l(?:es)?|quel(?:le|s|les)?|welche[ar]?|welches)\b"
+    r"\s*(es|son|ist|sind)?\s*"
+    r"(el|la|los|las|das|der|die|den|le|les|un|une|una)?\s*"
+    r"(runtime|stack|repo|repository|framework|package\s+manager|"
+    r"project\s+structure|project\s+runtime|repositorio|"
+    r"r[ée]f[ée]rentiel|gestionnaire\s+de\s+paquets|projektstruktur|laufzeit|"
+    r"estructura\s+del\s+proyecto)"
+    r"\s*\??\s*$",
+    # Korean: cue + optional topic/subject particle + 무엇/뭐/어떠한.
+    r"(런타임|저장소|레포|프레임워크|패키지\s*매니저|프로젝트\s*구조|스택)"
+    r"(?:은|는|이|가)?\s*(무엇|뭐|어떠한)",
+    # Japanese: cue + は/の + 何/どの/どんな/なに.
+    r"(ランタイム|リポジトリ|レポ|フレームワーク|パッケージマネージャ|"
+    r"プロジェクト構造|スタック)"
+    r"(?:は|の)?\s*(何|どの|どんな|なに)",
+    # Chinese (simplified + traditional): cue + (是|有)? + 什么/什麼/哪个/哪個/哪些/啥.
+    r"(运行时|執行環境|栈|堆栈|仓库|倉庫|框架|包管理器|项目结构|專案結構)"
+    r"\s*(是|有)?\s*(什么|什麼|哪个|哪個|哪些|啥)",
+)
+
+
+def _has_runtime_direct_lookup_shape(lowered: str) -> bool:
+    return any(re.search(pattern, lowered) for pattern in _RUNTIME_DIRECT_LOOKUP_PATTERNS)
+
+
 def _has_runtime_context_intent(lowered: str) -> bool:
     """Classify runtime intent with question-shape validation for cue matches.
 
@@ -948,14 +990,16 @@ def _has_runtime_context_intent(lowered: str) -> bool:
     like ``"repository"`` or ``"architecture"`` as runtime intent, which
     silently misrouted property/status questions ("What is the repository
     status?") into ``_runtime_answer()``.  We keep the strict English shape
-    selector as the authoritative trigger and only let cross-lingual cues add
-    the intent when paired with a selection/decision verb.
+    selector as the authoritative trigger and let cross-lingual cues add the
+    intent only when paired with either a selection/decision verb (``사용`` /
+    ``使う`` / ``adopter`` / etc.) or a direct-lookup interrogative
+    (``¿Qué …?`` / ``X は何ですか?`` / ``X 是什么?`` / ``X 무엇?``).
     """
     if _is_runtime_context_question(lowered):
         return True
     if not _contains_intent_cue(lowered, QuestionIntent.RUNTIME_CONTEXT):
         return False
-    return _has_runtime_selection_shape(lowered)
+    return _has_runtime_selection_shape(lowered) or _has_runtime_direct_lookup_shape(lowered)
 
 
 # Cross-lingual permission/action shape for product-behavior questions.  The

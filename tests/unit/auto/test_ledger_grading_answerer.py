@@ -719,6 +719,29 @@ def test_auto_answerer_english_user_actor_questions_route_to_actor_io() -> None:
         assert {"actors", "inputs", "outputs"} <= updated_sections, (question, updated_sections)
 
 
+def test_auto_answerer_multilingual_direct_lookup_routes_to_runtime() -> None:
+    """Bare direct-lookup runtime questions in non-English languages must
+    populate ``runtime_context``.  Flagged by ouroboros-agent on commit
+    6a939bf — without a multilingual direct-lookup shape, examples like
+    ``"¿Qué framework?"``, ``"ランタイムは何ですか?"``, and ``"框架是什么？"``
+    fell through to ``_default_answer()``.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "¿Qué framework?",
+        "Quel framework ?",
+        "Welches Framework?",
+        "ランタイムは何ですか?",
+        "框架是什么？",
+        "런타임은 무엇인가요?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "runtime_context" in updated_sections, (question, updated_sections)
+
+
 def test_auto_answerer_cjk_questions_produce_distinct_ledger_keys() -> None:
     """``_slug_key()`` must keep Unicode letters so different CJK questions
     produce different ledger keys instead of all collapsing onto the
