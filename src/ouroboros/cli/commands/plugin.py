@@ -83,21 +83,36 @@ def _load_with_friendly_error(target: str) -> PluginManifest:
 def _trust_state_label(
     manifest: PluginManifest,
     trust_store: TrustStore,
+    *,
+    expected_source_identity: str | None = None,
+    expected_artifact_digest: str | None = None,
 ) -> str:
     """Compute the displayed trust state for a manifest.
 
+    Per the locked RFC ("Trust identity"), the full install subject is
+    ``(version, source.type, source_identity, artifact_digest)``;
     ``"trusted"`` is reserved for the state in which the firewall will
-    not block invocation on the trust check: the record matches the
-    installed version, has at least one granted scope, and covers every
-    ``required: true`` permission. A partial grant set is still gated by
-    `_missing_required`, so reporting it as ``"trusted"`` would mis-label
-    a permission boundary in `inspect` / `list` output.
+    not block invocation on the trust check. When the caller passes the
+    lockfile-recorded ``expected_*`` values, this label agrees with the
+    firewall's ``_record_matches_subject`` predicate exactly: a record
+    bound to a stale digest reads as ``"installed"`` here just as the
+    firewall would refuse it. A disabled subject reads as ``"disabled"``.
     """
     if manifest.source.type == "first_party":
         return "first_party"
+    if trust_store.is_disabled(manifest.name):
+        return "disabled"
     record = trust_store.read(manifest.name)
     if record is None or record.version != manifest.version:
         return "installed"
+    if record.source_type and record.source_type != manifest.source.type:
+        return "installed"
+    if expected_source_identity is not None and record.source_identity:
+        if record.source_identity != expected_source_identity:
+            return "installed"
+    if expected_artifact_digest is not None and record.artifact_digest:
+        if record.artifact_digest != expected_artifact_digest:
+            return "installed"
     granted = {g.scope for g in record.granted_scopes}
     if not granted:
         return "installed"
@@ -417,7 +432,9 @@ def inspect_command(
         console.print(f"  repository:     {entry.repository}")
     if entry.git_sha:
         console.print(f"  git_sha:        {entry.git_sha}")
-    console.print(f"  trust_state:    {_trust_state_label(manifest, trust)}")
+    console.print(
+        f"  trust_state:    {_trust_state_label(manifest, trust, expected_source_identity=entry.source_identity or None, expected_artifact_digest=entry.artifact_digest or None)}"
+    )
     console.print(f"  granted_scopes: {', '.join(granted) if granted else '(none)'}")
     if record is not None and not record_is_current:
         console.print(
@@ -478,7 +495,12 @@ def list_command(
         manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
         try:
             manifest = load_manifest(manifest_path)
-            trust_state = _trust_state_label(manifest, trust)
+            trust_state = _trust_state_label(
+                manifest,
+                trust,
+                expected_source_identity=entry.source_identity or None,
+                expected_artifact_digest=entry.artifact_digest or None,
+            )
         except PluginManifestError:
             # Manifest unreadable post-install (e.g. external mutation):
             # show conservatively as "installed", no granted scopes.
