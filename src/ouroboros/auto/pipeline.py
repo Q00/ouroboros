@@ -42,8 +42,23 @@ class RunStarter(Protocol):
     async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, Any]: ...
 
 
+RalphStarter = Callable[..., Awaitable[dict[str, Any]]]
 SeedSaver = Callable[[Seed], str]
 SeedLoader = Callable[[str], Seed]
+
+# Ralph stop_reason values that map to a recoverable BLOCKED auto phase
+# rather than a hard FAILED. Pinned by Q00/ouroboros#773 and asserted by
+# tests/unit/auto/test_pipeline_ralph_handoff.py so silent drift surfaces
+# as test failure.
+_RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
+    {
+        "iteration_timeout",
+        "wall_clock_exhausted",
+        "oscillation_detected",
+        "grade_regressing",
+        "max_generations reached",
+    }
+)
 
 # Tool-name marker recorded on ``state.last_tool_name`` whenever the top-level
 # pipeline deadline (#779) trips. Distinct from per-phase tool names so that
@@ -84,6 +99,9 @@ class AutoPipelineResult:
     run_reconciliation_status: str | None = None
     run_reconciliation_source: str | None = None
     run_reconciled_at: str | None = None
+    ralph_job_id: str | None = None
+    ralph_lineage_id: str | None = None
+    ralph_dispatch_mode: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -126,6 +144,12 @@ class AutoPipeline:
     seed_timeout_seconds: float = 120.0
     run_start_timeout_seconds: float = 60.0
     progress_callback: AutoProgressCallback | None = None
+    # Q00/ouroboros#773: chain RUN → RALPH_HANDOFF when ``complete_product``
+    # is true and a ``ralph_starter`` is configured. ``complete_product``
+    # defaults to False (opt-in safety) so existing callers see no behavior
+    # change.
+    ralph_starter: RalphStarter | None = None
+    complete_product: bool = False
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
@@ -602,6 +626,10 @@ class AutoPipeline:
                 if any((state.job_id, state.execution_id, state.run_session_id)):
                     state.run_handoff_status = "started"
                     state.run_handoff_guidance = None
+                    if self.complete_product and self.ralph_starter is not None:
+                        return await self._handoff_to_ralph(
+                            state, ledger, seed, review, run_subagent
+                        )
                     state.transition(
                         AutoPhase.COMPLETE,
                         f"execution started for grade "
@@ -635,6 +663,100 @@ class AutoPipeline:
             # timeout and no-handle paths share this same retry slot.
             self._save(state)
             retried = True
+
+    async def _handoff_to_ralph(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+    ) -> AutoPipelineResult:
+        """Run the RUN → RALPH_HANDOFF → terminal-phase chain.
+
+        Builds a deterministic ``lineage_id``, forwards the remaining
+        pipeline budget as ``max_total_seconds``, and maps the ralph
+        terminal status back into one of ``COMPLETE`` / ``BLOCKED`` /
+        ``FAILED`` per the contract pinned by
+        :data:`_RALPH_BLOCKED_STOP_REASONS`. Plugin-mode dispatches
+        transition to COMPLETE immediately and surface the OpenCode Task
+        widget guidance to the operator.
+        """
+        assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
+        lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+        state.ralph_lineage_id = lineage_id
+        state.transition(
+            AutoPhase.RALPH_HANDOFF,
+            f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
+        )
+        self._save(state)
+        max_total_seconds: float | None = None
+        if state.deadline_at is not None:
+            max_total_seconds = max(0.0, state.deadline_at - time.monotonic())
+        try:
+            ralph_meta = await self.ralph_starter(
+                seed,
+                lineage_id=lineage_id,
+                max_total_seconds=max_total_seconds,
+            )
+        except Exception as exc:
+            state.mark_failed(f"ralph handoff failed: {exc}", tool_name="ralph_starter")
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+        if not isinstance(ralph_meta, dict):
+            state.mark_failed(
+                f"ralph starter returned {type(ralph_meta).__name__}, expected dict",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+        state.ralph_job_id = _optional_str(ralph_meta.get("job_id"))
+        state.ralph_dispatch_mode = _optional_str(ralph_meta.get("dispatch_mode"))
+        terminal_status = _optional_str(ralph_meta.get("terminal_status"))
+        stop_reason = _optional_str(ralph_meta.get("stop_reason"))
+        # Plugin delegation: nothing to await, transition straight to
+        # COMPLETE and surface the OpenCode Task widget guidance.
+        if state.ralph_dispatch_mode == "plugin":
+            state.run_handoff_guidance = (
+                "Ralph loop delegated to the OpenCode plugin child session. "
+                "Track progress through the OpenCode Task widget; this auto "
+                "session will not block on the loop's completion."
+            )
+            state.transition(
+                AutoPhase.COMPLETE,
+                "ralph loop delegated to OpenCode plugin child session",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, run_subagent=run_subagent)
+        if terminal_status == "completed":
+            state.transition(
+                AutoPhase.COMPLETE,
+                f"ralph loop completed ({stop_reason or 'qa passed'})",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, run_subagent=run_subagent)
+        if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
+            state.mark_blocked(stop_reason, tool_name="ralph_starter")
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+        # Any other failure (terminal failure action, exception bubbled up,
+        # or an unrecognized status) is a hard FAILED.
+        message = (
+            f"ralph loop failed: {stop_reason}"
+            if stop_reason
+            else f"ralph loop failed: terminal_status={terminal_status or 'unknown'}"
+        )
+        state.mark_failed(message, tool_name="ralph_starter")
+        self._save(state)
+        return self._result(
+            state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+        )
 
     def _enforce_deadline(self, state: AutoPipelineState) -> bool:
         """Return True when the pipeline must abort because the deadline expired.
@@ -726,6 +848,9 @@ class AutoPipeline:
             run_reconciliation_status=state.run_reconciliation_status,
             run_reconciliation_source=state.run_reconciliation_source,
             run_reconciled_at=state.run_reconciled_at,
+            ralph_job_id=state.ralph_job_id,
+            ralph_lineage_id=state.ralph_lineage_id,
+            ralph_dispatch_mode=state.ralph_dispatch_mode,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
