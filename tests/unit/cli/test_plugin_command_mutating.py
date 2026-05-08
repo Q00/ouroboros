@@ -1266,6 +1266,53 @@ def test_add_rejects_ambiguous_catalog_with_duplicate_manifest_names(
     )
 
 
+def test_install_named_from_local_path_rejects_ambiguous_catalog(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:2191 —
+    the qualified ``install <name> --from <local-path>`` fallback
+    scan previously stopped at the first matching manifest, so a
+    catalog with two subdirectories declaring the same plugin name
+    silently installed whichever directory sorted first. Mirror the
+    "ambiguous catalog" guard ``add`` already enforces in
+    ``_enumerate_catalog``.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "repo"
+    plugins = repo / "plugins"
+    plugins.mkdir(parents=True)
+    # Two distinct subdirectories, both declaring `name: "github-pr-ops"`.
+    for subdir in ("alpha", "beta"):
+        d = plugins / subdir
+        d.mkdir()
+        (d / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    catalog_state = tmp_path / "catalog-state.json"
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            "github-pr-ops",
+            "--from",
+            str(repo.resolve()),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "ambiguous catalog" in result.output
+    assert "github-pr-ops" in result.output
+    # Nothing got installed.
+    assert (
+        not paths["lockfile"].exists() or "github-pr-ops" not in Lockfile(paths["lockfile"]).read()
+    )
+
+
 def test_install_named_from_local_catalog_dirname_differs_from_manifest_name(
     runner: CliRunner, tmp_path: Path
 ) -> None:

@@ -1092,16 +1092,43 @@ def list_command(
         if manifest.source.type == "first_party":
             # The firewall does not consult the trust store for
             # first-party plugins, so neither granted nor missing scopes
-            # are meaningful here. Surface empty lists for both — the
-            # JSON view must not echo declared `required: true` scopes
-            # as if they were granted (or missing), since invocation is
-            # ungated regardless. Mirrors `inspect` for first-party.
+            # are meaningful here. BUT the firewall's `is_disabled` gate
+            # applies regardless of source type — a disabled built-in
+            # plugin is still refused at invocation time, so the list
+            # row MUST surface that to agree with the runtime gate.
+            # Without this check, `ooo plugin list` would report a
+            # disabled built-in as ``first_party`` (active) while
+            # ``ooo <name> ...`` is in fact blocked.
+            try:
+                if entry.source_identity:
+                    fp_disabled = trust.is_disabled_for_subject(
+                        entry.name,
+                        source_type="first_party",
+                        source_identity=entry.source_identity,
+                    )
+                else:
+                    fp_disabled = trust.is_disabled(entry.name)
+            except (ValueError, OSError):
+                # Corrupt disabled.json: degrade to "trust_unreadable"
+                # rather than aborting the entire listing.
+                rows.append(
+                    {
+                        "name": entry.name,
+                        "version": entry.version,
+                        "source_kind": entry.source_kind,
+                        "trust_state": "trust_unreadable",
+                        "granted_scopes": [],
+                        "missing_required_scopes": [],
+                        "trust_version_stale": False,
+                    }
+                )
+                continue
             rows.append(
                 {
                     "name": entry.name,
                     "version": entry.version,
                     "source_kind": entry.source_kind,
-                    "trust_state": "first_party",
+                    "trust_state": "disabled" if fp_disabled else "first_party",
                     "granted_scopes": [],
                     "missing_required_scopes": [],
                     "trust_version_stale": False,
@@ -2185,8 +2212,14 @@ def _install_named_from_local_path(
     else:
         # Fallback: scan `<src>/plugins/*/ouroboros.plugin.json` and
         # bind to the (unique) directory whose manifest declares
-        # `name == <name>`. Mirrors `add`'s catalog-walking behavior.
+        # `name == <name>`. Mirrors `add`'s catalog-walking behavior —
+        # including the "ambiguous catalog" guard: when two
+        # subdirectories declare the same plugin name, fail rather
+        # than silently install whichever sorts first. Without this
+        # guard, the bytes the user installs would depend on
+        # `iterdir` ordering instead of an explicit choice.
         plugins_dir = src_path / "plugins"
+        matches: list[tuple[Path, Path]] = []
         if plugins_dir.is_dir():
             for entry in sorted(plugins_dir.iterdir()):
                 if not entry.is_dir():
@@ -2202,9 +2235,18 @@ def _install_named_from_local_path(
                     # from the same catalog.
                     continue
                 if scanned.name == name:
-                    candidate_root = entry
-                    manifest_path = candidate_manifest
-                    break
+                    matches.append((entry, candidate_manifest))
+        if len(matches) > 1:
+            dirs = sorted(p[0].name for p in matches)
+            print_error(
+                f"ambiguous catalog at {src}: multiple manifests under "
+                f"`plugins/*/ouroboros.plugin.json` declare "
+                f"`name: {name!r}` (in {dirs}). Rename or remove duplicates "
+                f"so each plugin name resolves to exactly one directory."
+            )
+            raise typer.Exit(code=1)
+        if matches:
+            candidate_root, manifest_path = matches[0]
         if candidate_root is None or manifest_path is None:
             print_error(
                 f"no plugin {name!r} found at {src} (looked for "

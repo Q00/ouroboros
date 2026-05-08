@@ -480,6 +480,63 @@ def test_list_json_legacy_unbound_record_reports_installed(
     assert row["missing_required_scopes"] == ["github:read"]
 
 
+def test_list_json_disabled_first_party_reports_disabled(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1092 —
+    ``list --json`` previously hardcoded ``trust_state="first_party"``
+    without consulting the disable record. The firewall blocks
+    invocation for any disabled plugin including first-party, so the
+    JSON view must agree with the runtime gate (``inspect`` was
+    already fixed to do this in the prior commit; this brings the
+    machine-readable surface in line).
+    """
+    plugin_home = tmp_path / "plugin_home"
+    fp_manifest = {
+        **REFERENCE_MANIFEST,
+        "name": "ooo-builtin",
+        "source": {"type": "first_party"},
+        "permissions": [],
+    }
+    _write_manifest(plugin_home, fp_manifest)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="ooo-builtin",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="first_party",
+            source_identity=str(plugin_home),
+        )
+    )
+    TrustStore(root=trust_root).write_disable(
+        "ooo-builtin",
+        source_type="first_party",
+        source_identity=str(plugin_home),
+        disabled_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--json",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 1
+    row = data[0]
+    assert row["trust_state"] == "disabled"
+
+
 def test_inspect_disabled_first_party_reports_disabled_not_first_party(
     runner: CliRunner, tmp_path: Path
 ) -> None:
