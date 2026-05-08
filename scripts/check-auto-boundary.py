@@ -47,6 +47,29 @@ Pattern strategy:
     PascalCase composition (lowercase ``linear`` + an explicit
     uppercase letter), or one of an enumerated set of integration
     suffixes.
+
+    Each keyword carries TWO recognition forms so that compound
+    identifiers across naming conventions are not silent bypasses:
+
+    1. *Token-start* form: anchored by ``(?<![A-Za-z])`` so the keyword
+       starts after a non-letter (start-of-line, whitespace, ``_``,
+       digit, punctuation). This catches ``GitHubClient``,
+       ``GITHUB_TOKEN``, ``github_client``, ``_github_url``, and the
+       SCREAMING_SNAKE form ``FOO_GITHUB_BASE``.
+
+    2. *camelCase-boundary* form: anchored by ``(?<=[a-z])`` (lowercase
+       letter on the left) plus a *case-sensitive* uppercase first
+       character of the keyword. This catches mixed-case compounds like
+       ``openGithubIssue``, ``makePullRequestUrl``, ``sendToSlack``,
+       ``openJiraIssue``, and ``notifyLinearAdapter`` -- the exact
+       bypass class that earlier iterations of this guard missed -- while
+       still rejecting the explicitly-benign embedded-substring forms
+       that only contain the keyword in lowercase (``mygithub_thing``,
+       ``mypull_request_data``, ``collinearPoints``, ``bilinearForm``,
+       ``nonlinearAdapter``, ``nonlinear_adapter``). The discrimination
+       is purely the case of the keyword's first letter at the boundary:
+       lowercase = embedded substring (benign), uppercase = camelCase
+       composition (domain leak).
 """
 
 from __future__ import annotations
@@ -97,26 +120,41 @@ SCAN_EXTRA_FILES: tuple[str, ...] = ("src/ouroboros/cli/commands/auto.py",)
 # case-sensitive, which is the exact discrimination needed for
 # PascalCase-composition forms.
 #
-# Every keyword anchors with a left ``(?<![A-Za-z])`` (negative
-# lookbehind: not preceded by a letter) so that benign identifiers
-# that merely *contain* the keyword as a substring --
-# ``collinearPoints``, ``bilinearForm``, ``nonlinear_adapter``,
-# ``mygithub_thing``, ``mypull_request_data`` -- do not false-positive.
-# We deliberately do *not* use ``\b`` here, because ``_`` is a word
-# character: ``\b`` would mean the underscore-adjacent forms
-# ``notify_slack_user``, ``FOO_GITHUB_BASE``, and ``linear_client``
-# stop matching, which loses the legitimate snake_case-composition
-# catches the bot review specifically asked us to keep.
+# Every keyword has TWO recognition arms (separated by ``|``):
+#
+#   * Token-start arm ``(?<![A-Za-z])(?i:<kw>)``: the keyword sits at
+#     the start of a token (preceded by start-of-line, whitespace,
+#     ``_``, digit, ``/``, ``"``, etc.). Case-insensitive, so it
+#     catches ``GitHubClient``, ``GITHUB_TOKEN``, ``github_client``,
+#     ``_github_url``, and SCREAMING_SNAKE forms like
+#     ``FOO_GITHUB_BASE``. We deliberately do *not* use ``\b`` here,
+#     because ``_`` is a word character and ``\b`` would lose the
+#     underscore-adjacent forms (``notify_slack_user``,
+#     ``FOO_GITHUB_BASE``, ``linear_client``).
+#
+#   * camelCase-boundary arm ``(?<=[a-z])<KW first letter capitalized>(?i:<kw rest>)``:
+#     the keyword sits at a camelCase boundary (lowercase letter on
+#     the left, *uppercase* keyword first letter, case-insensitive
+#     remainder). This catches ``openGithubIssue``,
+#     ``makePullRequestUrl``, ``sendToSlack``, ``openJiraIssue``,
+#     ``notifyLinearAdapter`` -- the bypass class earlier iterations
+#     missed. The case-sensitive uppercase first letter is what
+#     preserves the explicitly-benign embedded-lowercase forms
+#     (``mygithub_thing``, ``mypull_request_data``,
+#     ``collinearPoints``, ``bilinearForm``, ``nonlinearAdapter``,
+#     ``nonlinear_adapter``): in those, the keyword's first letter is
+#     lowercase, so the camelCase arm does not match.
 FORBIDDEN_PATTERNS: tuple[str, ...] = (
-    r"(?<![A-Za-z])(?i:github)",
+    r"(?<![A-Za-z])(?i:github)|(?<=[a-z])G(?i:ithub)",
     r"(?<![A-Za-z])(?i:pull_request)",
-    # Compressed camelCase form ``PullRequestHandler`` / ``pullRequestId``
-    # that the snake-case pattern above misses (the underscore prevents
-    # the substrings from sharing).
-    r"(?<![A-Za-z])(?i:pullrequest)",
+    # Compressed camelCase / no-underscore form ``PullRequestHandler`` /
+    # ``pullRequestId`` / ``makePullRequestUrl`` that the snake-case
+    # pattern above misses (the underscore prevents the substrings from
+    # sharing).
+    r"(?<![A-Za-z])(?i:pullrequest)|(?<=[a-z])P(?i:ullrequest)",
     r"(?i:/pulls?/)",  # `/` is already a non-word boundary
-    r"(?<![A-Za-z])(?i:jira)",
-    r"(?<![A-Za-z])(?i:slack)",
+    r"(?<![A-Za-z])(?i:jira)|(?<=[a-z])J(?i:ira)",
+    r"(?<![A-Za-z])(?i:slack)|(?<=[a-z])S(?i:lack)",
     # Linear (the issue tracker / SaaS) -- tightened to:
     #   * the URL form ``linear.app`` / ``linear.com``, or
     #   * a PascalCase composition (`LinearClient`, `LinearAdapter`,
@@ -124,15 +162,21 @@ FORBIDDEN_PATTERNS: tuple[str, ...] = (
     #     trailing ``[A-Z]`` is case-sensitive, so this distinguishes
     #     ``LinearClient`` from benign ``linearize`` / ``linear_time``,
     #   * an explicit integration suffix in snake_case
-    #     (`linear_client`, `linear_webhook`, ...).
+    #     (`linear_client`, `linear_webhook`, ...),
+    #   * a camelCase composition where ``Linear`` is preceded by a
+    #     lowercase letter (``notifyLinearAdapter``,
+    #     ``maybeLinearClient``).
     # Plain "linear pipeline" / "linear scan" / "linear_time" do NOT
-    # match. Each sub-pattern carries its own ``(?<![A-Za-z])`` anchor
-    # so that embedded forms like ``collinearPoints``, ``bilinearForm``,
+    # match. Each token-start arm carries ``(?<![A-Za-z])`` and each
+    # camelCase arm carries ``(?<=[a-z])L`` (case-sensitive) so that
+    # embedded forms like ``collinearPoints``, ``bilinearForm``,
     # ``nonlinearAdapter``, and ``nonlinear_adapter`` also do not match.
     (
         r"(?<![A-Za-z])(?i:linear\.(?:app|com))"
         r"|(?<![A-Za-z])(?i:linear)[A-Z]"
         r"|(?<![A-Za-z])(?i:linear_(?:client|adapter|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
+        r"|(?<=[a-z])L(?i:inear)[A-Z]"
+        r"|(?<=[a-z])L(?i:inear_(?:client|adapter|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
     ),
 )
 

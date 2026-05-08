@@ -197,6 +197,17 @@ def test_each_forbidden_pattern_independently_caught(
         ("client = LinearClient()", "Linear PascalCase"),
         ("adapter = LinearAdapter()", "Linear adapter PascalCase"),
         ("from foo import linear_client", "linear snake_case"),
+        # camelCase-compound forms where the keyword sits in the middle
+        # of an identifier preceded by a lowercase letter (the bypass
+        # class flagged by bot review on commit c2b6943).
+        ("issue = openGithubIssue()", "openGithubIssue (Github mid-camelCase)"),
+        ("url = makePullRequestUrl()", "makePullRequestUrl (PullRequest mid-camelCase)"),
+        ("sendToSlack(msg)", "sendToSlack (Slack mid-camelCase)"),
+        ("issue = openJiraIssue()", "openJiraIssue (Jira mid-camelCase)"),
+        ("hook = notifyLinearAdapter()", "notifyLinearAdapter (Linear mid-camelCase)"),
+        ("client = maybeLinearClient()", "maybeLinearClient (Linear mid-camelCase)"),
+        ("notifier = registerSlackNotifier()", "registerSlackNotifier (Slack mid-camelCase)"),
+        ("payload = buildGithubPayload()", "buildGithubPayload (Github mid-camelCase)"),
     ],
 )
 def test_identifier_forms_are_caught(
