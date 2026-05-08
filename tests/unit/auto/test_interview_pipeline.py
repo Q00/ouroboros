@@ -560,26 +560,33 @@ def test_safe_default_allows_benign_production_mentions(goal: str) -> None:
     [
         # Fullwidth Latin block (U+FF21..U+FF5A) — visually identical to
         # ASCII for end users and routinely produced by IMEs that round-trip
-        # through CJK keyboards. Without NFKC normalization the
-        # ``\b(deploy|production|...)\b`` regex bank would not see these
-        # forms and the unsafe-context gate would silently mark a production
-        # cutover as safe-defaultable.
+        # through CJK keyboards. The unsafe-context "external side effect"
+        # arm matches the action verbs (``deploy``/``release``/``publish``/
+        # ``go live``/``push live``/``database migration``/...). Without
+        # NFKC normalization those alternations cannot see the fullwidth
+        # form, and the gate silently authorizes a production cutover.
         "ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ this Friday",
         "ｒｅｌｅａｓｅ version 2 to ｐｒｏｄ",
-        # Compatibility ligature (U+FB01 ``ﬁ``) is a less common but legal
-        # NFKC variant of ``fi``; pair it with a real production-action
-        # verb to lock in normalization on the verb side.
+        # Compatibility ligature (U+FB01 ``ﬁ``) paired with a real
+        # production-action verb so the regression covers normalization on
+        # the verb-token side as well.
         "ﬁnalize ｄｅｐｌｏｙ to production tomorrow",
     ],
 )
 def test_safe_default_blocks_unicode_compat_production_actions(goal: str) -> None:
     """Fullwidth/ligature Unicode must not bypass the unsafe-context regex bank.
 
-    Without ``unicodedata.normalize('NFKC', context)`` before the
-    ``re.search`` calls in ``_unsafe_context_reason``, the goal
-    ``ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ`` returns ``None`` (no unsafe
-    reason), letting the safe-default policy auto-default a session that
-    actually authorizes a production deploy.
+    The relevant arm is the "ambiguous external side effect" pattern,
+    which matches the action verbs (``deploy``/``release``/``publish``/
+    ``send email``/``webhook``/``database migration``/``go live``/
+    ``push live``/...). Bare ``production``/``prod``/``live`` is *not*
+    by itself flagged any more — the verb token is what carries the
+    block decision. Without ``unicodedata.normalize("NFKC", context)``
+    before the ``re.search`` calls in ``_unsafe_context_reason``, those
+    verb alternations cannot see fullwidth Latin (``ｄｅｐｌｏｙ``) or
+    ligature (``ﬁ``) variants, and the safe-default policy
+    auto-defaults a session that actually authorizes a production
+    deploy.
     """
     ledger = SeedDraftLedger.from_goal(goal)
 
