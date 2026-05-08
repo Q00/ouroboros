@@ -532,6 +532,95 @@ def test_disable_record_blocks_independently_of_trust(tmp_path: Path) -> None:
     assert events[0]["provenance"]["reason"] == "disabled"
 
 
+def test_argv_redacts_secret_flags_and_high_confidence_tokens(tmp_path: Path) -> None:
+    """Per the locked RFC, the firewall MUST redact secret-looking argv
+    values before persistence. The flag-name policy covers `--token`,
+    `--password`, etc. (both `--flag=value` and `--flag value` forms);
+    the value-pattern policy covers Bearer tokens, GitHub PATs, OpenAI
+    keys, AWS access key IDs, and JWT-shaped strings.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:87.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    secret_argv = [
+        "https://example.com/pr/1",
+        "--token=ghp_thisIsClearlyASecretValue123456789",  # equals form
+        "--password",  # bare flag
+        "hunter2-supersecret",  # value follows
+        "Bearer eyJhbGciOiJIUzI1NiJ9.payload",  # high-confidence
+        "AKIAIOSFODNN7EXAMPLE",  # AWS access key id
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",  # JWT
+        "plain-arg",  # not secret
+    ]
+    events: list[dict] = []
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=secret_argv,
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-redact",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    invoked = next(e for e in events if e["event_type"] == "plugin.invoked")
+    redacted = invoked["command"]["argv"]
+    assert redacted[0] == "https://example.com/pr/1"
+    # `--token=` keeps the flag name, replaces the value with [redacted].
+    assert redacted[1] == "--token=[redacted]"
+    # `--password` value redacted via the bare-flag-then-value rule.
+    assert redacted[2] == "--password"
+    assert redacted[3] == "[redacted]"
+    # Bearer / AWS / JWT all match high-confidence patterns.
+    assert redacted[4] == "[redacted]"
+    assert redacted[5] == "[redacted]"
+    assert redacted[6] == "[redacted]"
+    # Non-secret string passed through unchanged.
+    assert redacted[7] == "plain-arg"
+    # No raw secret bytes anywhere in the serialized event stream.
+    serialized = json.dumps(events)
+    for needle in (
+        "ghp_thisIsClearlyASecret",
+        "hunter2-supersecret",
+        "eyJhbGciOiJIUzI1NiJ9.payload",
+        "AKIAIOSFODNN7EXAMPLE",
+    ):
+        assert needle not in serialized, needle
+    # Forensic: argv_sha256 attached to provenance because redaction fired.
+    assert "argv_sha256" in invoked["provenance"]
+
+
+def test_argv_no_redaction_keeps_argv_verbatim(tmp_path: Path) -> None:
+    """When no token in argv matches the redaction policy, argv passes
+    through unchanged AND no `argv_sha256` is added (we only record the
+    forensic hash when redaction actually fired)."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1", "--verbose"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-clean",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    invoked = next(e for e in events if e["event_type"] == "plugin.invoked")
+    assert invoked["command"]["argv"] == ["https://example.com/pr/1", "--verbose"]
+    assert "argv_sha256" not in invoked.get("provenance", {})
+
+
 def test_subprocess_invoked_with_plugin_home_as_cwd(tmp_path: Path) -> None:
     """When the caller plumbs `plugin_home`, the entrypoint subprocess
     must be launched with `cwd=plugin_home` so that

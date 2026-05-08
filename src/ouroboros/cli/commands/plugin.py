@@ -100,7 +100,20 @@ def _trust_state_label(
     """
     if manifest.source.type == "first_party":
         return "first_party"
-    if trust_store.is_disabled(manifest.name):
+    # Disable records are keyed by (name, source.type, source_identity)
+    # per the RFC: a stale disable from a previous install at source A
+    # MUST NOT carry over to a fresh install from source B. When the
+    # caller plumbs the lockfile-recorded identity, use the
+    # subject-scoped predicate; otherwise fall back to the name-only
+    # check (defensive default for legacy callers).
+    if expected_source_identity is not None:
+        if trust_store.is_disabled_for_subject(
+            manifest.name,
+            source_type=manifest.source.type,
+            source_identity=expected_source_identity,
+        ):
+            return "disabled"
+    elif trust_store.is_disabled(manifest.name):
         return "disabled"
     record = trust_store.read(manifest.name)
     if record is None or record.version != manifest.version:

@@ -1434,6 +1434,80 @@ def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> No
     assert not paths["audit_log"].exists() or paths["audit_log"].read_text() == ""
 
 
+def test_disable_record_does_not_carry_to_different_source(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """RFC: disable records are keyed by (name, source.type,
+    source_identity). A disable from source A MUST NOT carry over to a
+    fresh install of the same plugin name from source B — the user
+    explicitly chose to install from B and the stale disable signal
+    should not silently block them.
+
+    Regression catch for the bot's follow-up on trust_store.py:296.
+    """
+    paths = _common_paths(tmp_path)
+    src_a = tmp_path / "src_a"
+    _install_reference_plugin(runner, plugin_dir=src_a, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    trust = TrustStore(root=paths["trust_root"])
+    assert trust.is_disabled("github-pr-ops")  # name-only predicate fires
+
+    # Now install from a DIFFERENT source directory (different
+    # source_identity). The subject-scoped predicate must report False.
+    src_b = tmp_path / "src_b"
+    src_b.mkdir()
+    (src_b / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(src_b),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    entry = Lockfile(paths["lockfile"]).read()["github-pr-ops"]
+    # Subject-scoped predicate: source_identity now points at src_b,
+    # disable was recorded against src_a → predicate returns False.
+    assert not trust.is_disabled_for_subject(
+        "github-pr-ops",
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+    ), (
+        "disable record from source A must NOT apply to a fresh install from source B; "
+        f"recorded source_identity={entry.source_identity!r}"
+    )
+    # And `list` reports `installed`, not `disabled`, for the new install.
+    listed = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--json",
+        ],
+    )
+    assert listed.exit_code == 0, listed.output
+    rows = json.loads(listed.stdout)
+    assert rows[0]["trust_state"] == "installed"
+
+
 def test_trust_audit_event_records_real_source_type(runner: CliRunner, tmp_path: Path) -> None:
     """`plugin.trusted` audit payloads must record the manifest's actual
     source.type, not a hardcoded ``plugin_home``. The reference manifest

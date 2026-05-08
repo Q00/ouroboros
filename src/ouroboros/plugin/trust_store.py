@@ -296,13 +296,50 @@ class TrustStore:
     def is_disabled(self, plugin: str) -> bool:
         """True if a disable record exists for `plugin`.
 
-        Per the RFC, the disable record is keyed by
-        ``(name, source.type, source_identity)`` without
-        ``artifact_digest``, so it survives upgrades. The CLI consults
-        this BEFORE running a plugin and refuses invocation regardless of
-        trust state when set.
+        This is the **name-only** predicate; it is intentionally lossy
+        because the RFC keys disable records by ``(name, source.type,
+        source_identity)`` and many call sites only know the name. Use
+        ``is_disabled_for_subject`` when the install subject is known
+        (CLI dispatch, firewall) so a stale disable record from an old
+        source does not block a fresh install from a different source.
         """
         return self._disable_path(plugin).is_file()
+
+    def is_disabled_for_subject(
+        self,
+        plugin: str,
+        *,
+        source_type: str,
+        source_identity: str,
+    ) -> bool:
+        """True iff a disable record exists AND its `(source.type,
+        source_identity)` matches the given install subject.
+
+        Per the locked RFC ("Disable records"), disable records are
+        keyed by ``(name, source.type, source_identity)`` without
+        ``artifact_digest``: they survive upgrades but DO NOT carry over
+        to a re-install from a different source. This predicate is the
+        production-correct check the firewall and the CLI's view layer
+        should use; ``is_disabled`` remains for code paths that legacy
+        only know the name.
+
+        Records lacking source identity (pre-RFC writes / unknown
+        provenance) are treated as still applying — failing closed
+        keeps the safety property that an explicit disable cannot be
+        silently bypassed by a re-install whose source-identity field
+        was not yet recorded.
+        """
+        record = self.read_disable(plugin)
+        if record is None:
+            return False
+        recorded_type = record.get("source_type", "")
+        recorded_identity = record.get("source_identity", "")
+        if not recorded_type and not recorded_identity:
+            # Pre-RFC / partially-recorded disable — fail closed.
+            return True
+        if recorded_type and recorded_type != source_type:
+            return False
+        return not (recorded_identity and recorded_identity != source_identity)
 
     def read_disable(self, plugin: str) -> dict | None:
         """Return the parsed disable record, or None."""

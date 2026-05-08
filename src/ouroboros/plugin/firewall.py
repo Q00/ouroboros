@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from typing import Literal
@@ -68,6 +69,129 @@ def _source_type_for_event(manifest: PluginManifest) -> str:
     return manifest.source.type
 
 
+# --- argv redaction ---------------------------------------------------------
+#
+# Per the locked RFC ("Audit-event compatibility / Bounded payloads — argv
+# handling"), the firewall MUST apply a built-in argv redaction policy
+# before ledger write. This is the safety net for the case where a plugin
+# accidentally accepts secrets via argv despite documentation telling
+# users not to.
+#
+# The minimum policy is enumerated in the RFC and implemented here:
+#   1. Values of well-known secret flags (`--token`, `--password`, etc.),
+#      whether `--flag=value` or `--flag value`. The flag NAME survives;
+#      only the VALUE is replaced with the literal `[redacted]`.
+#   2. Tokens with high-confidence formats: `Bearer …`, GitHub
+#      `gh[oprsu]_…`, OpenAI `sk-…`, AWS `AKIA…` access keys, and
+#      JWT-shaped strings (three dot-separated base64url segments).
+#
+# The hash of the original argv (sha256 over the un-redacted form) MAY be
+# recorded alongside the redacted argv for forensic reconciliation; we
+# attach it to the event provenance under `argv_sha256` when redaction
+# actually fired so the original value can be re-confirmed against an
+# out-of-band store but never read straight off the ledger.
+
+_REDACTED = "[redacted]"
+
+_SECRET_FLAG_NAMES: frozenset[str] = frozenset(
+    {
+        "--token",
+        "-t",
+        "--password",
+        "--passwd",
+        "--api-key",
+        "--apikey",
+        "--secret",
+        "--auth",
+        "--authorization",
+        "--client-secret",
+        "--access-token",
+        "--refresh-token",
+        "--bearer",
+        "--credential",
+        "--credentials",
+    }
+)
+
+# High-confidence secret patterns. Anchored where useful; safe to err on
+# the side of redacting things that look secret-shaped.
+_SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # GitHub PAT / app / OAuth tokens
+    re.compile(r"^gh[oprsu]_[A-Za-z0-9]{20,}$"),
+    # OpenAI keys
+    re.compile(r"^sk-[A-Za-z0-9_-]{20,}$"),
+    # AWS access key id
+    re.compile(r"^AKIA[0-9A-Z]{16}$"),
+    # JWT-shaped: three dot-separated base64url segments
+    re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$"),
+)
+
+
+def _is_secret_value(value: str) -> bool:
+    """Return True for argv values that match one of the locked
+    high-confidence secret formats. Conservative: bare strings that don't
+    match are passed through untouched so non-secret argv stays readable
+    in the ledger."""
+    if value.startswith("Bearer ") and len(value) > len("Bearer "):
+        return True
+    return any(p.fullmatch(value) for p in _SECRET_VALUE_PATTERNS)
+
+
+def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
+    """Apply the RFC's built-in argv redaction policy.
+
+    Returns a tuple ``(redacted_argv, redaction_fired)``. ``redaction_fired``
+    is True iff at least one element was rewritten — the caller uses that
+    to decide whether to record the sha256 of the original argv on the
+    event for forensic reconciliation.
+    """
+    redacted: list[str] = []
+    fired = False
+    pending_value_redact = False
+    for token in argv:
+        if pending_value_redact:
+            redacted.append(_REDACTED)
+            fired = True
+            pending_value_redact = False
+            continue
+        # `--flag=value` form: split on first `=`.
+        if token.startswith("-") and "=" in token:
+            flag, _, _ = token.partition("=")
+            if flag in _SECRET_FLAG_NAMES:
+                redacted.append(f"{flag}={_REDACTED}")
+                fired = True
+                continue
+        # Bare flag form: value is the next argv element.
+        if token in _SECRET_FLAG_NAMES:
+            redacted.append(token)
+            pending_value_redact = True
+            continue
+        # High-confidence value-shaped match (Bearer …, gh*_…, sk-…,
+        # AKIA…, JWT-shaped).
+        if _is_secret_value(token):
+            redacted.append(_REDACTED)
+            fired = True
+            continue
+        redacted.append(token)
+    if pending_value_redact:
+        # Trailing `--token` with no value: nothing to redact, but the
+        # plugin will reject it at parse-time anyway. Emit it as-is.
+        pass
+    return redacted, fired
+
+
+def _argv_sha256(argv: list[str]) -> str:
+    """Hex sha256 over the un-redacted argv joined by a record separator
+    that cannot appear in argv tokens (so the digest is collision-resistant
+    across argv boundary). Forensic-only — never persisted alongside the
+    raw value."""
+    h = hashlib.sha256()
+    for token in argv:
+        h.update(token.encode("utf-8", errors="surrogateescape"))
+        h.update(b"\x1f")  # ASCII unit separator
+    return h.hexdigest()
+
+
 def _event_envelope(
     *,
     event_type: str,
@@ -81,10 +205,21 @@ def _event_envelope(
     result: dict | None = None,
     provenance: dict[str, str] | None = None,
 ) -> dict:
-    """Build an event matching schemas/0.1/audit-event.schema.json."""
+    """Build an event matching schemas/0.1/audit-event.schema.json.
+
+    Per the RFC's bounded-payload argv contract, ``argv`` is run through
+    ``_redact_argv`` before reaching the ledger; when redaction fires, a
+    ``argv_sha256`` field is added to ``provenance`` for forensic
+    reconciliation against the un-redacted argv stored out-of-band.
+    """
     cmd: dict = {"namespace": namespace, "name": command_name}
+    redaction_fired = False
+    argv_hash: str | None = None
     if argv is not None:
-        cmd["argv"] = list(argv)
+        redacted, redaction_fired = _redact_argv(list(argv))
+        cmd["argv"] = redacted
+        if redaction_fired:
+            argv_hash = _argv_sha256(list(argv))
     event: dict = {
         "schema_version": SCHEMA_VERSION,
         "event_type": event_type,
@@ -100,8 +235,11 @@ def _event_envelope(
         "permissions_used": list(permissions_used),
         "result": result or {"status": "success"},
     }
-    if provenance is not None:
-        event["provenance"] = dict(provenance)
+    final_provenance: dict[str, str] = dict(provenance) if provenance is not None else {}
+    if argv_hash is not None:
+        final_provenance.setdefault("argv_sha256", argv_hash)
+    if final_provenance:
+        event["provenance"] = final_provenance
     return event
 
 
