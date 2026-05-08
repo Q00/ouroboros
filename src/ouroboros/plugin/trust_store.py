@@ -576,19 +576,39 @@ def _subject_matches(
     source_identity: str,
     artifact_digest: str,
 ) -> bool:
-    """Internal helper for `grant` — `_subject_matches` is intentionally
-    permissive about empty fields on the existing record so legacy trust
-    files (no source_identity / artifact_digest persisted) are not
-    spuriously voided by an otherwise-valid second grant from a CLI that
-    now passes the triple. Once any field is set, it must match.
+    """Internal helper for ``grant`` deciding whether the existing trust
+    record is bound to the same install subject the new grant targets.
+
+    Under the post-RFC contract, any blank subject column on the
+    existing record is a hard mismatch whenever the caller plumbs the
+    corresponding column on the grant. A pre-RFC ``trust.json`` would
+    otherwise be silently "upgraded" to the current subject by adding
+    one new scope — and every previously stored scope would carry over
+    unconsented for THIS subject, defeating the trust-subject binding
+    every other surface in this PR enforces.
+
+    Legacy callers that don't plumb subject columns on the grant
+    (firewall unit tests, two-arg ``grant(name, scope=...)`` callers)
+    keep the version-only behavior so existing test fixtures stay
+    green; production CLI install paths always pass the full triple,
+    so prod records are bound for every real grant.
     """
     if record.version != version:
         return False
-    if record.source_type and record.source_type != source_type:
+    # Caller plumbed a populated subject column → existing record MUST
+    # have a matching populated value, not a blank legacy column. A
+    # silent "upgrade" of a pre-RFC record (blank columns) by adding a
+    # single new scope would otherwise rehydrate every previously
+    # stored scope under the new subject without re-consent.
+    if source_type and record.source_type != source_type:
         return False
-    if record.source_identity and record.source_identity != source_identity:
+    if source_identity and record.source_identity != source_identity:
         return False
-    return not (record.artifact_digest and record.artifact_digest != artifact_digest)
+    # When the caller doesn't plumb a column (legacy grant signature,
+    # firewall unit tests), stay permissive on that column so existing
+    # fixtures keep working; the populated columns above already guard
+    # against cross-subject inheritance for production callers.
+    return not (artifact_digest and record.artifact_digest != artifact_digest)
 
 
 __all__ = [

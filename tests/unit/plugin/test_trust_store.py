@@ -60,6 +60,49 @@ def test_exact_scope_only(tmp_path: Path) -> None:
     assert record.missing(["github:pull_request:write"]) == ["github:pull_request:write"]
 
 
+def test_grant_resets_legacy_unbound_record_on_subject_bound_grant(tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on trust_store.py:318
+    (`_subject_matches`).
+
+    A pre-RFC ``trust.json`` has blank ``source_type`` /
+    ``source_identity`` / ``artifact_digest`` columns. Without this
+    fix, a follow-up ``grant()`` that plumbs the new install subject
+    would silently "upgrade" the legacy record by appending one new
+    scope while every previously stored scope carries over unconsented
+    for THIS subject — defeating the trust-subject binding the rest of
+    this PR enforces. The grant write path must treat any legacy /
+    unbound existing record as a subject change and reset it before
+    appending the new scope.
+    """
+    store = TrustStore(root=tmp_path)
+    # Pre-RFC grant: only `version` + `scope`, no subject columns.
+    store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
+    legacy = store.read("test-plugin")
+    assert legacy is not None
+    assert legacy.has_scope("github:read")
+    assert legacy.source_type == ""
+
+    # New grant under the post-RFC contract — full install subject
+    # plumbed through. The legacy scope MUST be dropped because it was
+    # never consented for THIS subject.
+    record = store.grant(
+        plugin="test-plugin",
+        version="0.1.0",
+        scope="github:repo:read",
+        granted_by="u",
+        source_type="local_path",
+        source_identity="/tmp/installs/test-plugin",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+    assert record.source_type == "local_path"
+    assert record.source_identity == "/tmp/installs/test-plugin"
+    assert record.artifact_digest == "sha256:" + "0" * 64
+    # Only the freshly granted scope survives — the legacy
+    # `github:read` did not carry over.
+    assert [g.scope for g in record.granted_scopes] == ["github:repo:read"]
+    assert not record.has_scope("github:read")
+
+
 def test_version_bump_invalidates_trust(tmp_path: Path) -> None:
     """Test 4: granting against a new version drops the previous grants
     (Q00/ouroboros-plugins#9 Q4 lock)."""
