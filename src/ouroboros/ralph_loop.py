@@ -55,7 +55,6 @@ class RalphLoopConfig:
     max_total_seconds: float | None = None
     oscillation_window: int = DEFAULT_OSCILLATION_WINDOW
     grade_regression_window: int = DEFAULT_GRADE_REGRESSION_WINDOW
-    max_total_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

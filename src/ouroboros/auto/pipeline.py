@@ -916,18 +916,6 @@ class AutoPipeline:
         )
 
     def _deadline_capped_timeout(self, state: AutoPipelineState, phase_timeout: float) -> float:
-        """Return ``phase_timeout`` capped by the remaining pipeline deadline."""
-        if state.deadline_at is None:
-            return phase_timeout
-        remaining = state.deadline_at - time.monotonic()
-        if remaining <= 0:
-            # A tiny positive timeout lets ``asyncio.wait_for`` drive the
-            # cancellation path, after which callers invoke ``_enforce_deadline``
-            # and surface the public pipeline_deadline blocker.
-            return 0.001
-        return max(0.001, min(phase_timeout, remaining))
-
-    def _deadline_capped_timeout(self, state: AutoPipelineState, phase_timeout: float) -> float:
         """Return ``phase_timeout`` capped by the remaining pipeline deadline.
 
         Without this cap, ``_enforce_deadline`` only fires at phase
