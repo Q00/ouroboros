@@ -359,6 +359,55 @@ def test_safe_default_allows_benign_external_mentions(goal: str) -> None:
     assert ledger.is_seed_ready()
 
 
+def test_safe_default_treats_confirmed_non_goals_as_exclusions_not_unsafe_scope() -> None:
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+    ledger.add_entry(
+        "non_goals",
+        LedgerEntry(
+            key="non_goals.user_excludes",
+            value="auth, credentials, and production deployment",
+            source=LedgerSource.NON_GOAL,
+            confidence=0.95,
+            status=LedgerStatus.CONFIRMED,
+            rationale="User explicitly ruled these out during the interview.",
+        ),
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert result.completed
+    assert result.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
+def test_safe_default_ignores_unsafe_terms_in_interview_questions() -> None:
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+    # The backend asked about authentication and production deployment, but
+    # the user explicitly answered no. Only answers carry user intent — the
+    # question alone must not poison finalization.
+    ledger.record_qa(
+        "How should this authenticate? Does it deploy to production?",
+        "No auth and local-only execution; nothing leaves the machine.",
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+        pending_question="Does this require any production credentials?",
+    )
+
+    assert result.completed
+    assert result.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
 def test_safe_default_non_goals_do_not_make_later_finalization_unsafe() -> None:
     ledger = SeedDraftLedger.from_goal("Build a small local CLI")
     ledger.add_entry(

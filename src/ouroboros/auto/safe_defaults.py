@@ -211,15 +211,29 @@ def finalize_safe_defaultable_gaps(
 
 
 def _unsafe_context_reason(
-    ledger: SeedDraftLedger, *, goal: str, pending_question: str | None
+    ledger: SeedDraftLedger,
+    *,
+    goal: str,
+    pending_question: str | None,  # noqa: ARG001 - kept for backward-compatible call sites
 ) -> str | None:
+    """Detect whether the user-asserted context authorizes any unsafe action.
+
+    The detector inspects only assertions the user (or repo) has actually
+    affirmed: the original goal, active non-NON_GOAL ledger entries, and the
+    interview answers the user gave. It deliberately ignores backend-authored
+    interview questions and the still-open ``pending_question``, because a
+    clarifying question like "should this deploy to production?" does not
+    authorize a deploy — only the answer does. It also ignores ``NON_GOAL``
+    entries because confirmed non-goals are explicit *exclusions*; treating
+    "non-goals are credentials and production deployment" as active unsafe
+    scope would invert the user's intent.
+    """
     context = "\n".join(
         value
         for value in (
             goal,
-            pending_question or "",
             *_unsafe_ledger_values(ledger),
-            *_interview_transcript(ledger),
+            *_interview_answers(ledger),
         )
         if value.strip()
     ).lower()
@@ -235,15 +249,21 @@ _INACTIVE_LEDGER_STATUSES: frozenset[LedgerStatus] = frozenset(
 
 
 def _unsafe_ledger_values(ledger: SeedDraftLedger) -> tuple[str, ...]:
-    """Return active ledger entry values that may carry unsafe interview context.
+    """Return active ledger entry values that may carry unsafe user assertions.
 
-    Includes any source that represents user-supplied, repository-derived, or
-    interview-derived requirements (USER_GOAL, REPO_FACT, EXISTING_CONVENTION,
-    INFERENCE, NON_GOAL, BLOCKER, CONSERVATIVE_DEFAULT). Excludes inactive
-    entries (weak/conflicting/blocked) and the safe-default policy's own
-    DEFAULTED outputs so the gate does not re-flag its own boundary text on a
-    subsequent pass.
+    Includes USER_GOAL, REPO_FACT, EXISTING_CONVENTION, INFERENCE, BLOCKER,
+    and CONSERVATIVE_DEFAULT entries. Excludes:
+
+    * inactive entries (weak/conflicting/blocked) — superseded or rejected,
+    * the safe-default policy's own DEFAULTED outputs — to avoid re-flagging
+      its own boundary text on a subsequent pass,
+    * any ASSUMPTION-source entry — assumptions describe boundary defaults,
+      not user-affirmed scope, and
+    * ``NON_GOAL`` entries — confirmed non-goals are explicit exclusions
+      ("non-goals are auth and production deployment"), and reading them as
+      active unsafe scope would invert the user's intent.
     """
+    skip_sources = {LedgerSource.ASSUMPTION, LedgerSource.NON_GOAL}
     values: list[str] = []
     for section in ledger.sections.values():
         for entry in section.entries:
@@ -251,20 +271,22 @@ def _unsafe_ledger_values(ledger: SeedDraftLedger) -> tuple[str, ...]:
                 continue
             if entry.status == LedgerStatus.DEFAULTED:
                 continue
-            if entry.source == LedgerSource.ASSUMPTION:
+            if entry.source in skip_sources:
                 continue
             values.append(entry.value)
     return tuple(values)
 
 
-def _interview_transcript(ledger: SeedDraftLedger) -> tuple[str, ...]:
-    """Return both questions and answers recorded during the interview."""
+def _interview_answers(ledger: SeedDraftLedger) -> tuple[str, ...]:
+    """Return user-supplied interview answers only.
+
+    Backend-authored questions are deliberately excluded because a clarifying
+    question (for example "Does this deploy to production?") does not assert
+    that the deploy will happen — only the answer can.
+    """
     values: list[str] = []
     for item in ledger.question_history:
-        question = item.get("question", "")
         answer = item.get("answer", "")
-        if question:
-            values.append(question)
         if answer:
             values.append(answer)
     return tuple(values)
