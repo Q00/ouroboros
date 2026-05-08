@@ -1434,6 +1434,90 @@ def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> No
     assert not paths["audit_log"].exists() or paths["audit_log"].read_text() == ""
 
 
+def test_default_trust_root_is_outside_plugin_install_root() -> None:
+    """The default trust root MUST live OUTSIDE the plugin install root.
+
+    If both defaulted to ``~/.ouroboros/plugins``, ``trust.json`` would
+    be written inside the installed plugin subtree and the firewall's
+    pre-invocation canonical-tree-hash check would see the digest drift
+    on the very next invocation, blocking with ``trust_subject_changed``.
+
+    Regression catch for the bot's BLOCKING finding on
+    trust_store.py:35.
+    """
+    from ouroboros.plugin.trust_store import DEFAULT_TRUST_ROOT
+
+    install_root = Path.home() / ".ouroboros" / "plugins"
+    # The two default roots must not be the same directory, and the trust
+    # root must not be a descendant of the install root.
+    assert install_root != DEFAULT_TRUST_ROOT
+    try:
+        DEFAULT_TRUST_ROOT.relative_to(install_root)
+    except ValueError:
+        # NOT a descendant — that's the safe state.
+        return
+    raise AssertionError(
+        f"DEFAULT_TRUST_ROOT={DEFAULT_TRUST_ROOT} is a descendant of "
+        f"the plugin install root {install_root}; trust state would "
+        "perturb the hashed artifact"
+    )
+
+
+def test_trust_does_not_perturb_installed_artifact_digest(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Granting trust must NOT change the on-disk digest of the
+    installed plugin home. Otherwise the firewall would see the bytes
+    drift on the very next invocation and block with
+    ``trust_subject_changed``.
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    plugin_home = paths["plugin_home_root"] / "github-pr-ops"
+    digest_pre_trust = canonical_tree_hash(plugin_home)
+
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    digest_post_trust = canonical_tree_hash(plugin_home)
+    assert digest_post_trust == digest_pre_trust, (
+        "trust must not perturb the installed artifact's canonical "
+        f"tree hash; pre={digest_pre_trust} post={digest_post_trust}"
+    )
+
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    digest_post_disable = canonical_tree_hash(plugin_home)
+    assert digest_post_disable == digest_pre_trust, (
+        "disable must not perturb the installed artifact's canonical "
+        f"tree hash; pre={digest_pre_trust} post={digest_post_disable}"
+    )
+
+
 def test_disable_record_does_not_carry_to_different_source(
     runner: CliRunner, tmp_path: Path
 ) -> None:

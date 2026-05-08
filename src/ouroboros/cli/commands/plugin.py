@@ -886,13 +886,19 @@ def add_command(
             artifact_digest=artifact_digest,
         )
         # Catalog registration: record the source so `install <name>`
-        # can find it later. Also record the plugin -> source mapping so
-        # ambiguity detection works across multiple known catalogs.
+        # can find it later. The recorded ``source_identity`` MUST match
+        # the lockfile's per-plugin ``source_identity``; otherwise a
+        # later ``install <name>`` resolved through the catalog would
+        # appear to come from a different source than the original
+        # ``add`` and force an unnecessary trust reset on the user's
+        # already-trusted plugin (RFC: trust subject is keyed by
+        # ``source_identity``). For git URLs the per-plugin and
+        # repo-root identities are the same normalized URL; for local
+        # paths we record the per-plugin path so the catalog and the
+        # lockfile agree.
         catalog_state.register(
             source_type=source_type,
-            source_identity=(
-                normalize_repo_url(target) if source_kind == "git" else str(repo_root.resolve())
-            ),
+            source_identity=plugin_source_identity,
             plugin_name=manifest.name,
         )
         # Now that the new version is on disk and recorded in the

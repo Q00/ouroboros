@@ -32,7 +32,17 @@ import tempfile
 TRUST_SCHEMA_VERSION = "0.1"
 
 # Default location root. Each plugin gets a subdirectory here.
-DEFAULT_TRUST_ROOT = Path.home() / ".ouroboros" / "plugins"
+#
+# CRITICAL: this MUST live OUTSIDE the plugin install root
+# (``~/.ouroboros/plugins``). The firewall recomputes the canonical tree
+# hash of the installed plugin home before every invocation; if
+# ``trust.json`` or ``disabled.json`` were written inside that subtree
+# the very act of trusting a plugin would change its digest and cause
+# the next invocation to fail closed with ``trust_subject_changed``.
+# Trust metadata is metadata ABOUT the artifact, not part of it — it
+# lives in a sibling directory so the hashed artifact stays immutable
+# under user-driven trust state changes.
+DEFAULT_TRUST_ROOT = Path.home() / ".ouroboros" / "trust"
 
 
 @dataclass(frozen=True)
