@@ -13,6 +13,7 @@ import typer
 
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
+    HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     load_seed,
@@ -37,6 +38,7 @@ from ouroboros.cli.formatters.panels import print_error, print_info, print_succe
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 
 
@@ -161,6 +163,17 @@ def auto_command(
             ),
         ),
     ] = None,
+    complete_product: Annotated[
+        bool,
+        typer.Option(
+            "--complete-product",
+            help=(
+                "Chain RUN → RALPH_HANDOFF after a successful run handoff so a "
+                "single ooo auto invocation iterates Ralph until QA passes, "
+                "convergence, or a budget bound trips. Default off."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -205,6 +218,7 @@ def auto_command(
                 reconcile_run=reconcile_run,
                 reconcile_source=reconcile_source,
                 pipeline_timeout_seconds=timeout,
+                complete_product=complete_product,
                 progress_callback=_make_progress_renderer(quiet=quiet),
             )
         )
@@ -247,6 +261,7 @@ async def _run_auto(
     reconcile_run: bool = False,
     reconcile_source: str | None = None,
     pipeline_timeout_seconds: float | None = None,
+    complete_product: bool = False,
     progress_callback: AutoProgressCallback | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
@@ -360,6 +375,13 @@ async def _run_auto(
         max_rounds=max_interview_rounds,
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
     )
+    ralph_starter = (
+        HandlerRalphStarter(
+            RalphHandler(agent_runtime_backend=runtime, opencode_mode=opencode_mode)
+        )
+        if complete_product
+        else None
+    )
     pipeline = AutoPipeline(
         driver,
         HandlerSeedGenerator(generate_seed),
@@ -375,6 +397,8 @@ async def _run_auto(
         attach_source=attach_source,
         reconcile_run=reconcile_run,
         reconcile_source=reconcile_source,
+        ralph_starter=ralph_starter,
+        complete_product=complete_product,
         progress_callback=progress_callback,
     )
     result = await pipeline.run(state)

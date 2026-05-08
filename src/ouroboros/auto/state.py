@@ -21,6 +21,7 @@ class AutoPhase(StrEnum):
     REVIEW = "review"
     REPAIR = "repair"
     RUN = "run"
+    RALPH_HANDOFF = "ralph_handoff"
     COMPLETE = "complete"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -197,7 +198,17 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.FAILED,
     },
     AutoPhase.REPAIR: {AutoPhase.REVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
-    AutoPhase.RUN: {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED},
+    AutoPhase.RUN: {
+        AutoPhase.COMPLETE,
+        AutoPhase.RALPH_HANDOFF,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    },
+    AutoPhase.RALPH_HANDOFF: {
+        AutoPhase.COMPLETE,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    },
     AutoPhase.COMPLETE: set(),
     AutoPhase.BLOCKED: {
         AutoPhase.INTERVIEW,
@@ -258,6 +269,14 @@ class AutoPipelineState:
     run_reconciliation_status: str | None = None
     run_reconciliation_source: str | None = None
     run_reconciled_at: str | None = None
+    # Ralph handoff persistence (Q00/ouroboros#773). Populated only when
+    # ``--complete-product`` chains RUN → RALPH_HANDOFF after a successful run
+    # handoff. ``ralph_dispatch_mode`` is ``"job"`` for in-process job-manager
+    # dispatches and ``"plugin"`` for OpenCode-plugin delegations. All three
+    # default to None so legacy state files load unchanged.
+    ralph_job_id: str | None = None
+    ralph_lineage_id: str | None = None
+    ralph_dispatch_mode: str | None = None
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -544,6 +563,9 @@ class AutoPipelineState:
         payload.setdefault("run_reconciliation_status", None)
         payload.setdefault("run_reconciliation_source", None)
         payload.setdefault("run_reconciled_at", None)
+        payload.setdefault("ralph_job_id", None)
+        payload.setdefault("ralph_lineage_id", None)
+        payload.setdefault("ralph_dispatch_mode", None)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
         payload.setdefault("seed_origin", SeedOrigin.NONE.value)
@@ -731,6 +753,9 @@ class AutoPipelineState:
             "run_reconciliation_status",
             "run_reconciliation_source",
             "run_reconciled_at",
+            "ralph_job_id",
+            "ralph_lineage_id",
+            "ralph_dispatch_mode",
             "last_grade",
             "pending_question",
             "last_tool_name",

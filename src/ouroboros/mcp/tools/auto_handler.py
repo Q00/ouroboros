@@ -10,6 +10,7 @@ from typing import Any
 
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
+    HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     load_seed,
@@ -36,6 +37,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -159,6 +161,18 @@ class AutoHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    "complete_product",
+                    ToolInputType.BOOLEAN,
+                    (
+                        "When true, chain RUN → RALPH_HANDOFF after a successful run "
+                        "handoff so a single ouroboros_auto invocation iterates Ralph "
+                        "until QA passes, convergence, or a budget bound trips. "
+                        "Defaults to false (opt-in)."
+                    ),
+                    required=False,
+                    default=False,
+                ),
             ),
         )
 
@@ -186,6 +200,7 @@ class AutoHandler:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_skip_run = bool(arguments.get("skip_run", False))
+        complete_product = bool(arguments.get("complete_product", False))
         attach_execution = _optional_text_arg(arguments, "attach_execution")
         attach_job = _optional_text_arg(arguments, "attach_job")
         attach_session = _optional_text_arg(arguments, "attach_session")
@@ -283,6 +298,16 @@ class AutoHandler:
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
         )
+        ralph_starter = (
+            HandlerRalphStarter(
+                RalphHandler(
+                    agent_runtime_backend=runtime_backend,
+                    opencode_mode=opencode_mode,
+                )
+            )
+            if complete_product
+            else None
+        )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -298,6 +323,8 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
+            ralph_starter=ralph_starter,
+            complete_product=complete_product,
         )
         return await pipeline.run(state)
 
