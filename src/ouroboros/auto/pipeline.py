@@ -521,9 +521,7 @@ class AutoPipeline:
                             tool_name="ralph_starter",
                         )
                         self._save(state)
-                        return self._result(
-                            state, ledger, review=review, blocker=state.last_error
-                        )
+                        return self._result(state, ledger, review=review, blocker=state.last_error)
                     return await self._handoff_to_ralph(state, ledger, seed, review, None)
                 state.transition(
                     AutoPhase.COMPLETE, "execution already started; using persisted run handle"
@@ -646,9 +644,7 @@ class AutoPipeline:
             state.run_start_attempted = True
             self._save(state)
             run_meta: dict[str, Any] | None = None
-            run_start_timeout = self._deadline_capped_timeout(
-                state, self.run_start_timeout_seconds
-            )
+            run_start_timeout = self._deadline_capped_timeout(state, self.run_start_timeout_seconds)
             try:
                 run_kwargs: dict[str, Any] = {}
                 if _accepts_keyword(self.run_starter, "idempotency_key"):
@@ -800,7 +796,9 @@ class AutoPipeline:
         widget guidance to the operator.
         """
         assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
-        lineage_id = state.ralph_lineage_id or f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+        lineage_id = (
+            state.ralph_lineage_id or f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+        )
         state.ralph_lineage_id = lineage_id
         if state.phase is not AutoPhase.RALPH_HANDOFF:
             state.transition(

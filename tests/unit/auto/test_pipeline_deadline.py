@@ -324,7 +324,6 @@ async def test_legacy_blocked_session_arms_deadline_on_recovery(tmp_path) -> Non
     assert armed.deadline_at_epoch > time.time()
 
 
-
 @pytest.mark.asyncio
 async def test_resume_after_deadline_expired_immediately_blocks(tmp_path) -> None:
     """Loading a state whose deadline already passed must transition to BLOCKED on entry."""
@@ -379,7 +378,6 @@ async def test_resume_arms_missing_legacy_deadline_before_phase_work(tmp_path) -
     loaded = store.load(state.auto_session_id)
     assert loaded.deadline_at is not None
     assert loaded.deadline_at_epoch is not None
-
 
 
 def test_arm_deadline_is_idempotent() -> None:

@@ -196,7 +196,6 @@ async def test_wall_clock_exhausted_after_successful_iteration_replaces_terminal
     assert "iter2-output" not in tool_result.text_content
 
 
-
 @pytest.mark.asyncio
 async def test_ralph_loop_max_total_seconds_none_does_not_constrain() -> None:
     """When max_total_seconds is None at the runner level, no extra cap applies."""

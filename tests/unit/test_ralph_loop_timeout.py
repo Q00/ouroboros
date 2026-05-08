@@ -275,7 +275,6 @@ async def test_plugin_dispatch_forwards_iteration_and_total_timeouts(
     assert "stop_reason=wall_clock_exhausted" in sub["prompt"]
 
 
-
 @dataclass
 class _SuccessThenHangEvolveHandler:
     """First call succeeds quickly; subsequent calls hang past the timeout."""
