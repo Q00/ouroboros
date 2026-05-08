@@ -719,6 +719,35 @@ def test_auto_answerer_english_user_actor_questions_route_to_actor_io() -> None:
         assert {"actors", "inputs", "outputs"} <= updated_sections, (question, updated_sections)
 
 
+def test_auto_answerer_cjk_questions_produce_distinct_ledger_keys() -> None:
+    """``_slug_key()`` must keep Unicode letters so different CJK questions
+    produce different ledger keys instead of all collapsing onto the
+    fallback ``"requested_behavior"``.  Flagged by ouroboros-agent on
+    commit 1581a7b — the contract boundary regression where multilingual
+    routing landed correctly but ledger keys silently merged unrelated
+    requirements together.
+    """
+    answerer = AutoAnswerer()
+    question_a = "哪些用户可以删除分支?"
+    question_b = "用户可以验证他们的电子邮件吗？"
+
+    answer_a = answerer.answer(question_a, SeedDraftLedger.from_goal("Build a CLI"))
+    answer_b = answerer.answer(question_b, SeedDraftLedger.from_goal("Build an auth service"))
+
+    keys_a = sorted({entry.key for _section, entry in answer_a.ledger_updates})
+    keys_b = sorted({entry.key for _section, entry in answer_b.ledger_updates})
+
+    # Both questions must produce ``constraints.behavior.<subject>`` keys
+    # (or ``acceptance.<subject>`` keys for acceptance routes).
+    assert any(".behavior." in k or k.startswith("acceptance.") for k in keys_a), keys_a
+    assert any(".behavior." in k or k.startswith("acceptance.") for k in keys_b), keys_b
+    # Keys must NOT collapse onto the language-blind fallback.
+    assert not any(k.endswith(".requested_behavior") for k in keys_a), keys_a
+    assert not any(k.endswith(".requested_behavior") for k in keys_b), keys_b
+    # Keys for two distinct questions must differ.
+    assert keys_a != keys_b, (keys_a, keys_b)
+
+
 def test_auto_answerer_acceptance_status_does_not_misroute_to_acceptance_route() -> None:
     """Bare ``"acceptance"`` substring must not classify property/status
     questions like ``"What is the acceptance status?"`` as

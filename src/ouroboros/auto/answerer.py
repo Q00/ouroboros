@@ -1184,7 +1184,17 @@ def _acceptance_subject(question: str) -> str:
 
 
 def _slug_key(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    """Build a stable, language-aware ledger key fragment from arbitrary text.
+
+    Earlier this stripped everything outside ``[a-z0-9]``, which meant CJK
+    questions like ``"哪些用户可以删除分支?"`` and
+    ``"用户可以验证他们的电子邮件吗？"`` both collapsed to the
+    ``requested_behavior`` fallback and silently merged into the same
+    ledger slot.  Now we keep Unicode letters / digits (``\\w`` is
+    Unicode-aware in Python 3 by default) so non-English questions each
+    produce a distinct, descriptive key.
+    """
+    slug = re.sub(r"[^\w]+", "_", value.casefold(), flags=re.UNICODE).strip("_")
     return slug[:64] or "requested_behavior"
 
 
