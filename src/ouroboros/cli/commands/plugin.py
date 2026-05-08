@@ -556,7 +556,26 @@ def _reject_subdirectory_form(target: str) -> None:
 
 
 def _looks_like_url(target: str) -> bool:
-    return target.startswith(("http://", "https://", "git+http://", "git+https://", "git@"))
+    """True if `target` is a clone URL we should pass through `git clone`.
+
+    Mirrors the prefixes that `_normalize_clone_url` knows how to strip,
+    so any `git+...` form `_normalize_clone_url` accepts is also routed
+    through this URL detector. Without this symmetry the install path
+    would fall into the local-path branch for documented forms (notably
+    ``git+ssh://...``) and fail with "not a directory" instead of
+    cloning.
+    """
+    return target.startswith(
+        (
+            "http://",
+            "https://",
+            "git+http://",
+            "git+https://",
+            "git+ssh://",
+            "ssh://",
+            "git@",
+        )
+    )
 
 
 def _normalize_clone_url(target: str) -> str:
@@ -1318,6 +1337,41 @@ def trust_command(
         print_error(f"{name!r} is not installed; nothing to trust")
         raise typer.Exit(code=1)
 
+    # Validate the requested scopes against the installed manifest's
+    # declared permissions BEFORE persisting anything. A typo or an
+    # undeclared scope would otherwise produce a misleading
+    # "Granted: <scope>" + plugin.trusted event while the firewall still
+    # blocked invocation because the real required scope was never
+    # granted — a silent false-success at the trust boundary.
+    manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
+    try:
+        manifest = load_manifest(manifest_path)
+    except PluginManifestError as exc:
+        print_error(
+            f"installed manifest is unreadable; refusing to grant trust: "
+            f"{exc.path}: {exc.json_pointer or '(root)'}: "
+            f"{exc.args[0] if exc.args else ''}"
+        )
+        raise typer.Exit(code=1) from exc
+    declared = {p.scope for p in manifest.permissions}
+    undeclared = sorted(s for s in scopes if s not in declared)
+    if undeclared:
+        print_error(
+            f"scope(s) {undeclared!r} are not declared by {name!r}'s manifest "
+            f"(declared: {sorted(declared) if declared else '(none)'}); "
+            "refusing to grant. Trust may only be granted for scopes the "
+            "plugin actually requests — typos must not silently persist as "
+            "phantom grants."
+        )
+        raise typer.Exit(code=1)
+
+    # Audit events should record the install subject (source.type) the
+    # firewall actually keys trust by. The pre-RFC implementation
+    # hardcoded ``plugin_home`` here, which mis-labelled local_path
+    # plugins in the audit trail. Source it from the manifest (or the
+    # lockfile entry as a fallback), not a hardcoded literal.
+    event_source_type = manifest.source.type or entry.source_type or "plugin_home"
+
     # Trust is bound to the install subject recorded in the lockfile.
     # Re-trusting also clears the disable record (per the RFC: "Re-enabling
     # is performed by re-running ooo plugin trust …").
@@ -1347,7 +1401,7 @@ def trust_command(
                 "plugin": {
                     "name": name,
                     "version": entry.version,
-                    "source_type": "plugin_home",
+                    "source_type": event_source_type,
                 },
                 "command": {
                     "namespace": "trust",

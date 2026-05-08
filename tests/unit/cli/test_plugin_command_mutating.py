@@ -1327,3 +1327,144 @@ def test_remove_clears_disable_record(runner: CliRunner, tmp_path: Path) -> None
         ],
     )
     assert not TrustStore(root=paths["trust_root"]).is_disabled("github-pr-ops")
+
+
+# ---------------------------------------------------------------------------
+# Bot review (commit 58095bd5) follow-ups
+# ---------------------------------------------------------------------------
+
+
+def test_add_routes_git_plus_ssh_url_through_clone(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`git+ssh://...` install strings are documented as supported and
+    `_normalize_clone_url()` strips the `git+` prefix; the URL detector
+    must recognize them too, otherwise `add` mis-classifies them as a
+    local path and exits with "not a directory".
+
+    Regression catch for the bot's BLOCKING finding on plugin.py:558.
+    """
+    paths = _common_paths(tmp_path)
+    seen_argvs: list[list[str]] = []
+    real_run = subprocess.run
+
+    def _spy(argv, *args, **kwargs):
+        seen_argvs.append(list(argv))
+        if argv[:3] == ["git", "clone", "--depth"]:
+            dest = Path(argv[-1])
+            (dest / "plugins" / "github-pr-ops").mkdir(parents=True, exist_ok=True)
+            (dest / "plugins" / "github-pr-ops" / "ouroboros.plugin.json").write_text(
+                json.dumps(REFERENCE_MANIFEST)
+            )
+            (dest / ".git").mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        if argv[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="cafef00d\n", stderr=""
+            )
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.subprocess.run", _spy)
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            "git+ssh://git@github.com/Q00/ouroboros-plugins.git",
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(tmp_path / "cache"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    clone_calls = [a for a in seen_argvs if a[:2] == ["git", "clone"]]
+    assert len(clone_calls) == 1, clone_calls
+    cloned_url = clone_calls[0][-2]
+    # `git+` is stripped before reaching git, leaving a normal ssh URL.
+    assert cloned_url == "ssh://git@github.com/Q00/ouroboros-plugins.git", cloned_url
+    # And lockfile records source_kind="git".
+    assert Lockfile(paths["lockfile"]).read()["github-pr-ops"].source_kind == "git"
+
+
+def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> None:
+    """`ooo plugin trust --scope <typo>` must refuse to persist a grant
+    for a scope the manifest does not declare. Otherwise the command
+    silently records a phantom grant + emits `plugin.trusted` while the
+    firewall still blocks invocation because the real required scope was
+    never granted — a false success at the trust boundary.
+
+    Regression catch for the bot's BLOCKING finding on plugin.py:1328.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:reed",  # typo of "github:read"
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(paths["audit_log"]),
+        ],
+    )
+    assert result.exit_code == 1
+    # Strip Rich panel borders before matching.
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    plain = plain.replace("│", " ").replace("╭", " ").replace("╮", " ")
+    plain = plain.replace("╰", " ").replace("╯", " ").replace("─", " ")
+    flat = " ".join(plain.split())
+    assert "not declared" in flat
+    assert "github:reed" in flat
+    # No trust file written, no audit event emitted.
+    assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
+    assert not paths["audit_log"].exists() or paths["audit_log"].read_text() == ""
+
+
+def test_trust_audit_event_records_real_source_type(runner: CliRunner, tmp_path: Path) -> None:
+    """`plugin.trusted` audit payloads must record the manifest's actual
+    source.type, not a hardcoded ``plugin_home``. The reference manifest
+    uses ``local_path`` — the audit event must say so.
+
+    Regression catch for the bot's follow-up on plugin.py:1350.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(paths["audit_log"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    lines = paths["audit_log"].read_text().splitlines()
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    payload = envelope["payload"]
+    # Reference manifest has source.type=local_path, NOT plugin_home.
+    assert payload["plugin"]["source_type"] == "local_path", payload["plugin"]
