@@ -163,12 +163,16 @@ class AutoAnswerer:
                 self._verification_answer(question),
                 _INTENT_TO_SECTIONS[QuestionIntent.VERIFICATION],
                 context,
+                question=question,
+                lowered=lowered,
             )
         if QuestionIntent.ACCEPTANCE_CRITERIA in intents and not demote_for_user_verify:
             return _maybe_apply_user_preference(
                 self._feature_acceptance_answer(question),
                 _INTENT_TO_SECTIONS[QuestionIntent.ACCEPTANCE_CRITERIA],
                 context,
+                question=question,
+                lowered=lowered,
             )
         if QuestionIntent.RUNTIME_CONTEXT in intents and _should_preserve_runtime_route(lowered):
             answer = self._runtime_answer(question, context)
@@ -184,7 +188,13 @@ class AutoAnswerer:
         # Try a USER_PREFERENCE upgrade for upgradable answers (CONSERVATIVE_DEFAULT
         # / ASSUMPTION sources only). Stronger sources (REPO_FACT,
         # EXISTING_CONVENTION, NON_GOAL, USER_GOAL) are preserved as-is.
-        answer = _maybe_apply_user_preference(answer, _section_hints_for_intents(intents), context)
+        answer = _maybe_apply_user_preference(
+            answer,
+            _section_hints_for_intents(intents),
+            context,
+            question=question,
+            lowered=lowered,
+        )
 
         # When the chosen route produced a non-grounded fallback (ASSUMPTION,
         # EXISTING_CONVENTION, CONSERVATIVE_DEFAULT) for a question that the
@@ -237,19 +247,20 @@ class AutoAnswerer:
                 blocker=blocker,
             )
         if section in {"actors", "inputs", "outputs"}:
+            gap_question = "Who are the actors, inputs, and outputs for this task?"
             return _maybe_apply_user_preference(
-                self._io_actor_answer("Who are the actors, inputs, and outputs for this task?"),
+                self._io_actor_answer(gap_question),
                 (section,),
                 context,
+                question=gap_question,
             )
         if section in {"constraints", "failure_modes"}:
+            gap_question = "What conservative constraints and failure modes should bound this MVP?"
             return _maybe_apply_user_preference(
-                self._default_answer(
-                    "What conservative constraints and failure modes should bound this MVP?",
-                    ledger,
-                ),
+                self._default_answer(gap_question, ledger),
                 (section,),
                 context,
+                question=gap_question,
             )
         if section == "non_goals":
             # NON_GOAL source is not upgradable; preference will be ignored here
@@ -258,18 +269,20 @@ class AutoAnswerer:
                 "What non-goals should explicitly remain out of scope?", ledger
             )
         if section in {"acceptance_criteria", "verification_plan"}:
+            gap_question = "Which command output verifies the acceptance criteria?"
             return _maybe_apply_user_preference(
-                self._verification_answer("Which command output verifies the acceptance criteria?"),
+                self._verification_answer(gap_question),
                 (section,),
                 context,
+                question=gap_question,
             )
         if section == "runtime_context":
+            gap_question = "Which runtime stack, repo, and project patterns should be used?"
             return _maybe_apply_user_preference(
-                self._runtime_answer(
-                    "Which runtime stack, repo, and project patterns should be used?", context
-                ),
+                self._runtime_answer(gap_question, context),
                 ("runtime_context",),
                 context,
+                question=gap_question,
             )
         blocker = AutoBlocker(
             reason=f"unsupported ledger gap section: {section}",
@@ -1624,6 +1637,9 @@ def _maybe_apply_user_preference(
     answer: AutoAnswer,
     section_hints: tuple[str, ...],
     context: AutoAnswerContext,
+    *,
+    question: str = "",
+    lowered: str = "",
 ) -> AutoAnswer:
     """Replace an upgradable answer with a USER_PREFERENCE-tagged answer.
 
@@ -1635,6 +1651,16 @@ def _maybe_apply_user_preference(
     - ``context.user_preferences`` has a non-empty value for one of the
       provided ``section_hints``
     - ``answer.blocker`` is None
+    - the question is **not** flagged as a risky-fallback topic (regulated
+      personal data, destructive bulk operations, etc.). On early-return
+      answer paths (``VERIFICATION`` / ``ACCEPTANCE_CRITERIA`` / ``answer_gap``)
+      the routing-block safety gate never runs, so a caller-supplied
+      preference for ``verification_plan`` or ``acceptance_criteria`` could
+      otherwise smuggle a regulated answer into the ledger as a confirmed
+      ``USER_PREFERENCE`` entry. The helper short-circuits to a BLOCKER answer
+      in that case so the same policy fires regardless of which call site
+      requested the upgrade. The blocker mirrors the routing-block path
+      (``_RISKY_FALLBACK_SOURCES`` re-route).
 
     The first matching section wins. The new answer carries the user's value
     verbatim and tags the corresponding ledger entry with
@@ -1648,6 +1674,9 @@ def _maybe_apply_user_preference(
         return answer
     if not context.user_preferences:
         return answer
+    # Compute the lowered form lazily — most call sites pass it; ``answer_gap``
+    # and any future caller can rely on the inline normalisation here.
+    lowered_q = lowered or (_normalize_question(question) if question else "")
     for section in section_hints:
         raw_value = context.user_preferences.get(section)
         if not isinstance(raw_value, str):
@@ -1655,6 +1684,22 @@ def _maybe_apply_user_preference(
         value = raw_value.strip()
         if not value:
             continue
+        # Safety gate: a caller-supplied preference must not bypass the
+        # risky-fallback policy. If the question matches a regulated /
+        # destructive-bulk pattern, the upgrade is rejected here so the
+        # behaviour is identical across early-return and routing-block paths.
+        if lowered_q and question:
+            risky_blocker = _risky_fallback_blocker_for(question, lowered_q)
+            if risky_blocker is not None:
+                return AutoAnswer(
+                    text=(
+                        "Cannot safely decide automatically with a generic default: "
+                        f"{risky_blocker.reason}"
+                    ),
+                    source=AutoAnswerSource.BLOCKER,
+                    confidence=1.0,
+                    blocker=risky_blocker,
+                )
         preserved = [
             (other_section, other_entry)
             for other_section, other_entry in answer.ledger_updates

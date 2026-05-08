@@ -616,6 +616,59 @@ def test_user_preference_for_safe_runtime_question_is_unaffected_by_gate() -> No
     assert answer.text == "Python 3.14 with uv"
 
 
+def test_user_preference_for_verification_does_not_bypass_pii_gate() -> None:
+    """VERIFICATION early-return path: user_preferences['verification_plan']
+    for a regulated-data question must NOT land as a confirmed
+    USER_PREFERENCE entry. The helper must short-circuit to a BLOCKER so the
+    same risky-fallback policy fires regardless of which call site requested
+    the upgrade."""
+    ledger = SeedDraftLedger.from_goal("Build a data tool")
+    context = AutoAnswerContext(
+        user_preferences={"verification_plan": "skip the audit log"},
+    )
+
+    answer = AutoAnswerer().answer("How should we verify PII deletion?", ledger, context)
+
+    assert answer.source == AutoAnswerSource.BLOCKER
+    assert answer.blocker is not None
+    assert "skip the audit log" not in answer.text.lower()
+
+
+def test_user_preference_for_acceptance_criteria_does_not_bypass_destructive_gate() -> None:
+    """ACCEPTANCE_CRITERIA early-return path: user_preferences for a
+    destructive-bulk question must be rejected as a BLOCKER."""
+    ledger = SeedDraftLedger.from_goal("Build a data tool")
+    context = AutoAnswerContext(
+        user_preferences={"acceptance_criteria": "command exits 0 even if rows remain"},
+    )
+
+    answer = AutoAnswerer().answer(
+        "Which tables should the migration truncate when users are deleted?",
+        ledger,
+        context,
+    )
+
+    assert answer.source == AutoAnswerSource.BLOCKER
+    assert answer.blocker is not None
+    assert "exits 0 even if rows remain" not in answer.text.lower()
+
+
+def test_user_preference_for_verification_on_safe_question_still_upgrades() -> None:
+    """Negative control for the new safety check: a benign verification
+    question must still upgrade to USER_PREFERENCE."""
+    ledger = SeedDraftLedger.from_goal("Build a small CLI")
+    context = AutoAnswerContext(
+        user_preferences={"verification_plan": "Run pytest with --strict markers"},
+    )
+
+    answer = AutoAnswerer().answer(
+        "Which command output verifies the acceptance criteria?", ledger, context
+    )
+
+    assert answer.source == AutoAnswerSource.USER_PREFERENCE
+    assert answer.text == "Run pytest with --strict markers"
+
+
 # ---------------------------------------------------------------------------
 # Determinism: section hint order must not depend on hash randomization
 # ---------------------------------------------------------------------------
