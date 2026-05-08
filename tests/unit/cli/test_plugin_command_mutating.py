@@ -434,6 +434,95 @@ def test_remove_lockfile_failure_preserves_installed_state(
     assert trust.read_disable("github-pr-ops") is not None
 
 
+def test_remove_retry_cleans_stale_state_after_trust_wipe_failure(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If trust cleanup fails after lock removal, a second remove can recover."""
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    (plugin_dir / "marker.txt").write_text("installed")
+    paths = _common_paths(tmp_path)
+
+    installed = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert installed.exit_code == 0, installed.output
+    entry = Lockfile(paths["lockfile"]).read()["github-pr-ops"]
+    trust = TrustStore(root=paths["trust_root"])
+    trust.grant(
+        plugin="github-pr-ops",
+        version=entry.version,
+        scope="github:read",
+        granted_by="user:test",
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+        artifact_digest=entry.artifact_digest,
+    )
+    trust.write_disable(
+        "github-pr-ops",
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+        disabled_by="user:test",
+    )
+
+    original_clear_disable = TrustStore.clear_disable
+
+    def _fail_clear_disable(self, plugin):  # noqa: ANN001
+        raise OSError("simulated disabled.json unlink failure")
+
+    monkeypatch.setattr(TrustStore, "clear_disable", _fail_clear_disable)
+    first = runner.invoke(
+        plugin_app,
+        [
+            "remove",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert first.exit_code == 1
+    assert "could not finalize remove" in first.output
+    assert "github-pr-ops" not in Lockfile(paths["lockfile"]).read()
+    assert trust.is_disabled("github-pr-ops")
+    assert (paths["plugin_home_root"] / "github-pr-ops" / "marker.txt").is_file()
+
+    monkeypatch.setattr(TrustStore, "clear_disable", original_clear_disable)
+    retry = runner.invoke(
+        plugin_app,
+        [
+            "remove",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert retry.exit_code == 0, retry.output
+    assert "Removed stale state" in retry.output
+    assert "github-pr-ops" not in Lockfile(paths["lockfile"]).read()
+    assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
+    assert not TrustStore(root=paths["trust_root"]).is_disabled("github-pr-ops")
+    assert not (paths["plugin_home_root"] / "github-pr-ops").exists()
+
+
 def test_install_failure_preserves_existing_trust_grants(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

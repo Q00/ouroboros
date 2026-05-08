@@ -2537,6 +2537,36 @@ def remove_command(
     entries = _read_lock_or_exit(lock)
     entry = entries.get(name)
     if entry is None:
+        stale_plugin_home_root = plugin_home_root or Path.home() / ".ouroboros" / "plugins"
+        plugin_home = stale_plugin_home_root.expanduser() / name
+        stale_trust_dir = trust.root / name
+        has_stale_state = stale_trust_dir.exists() or plugin_home.exists()
+        if has_stale_state:
+            try:
+                trust.wipe_subject(name)
+            except (ValueError, OSError) as exc:
+                print_error(
+                    f"could not finalize remove for {name!r}: {exc}. "
+                    f"Inspect the trust files under {trust.root / name} and the "
+                    f"lockfile at {lock.path}, then re-run `ooo plugin remove "
+                    f"{name}` after the underlying issue is fixed."
+                )
+                raise typer.Exit(code=1) from exc
+
+            plugin_home_status = "plugin home"
+            if plugin_home.is_dir():
+                try:
+                    shutil.rmtree(plugin_home)
+                except OSError as exc:
+                    plugin_home_status = (
+                        f"plugin home (BYTES NOT REMOVED: {plugin_home} — "
+                        f"{type(exc).__name__}: {exc}; remove manually)"
+                    )
+            print_success(
+                f"Removed stale state for {name} "
+                f"(trust file + disable record + {plugin_home_status})"
+            )
+            return
         print_error(f"{name!r} is not installed")
         raise typer.Exit(code=1)
 
