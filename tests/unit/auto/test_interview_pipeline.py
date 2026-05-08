@@ -311,6 +311,75 @@ async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_
     assert state.pending_question is None
 
 
+def test_revert_safe_default_entries_preserves_user_keys_with_matching_suffix() -> None:
+    """Regression: rollback must NOT remove a non-policy entry whose key
+    coincidentally ends with ``.safe_default_finalization``.
+
+    The earlier ``entry.key.endswith(".safe_default_finalization")`` filter
+    would delete a user/answerer-authored ledger entry whose key just
+    happens to share that suffix (for example, an answerer-synthesized
+    constraint key ``constraints.my.safe_default_finalization``).
+    Only the canonical key written by ``finalize_safe_defaultable_gaps``
+    (``{section}.safe_default_finalization``) should be removed on rollback.
+    """
+    from ouroboros.auto.interview_driver import _revert_safe_default_entries
+    from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus
+
+    ledger = SeedDraftLedger.from_goal("Build a small CLI")
+
+    # 1. The canonical safe-default policy entry — must be removed.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.safe_default_finalization",
+            value="defaulted",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+            rationale="policy",
+            evidence=("provenance",),
+        ),
+    )
+    # 2. A user-authored entry that ends with the same suffix but is NOT
+    #    the canonical policy key. Must SURVIVE the rollback.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.my.safe_default_finalization",
+            value="user-specified constraint",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.95,
+            status=LedgerStatus.CONFIRMED,
+            rationale="user said so",
+            evidence=("interview answer",),
+        ),
+    )
+    # 3. An unrelated entry that does not match the suffix at all.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.other",
+            value="unrelated",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+            rationale="control",
+            evidence=("control",),
+        ),
+    )
+
+    _revert_safe_default_entries(ledger, ("constraints",))
+
+    remaining_keys = {entry.key for entry in ledger.sections["constraints"].entries}
+    assert "constraints.safe_default_finalization" not in remaining_keys, (
+        "the canonical safe-default policy entry MUST be removed on rollback"
+    )
+    assert "constraints.my.safe_default_finalization" in remaining_keys, (
+        "a user-authored entry whose key shares the suffix MUST survive rollback"
+    )
+    assert "constraints.other" in remaining_keys
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_finalizes_when_backend_requires_two_completion_signals(
     tmp_path,
@@ -553,6 +622,54 @@ def test_safe_default_allows_benign_production_mentions(goal: str) -> None:
     )
     assert result.unsafe_gaps == ()
     assert ledger.is_seed_ready()
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        # Fullwidth Latin block (U+FF21..U+FF5A) — visually identical to
+        # ASCII for end users and routinely produced by IMEs that round-trip
+        # through CJK keyboards. The unsafe-context "external side effect"
+        # arm matches the action verbs (``deploy``/``release``/``publish``/
+        # ``go live``/``push live``/``database migration``/...). Without
+        # NFKC normalization those alternations cannot see the fullwidth
+        # form, and the gate silently authorizes a production cutover.
+        "ｄｅｐｌｏｙ to ｐｒｏｄｕｃｔｉｏｎ this Friday",
+        "ｒｅｌｅａｓｅ version 2 to ｐｒｏｄ",
+        # Compatibility ligature (U+FB01 ``ﬁ``) paired with a real
+        # production-action verb so the regression covers normalization on
+        # the verb-token side as well.
+        "ﬁnalize ｄｅｐｌｏｙ to production tomorrow",
+    ],
+)
+def test_safe_default_blocks_unicode_compat_production_actions(goal: str) -> None:
+    """Fullwidth/ligature Unicode must not bypass the unsafe-context regex bank.
+
+    The relevant arm is the "ambiguous external side effect" pattern,
+    which matches the action verbs (``deploy``/``release``/``publish``/
+    ``send email``/``webhook``/``database migration``/``go live``/
+    ``push live``/...). Bare ``production``/``prod``/``live`` is *not*
+    by itself flagged any more — the verb token is what carries the
+    block decision. Without ``unicodedata.normalize("NFKC", context)``
+    before the ``re.search`` calls in ``_unsafe_context_reason``, those
+    verb alternations cannot see fullwidth Latin (``ｄｅｐｌｏｙ``) or
+    ligature (``ﬁ``) variants, and the safe-default policy
+    auto-defaults a session that actually authorizes a production
+    deploy.
+    """
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert not result.completed, (
+        f"NFKC-equivalent goal {goal!r} authorizes a production action; finalization must block"
+    )
+    assert any("external side effect" in gap.lower() for gap in result.unsafe_gaps)
+    assert not ledger.is_seed_ready()
 
 
 @pytest.mark.parametrize(

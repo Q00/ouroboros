@@ -584,10 +584,17 @@ class GenerateSeedHandler:
         # Fall-through: real in-process seed generation (subprocess / non-opencode runtimes).
 
         try:
-            # Use injected or create services
+            # Use injected or create services.
+            # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use
+            # block emitted by the model would consume the only allowed turn
+            # and the SDK then raises ``Reached maximum number of turns (1)``
+            # before a final text response can stream. See issue #781.
             llm_adapter = self.llm_adapter or create_llm_adapter(
                 backend=self.llm_backend,
                 max_turns=1,
+                allowed_tools=[]
+                if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+                else None,
             )
             interview_engine = self.interview_engine or InterviewEngine(
                 llm_adapter=llm_adapter,
@@ -1250,6 +1257,16 @@ class InterviewHandler:
         # max_turns=1: MCP is a pure question generator. No tool use needed.
         # Main session handles codebase exploration and answering.
         #
+        # ``allowed_tools=[]`` is paired with ``max_turns=1``: any tool-use
+        # block emitted by the model would consume the only allowed turn
+        # and the SDK then raises ``Reached maximum number of turns (1)``
+        # before a final text response can stream.  The read-only policy
+        # envelope (``_interview_allowed_tools``) is intentionally bypassed
+        # here — interview is a single-shot question generator, not an
+        # agentic explorer, and matches ``PMInterviewHandler._get_engine``
+        # which closes the envelope the same way (``pm_handler.py``).
+        # See: https://github.com/Q00/ouroboros/issues/765
+        #
         # ``strict_mcp_config=True`` is opt-in here — and ONLY here — so the
         # subprocess spawned for question generation cannot rediscover the
         # plugin-provided ouroboros MCP server when this handler runs as a
@@ -1262,7 +1279,11 @@ class InterviewHandler:
             backend=self.llm_backend,
             max_turns=1,
             use_case="interview",
-            allowed_tools=_interview_allowed_tools(self.llm_backend),
+            allowed_tools=(
+                []
+                if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+                else None
+            ),
             strict_mcp_config=True,
         )
         engine = self.interview_engine or InterviewEngine(

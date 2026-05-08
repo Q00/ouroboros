@@ -33,6 +33,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import render_seed_contract_for_execution
@@ -95,7 +96,7 @@ from ouroboros.orchestrator.runtime_message_projection import (
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
-from ouroboros.providers import create_llm_adapter
+from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.resilience.lateral import ThinkingPersona
 from ouroboros.resilience.recovery import (
     RecoveryActionKind,
@@ -728,12 +729,16 @@ class OrchestratorRunner:
         cli_path = getattr(self._adapter, "cli_path", None)
         resolved_cli_path = cli_path if isinstance(cli_path, str) and cli_path else None
         try:
+            # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
             llm_adapter = create_llm_adapter(
                 backend=backend,
                 permission_mode=self._adapter.permission_mode,
                 cli_path=resolved_cli_path,
                 cwd=self._effective_cwd(),
                 max_turns=1,
+                allowed_tools=(
+                    [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
+                ),
             )
         except (RuntimeError, ImportError, ConnectionError, OSError, ValueError) as exc:
             log.warning(

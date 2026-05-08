@@ -1168,6 +1168,7 @@ def build_ralph_subagent(
     skip_qa: bool = False,
     project_dir: str | None = None,
     max_generations: int = 10,
+    per_iteration_timeout_seconds: float | None = None,
     delegation_depth: int = 1,
     allow_nested_ouroboros_ralph: bool = False,
 ) -> SubagentPayload:
@@ -1177,6 +1178,22 @@ def build_ralph_subagent(
     OpenCode bridge plugin runtime, however, MCP handlers must return a
     ``_subagent`` envelope and let the plugin's Task pane own execution rather
     than enqueueing an unobservable local background job.
+
+    Args:
+        per_iteration_timeout_seconds: Per-iteration wall-clock bound forwarded
+            from the MCP handler.
+
+            This is an *advisory* bound on the plugin path: the parent Python
+            MCP process cannot interrupt the OpenCode child session, so the
+            value is rendered into the subagent's prompt (with an explicit
+            stop instruction) and context dict, and the child session is
+            expected to honor it and return
+            ``stop_reason=iteration_timeout`` on expiry. A non-conforming
+            child session may still exceed the bound; hard wall-clock
+            enforcement only exists on the in-process runtime path
+            (``RalphLoopRunner``). When ``None``, the field is omitted from
+            both prompt and context (legacy shape preserved for callers that
+            don't care about the bound).
     """
     seed_note = ""
     if seed_content is not None:
@@ -1211,6 +1228,16 @@ def build_ralph_subagent(
         )
     )
 
+    timeout_note = ""
+    if per_iteration_timeout_seconds is not None:
+        timeout_note = (
+            "\n## Per-Iteration Timeout\n"
+            f"per_iteration_timeout_seconds: {per_iteration_timeout_seconds:g}\n"
+            "Stop the generation immediately if any single `evolve_step` "
+            f"invocation exceeds {per_iteration_timeout_seconds:g} seconds; "
+            "that satisfies the public contract `stop_reason=iteration_timeout`.\n"
+        )
+
     prompt = f"""## Your Task
 
 Run a Ralph loop for the given lineage inside this OpenCode child session.
@@ -1220,6 +1247,8 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - action is converged
 - action is failed / interrupted / exhausted / stagnated
 - max_generations is reached
+- a single `evolve_step` invocation exceeds per_iteration_timeout_seconds
+  (when supplied) — return stop_reason=iteration_timeout
 
 ## Lineage ID
 {lineage_id}
@@ -1232,7 +1261,7 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - allow_nested_ouroboros_ralph: {str(allow_nested_ouroboros_ralph).lower()}
 - Do not call ouroboros_ralph from this child session. Run the loop directly
   by executing/evaluating one generation at a time.
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{timeout_note}
 For generation 1, use the seed content when present. For later generations,
 reconstruct state from the lineage and continue without resending seed_content.
 
@@ -1252,6 +1281,8 @@ do not enqueue another background Ralph job."""
         "delegation_depth": delegation_depth,
         "allow_nested_ouroboros_ralph": allow_nested_ouroboros_ralph,
     }
+    if per_iteration_timeout_seconds is not None:
+        context["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",

@@ -188,8 +188,37 @@ def is_first_time() -> bool:
 
 
 def _word_boundary_match(pattern: str, text: str) -> bool:
-    """Match pattern using word boundaries to avoid false positives."""
-    return bool(re.search(r"(?:^|\b)" + re.escape(pattern) + r"(?:\b|$)", text))
+    """Match ``pattern`` against ``text`` with strong end-of-token boundaries.
+
+    The naive ``(?:^|\\b)pattern(?:\\b|$)`` form mis-matches when the
+    pattern ends in a hyphenated token. ``\\b`` triggers on any
+    word-character ↔ non-word-character transition, so a pattern like
+    ``"ooo resume-session"`` matched ``"ooo resume-session-extra"``
+    because ``\\b`` fired between ``n`` and the trailing ``-``. The
+    detector then routed legitimately-different commands (e.g. a future
+    ``ooo resume-session-cleanup``) to ``/ouroboros:resume-session``.
+
+    Tighten both sides:
+
+    * Leading boundary: start-of-string OR a non-word, non-hyphen
+      character before the pattern. Prevents ``myooo auto`` from
+      matching ``ooo auto`` (the ``\\b`` form already did this; we
+      preserve that) AND prevents a leading hyphen from forming a
+      false token break.
+    * Trailing boundary: end-of-string OR a non-word, non-hyphen
+      character. The non-hyphen requirement is what actually fixes the
+      bug: now ``ooo resume-session-extra`` no longer matches
+      ``ooo resume-session`` because the trailing ``-`` is rejected as
+      a boundary.
+
+    The pattern itself can still legitimately *contain* a hyphen
+    (``"ooo resume-session"`` matches ``"ooo resume-session"`` because
+    ``re.escape`` quotes the inner ``-`` literally and the boundary
+    only inspects the character that comes AFTER the match).
+    """
+    boundary_lead = r"(?:^|[^\w-])"
+    boundary_trail = r"(?:$|[^\w-])"
+    return bool(re.search(boundary_lead + re.escape(pattern) + boundary_trail, text))
 
 
 def detect_keywords(text: str) -> dict:

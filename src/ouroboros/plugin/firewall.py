@@ -207,6 +207,29 @@ def _argv_sha256(argv: list[str]) -> str:
     return h.hexdigest()
 
 
+def _argv_summary(argv: list[str]) -> dict:
+    """Compute a bounded fingerprint of argv for the audit envelope.
+
+    Returns ``{argc, byte_length, sha256}``. Hashing uses NUL as the
+    element separator so two different argv lists with the same
+    concatenation cannot collide
+    (``["ab", "cd"]`` vs ``["abcd"]``). ``byte_length`` excludes the
+    separators so the number reflects the operator-visible payload
+    size. The summary is computed over the **redacted** argv (the
+    same value that lands in ``cmd["argv"]``) so the byte-length and
+    sha256 describe what actually appears on the audit ledger; this
+    keeps the observation-only metric consistent with the redaction
+    contract that secret values never reach persisted state.
+    """
+    parts = [s.encode("utf-8", errors="replace") for s in argv]
+    digest = hashlib.sha256(b"\x00".join(parts)).hexdigest()
+    return {
+        "argc": len(argv),
+        "byte_length": sum(len(p) for p in parts),
+        "sha256": digest,
+    }
+
+
 def _event_envelope(
     *,
     event_type: str,
@@ -233,6 +256,12 @@ def _event_envelope(
     if argv is not None:
         redacted, redaction_fired = _redact_argv(list(argv))
         cmd["argv"] = redacted
+        # ``argv_summary`` is observation-only sizing of what actually
+        # lands on the ledger. Compute it over the redacted argv so the
+        # byte_length / sha256 describe the persisted shape, not the
+        # pre-redaction one — secret-shaped values must not contribute
+        # to a hash that an audit consumer might reverse-correlate.
+        cmd["argv_summary"] = _argv_summary(redacted)
         if redaction_fired:
             argv_hash = _argv_sha256(list(argv))
     event: dict = {

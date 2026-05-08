@@ -5,12 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import re
+import threading
 from uuid import uuid4
 
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.core.seed import Seed
+
+
+class RepairCancelled(Exception):
+    """Raised when the converge loop observes a set cancel signal.
+
+    The repair phase timeout in ``AutoPipeline.run`` cannot interrupt a
+    synchronous ``reviewer.review()`` call mid-execution, but it can stop the
+    loop from launching *another* review/repair iteration once the in-flight
+    call returns. This sentinel travels back through ``asyncio.to_thread``
+    and is intentionally distinct from ``TimeoutError`` (which the awaiter
+    already raised) so log analysis can tell "stopped at iteration boundary"
+    apart from "still hung in reviewer.review()".
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +43,26 @@ class SeedRepairer:
     """Deterministically repair common A-grade failures."""
 
     reviewer: SeedReviewer = field(default_factory=SeedReviewer)
-    max_repair_rounds: int = 5
+    # Canonical iteration bound. ``max_repair_rounds`` is preserved as a
+    # backward-compatible alias for existing callers (CLI, MCP, persisted
+    # state). The default mirrors ``AutoPipelineState.max_repair_rounds`` at
+    # ``state.py:228`` so the repairer-layer bound matches the pipeline-layer
+    # bound the rest of the codebase already advertises.
+    max_iterations: int = 5
+    max_repair_rounds: int = field(default=5, repr=False)
+
+    def __post_init__(self) -> None:
+        # Resolve ``max_iterations`` and ``max_repair_rounds`` to a single
+        # bound so callers can use either name without surprise. When a caller
+        # passes only ``max_repair_rounds`` (legacy callsites in CLI / MCP /
+        # tests), mirror it onto ``max_iterations``. When a caller passes
+        # ``max_iterations`` (new contract), mirror it back onto
+        # ``max_repair_rounds`` so existing introspection (e.g. progress
+        # surfaces reading ``repairer.max_repair_rounds``) keeps working.
+        if self.max_iterations == 5 and self.max_repair_rounds != 5:
+            self.max_iterations = self.max_repair_rounds
+        else:
+            self.max_repair_rounds = self.max_iterations
 
     def repair_once(
         self,
@@ -117,14 +150,52 @@ class SeedRepairer:
         )
 
     def converge(
-        self, seed: Seed, *, ledger: SeedDraftLedger | None = None
+        self,
+        seed: Seed,
+        *,
+        ledger: SeedDraftLedger | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[Seed, SeedReview, list[RepairResult]]:
-        """Review/repair until A-grade or bounded stop."""
+        """Review/repair until A-grade or bounded stop.
+
+        ``max_iterations`` caps the number of recorded repair attempts. Once
+        ``len(history) >= self.max_iterations`` the loop returns the most
+        recent reviewed ``(seed, review, history)`` — this is the upper bound
+        the pipeline relies on to prevent unbounded LLM cost when the reviewer
+        keeps producing the same finding.
+
+        When the bound is reached *immediately after* applying a repair, the
+        last cached ``review`` still describes the *pre-repair* seed; in that
+        case we perform exactly one final reconciliation review so the
+        returned ``(seed, review)`` pair is consistent. The pipeline persists
+        ``state.last_grade`` / ``state.findings`` from this review, so a stale
+        review here would block a seed that the final allowed repair actually
+        fixed (PR #785 review-1).
+
+        ``cancel_event`` enables cooperative cancellation by the pipeline's
+        repair-phase ``asyncio.wait_for``. ``wait_for`` only releases the
+        awaiting coroutine; it cannot interrupt a synchronous reviewer call
+        running in the worker thread. If the event is set, this method
+        raises :class:`RepairCancelled` at the next iteration boundary so no
+        *further* ``reviewer.review`` calls run after the budget expires.
+        The currently in-flight reviewer call still finishes naturally — that
+        is a non-cancellable C/IO boundary in CPython — but the loop will not
+        consume another review's worth of LLM time/cost (PR #785 review-3).
+        """
         history: list[RepairResult] = []
         previous_high_fingerprints: set[str] = set()
         current = seed
+
+        def _check_cancelled() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RepairCancelled(
+                    "repair phase cancelled by pipeline timeout before next reviewer call"
+                )
+
+        _check_cancelled()
         review = self.reviewer.review(current, ledger=ledger)
-        for _ in range(self.max_repair_rounds):
+        for _ in range(self.max_iterations):
+            _check_cancelled()
             if review.grade_result.grade == SeedGrade.A and review.may_run:
                 return current, review, history
             high = {
@@ -135,10 +206,19 @@ class SeedRepairer:
             if repair.blocker or not repair.changed:
                 return current, review, history
             current = repair.seed
+            if len(history) >= self.max_iterations:
+                # Bound hit *after* a successful repair: the cached ``review``
+                # still describes the previous (pre-repair) seed. Re-review
+                # ``current`` once so the returned pair is consistent.
+                _check_cancelled()
+                review = self.reviewer.review(current, ledger=ledger)
+                return current, review, history
             if high and high == previous_high_fingerprints:
+                _check_cancelled()
                 review = self.reviewer.review(current, ledger=ledger)
                 return current, review, history
             previous_high_fingerprints = high
+            _check_cancelled()
             review = self.reviewer.review(current, ledger=ledger)
         return current, review, history
 

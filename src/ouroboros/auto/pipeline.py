@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
+import inspect
+import threading
 from typing import Any
 
 from ouroboros.auto.blocker_attribution import record_authoring_backend
@@ -294,7 +296,34 @@ class AutoPipeline:
         if state.phase == AutoPhase.REVIEW:
             reviewer = self.reviewer or SeedReviewer(self.grade_gate)
             repairer = self.repairer or SeedRepairer(reviewer=reviewer)
-            seed, review, repairs = repairer.converge(seed, ledger=ledger)
+            repair_timeout = state.phase_timeout_seconds(AutoPhase.REPAIR)
+            # ``asyncio.wait_for`` only releases the awaiting coroutine; it
+            # cannot interrupt synchronous reviewer work running in the
+            # ``to_thread`` worker. Pass an explicit cancel signal so the
+            # repairer exits at the next iteration boundary instead of
+            # continuing to consume LLM calls after the budget expired
+            # (PR #785 review-3).
+            cancel_event = threading.Event()
+            converge_kwargs: dict[str, Any] = {"ledger": ledger}
+            # Older test stubs / external implementations of ``converge`` may
+            # not accept ``cancel_event``; only pass it when the callable
+            # actually declares it (or accepts ``**kwargs``). Real
+            # ``SeedRepairer.converge`` does declare it.
+            if _accepts_keyword(repairer.converge, "cancel_event"):
+                converge_kwargs["cancel_event"] = cancel_event
+            try:
+                seed, review, repairs = await asyncio.wait_for(
+                    asyncio.to_thread(repairer.converge, seed, **converge_kwargs),
+                    timeout=repair_timeout,
+                )
+            except TimeoutError:
+                cancel_event.set()
+                state.mark_blocked(
+                    f"repair phase exceeded {repair_timeout:.0f}s",
+                    tool_name="seed_repairer",
+                )
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
             state.seed_artifact = seed.to_dict()
             state.repair_round = len(repairs)
             state.last_grade = review.grade_result.grade.value
@@ -734,6 +763,25 @@ def _grade_meets_required(actual: str | None, required: str) -> bool:
     return rank[actual] <= rank[required]
 
 
+def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:
+    """Return True iff ``func`` declares ``name`` or accepts ``**kwargs``.
+
+    Used to decide whether the repair-phase cancel signal can be threaded
+    into a ``converge``-shaped callable without breaking older test stubs
+    that only declare ``(seed, *, ledger)``.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.name == name:
+            return True
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
+
 def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
     if tool_name in {
         "interview.start",
@@ -745,7 +793,12 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate", "seed_loader"}:
+    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer"}:
+        # ``seed_repairer`` joins this set so a repair-phase timeout (the
+        # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
+        # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
+        # restart is the REVIEW phase, which re-invokes the bounded repairer.
+        # Without this entry a transient timeout becomes a permanent dead end.
         return AutoPhase.REVIEW
     if tool_name == "run_starter":
         return AutoPhase.RUN

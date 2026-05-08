@@ -7,6 +7,7 @@ longer have to own the multi-generation loop in prompt/skill pseudo-code.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from ouroboros.core.types import Result
@@ -28,9 +29,16 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.ralph_loop import EvolveStepLike, RalphLoopConfig, RalphLoopRunner
+from ouroboros.ralph_loop import (
+    DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
+    EvolveStepLike,
+    RalphLoopConfig,
+    RalphLoopRunner,
+)
 
 MAX_RALPH_GENERATIONS = 10
+MIN_PER_ITERATION_TIMEOUT_SECONDS = 30.0
+MAX_PER_ITERATION_TIMEOUT_SECONDS = 7200.0
 
 
 @dataclass
@@ -112,6 +120,24 @@ class RalphHandler:
                     required=False,
                     default=MAX_RALPH_GENERATIONS,
                 ),
+                MCPToolParameter(
+                    name="per_iteration_timeout_seconds",
+                    type=ToolInputType.NUMBER,
+                    description=(
+                        "Per-iteration wall-clock bound in seconds. In-process "
+                        "runtime: hard-enforced via asyncio.timeout, the loop "
+                        "stops with stop_reason='iteration_timeout' on expiry. "
+                        "OpenCode plugin runtime: advisory bound advertised to "
+                        "the child session via prompt + subagent context — the "
+                        "child is expected to honor it and return "
+                        "stop_reason='iteration_timeout', but the parent MCP "
+                        "process cannot interrupt the child, so a non-conforming "
+                        "child session may still exceed this bound. "
+                        "Default: 1800. Range: 30-7200."
+                    ),
+                    required=False,
+                    default=DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
+                ),
             ),
         )
 
@@ -152,6 +178,40 @@ class RalphHandler:
                 )
             )
 
+        try:
+            per_iteration_timeout_seconds = float(
+                arguments.get(
+                    "per_iteration_timeout_seconds",
+                    DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            return Result.err(
+                MCPToolError(
+                    "per_iteration_timeout_seconds must be a number",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+        if not math.isfinite(per_iteration_timeout_seconds):
+            return Result.err(
+                MCPToolError(
+                    "per_iteration_timeout_seconds must be a finite number",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+        if (
+            per_iteration_timeout_seconds < MIN_PER_ITERATION_TIMEOUT_SECONDS
+            or per_iteration_timeout_seconds > MAX_PER_ITERATION_TIMEOUT_SECONDS
+        ):
+            return Result.err(
+                MCPToolError(
+                    "per_iteration_timeout_seconds must be between "
+                    f"{MIN_PER_ITERATION_TIMEOUT_SECONDS:g} and "
+                    f"{MAX_PER_ITERATION_TIMEOUT_SECONDS:g}",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+
         if arguments.get("delegation_depth", 0):
             return Result.err(
                 MCPToolError(
@@ -168,6 +228,7 @@ class RalphHandler:
             skip_qa=bool(arguments.get("skip_qa", False)),
             project_dir=arguments.get("project_dir"),
             max_generations=max_generations,
+            per_iteration_timeout_seconds=per_iteration_timeout_seconds,
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -179,6 +240,7 @@ class RalphHandler:
                 skip_qa=config.skip_qa,
                 project_dir=config.project_dir,
                 max_generations=config.max_generations,
+                per_iteration_timeout_seconds=config.per_iteration_timeout_seconds,
             )
             await self._event_store.initialize()
             await emit_subagent_dispatched_event(

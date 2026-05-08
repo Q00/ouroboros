@@ -95,6 +95,74 @@ def _fake_runner(
 # ---------------------------------------------------------------------------
 
 
+def test_argv_summary_is_emitted_alongside_argv(tmp_path: Path) -> None:
+    """Every event with an argv carries an `argv_summary` block that sizes
+    the payload (argc, byte_length, sha256). The full argv stays in the
+    envelope verbatim — this is the observation step before any cap or
+    spill policy is decided. Two different argv lists with the same
+    concatenation must not collide on sha256 (NUL separator invariant).
+    """
+    import hashlib
+
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    events: list[dict] = []
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=["--input", "https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-summary",
+        subprocess_runner=_fake_runner(),
+    )
+    assert events  # something was emitted
+    for event in events:
+        if "argv" not in event["command"]:
+            continue
+        summary = event["command"]["argv_summary"]
+        assert summary["argc"] == 2
+        assert summary["byte_length"] == len("--input") + len("https://example.com/pr/1")
+        # The full argv survives unchanged — no truncation.
+        assert event["command"]["argv"] == ["--input", "https://example.com/pr/1"]
+        # sha256 deterministic and distinct from naive-concat collision.
+        joined = b"\x00".join(s.encode("utf-8") for s in event["command"]["argv"])
+        assert summary["sha256"] == hashlib.sha256(joined).hexdigest()
+        # Collision guard: ["ab","cd"] and ["abcd"] hash differently.
+        ab_cd = hashlib.sha256(b"ab\x00cd").hexdigest()
+        abcd = hashlib.sha256(b"abcd").hexdigest()
+        assert ab_cd != abcd
+
+
+def test_argv_summary_omitted_when_argv_is_none(tmp_path: Path) -> None:
+    """A plugin invocation with no argv (e.g. blocked-before-launch flow)
+    must not produce an argv_summary either — the schema's
+    `additionalProperties: false` rejects half-populated command dicts."""
+    program = _make_program(tmp_path)
+    events: list[dict] = []
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=[],
+        trust_record=None,  # blocks before launch
+        event_sink=events.append,
+        correlation_id="corr-noargv",
+        subprocess_runner=_fake_runner(),
+    )
+    # The blocked path emits plugin.failed only.
+    failed = [e for e in events if e["event_type"] == "plugin.failed"]
+    assert failed
+    cmd = failed[0]["command"]
+    if "argv" not in cmd:
+        # No argv → no summary.
+        assert "argv_summary" not in cmd
+
+
 def test_happy_path_emits_invoked_then_permission_then_completed(tmp_path: Path) -> None:
     """Test 1: trusted invocation emits invoked → permission_used → completed."""
     program = _make_program(tmp_path)
