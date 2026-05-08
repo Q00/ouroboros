@@ -259,9 +259,7 @@ async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_pat
     )
     assert "mark the interview complete" in synthesis_text.lower()
     assert "actors" in synthesis_text
-    assert any(
-        "safe-default" in item.get("answer", "").lower() for item in ledger.question_history
-    )
+    assert any("safe-default" in item.get("answer", "").lower() for item in ledger.question_history)
 
 
 @pytest.mark.asyncio
@@ -382,9 +380,7 @@ def test_safe_default_finalization_is_idempotent_against_its_own_synthesis() -> 
     goal = "Build a small local CLI"
     ledger = SeedDraftLedger.from_goal(goal)
 
-    first = finalize_safe_defaultable_gaps(
-        ledger, goal=goal, provenance="unit test pass 1"
-    )
+    first = finalize_safe_defaultable_gaps(ledger, goal=goal, provenance="unit test pass 1")
     assert first.completed
     assert ledger.is_seed_ready()
 
@@ -396,9 +392,7 @@ def test_safe_default_finalization_is_idempotent_against_its_own_synthesis() -> 
     assert synthesis  # sanity
     ledger.record_qa("auto safe-default finalization", synthesis)
 
-    second = finalize_safe_defaultable_gaps(
-        ledger, goal=goal, provenance="unit test pass 2"
-    )
+    second = finalize_safe_defaultable_gaps(ledger, goal=goal, provenance="unit test pass 2")
     # Nothing left to default on pass 2, and the synthesis must not have
     # poisoned the gate.
     assert second.unsafe_gaps == ()

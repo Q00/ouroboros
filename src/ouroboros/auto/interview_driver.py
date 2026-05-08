@@ -453,8 +453,7 @@ class AutoInterviewDriver:
             )
         except TimeoutError as exc:
             blocker = (
-                "safe-default synthesis could not be persisted to the interview "
-                f"transcript: {exc}"
+                f"safe-default synthesis could not be persisted to the interview transcript: {exc}"
             )
             state.mark_blocked(blocker, tool_name="interview.answer")
             record_authoring_backend(state)
