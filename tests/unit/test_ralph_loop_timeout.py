@@ -2,8 +2,10 @@
 
 Covers issue #776: a single hung ``evolve_step`` invocation must not consume
 the entire wall clock. The runner enforces a per-iteration timeout via
-``asyncio.wait_for``; the MCP layer validates the user-supplied bound at
-``30 <= x <= 7200`` seconds.
+``asyncio.timeout`` and uses ``Timeout.expired()`` to distinguish *its*
+deadline firing from any ``TimeoutError`` raised by the evolve stack itself.
+The MCP layer validates the user-supplied bound at ``30 <= x <= 7200`` seconds
+and rejects non-finite values.
 """
 
 from __future__ import annotations
@@ -106,6 +108,47 @@ async def test_ralph_loop_timeout_surfaces_in_tool_result_meta() -> None:
     assert tool_result.meta["status"] == "failed"
     assert tool_result.meta["stop_reason"] == "iteration_timeout"
     assert tool_result.meta["actions"] == ["iteration_timeout"]
+
+
+@dataclass
+class _InnerTimeoutEvolveHandler:
+    """Handler that raises ``TimeoutError`` itself, *before* the wall clock fires.
+
+    Models an inner provider/network timeout from inside ``evolve_step``: the
+    runtime per-iteration deadline must not silently rebrand this as
+    ``stop_reason=iteration_timeout`` — the original failure must propagate.
+    """
+
+    calls: int = 0
+
+    async def handle(self, arguments: dict[str, Any]):
+        self.calls += 1
+        raise TimeoutError("inner provider timeout")
+
+
+@pytest.mark.asyncio
+async def test_inner_timeout_error_is_not_swallowed_as_iteration_timeout() -> None:
+    """An inner ``TimeoutError`` must propagate, not be relabeled as our timeout.
+
+    Regression for #784 review-3: catching bare ``TimeoutError`` around
+    ``asyncio.wait_for(...)`` swallowed inner timeouts (provider/IO) and
+    misreported them with ``stop_reason=iteration_timeout``. The runner now
+    distinguishes the two by checking ``asyncio.timeout(...).expired()``.
+    """
+    evolve = _InnerTimeoutEvolveHandler()
+    runner = RalphLoopRunner(evolve)
+
+    with pytest.raises(TimeoutError, match="inner provider timeout"):
+        await runner.run(
+            RalphLoopConfig(
+                lineage_id="lin_inner_timeout",
+                max_generations=3,
+                # Generous budget so the wall-clock deadline cannot fire first.
+                per_iteration_timeout_seconds=30.0,
+            )
+        )
+
+    assert evolve.calls == 1
 
 
 @pytest.mark.asyncio

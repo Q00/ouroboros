@@ -133,12 +133,23 @@ class RalphLoopRunner:
             if config.project_dir:
                 arguments["project_dir"] = config.project_dir
 
+            iteration_timed_out = False
             try:
-                result = await asyncio.wait_for(
-                    self.evolve_handler.handle(arguments),
-                    timeout=config.per_iteration_timeout_seconds,
-                )
+                async with asyncio.timeout(config.per_iteration_timeout_seconds) as iteration_cm:
+                    result = await self.evolve_handler.handle(arguments)
             except TimeoutError:
+                # Distinguish *our* wall-clock timeout from any TimeoutError raised
+                # by ``evolve_handler.handle`` itself (e.g. an inner provider
+                # timeout). Only when ``iteration_cm.expired()`` is True did the
+                # per-iteration deadline actually fire; otherwise the inner
+                # exception is the real failure and must propagate so the outer
+                # caller can surface the underlying cause instead of a misleading
+                # ``stop_reason=iteration_timeout``.
+                if not iteration_cm.expired():
+                    raise
+                iteration_timed_out = True
+
+            if iteration_timed_out:
                 iterations.append(
                     RalphIteration(
                         generation=None,
