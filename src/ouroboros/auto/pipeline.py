@@ -757,7 +757,12 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate", "seed_loader"}:
+    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer"}:
+        # ``seed_repairer`` joins this set so a repair-phase timeout (the
+        # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
+        # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
+        # restart is the REVIEW phase, which re-invokes the bounded repairer.
+        # Without this entry a transient timeout becomes a permanent dead end.
         return AutoPhase.REVIEW
     if tool_name == "run_starter":
         return AutoPhase.RUN

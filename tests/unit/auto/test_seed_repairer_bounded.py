@@ -413,3 +413,105 @@ async def test_pipeline_blocks_when_repair_phase_exceeds_timeout(tmp_path) -> No
         f"orphan threads: before-return={threads_after_return}, "
         f"after-sleep={threading.active_count()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# AC: a session blocked by a repair-phase timeout must be resumable.
+# Regression for PR #785 review-2: ``tool_name="seed_repairer"`` was missing
+# from the recoverable-phase mapping, so ``--resume`` after a transient
+# timeout would refuse to recover and turn the timeout into a permanent dead
+# end. Resume must restart the REVIEW phase, which re-invokes the bounded
+# repairer.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resume_recovers_session_blocked_by_repair_timeout(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_1", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not need another answer")
+
+    seed_calls = {"count": 0}
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        seed_calls["count"] += 1
+        return _seed()
+
+    # First run: sleepy reviewer trips wait_for and blocks the session.
+    timeout = 1
+    sleepy = _SleepyReviewer(sleep_seconds=timeout * 2)
+    blocking_repairer = SeedRepairer(reviewer=sleepy)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.timeout_seconds_by_phase[AutoPhase.REPAIR.value] = timeout
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+
+    store = AutoStore(tmp_path)
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=store, max_rounds=1)
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=store,
+        repairer=blocking_repairer,
+        skip_run=True,
+    )
+
+    first_result = await pipeline.run(state)
+    assert first_result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    assert state.last_tool_name == "seed_repairer"
+    # Wait for the sleepy reviewer thread so it doesn't bleed into the resume run.
+    assert sleepy.thread_finished.wait(timeout=timeout * 4)
+
+    # Second run: clean reviewer should let the resumed session converge to A
+    # and reach COMPLETE. Without the recoverable-phase mapping for
+    # ``seed_repairer`` the pipeline would short-circuit at the BLOCKED check
+    # and return the prior blocker untouched (no repairer call, last_grade
+    # stays None).
+    class _CleanReviewer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> SeedReview:  # noqa: ARG002 — protocol shape
+            self.calls += 1
+            return SeedReview(
+                grade_result=GradeResult(
+                    grade=SeedGrade.A,
+                    scores={
+                        "coverage": 0.95,
+                        "ambiguity": 0.95,
+                        "testability": 0.95,
+                        "execution_feasibility": 0.95,
+                        "risk": 0.05,
+                    },
+                    findings=[],
+                    blockers=[],
+                    may_run=True,
+                ),
+                findings=(),
+            )
+
+    clean_reviewer = _CleanReviewer()
+    resume_repairer = SeedRepairer(reviewer=clean_reviewer)
+    resume_pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=store,
+        repairer=resume_repairer,
+        skip_run=True,
+    )
+
+    resumed = await resume_pipeline.run(state)
+
+    # Pipeline recovered: REVIEW re-ran, persisted a clean grade, and reached
+    # COMPLETE. The resumed reviewer was actually invoked (proving the
+    # repair phase resumed, not that we returned the prior blocker untouched).
+    assert clean_reviewer.calls >= 1
+    assert state.phase == AutoPhase.COMPLETE
+    assert state.last_grade == "A"
+    assert state.findings == []
+    assert resumed.status == AutoPhase.COMPLETE.value
