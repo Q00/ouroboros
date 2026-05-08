@@ -213,6 +213,31 @@ def _resolve_scan_targets() -> tuple[list[Path], list[str]]:
         root = REPO_ROOT / d
         if root.is_dir():
             for p in sorted(root.rglob("*.py")):
+                # Path.rglob follows symlinks by default. A symlink farm
+                # under SCAN_DIRS (e.g. ``src/ouroboros/auto/external ->
+                # ../../vendor/sdk``) would silently pull every ``*.py``
+                # under the link target into the scan, producing false
+                # positives for code we explicitly chose not to police —
+                # and training reviewers to add spurious allowlist markers
+                # to vendored files. Skip any symlink (file or directory
+                # link) so the scan stays anchored to in-tree files.
+                if p.is_symlink():
+                    continue
+                # Also skip files whose any parent on the scan path is a
+                # symlink: ``rglob`` traverses symlinked directories, and
+                # only the directory entry itself shows up as a symlink —
+                # the leaf ``*.py`` it descends into does not. Walk up
+                # from the file to ``root`` and reject if any intermediate
+                # directory is a symlink.
+                walked = p.parent
+                via_symlink = False
+                while walked != root and walked.parent != walked:
+                    if walked.is_symlink():
+                        via_symlink = True
+                        break
+                    walked = walked.parent
+                if via_symlink:
+                    continue
                 rp = p.resolve()
                 if rp not in seen:
                     seen.add(rp)

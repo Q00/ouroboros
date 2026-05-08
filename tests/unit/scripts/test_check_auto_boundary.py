@@ -287,6 +287,72 @@ def test_clean_auto_dir_with_anchors_passes(
     assert rc == 0
 
 
+def test_symlink_directory_under_scan_root_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlinked directory under the scan root must not pull files
+    from outside the boundary into the scan.
+
+    Without ``is_symlink()`` filtering, ``Path.rglob`` happily descends
+    into a directory symlink and pulls every ``*.py`` under the link
+    target into the scan. A symlink farm such as
+    ``src/ouroboros/auto/external -> ../../vendor/sdk`` would then
+    produce false-positive failures on files we deliberately did not
+    police, training reviewers to add spurious allowlist markers to
+    vendored code.
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    auto_dir = fake_repo / "src" / "ouroboros" / "auto"
+    auto_dir.mkdir(parents=True)
+    (auto_dir / "clean.py").write_text("# clean\n")
+    cli_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "auto.py").write_text("# clean\n")
+
+    # External vendored tree containing a forbidden token. This is OUTSIDE
+    # the scan boundary by intent.
+    external = tmp_path / "external_vendor"
+    external.mkdir()
+    (external / "github_helper.py").write_text("class GitHubAdapter:\n    pass\n")
+
+    # Build the symlink farm: ``auto/external -> external_vendor``.
+    (auto_dir / "external").symlink_to(external, target_is_directory=True)
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 0, (
+        "scan should not descend through the symlink and should not fail "
+        "on files outside the scan boundary"
+    )
+
+
+def test_symlinked_python_file_under_scan_root_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlinked ``*.py`` file under the scan root is also skipped.
+
+    Same boundary contract as the directory-symlink case above, applied
+    to a single-file symlink (``auto/legacy.py -> ../../vendor/sdk.py``).
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    auto_dir = fake_repo / "src" / "ouroboros" / "auto"
+    auto_dir.mkdir(parents=True)
+    (auto_dir / "clean.py").write_text("# clean\n")
+    cli_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "auto.py").write_text("# clean\n")
+
+    external = tmp_path / "vendor.py"
+    external.write_text("class GitHubVendor:\n    pass\n")
+    (auto_dir / "legacy.py").symlink_to(external)
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 0, "single-file symlink must not pull external file into scan"
+
+
 def test_keyword_in_docstring_of_watched_file_is_caught(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
