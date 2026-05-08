@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,7 @@ class HandlerRalphStarter:
         lineage_id: str,
         max_total_seconds: float | None = None,
         per_iteration_timeout_seconds: float | None = None,
+        on_started: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
@@ -208,6 +210,15 @@ class HandlerRalphStarter:
         # ``delegated_to_plugin`` status. The auto pipeline records this and
         # transitions straight to COMPLETE — there is nothing to wait for.
         if status == "delegated_to_plugin" or dispatch_mode == "plugin":
+            if on_started is not None:
+                on_started(
+                    {
+                        "job_id": None,
+                        "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
+                        "dispatch_mode": "plugin",
+                        "status": status,
+                    }
+                )
             return {
                 "job_id": None,
                 "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
@@ -221,6 +232,15 @@ class HandlerRalphStarter:
         job_id = _optional_str(meta.get("job_id"))
         if not job_id:
             raise HandlerError("ouroboros_ralph did not return a job_id")
+        if on_started is not None:
+            on_started(
+                {
+                    "job_id": job_id,
+                    "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
+                    "dispatch_mode": "job",
+                    "status": status,
+                }
+            )
         job_manager = self.handler._job_manager  # noqa: SLF001
         terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"

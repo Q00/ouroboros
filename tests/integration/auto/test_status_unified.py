@@ -254,6 +254,77 @@ def test_gap_window_reports_pending_starting_ralph(tmp_path) -> None:
     assert "Pending: starting ralph" in text
 
 
+@pytest.mark.asyncio
+async def test_mcp_status_replays_job_events_into_persisted_auto_state(tmp_path) -> None:
+    """Production MCP status refreshes the auto mirror from persisted job events."""
+    event_store = EventStore("sqlite+aiosqlite:///:memory:")
+    await event_store.initialize()
+    auto_store = AutoStore(tmp_path)
+    state = _state_at_ralph_handoff(tmp_path)
+    auto_store.save(state)
+    await event_store.append(
+        _make_job_event(
+            "mcp.job.updated",
+            job_id=state.ralph_job_id,
+            lineage_id=state.ralph_lineage_id,
+            status="running",
+            message="Generation 2 | execute",
+        )
+    )
+
+    handler = SessionStatusHandler(event_store=event_store, auto_store=auto_store)
+    result = await handler.handle({"session_id": state.auto_session_id})
+
+    assert result.is_ok
+    ralph = result.value.meta["ralph"]
+    assert ralph["status"] == "running"
+    assert ralph["current_generation"] == 2
+    persisted = auto_store.load(state.auto_session_id)
+    assert persisted.ralph_job_status == "running"
+    assert persisted.ralph_current_generation == 2
+    await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_cli_status_replays_same_job_events_as_mcp_status(tmp_path) -> None:
+    """CLI and MCP status agree after replaying the same linked job events."""
+    from ouroboros.cli.commands.status import _format_auto_status, _load_auto_status_state
+
+    event_store = EventStore("sqlite+aiosqlite:///:memory:")
+    await event_store.initialize()
+    auto_store = AutoStore(tmp_path)
+    state = _state_at_ralph_handoff(tmp_path)
+    auto_store.save(state)
+    await event_store.append(
+        _make_job_event(
+            "mcp.job.updated",
+            job_id=state.ralph_job_id,
+            lineage_id=state.ralph_lineage_id,
+            status="running",
+            message="Generation 5 | verify",
+        )
+    )
+
+    cli_state = await _load_auto_status_state(
+        state.auto_session_id,
+        auto_store=auto_store,
+        event_store=event_store,
+    )
+    cli_text = _format_auto_status(cli_state)
+    handler = SessionStatusHandler(event_store=event_store, auto_store=auto_store)
+    mcp = await handler.handle({"session_id": state.auto_session_id})
+
+    assert mcp.is_ok
+    ralph = mcp.value.meta["ralph"]
+    assert ralph["job_id"] == "job_ralph_001"
+    assert ralph["status"] == "running"
+    assert ralph["current_generation"] == 5
+    assert "  job_id: job_ralph_001" in cli_text
+    assert "  status: running" in cli_text
+    assert "  current_generation: 5" in cli_text
+    await event_store.close()
+
+
 # ---------------------------------------------------------------------------
 # 4. Plugin delegation — no job query is attempted.
 # ---------------------------------------------------------------------------
@@ -286,6 +357,56 @@ def test_plugin_dispatch_mode_no_job_query(tmp_path) -> None:
         status="completed",
     )
     assert apply_event(state, plugin_event) is False
+
+
+@pytest.mark.parametrize(
+    ("name", "configure", "expected"),
+    (
+        (
+            "gap",
+            lambda _state: None,
+            ("Phase: ralph_handoff", "starting ralph", "Terminal: False"),
+        ),
+        (
+            "job",
+            lambda state: (
+                setattr(state, "ralph_job_status", "running"),
+                setattr(state, "ralph_current_generation", 7),
+            ),
+            ("Phase: ralph_handoff", "job_id: job_ralph_001", "status: running"),
+        ),
+        (
+            "plugin",
+            lambda state: (
+                setattr(state, "ralph_dispatch_mode", "plugin"),
+                state.transition(AutoPhase.COMPLETE, "ralph loop delegated"),
+            ),
+            ("Phase: complete", "dispatch_mode: plugin", "guidance: ralph delegated"),
+        ),
+    ),
+)
+def test_cli_and_mcp_auto_status_agree_for_ralph_states(
+    tmp_path,
+    name: str,
+    configure: Any,
+    expected: tuple[str, str, str],
+) -> None:
+    """Both public status surfaces expose the same gap/job/plugin facts."""
+    from ouroboros.cli.commands.status import _format_auto_status
+
+    state = _state_at_ralph_handoff(tmp_path, with_job_id=(name == "job"))
+    configure(state)
+    AutoStore(tmp_path).save(state)
+
+    cli_text = _format_auto_status(state)
+    handler = SessionStatusHandler(auto_store=AutoStore(tmp_path))
+    result = asyncio.run(handler.handle({"session_id": state.auto_session_id}))
+
+    assert result.is_ok
+    mcp_text = result.value.content[0].text
+    for needle in expected:
+        assert needle in cli_text
+        assert needle in mcp_text
 
 
 # ---------------------------------------------------------------------------

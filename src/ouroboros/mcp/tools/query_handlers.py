@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.auto.listeners import replay_ralph_job_events
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -117,7 +118,16 @@ class SessionStatusHandler:
             }
         return None
 
-    def _handle_auto_session(
+    async def _refresh_auto_ralph_mirror(self, state: Any) -> None:
+        """Replay linked Ralph job events into the persisted auto snapshot."""
+        if state.ralph_dispatch_mode == "plugin" or state.ralph_job_id is None:
+            return
+        await self._ensure_initialized()
+        applied = await replay_ralph_job_events(state, self._event_store)
+        if applied:
+            self._auto_store.save(state)
+
+    async def _handle_auto_session(
         self,
         session_id: str,
     ) -> Result[MCPToolResult, MCPServerError]:
@@ -137,6 +147,8 @@ class SessionStatusHandler:
                     tool_name="ouroboros_session_status",
                 )
             )
+
+        await self._refresh_auto_ralph_mirror(state)
 
         # Gap window per the issue contract: between RUN's run_handoff_status
         # transitioning to "started" and the RALPH_HANDOFF entry persisting a
@@ -240,7 +252,7 @@ class SessionStatusHandler:
         # linked or is being prepared.
         if isinstance(session_id, str) and session_id.startswith("auto_"):
             try:
-                return self._handle_auto_session(session_id)
+                return await self._handle_auto_session(session_id)
             except Exception as e:  # pragma: no cover - defensive
                 log.error("mcp.tool.session_status.auto_error", error=str(e))
                 return Result.err(
@@ -249,6 +261,9 @@ class SessionStatusHandler:
                         tool_name="ouroboros_session_status",
                     )
                 )
+            finally:
+                if self._owns_event_store:
+                    await self.close()
 
         try:
             # Ensure event store is initialized

@@ -25,6 +25,7 @@ from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
     AutoPhase,
     AutoPipelineState,
+    AutoStore,
 )
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -234,6 +235,55 @@ async def test_ralph_qa_passed_completes_auto(tmp_path) -> None:
     assert state.ralph_lineage_id is not None
     assert state.ralph_lineage_id.startswith(f"ralph-{_build_seed().metadata.seed_id}-")
     assert captured["kwargs"]["lineage_id"] == state.ralph_lineage_id
+
+
+@pytest.mark.asyncio
+async def test_ralph_job_id_persisted_before_terminal_wait(tmp_path) -> None:
+    """RUN → RALPH_HANDOFF saves the ralph job id as soon as ralph starts."""
+    state = _state_at_run_phase(tmp_path)
+    store = AutoStore(tmp_path)
+    store.save(state)
+    observed: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        kwargs["on_started"](
+            {
+                "job_id": "job_ralph_live",
+                "lineage_id": kwargs["lineage_id"],
+                "dispatch_mode": "job",
+                "status": "running",
+            }
+        )
+        persisted = store.load(state.auto_session_id)
+        observed["phase"] = persisted.phase
+        observed["job_id"] = persisted.ralph_job_id
+        observed["status"] = persisted.ralph_job_status
+        return {
+            "job_id": "job_ralph_live",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        store=store,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert observed == {
+        "phase": AutoPhase.RALPH_HANDOFF,
+        "job_id": "job_ralph_live",
+        "status": "running",
+    }
+    assert result.status == "complete"
 
 
 # ---------------------------------------------------------------------------

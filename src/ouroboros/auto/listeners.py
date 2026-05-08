@@ -17,10 +17,9 @@ state ``BLOCKED("ralph cancelled by user")`` — but only if the auto session is
 not already in a terminal phase, otherwise we would clobber a successful
 ``COMPLETE`` with a noisy blocker.
 
-The listener is **best-effort**: mirror fields are only persisted when the
-auto pipeline next saves state for any other reason. The acceptance tests
-exercise the apply step directly without scheduling a background subscriber so
-the contract is testable without tying the test runtime to an asyncio loop.
+Status readers call :func:`replay_ralph_job_events` before rendering so the
+persisted auto snapshot reflects already-written ``mcp.job.*`` events even
+when no background subscriber is running.
 """
 
 from __future__ import annotations
@@ -243,10 +242,25 @@ def apply_events(state: AutoPipelineState, events: Iterable[BaseEvent]) -> int:
     return applied
 
 
+async def replay_ralph_job_events(state: AutoPipelineState, event_store: Any) -> int:
+    """Replay the linked Ralph job history into ``state`` and return apply count.
+
+    Production status paths use this as an on-demand listener pass: the job
+    event log remains the source of truth, and the auto JSON record is refreshed
+    before CLI/MCP surfaces render it. Plugin delegations intentionally skip the
+    replay because there is no in-process job lifecycle to mirror.
+    """
+    if state.ralph_dispatch_mode == "plugin" or state.ralph_job_id is None:
+        return 0
+    events = await event_store.replay("job", state.ralph_job_id)
+    return apply_events(state, events)
+
+
 __all__ = [
     "RALPH_CANCEL_BLOCKER_REASON",
     "apply_event",
     "apply_events",
+    "replay_ralph_job_events",
 ]
 
 

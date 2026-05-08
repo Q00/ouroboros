@@ -693,11 +693,31 @@ class AutoPipeline:
         max_total_seconds: float | None = None
         if state.deadline_at is not None:
             max_total_seconds = max(0.0, state.deadline_at - time.monotonic())
+
+        def _persist_ralph_started(started_meta: dict[str, Any]) -> None:
+            """Persist the durable Ralph handle before waiting for terminal status."""
+            changed = False
+            job_id = _optional_str(started_meta.get("job_id"))
+            dispatch_mode = _optional_str(started_meta.get("dispatch_mode"))
+            job_status = _optional_str(started_meta.get("status"))
+            if job_id is not None and state.ralph_job_id != job_id:
+                state.ralph_job_id = job_id
+                changed = True
+            if dispatch_mode is not None and state.ralph_dispatch_mode != dispatch_mode:
+                state.ralph_dispatch_mode = dispatch_mode
+                changed = True
+            if job_status is not None and state.ralph_job_status != job_status:
+                state.ralph_job_status = job_status
+                changed = True
+            if changed:
+                self._save(state)
+
         try:
             ralph_meta = await self.ralph_starter(
                 seed,
                 lineage_id=lineage_id,
                 max_total_seconds=max_total_seconds,
+                on_started=_persist_ralph_started,
             )
         except Exception as exc:
             state.mark_failed(f"ralph handoff failed: {exc}", tool_name="ralph_starter")
@@ -714,8 +734,11 @@ class AutoPipeline:
             return self._result(
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
-        state.ralph_job_id = _optional_str(ralph_meta.get("job_id"))
-        state.ralph_dispatch_mode = _optional_str(ralph_meta.get("dispatch_mode"))
+        state.ralph_job_id = _optional_str(ralph_meta.get("job_id")) or state.ralph_job_id
+        state.ralph_dispatch_mode = (
+            _optional_str(ralph_meta.get("dispatch_mode")) or state.ralph_dispatch_mode
+        )
+        self._save(state)
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
         # Plugin delegation: nothing to await, transition straight to
