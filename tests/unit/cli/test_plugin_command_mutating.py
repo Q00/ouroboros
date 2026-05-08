@@ -2126,6 +2126,100 @@ def test_install_by_name_routes_local_path_for_plugin_home_manifest(
     assert "git clone failed" not in install_result.output
 
 
+def test_inspect_first_party_does_not_report_missing_scopes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:585.
+
+    First-party programs bypass the user-facing trust flow at the
+    firewall (their required permissions are implicitly trusted at
+    boot). ``ooo plugin inspect`` MUST NOT report them as having
+    missing scopes — that misleads operators about invocability and
+    contradicts what the firewall actually does.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    manifest = json.loads(json.dumps(REFERENCE_MANIFEST))
+    manifest["source"] = {"type": "first_party"}
+    # Keep a required permission to make the regression load-bearing:
+    # the previous ``inspect`` would have shown "missing scopes" for it.
+    (src / "ouroboros.plugin.json").write_text(json.dumps(manifest))
+
+    install_result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert install_result.exit_code == 0, install_result.output
+
+    inspect_result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert inspect_result.exit_code == 0, inspect_result.output
+    plain = " ".join(inspect_result.output.split())
+    assert "missing scopes" not in plain, (
+        f"first_party inspect must not list missing scopes; got: {plain!r}"
+    )
+    assert "first_party" in plain  # trust_state line names the implicit grant
+
+
+def test_add_friendly_error_on_structurally_corrupt_catalog_state(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:367.
+
+    A parseable JSON file whose inner shape is wrong (e.g.
+    ``{"catalogs": 1}``) must surface the same friendly recovery
+    hint as outright malformed JSON — not crash with
+    ``TypeError``/``AttributeError`` from the iterator path.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    _make_repo_layout(repo, [REFERENCE_MANIFEST])
+
+    catalog_state = tmp_path / "plugin-catalogs.json"
+    catalog_state.write_text(json.dumps({"catalogs": 1}))
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "non-list" in plain or "non-dict" in plain or "catalogs" in plain
+    assert "Traceback" not in result.output
+
+
 def test_trust_failure_after_disable_check_keeps_disable_record(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

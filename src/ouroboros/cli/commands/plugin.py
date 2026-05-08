@@ -381,6 +381,25 @@ class CatalogRegistry:
             ) from exc
         if not isinstance(payload, dict):
             raise ValueError(f"plugin catalog state at {self.state_path} is not a JSON object")
+        # Validate inner shape too. ``register()`` and
+        # ``find_sources_for()`` immediately assume ``catalogs`` is a
+        # list of dicts; a parseable-but-structurally-corrupt file
+        # like ``{"catalogs": 1}`` would otherwise pass the outer
+        # check and crash with TypeError/AttributeError downstream.
+        # Surface inner-shape mismatches with the same ``ValueError``
+        # shape so the CLI's friendly-error wrapper catches them too.
+        catalogs = payload.get("catalogs", [])
+        if not isinstance(catalogs, list):
+            raise ValueError(
+                f"plugin catalog state at {self.state_path} has a non-list "
+                f"'catalogs' field (got {type(catalogs).__name__})"
+            )
+        for index, entry in enumerate(catalogs):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"plugin catalog state at {self.state_path}: catalogs[{index}] "
+                    f"is not a JSON object (got {type(entry).__name__})"
+                )
         return payload
 
     def _save(self, payload: dict) -> None:
@@ -564,8 +583,19 @@ def inspect_command(
     # the stale scopes would mislead the user about what is actually
     # honored. ``_record_applies_to_subject`` mirrors the firewall's
     # ``_record_matches_subject`` predicate.
-    applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
-    granted = [g.scope for g in record.granted_scopes] if applies and record else []
+    # First-party programs bypass the user-facing trust flow at the
+    # firewall (RFC: "First-party trust semantics") — their required
+    # permissions are implicitly trusted at boot. Reflect that in the
+    # `inspect` output so it agrees with `list` / firewall events:
+    # "missing scopes" is not meaningful for them and would falsely
+    # imply invocation will be blocked.
+    is_first_party = manifest.source.type == "first_party"
+    if is_first_party:
+        granted = [p.scope for p in manifest.permissions if p.required]
+        applies = True
+    else:
+        applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
+        granted = [g.scope for g in record.granted_scopes] if applies and record else []
 
     print_info(f"{manifest.name} {manifest.version} ({entry.source_kind})")
     console.print(f"  installed_at:   {entry.installed_at}")
@@ -582,12 +612,13 @@ def inspect_command(
         # Surface why the grants don't apply, naming the field that drifted.
         reason = _subject_drift_reason(record, manifest=manifest, entry=entry)
         console.print(f"  trust note:     stored grants are stale ({reason}); re-grant required")
-    required_perms = [p.scope for p in manifest.permissions if p.required]
-    missing = [s for s in required_perms if s not in granted]
-    if missing:
-        console.print(
-            f"  missing scopes: {', '.join(missing)} (invocation will be blocked until granted)"
-        )
+    if not is_first_party:
+        required_perms = [p.scope for p in manifest.permissions if p.required]
+        missing = [s for s in required_perms if s not in granted]
+        if missing:
+            console.print(
+                f"  missing scopes: {', '.join(missing)} (invocation will be blocked until granted)"
+            )
 
 
 @app.command("list")
