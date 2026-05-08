@@ -650,6 +650,13 @@ class TestJsonSchemaHandling:
         assert options_call_kwargs["allowed_tools"] == []
         assert options_call_kwargs["tools"] == []
         assert "Read" in options_call_kwargs["disallowed_tools"]
+        # Strict envelope must include the wildcard sentinel ``"*"`` so a
+        # future SDK built-in not present in the static ``all_tools`` list
+        # is still denied — defense in depth against catalog drift.
+        assert "*" in options_call_kwargs["disallowed_tools"], (
+            "empty allowed_tools must add the '*' wildcard to disallowed_tools "
+            "so future SDK built-ins do not silently slip past the read-only envelope"
+        )
 
     @pytest.mark.asyncio
     async def test_explicit_allowed_tools_sets_visible_sdk_tools(self) -> None:

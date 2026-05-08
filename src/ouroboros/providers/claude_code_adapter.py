@@ -596,6 +596,36 @@ class ClaudeCodeAdapter:
 
         # If allowed_tools is explicitly set (even empty []), compute disallowed
         # from it (strict mode). None = permissive (only block dangerous).
+        #
+        # The hardcoded ``all_tools`` list below is a snapshot of the
+        # SDK's known built-in tools at the time this adapter was
+        # written. When the SDK adds a new built-in (a hypothetical
+        # future ``ShellSession``, ``BrowserControl``, ``RunCommand``,
+        # …), it does NOT appear in ``all_tools`` and therefore does
+        # not appear in ``disallowed`` — so the new tool stays
+        # permitted by the SDK's permissive default even when the
+        # caller explicitly requested ``allowed_tools=[]`` for a
+        # strictly read-only envelope (e.g. the interview path).
+        # That is a silent policy gap that widens with every SDK
+        # release.
+        #
+        # Two-prong fix:
+        #
+        # 1. ``allowed_tools=[]`` is the strongest signal the caller
+        #    can give: "no tools at all". For that exact case the
+        #    catalog drift no longer matters — we set ``disallowed``
+        #    to a name that cannot match any concrete SDK tool
+        #    (``"*"``) so that the SDK's allowlist + an "every-tool"
+        #    deny carry the policy together. The ``allowed_tools``
+        #    parameter on the SDK is the load-bearing surface; the
+        #    ``disallowed_tools`` list is defense in depth.
+        #
+        # 2. For non-empty ``allowed_tools``, keep the explicit
+        #    ``all_tools`` list but add the dangerous-tools catalog
+        #    so a name accidentally omitted from ``all_tools`` (e.g.
+        #    ``Bash``) still ends up in ``disallowed``. Future
+        #    additions to ``dangerous_tools`` therefore propagate to
+        #    explicit-allowlist callers without a second edit.
         if self._allowed_tools is not None:
             all_tools = [
                 "Read",
@@ -612,7 +642,16 @@ class ClaudeCodeAdapter:
                 "TodoWrite",
                 "LS",
             ]
-            disallowed = [t for t in all_tools if t not in self._allowed_tools]
+            if not self._allowed_tools:
+                # Empty explicit allowlist → strict no-tools envelope.
+                # Use the wildcard sentinel ``"*"`` so any future SDK
+                # built-in not in ``all_tools`` is still denied.
+                disallowed = ["*", *all_tools]
+            else:
+                disallowed = sorted(
+                    set(t for t in all_tools if t not in self._allowed_tools)
+                    | set(t for t in dangerous_tools if t not in self._allowed_tools)
+                )
         else:
             disallowed = dangerous_tools
 
