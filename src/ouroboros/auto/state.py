@@ -289,6 +289,12 @@ class AutoPipelineState:
     # rewrote a natural-language request into ``ooo auto`` shell command. None
     # for direct CLI invocations so legacy state files load unchanged.
     provenance: dict[str, Any] | None = None
+    # Caller-supplied user preferences keyed by ledger section name. Persisted
+    # so resumed sessions converge to the same Seed as the original run when
+    # the caller does not resupply preferences. Validated against
+    # ``REQUIRED_SECTIONS`` at construction time by the MCP handler — only
+    # known section keys with non-empty string values land here.
+    user_preferences: dict[str, str] = field(default_factory=dict)
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -545,6 +551,7 @@ class AutoPipelineState:
         payload.setdefault("pipeline_timeout_seconds", DEFAULT_PIPELINE_TIMEOUT_SECONDS)
         payload.setdefault("deadline_at", None)
         payload.setdefault("deadline_at_epoch", None)
+        payload.setdefault("user_preferences", {})
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -678,6 +685,19 @@ class AutoPipelineState:
         if not isinstance(self.run_subagent, dict):
             msg = "run_subagent must be an object"
             raise ValueError(msg)
+        if not isinstance(self.user_preferences, dict):
+            msg = "user_preferences must be an object"
+            raise ValueError(msg)
+        for pref_key, pref_value in self.user_preferences.items():
+            if not isinstance(pref_key, str) or not pref_key.strip():
+                msg = "user_preferences keys must be non-empty strings"
+                raise ValueError(msg)
+            if not isinstance(pref_value, str) or not pref_value.strip():
+                msg = (
+                    "user_preferences values must be non-empty strings; persist via the "
+                    "MCP handler which validates against REQUIRED_SECTIONS"
+                )
+                raise ValueError(msg)
         if self.provenance is not None:
             if not isinstance(self.provenance, dict):
                 msg = "provenance must be an object or null"

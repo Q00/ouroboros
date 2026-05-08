@@ -1605,11 +1605,19 @@ _INTENT_TO_SECTIONS: dict[QuestionIntent, tuple[str, ...]] = {
 
 
 def _section_hints_for_intents(intents: frozenset[QuestionIntent]) -> tuple[str, ...]:
-    """Return ordered, deduplicated ledger sections to consult for ``intents``."""
+    """Return ordered, deduplicated ledger sections to consult for ``intents``.
+
+    Iterates ``_INTENT_TO_SECTIONS`` in dict-insertion order (Python 3.7+
+    guarantee) rather than the input ``frozenset`` — set iteration is
+    hash-randomized across processes, which would let the "first matching
+    section" vary between runs and break the answerer's determinism contract.
+    """
     seen: set[str] = set()
     ordered: list[str] = []
-    for intent in intents:
-        for section in _INTENT_TO_SECTIONS.get(intent, ()):
+    for intent, sections in _INTENT_TO_SECTIONS.items():
+        if intent not in intents:
+            continue
+        for section in sections:
             if section not in seen:
                 seen.add(section)
                 ordered.append(section)

@@ -203,7 +203,18 @@ class AutoHandler:
                 "pipeline_timeout_seconds cannot be changed on resume; the "
                 "original deadline is preserved across process restarts"
             )
-        user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
+        # Distinguish "caller did not pass user_preferences" from "caller
+        # passed an empty mapping". Only validate/parse when the caller
+        # actually supplied the arg so a resume call can defer to persisted
+        # state without being forced to resupply.
+        user_preferences_supplied = (
+            "user_preferences" in arguments and arguments.get("user_preferences") is not None
+        )
+        supplied_user_preferences = (
+            _parse_user_preferences(arguments.get("user_preferences"))
+            if user_preferences_supplied
+            else {}
+        )
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -217,6 +228,11 @@ class AutoHandler:
             max_interview_rounds = state.max_interview_rounds
             max_repair_rounds = state.max_repair_rounds
             skip_run = requested_skip_run or state.skip_run
+            # Resume contract: caller-supplied preferences override persisted
+            # ones; otherwise the original session's preferences are reused so
+            # the same input converges to the same Seed.
+            if user_preferences_supplied:
+                state.user_preferences = dict(supplied_user_preferences)
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
@@ -228,6 +244,7 @@ class AutoHandler:
             max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
             skip_run = requested_skip_run
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
+            state.user_preferences = dict(supplied_user_preferences)
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
             if pipeline_timeout_seconds is not None:
@@ -258,7 +275,7 @@ class AutoHandler:
             mcp_tool_prefix=self.mcp_tool_prefix,
         )
 
-        context_provider = _build_context_provider(user_preferences)
+        context_provider = _build_context_provider(dict(state.user_preferences))
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,

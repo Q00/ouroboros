@@ -632,3 +632,125 @@ def test_user_preference_for_safe_runtime_question_is_unaffected_by_gate() -> No
 
     assert answer.source == AutoAnswerSource.USER_PREFERENCE
     assert answer.text == "Python 3.14 with uv"
+
+
+# ---------------------------------------------------------------------------
+# Determinism: section hint order must not depend on hash randomization
+# ---------------------------------------------------------------------------
+
+
+def test_section_hints_for_intents_iterates_in_dict_definition_order() -> None:
+    """``_section_hints_for_intents`` must iterate ``_INTENT_TO_SECTIONS`` in
+    its dict-definition order, not the hash-randomized order of the input
+    frozenset. Multiple matching intents must yield a stable ordering across
+    Python processes."""
+    from ouroboros.auto.answerer import (
+        _INTENT_TO_SECTIONS,
+        QuestionIntent,
+        _section_hints_for_intents,
+    )
+
+    multi_intents = frozenset(
+        {
+            QuestionIntent.RUNTIME_CONTEXT,
+            QuestionIntent.NON_GOALS,
+            QuestionIntent.PRODUCT_BEHAVIOR,
+            QuestionIntent.ACTOR_IO,
+        }
+    )
+    hints = _section_hints_for_intents(multi_intents)
+
+    # Expected order is the order these intents appear in _INTENT_TO_SECTIONS:
+    # NON_GOALS, ACTOR_IO, RUNTIME_CONTEXT, PRODUCT_BEHAVIOR.
+    expected_order = []
+    for intent, sections in _INTENT_TO_SECTIONS.items():
+        if intent in multi_intents:
+            for section in sections:
+                if section not in expected_order:
+                    expected_order.append(section)
+    assert list(hints) == expected_order
+
+
+def test_section_hints_for_intents_first_match_is_stable() -> None:
+    """Calling ``_section_hints_for_intents`` repeatedly with the same input
+    must yield identical output — guards against frozenset iteration order
+    creeping back in via subtle refactors."""
+    from ouroboros.auto.answerer import (
+        QuestionIntent,
+        _section_hints_for_intents,
+    )
+
+    intents = frozenset(
+        {
+            QuestionIntent.RUNTIME_CONTEXT,
+            QuestionIntent.ACTOR_IO,
+            QuestionIntent.NON_GOALS,
+        }
+    )
+    runs = [_section_hints_for_intents(intents) for _ in range(50)]
+    assert len(set(runs)) == 1, "section_hints order is not stable across calls"
+
+
+# ---------------------------------------------------------------------------
+# Resume: user_preferences must persist on AutoPipelineState
+# ---------------------------------------------------------------------------
+
+
+def test_auto_pipeline_state_round_trips_user_preferences() -> None:
+    from ouroboros.auto.state import AutoPipelineState
+
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/x")
+    state.user_preferences = {"runtime_context": "Python 3.14 with uv"}
+
+    raw = state.to_dict()
+    assert raw["user_preferences"] == {"runtime_context": "Python 3.14 with uv"}
+
+    restored = AutoPipelineState.from_dict(raw)
+    assert restored.user_preferences == {"runtime_context": "Python 3.14 with uv"}
+
+
+def test_auto_pipeline_state_loads_legacy_dump_without_user_preferences() -> None:
+    """Old persisted state files predating Phase 1 must still load — the
+    field is backfilled to an empty dict."""
+    from ouroboros.auto.state import AutoPipelineState
+
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/x")
+    raw = state.to_dict()
+    raw.pop("user_preferences", None)  # simulate legacy dump
+
+    restored = AutoPipelineState.from_dict(raw)
+    assert restored.user_preferences == {}
+
+
+def test_auto_pipeline_state_validates_user_preferences_shape() -> None:
+    import pytest as _pytest
+
+    from ouroboros.auto.state import AutoPipelineState
+
+    with _pytest.raises(ValueError, match="user_preferences"):
+        AutoPipelineState(
+            goal="Build a CLI",
+            cwd="/tmp/x",
+            user_preferences={"runtime_context": ""},  # empty value
+        )._validate_loaded()
+
+    with _pytest.raises(ValueError, match="user_preferences"):
+        AutoPipelineState(
+            goal="Build a CLI",
+            cwd="/tmp/x",
+            user_preferences={"": "value"},  # empty key
+        )._validate_loaded()
+
+
+def test_auto_store_persists_user_preferences_across_save_load(tmp_path) -> None:
+    """End-to-end round trip: persist user_preferences on a saved state file
+    and reload — values must be identical."""
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.user_preferences = {"runtime_context": "Python 3.14 with uv"}
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    reloaded = store.load(state.auto_session_id)
+    assert reloaded.user_preferences == {"runtime_context": "Python 3.14 with uv"}
