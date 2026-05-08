@@ -656,6 +656,48 @@ def test_subprocess_invoked_with_plugin_home_as_cwd(tmp_path: Path) -> None:
     assert seen_cwds == [str(tmp_path)], seen_cwds
 
 
+def test_subprocess_permission_error_emits_failed_with_exit_126(tmp_path: Path) -> None:
+    """Per the RFC, the firewall MUST always emit a terminal
+    `plugin.failed` event for a launch failure. Previously only
+    `FileNotFoundError` was caught, so `PermissionError` (entrypoint
+    not executable) and other `OSError` subclasses would escape the
+    firewall entirely — crashing the caller and skipping the audit
+    trail. The catch is now broadened to `OSError` and uses POSIX
+    convention exit code 126 ("found but not executable").
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:635.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _boom(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", args[0][0] if args else "?")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-perm",
+        subprocess_runner=_boom,
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert "PermissionError" in failed["result"]["message"]
+    assert failed["provenance"]["exception_type"] == "PermissionError"
+
+
 def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     """Test 9: subprocess FileNotFoundError → status=failed, exit_code=127."""
     program = _make_program(tmp_path)

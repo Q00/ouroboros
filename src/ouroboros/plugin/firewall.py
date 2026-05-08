@@ -635,6 +635,8 @@ def invoke_plugin(
     try:
         completed = runner(cmd_argv, **run_kwargs)
     except FileNotFoundError as exc:
+        # Entrypoint executable not on PATH. Posix shell convention is
+        # exit code 127 ("command not found").
         message = f"entrypoint not found: {cmd_argv[0]!r} ({exc})"
         _emit(
             _event_envelope(
@@ -651,6 +653,36 @@ def invoke_plugin(
         return InvocationResult(
             status="failed",
             exit_code=127,
+            message=message,
+            events=tuple(emitted),
+        )
+    except OSError as exc:
+        # Other OS-level launch failures: PermissionError (entrypoint
+        # not executable), NotADirectoryError (bad cwd), generic IO
+        # failures. Posix shell convention is exit code 126 ("command
+        # found but not executable"). The firewall MUST always emit a
+        # terminal `plugin.failed` event; without this branch the
+        # exception would escape `invoke_plugin` and crash the caller
+        # while skipping the audit trail.
+        message = f"entrypoint failed to start: {type(exc).__name__}: {exc}"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={
+                    "correlation_id": correlation_id,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=126,
             message=message,
             events=tuple(emitted),
         )

@@ -402,9 +402,7 @@ def inspect_command(
     ] = None,
     trust_root: Annotated[
         Path | None,
-        typer.Option(
-            "--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."
-        ),
+        typer.Option("--trust-root", help="Override the trust root (default: ~/.ouroboros/trust)."),
     ] = None,
 ) -> None:
     """Show installed plugin metadata + trust state.
@@ -472,9 +470,7 @@ def list_command(
     ] = None,
     trust_root: Annotated[
         Path | None,
-        typer.Option(
-            "--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."
-        ),
+        typer.Option("--trust-root", help="Override the trust root (default: ~/.ouroboros/trust)."),
     ] = None,
     json_output: Annotated[
         bool,
@@ -780,7 +776,7 @@ def add_command(
         Path | None,
         typer.Option(
             "--trust-root",
-            help="Override the trust root (default: ~/.ouroboros/plugins). "
+            help="Override the trust root (default: ~/.ouroboros/trust). "
             "Used to invalidate prior grants on a version bump.",
         ),
     ] = None,
@@ -970,7 +966,7 @@ def install_command(
         Path | None,
         typer.Option(
             "--trust-root",
-            help="Override the trust root (default: ~/.ouroboros/plugins). "
+            help="Override the trust root (default: ~/.ouroboros/trust). "
             "Used to invalidate prior grants on a subject change.",
         ),
     ] = None,
@@ -1455,7 +1451,7 @@ def disable_command(
         Path | None,
         typer.Option(
             "--trust-root",
-            help="Override the trust root (default: ~/.ouroboros/plugins). "
+            help="Override the trust root (default: ~/.ouroboros/trust). "
             "Required when the plugin was trusted under a non-default root.",
         ),
     ] = None,

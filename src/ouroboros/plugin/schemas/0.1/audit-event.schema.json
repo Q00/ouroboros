@@ -85,7 +85,7 @@
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["success", "blocked", "failed"]
+          "enum": ["success", "blocked", "failed", "trust_subject_changed"]
         },
         "message": { "type": "string" }
       }
