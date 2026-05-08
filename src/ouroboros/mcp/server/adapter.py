@@ -1224,14 +1224,17 @@ def create_ouroboros_server(
     from ouroboros.backends import backend_supports_tool_envelope
     from ouroboros.providers import resolve_llm_backend
 
-    _shared_allowed_tools: list[str] | None = (
-        [] if backend_supports_tool_envelope(resolve_llm_backend(llm_backend)) else None
-    )
+    # Inlined as a direct ``[] if cond else None`` literal (rather than a
+    # Name binding) so the static guard at scripts/check-max-turns-envelope.py
+    # can verify the envelope without resolving Name references — see PR
+    # #786 review-1: AST-walk Name resolution is order- and scope-unsafe.
     llm_adapter = create_llm_adapter(
         backend=llm_backend,
         max_turns=1,
         cwd=effective_cwd,
-        allowed_tools=_shared_allowed_tools,
+        allowed_tools=(
+            [] if backend_supports_tool_envelope(resolve_llm_backend(llm_backend)) else None
+        ),
     )
 
     # Create or use provided EventStore

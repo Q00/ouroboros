@@ -28,8 +28,6 @@ Accepted ``allowed_tools`` value forms (Form A — see issue #781):
     * ``allowed_tools=[]``
     * ``allowed_tools=[] if cond else None``
     * ``allowed_tools=([] if cond else None)``
-    * ``allowed_tools=<Name>`` where the same scope binds the Name
-      to one of the forms above (e.g. ``_shared_allowed_tools``).
 
 This deliberately rejects:
 
@@ -37,6 +35,11 @@ This deliberately rejects:
     * a non-empty list literal (``allowed_tools=["Read", ...]``)
     * an opaque function call (``allowed_tools=_interview_allowed_tools(...)``)
       — those return non-empty envelopes and re-introduce the regression.
+    * a ``Name`` reference (``allowed_tools=_shared_allowed_tools``).
+      Resolving Names via AST walk is order- and scope-unsafe (PR #786
+      review): an assignment after the call, in a sibling/inner function,
+      or in a nested class would be erroneously accepted. Inline the
+      ``[] if cond else None`` literal at every call site instead.
 """
 
 from __future__ import annotations
@@ -61,27 +64,16 @@ def _ifexp_resolves_to_empty_list(node: ast.expr) -> bool:
 
 
 def _value_is_empty_envelope(value: ast.expr) -> bool:
+    """Approach A — strict literal-only acceptance (PR #786 review).
+
+    Only a direct ``[]`` literal, or an ``IfExp`` where at least one branch
+    is a direct ``[]`` literal, counts as an empty envelope. Any other form
+    (``Name`` reference, function call, attribute access, comprehension,
+    starred expansion) is rejected. Resolving ``Name`` bindings via AST
+    walk is order- and scope-unsafe — see the rejection notes in this
+    file's module docstring.
+    """
     return _is_empty_list(value) or _ifexp_resolves_to_empty_list(value)
-
-
-def _scope_bindings_to_empty_envelope(scope: ast.AST, name: str) -> bool:
-    """Return True if ``name`` is assigned an empty-envelope expression in ``scope``."""
-    for node in ast.walk(scope):
-        target_id: str | None = None
-        value: ast.expr | None = None
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            target_id = node.target.id
-            value = node.value
-        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
-            t = node.targets[0]
-            if isinstance(t, ast.Name):
-                target_id = t.id
-                value = node.value
-        if target_id != name or value is None:
-            continue
-        if _value_is_empty_envelope(value):
-            return True
-    return False
 
 
 def _find_max_turns_one_calls(tree: ast.AST) -> list[ast.Call]:
@@ -96,36 +88,12 @@ def _find_max_turns_one_calls(tree: ast.AST) -> list[ast.Call]:
     return hits
 
 
-def _enclosing_scopes(tree: ast.AST, target: ast.Call) -> list[ast.AST]:
-    """Return ancestor scopes (Module / FunctionDef / AsyncFunctionDef / ClassDef)
-    of ``target`` from innermost to outermost. Used to resolve ``Name`` bindings
-    for ``allowed_tools=<Name>`` forms.
-    """
-    scopes: list[ast.AST] = []
-
-    def _walk(node: ast.AST, ancestors: list[ast.AST]) -> bool:
-        if node is target:
-            scopes.extend(reversed(ancestors))
-            return True
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            ancestors = ancestors + [node]
-        return any(_walk(child, ancestors) for child in ast.iter_child_nodes(node))
-
-    _walk(tree, [])
-    return scopes
-
-
-def _call_has_empty_envelope(tree: ast.AST, call: ast.Call) -> bool:
+def _call_has_empty_envelope(call: ast.Call) -> bool:
     for kw in call.keywords:
         if kw.arg != "allowed_tools":
             continue
-        value = kw.value
-        if _value_is_empty_envelope(value):
+        if _value_is_empty_envelope(kw.value):
             return True
-        if isinstance(value, ast.Name):
-            for scope in _enclosing_scopes(tree, call):
-                if _scope_bindings_to_empty_envelope(scope, value.id):
-                    return True
     return False
 
 
@@ -143,7 +111,7 @@ def _scan_file(path: Path) -> list[tuple[int, str]]:
         return findings
 
     for call in _find_max_turns_one_calls(tree):
-        if _call_has_empty_envelope(tree, call):
+        if _call_has_empty_envelope(call):
             continue
         # Surface the offending call's location.
         line = (
