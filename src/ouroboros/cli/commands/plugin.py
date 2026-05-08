@@ -400,6 +400,28 @@ class CatalogRegistry:
                     f"plugin catalog state at {self.state_path}: catalogs[{index}] "
                     f"is not a JSON object (got {type(entry).__name__})"
                 )
+            # ``register()`` does ``set(entry.get("plugins", []))`` and
+            # ``find_sources_for()`` does ``plugin_name in entry.get("plugins", [])``.
+            # If ``plugins`` is anything but a list of strings (e.g.
+            # ``"plugins": 1`` or ``"plugins": {"a": 1}``), both paths
+            # crash with raw ``TypeError`` / ``AttributeError``. Surface
+            # the corruption with the same typed ``ValueError`` shape so
+            # the CLI's friendly-error wrapper catches it too.
+            if "plugins" in entry:
+                plugins_field = entry["plugins"]
+                if not isinstance(plugins_field, list):
+                    raise ValueError(
+                        f"plugin catalog state at {self.state_path}: "
+                        f"catalogs[{index}].plugins is not a list "
+                        f"(got {type(plugins_field).__name__})"
+                    )
+                for plugin_index, name in enumerate(plugins_field):
+                    if not isinstance(name, str):
+                        raise ValueError(
+                            f"plugin catalog state at {self.state_path}: "
+                            f"catalogs[{index}].plugins[{plugin_index}] is not a string "
+                            f"(got {type(name).__name__})"
+                        )
         return payload
 
     def _save(self, payload: dict) -> None:

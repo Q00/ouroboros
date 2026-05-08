@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import subprocess
 
 from click.testing import CliRunner
@@ -336,4 +337,54 @@ def test_dispatch_surfaces_corrupt_lockfile_instead_of_unknown_command(
     result = runner.invoke(cmd, ["review", "https://example.com/pr/1"])
     assert result.exit_code != 0
     assert "lockfile is unreadable" in result.output, result.output
+    assert "Traceback" not in result.output
+
+
+def test_dispatch_surfaces_corrupt_manifest_instead_of_unknown_command(
+    stub_default_paths: dict[str, Path],
+) -> None:
+    """Regression for the bot's follow-up finding on plugin_dispatch.py:58.
+
+    When a lockfile entry's manifest fails to load, the previous code
+    silently skipped that entry. Combined with
+    ``build_plugin_dispatch_command`` returning ``None`` for any
+    unresolved name, the operator typing ``ooo <installed-plugin> ...``
+    saw Typer's generic "no such command" — indistinguishable from a
+    typo — even though the lockfile insists the plugin IS installed.
+
+    The dispatcher now records the failed-to-load lockfile entry's name
+    and returns a stub command that prints a friendly recovery hint
+    naming the unreadable manifest path and the recovery action
+    (``ooo plugin remove <name>`` to reset the install).
+    """
+    plugin_home = _stage_installed_plugin(
+        home_root=stub_default_paths["homes"],
+        lockfile_path=stub_default_paths["lockfile"],
+        trust_root=stub_default_paths["trust"],
+    )
+    # Corrupt the manifest: keep it parseable JSON but break the schema
+    # so ``load_manifest`` raises ``PluginManifestError`` (the path the
+    # dispatcher was previously hiding behind "no such command").
+    manifest_path = plugin_home / "ouroboros.plugin.json"
+    manifest_path.write_text(json.dumps({"schema_version": "0.1", "name": "github-pr-ops"}))
+
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None, (
+        "build_plugin_dispatch_command must NOT return None when the "
+        "lockfile entry exists but its manifest is corrupt; that hides "
+        "manifest corruption as 'no such command'"
+    )
+    runner = CliRunner()
+    result = runner.invoke(cmd, ["review", "https://example.com/pr/1"])
+    assert result.exit_code != 0
+    # Rich wraps the panel across lines AND injects panel-border glyphs
+    # mid-token, so collapse the output to its plain alphanumeric form
+    # before substring matching.
+    no_ansi = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    compact = re.sub(r"[\s│]+", "", no_ansi)
+    assert "manifestisunreadable" in compact, result.output
+    # The recovery hint names both the offending manifest path and the
+    # canonical reset action so the operator can act without guessing.
+    assert "ouroboros.plugin.json" in compact, result.output
+    assert "ooopluginremovegithub-pr-ops" in compact, result.output
     assert "Traceback" not in result.output

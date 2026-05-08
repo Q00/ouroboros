@@ -42,23 +42,33 @@ from ouroboros.plugin.userlevel_registry import (
 )
 
 
-def _build_registry_from_lockfile(lockfile_path: Path) -> tuple[UserLevelProgramRegistry, dict]:
+def _build_registry_from_lockfile(
+    lockfile_path: Path,
+) -> tuple[UserLevelProgramRegistry, dict, dict[str, str]]:
     """Read the lockfile, load each manifest, register everything.
 
-    Manifests that fail to load are skipped with a stderr warning so
-    one bad plugin doesn't disable dispatch for every other installed
-    plugin. Returns the populated registry and a name → ``LockEntry``
-    map for callers that need install-subject metadata.
+    Manifests that fail to load are skipped (one bad plugin must not
+    disable dispatch for every other installed plugin) but their
+    ``(plugin_name → reason)`` is recorded in the third return value.
+    Callers can use that map to distinguish "plugin is installed but
+    its manifest is corrupt" from "no such command" so the operator
+    receives a recovery hint instead of a generic typo error.
+
+    Returns the populated registry, a name → ``LockEntry`` map, and a
+    name → corruption-reason map.
     """
     registry = UserLevelProgramRegistry()
     lock = Lockfile(lockfile_path)
     entries = lock.read()
+    corrupt: dict[str, str] = {}
     for entry in entries.values():
         manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
         try:
             manifest = load_manifest(manifest_path)
-        except PluginManifestError:
-            # Skip — but never crash dispatch for one broken plugin.
+        except PluginManifestError as exc:
+            # Skip — but remember the failure so dispatch can surface
+            # a recovery hint when this name is actually requested.
+            corrupt[entry.name] = str(exc)
             continue
         try:
             registry.register(manifest, replace=True)
@@ -66,7 +76,7 @@ def _build_registry_from_lockfile(lockfile_path: Path) -> tuple[UserLevelProgram
             # Namespace collision with another already-registered
             # plugin: keep the first registration, skip subsequent.
             continue
-    return registry, entries
+    return registry, entries, corrupt
 
 
 def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
@@ -96,7 +106,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
         # "unknown command" hint.
         return None
     try:
-        registry, entries = _build_registry_from_lockfile(DEFAULT_LOCKFILE_PATH)
+        registry, entries, corrupt = _build_registry_from_lockfile(DEFAULT_LOCKFILE_PATH)
     except (OSError, ValueError) as exc:
         # Lockfile present but corrupt — surface the corruption
         # directly. Hiding this as "no such command" makes a real
@@ -122,6 +132,35 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
 
     program = registry.get_by_namespace(cmd_name) or registry.get(cmd_name)
     if program is None:
+        # Distinguish "plugin is installed but its manifest is corrupt"
+        # from a real typo: if ``cmd_name`` matches a lockfile entry
+        # whose manifest failed to load, surface a friendly recovery
+        # hint instead of letting Typer say "no such command".
+        if cmd_name in corrupt:
+            captured_reason = corrupt[cmd_name]
+            corrupt_entry = entries.get(cmd_name)
+            corrupt_home = (
+                str(Path(corrupt_entry.plugin_home).expanduser())
+                if corrupt_entry is not None
+                else "<unknown plugin home>"
+            )
+
+            @click.command(
+                name=cmd_name,
+                context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+            )
+            @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
+            def _broken_manifest(argv: tuple[str, ...]) -> None:  # noqa: ARG001 — argv ignored
+                print_error(
+                    f"plugin {cmd_name!r} is installed but its manifest is "
+                    f"unreadable: {captured_reason}. "
+                    f"Inspect or repair the manifest at {corrupt_home}/"
+                    f"ouroboros.plugin.json, or run `ooo plugin remove "
+                    f"{cmd_name}` to reset its install."
+                )
+                raise click.exceptions.Exit(code=1)
+
+            return _broken_manifest
         return None
 
     entry = entries.get(program.name)

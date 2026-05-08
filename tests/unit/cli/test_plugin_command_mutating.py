@@ -2220,6 +2220,112 @@ def test_add_friendly_error_on_structurally_corrupt_catalog_state(
     assert "Traceback" not in result.output
 
 
+def test_add_friendly_error_on_corrupt_inner_plugins_field(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:431.
+
+    Inner-shape validation must reach the ``plugins`` field too:
+    ``register()`` does ``set(entry.get("plugins", []))`` and
+    ``find_sources_for()`` does ``plugin_name in entry.get("plugins", [])``.
+    A parseable file whose ``plugins`` value is a non-iterable (e.g.
+    ``"plugins": 1``) or a non-list must surface the friendly recovery
+    hint, not crash with ``TypeError``.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    _make_repo_layout(repo, [REFERENCE_MANIFEST])
+
+    catalog_state = tmp_path / "plugin-catalogs.json"
+    catalog_state.write_text(
+        json.dumps(
+            {
+                "catalogs": [
+                    {
+                        "source_type": "local_path",
+                        "source_identity": str(repo),
+                        # Wrong type — should be list[str].
+                        "plugins": 1,
+                    }
+                ]
+            }
+        )
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    # Friendly recovery error names the field that drifted.
+    assert "plugins" in plain, plain
+    assert "Traceback" not in result.output
+
+
+def test_add_friendly_error_on_non_string_plugin_name_in_catalog(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Sibling regression: a list-typed but non-string-element ``plugins``
+    field (e.g. ``[1, 2]``) also breaks the membership/set paths
+    silently. The validator must reject it before the iterator path
+    runs.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    _make_repo_layout(repo, [REFERENCE_MANIFEST])
+
+    catalog_state = tmp_path / "plugin-catalogs.json"
+    catalog_state.write_text(
+        json.dumps(
+            {
+                "catalogs": [
+                    {
+                        "source_type": "local_path",
+                        "source_identity": str(repo),
+                        "plugins": [1, 2],
+                    }
+                ]
+            }
+        )
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "plugins" in plain, plain
+    assert "Traceback" not in result.output
+
+
 def test_trust_failure_after_disable_check_keeps_disable_record(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
