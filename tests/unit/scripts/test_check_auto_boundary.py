@@ -382,6 +382,66 @@ def test_in_repo_symlink_clean_target_still_scanned(
     assert rc == 0, "in-repo symlink to clean file must not regress the scan"
 
 
+def test_scan_extra_file_symlink_to_outside_repo_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for PR #797 review: the repo-boundary check must apply
+    to ``SCAN_EXTRA_FILES`` too, not only to ``SCAN_DIRS``.
+
+    Reproduces the exact failure the bot flagged: ``auto.py`` (a
+    SCAN_EXTRA_FILES entry) is a symlink to a file containing
+    ``GitHubVendor`` outside the repo. The earlier patch only applied
+    the resolve-and-check rule inside the SCAN_DIRS loop, so the extra-
+    file slot still resolved and scanned the external file
+    unconditionally and ``main()`` returned 1.
+    """
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    auto_dir = fake_repo / "src" / "ouroboros" / "auto"
+    auto_dir.mkdir(parents=True)
+    (auto_dir / "clean.py").write_text("# clean\n")
+    cli_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    cli_dir.mkdir(parents=True)
+
+    # External file outside the repo, carrying a forbidden token.
+    external = tmp_path / "external_auto.py"
+    external.write_text("class GitHubVendor:\n    pass\n")
+    # The SCAN_EXTRA_FILES entry is a symlink to that external file.
+    (cli_dir / "auto.py").symlink_to(external)
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 0, "SCAN_EXTRA_FILES entry resolving outside REPO_ROOT must not be scanned"
+
+
+def test_scan_extra_file_in_repo_symlink_is_still_scanned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Conjugate of the above: an in-repo symlink at the
+    SCAN_EXTRA_FILES slot must remain scanned. ``auto.py`` →
+    ``shared/auto.py`` (same repo) carrying a forbidden token must be
+    caught — the boundary is REPO_ROOT, not symlink-or-not."""
+    module = _load_module()
+    fake_repo = tmp_path / "repo"
+    auto_dir = fake_repo / "src" / "ouroboros" / "auto"
+    auto_dir.mkdir(parents=True)
+    (auto_dir / "clean.py").write_text("# clean\n")
+    cli_dir = fake_repo / "src" / "ouroboros" / "cli" / "commands"
+    cli_dir.mkdir(parents=True)
+
+    shared = fake_repo / "src" / "ouroboros" / "shared"
+    shared.mkdir(parents=True)
+    (shared / "auto.py").write_text("class GitHubAdapter:\n    pass\n")
+    # In-repo symlink at the SCAN_EXTRA_FILES slot.
+    (cli_dir / "auto.py").symlink_to(shared / "auto.py")
+
+    _isolate(module, monkeypatch, fake_repo)
+    rc = module.main()
+    assert rc == 1, (
+        "in-repo symlink at SCAN_EXTRA_FILES carrying a forbidden token must still be caught"
+    )
+
+
 def test_in_repo_symlink_dirty_target_is_caught(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

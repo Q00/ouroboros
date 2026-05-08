@@ -251,11 +251,28 @@ def _resolve_scan_targets() -> tuple[list[Path], list[str]]:
 
     for rel in SCAN_EXTRA_FILES:
         p = REPO_ROOT / rel
-        if p.is_file():
-            rp = p.resolve()
-            if rp not in seen:
-                seen.add(rp)
-                targets.append(p)
+        if not p.is_file():
+            continue
+        # Apply the same repo-boundary check used for SCAN_DIRS: if the
+        # extra-file slot is itself a symlink to something outside the
+        # repo (e.g. a contributor accidentally points
+        # ``src/ouroboros/cli/commands/auto.py`` at a vendored copy
+        # outside the tree), the scan must skip it. Without this, the
+        # SCAN_DIRS path enforces "in-repo only" but the explicit
+        # extra-files path silently re-introduces the same false-positive
+        # class — flagged on PR #797 by the bot reviewer (auto.py ->
+        # external file containing GitHubVendor reproduced rc=1).
+        try:
+            resolved = p.resolve(strict=False)
+        except OSError:  # broken symlink — treat as escape
+            continue
+        try:
+            resolved.relative_to(repo_root_resolved)
+        except ValueError:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            targets.append(p)
 
     missing = [rel for rel in ANCHOR_FILES if not (REPO_ROOT / rel).is_file()]
     return targets, missing
