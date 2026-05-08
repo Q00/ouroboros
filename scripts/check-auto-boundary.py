@@ -155,28 +155,38 @@ FORBIDDEN_PATTERNS: tuple[str, ...] = (
     r"(?i:/pulls?/)",  # `/` is already a non-word boundary
     r"(?<![A-Za-z])(?i:jira)|(?<=[a-z])J(?i:ira)",
     r"(?<![A-Za-z])(?i:slack)|(?<=[a-z])S(?i:lack)",
-    # Linear (the issue tracker / SaaS) -- tightened to:
-    #   * the URL form ``linear.app`` / ``linear.com``, or
-    #   * a PascalCase composition (`LinearClient`, `LinearAdapter`,
-    #     `LinearAuth`, ...): "(?i:linear)" is case-insensitive but the
-    #     trailing ``[A-Z]`` is case-sensitive, so this distinguishes
-    #     ``LinearClient`` from benign ``linearize`` / ``linear_time``,
-    #   * an explicit integration suffix in snake_case
-    #     (`linear_client`, `linear_webhook`, ...),
-    #   * a camelCase composition where ``Linear`` is preceded by a
-    #     lowercase letter (``notifyLinearAdapter``,
-    #     ``maybeLinearClient``).
-    # Plain "linear pipeline" / "linear scan" / "linear_time" do NOT
-    # match. Each token-start arm carries ``(?<![A-Za-z])`` and each
-    # camelCase arm carries ``(?<=[a-z])L`` (case-sensitive) so that
-    # embedded forms like ``collinearPoints``, ``bilinearForm``,
-    # ``nonlinearAdapter``, and ``nonlinear_adapter`` also do not match.
+    # Linear (the issue tracker / SaaS) -- tightened to require an
+    # explicit *integration suffix* from a closed enumerated list, so
+    # generic English compounds like ``linearTime``,
+    # ``linearTransform``, or ``LinearOperator`` stay benign even
+    # though their first letter is uppercase. Linear-the-product
+    # integrations always carry a recognizable role suffix
+    # (``Client``, ``Adapter``, ``Auth``, ``Webhook``, ...), so
+    # enumerating those suffixes -- rather than accepting any trailing
+    # ``[A-Z]`` -- removes the entire false-positive class without
+    # losing any real-domain catch.
+    #
+    # The arms cover:
+    #   * the URL form ``linear.app`` / ``linear.com``;
+    #   * token-start ``linear<suffix>`` with optional underscore --
+    #     handles PascalCase ``LinearClient``, camelCase
+    #     ``linearClient``, snake_case ``linear_client``,
+    #     SCREAMING_SNAKE ``LINEAR_CLIENT``, and the no-separator
+    #     all-caps ``LINEARCLIENT``;
+    #   * camelCase-boundary form preceded by a lowercase letter
+    #     (``notifyLinearAdapter``, ``maybeLinearClient``) -- the
+    #     literal ``L`` is case-sensitive so embedded-lowercase forms
+    #     (``mylinear_client``, ``collinear_client``) stay benign by
+    #     the same rule the other keywords use.
+    # Plain "linear pipeline", "linear scan", "linear_time",
+    # ``linearize``, ``linearTime``, ``LinearTime``, ``LinearOperator``
+    # do NOT match. Embedded forms like ``collinearPoints``,
+    # ``bilinearForm``, ``nonlinearAdapter``, and ``nonlinear_adapter``
+    # also do not match.
     (
         r"(?<![A-Za-z])(?i:linear\.(?:app|com))"
-        r"|(?<![A-Za-z])(?i:linear)[A-Z]"
-        r"|(?<![A-Za-z])(?i:linear_(?:client|adapter|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
-        r"|(?<=[a-z])L(?i:inear)[A-Z]"
-        r"|(?<=[a-z])L(?i:inear_(?:client|adapter|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
+        r"|(?<![A-Za-z])(?i:linear_?(?:client|adapter|auth|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
+        r"|(?<=[a-z])L(?i:inear_?(?:client|adapter|auth|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
     ),
 )
 

@@ -411,6 +411,19 @@ def test_allowlist_marker_split_string_and_comment(
         ("data = myslack_data", "myslack_data (embedded slack)"),
         ("data = mypull_request_data", "mypull_request_data (embedded pull_request)"),
         ("var = mypullrequest_handler", "mypullrequest (embedded pullrequest)"),
+        # Generic English camelCase / PascalCase compounds that begin
+        # with ``linear`` but are not Linear-the-product integrations
+        # must NOT trigger. The follow-up bot review on commit 293d87c7
+        # flagged that the previous ``(?i:linear)[A-Z]`` arm rejected
+        # this whole class as if it referenced Linear-the-SaaS.
+        ("dt = linearTime", "linearTime (generic camelCase)"),
+        ("class LinearTime: ...", "LinearTime (generic PascalCase)"),
+        ("op = linearTransform()", "linearTransform (generic camelCase)"),
+        ("class LinearTransform: ...", "LinearTransform (generic PascalCase)"),
+        ("op = LinearOperator()", "LinearOperator (generic PascalCase)"),
+        ("class LinearRegressor: ...", "LinearRegressor (generic PascalCase)"),
+        ("y = linearScan(arr)", "linearScan (generic camelCase)"),
+        ("var = LinearProgrammingSolver()", "LinearProgrammingSolver (generic compound)"),
     ],
 )
 def test_linear_word_is_not_a_false_positive(
