@@ -748,6 +748,102 @@ def test_subprocess_permission_error_emits_failed_with_exit_126(tmp_path: Path) 
     assert failed["provenance"]["exception_type"] == "PermissionError"
 
 
+def test_entrypoint_unmatched_quote_emits_failed_not_crash(tmp_path: Path) -> None:
+    """A manifest whose ``entrypoint.command`` carries an unmatched quote
+    is installable today — the schema only enforces ``minLength: 1`` on
+    the field, leaving lexical validity to the dispatcher. Without
+    explicit handling, ``shlex.split`` would raise ``ValueError`` BEFORE
+    any error path in ``invoke_plugin``, the exception would escape the
+    firewall, and the caller would crash without ever seeing the
+    required terminal ``plugin.failed`` event. The firewall must emit
+    a controlled ``plugin.failed`` instead.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:640.
+    """
+    import dataclasses
+
+    from ouroboros.plugin.manifest import Entrypoint
+
+    program = _make_program(tmp_path)
+    bad_manifest = dataclasses.replace(
+        program.manifest,
+        entrypoint=Entrypoint(type="command", command='python -m "broken'),
+    )
+    bad_program = dataclasses.replace(program, manifest=bad_manifest)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        bad_program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-shlex",
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    # The terminal event MUST be plugin.failed and the dispatcher must
+    # not have raised. The exact prefix of events (whether
+    # ``plugin.invoked`` was emitted) is a refinement; what's
+    # contractually required is that ``plugin.failed`` is the last
+    # event and that the runtime did not crash.
+    assert types[-1] == "plugin.failed"
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert "not parseable" in failed["result"]["message"]
+    assert failed["provenance"]["exception_type"] == "ValueError"
+
+
+def test_entrypoint_whitespace_only_command_emits_failed(tmp_path: Path) -> None:
+    """``entrypoint.command`` containing only whitespace tokenises to
+    ``[]`` via ``shlex.split``. Without explicit handling, the
+    concatenated argv would be ``[command_name, *argv]`` and the runtime
+    would attempt to launch the user-facing command name as if it were
+    the executable — masking a manifest validation failure as a
+    "command not found" runtime failure. Surface the empty-tokenisation
+    case as a controlled ``plugin.failed`` instead.
+
+    Regression catch for the bot's BLOCKING finding on firewall.py:640.
+    """
+    import dataclasses
+
+    from ouroboros.plugin.manifest import Entrypoint
+
+    program = _make_program(tmp_path)
+    bad_manifest = dataclasses.replace(
+        program.manifest,
+        entrypoint=Entrypoint(type="command", command="   "),
+    )
+    bad_program = dataclasses.replace(program, manifest=bad_manifest)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        bad_program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-empty",
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    assert types[-1] == "plugin.failed"
+    failed = events[-1]
+    assert "empty" in failed["result"]["message"].lower()
+
+
 def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     """Test 9: subprocess FileNotFoundError → status=failed, exit_code=127."""
     program = _make_program(tmp_path)

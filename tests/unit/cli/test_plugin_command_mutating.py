@@ -316,6 +316,116 @@ def test_trust_grants_scope_and_writes_event(runner: CliRunner, tmp_path: Path) 
     assert payload["provenance"]["granted_scope"] == "github:read"
 
 
+def test_trust_partial_grant_records_installed_in_audit_event(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`plugin.trusted` audit `trust_state` must mirror firewall invokability.
+
+    Concrete shape: a manifest that declares one **required** scope and
+    one **optional** scope. The user grants only the optional one.
+    `inspect`/`list` and the firewall correctly treat the plugin as
+    `installed` (the required scope is still missing). The audit event
+    MUST agree — a hardcoded `"trusted"` here would misstate the
+    permission boundary in the event stream and break consumers that
+    key off `trust_state`.
+    """
+    manifest_with_optional = {
+        **REFERENCE_MANIFEST,
+        "permissions": [
+            {"scope": "github:read", "risk": "read_only", "required": True},
+            {
+                "scope": "github:pull_request:write",
+                "risk": "destructive",
+                "required": False,
+            },
+        ],
+    }
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(manifest_with_optional))
+    paths = _common_paths(tmp_path)
+    install = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert install.exit_code == 0, install.output
+
+    # Grant ONLY the optional scope.
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:pull_request:write",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(paths["audit_log"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(paths["audit_log"].read_text().splitlines()[0])["payload"]
+    assert payload["event_type"] == "plugin.trusted"
+    assert payload["trust_state"] == "installed", (
+        "audit `trust_state` must reflect the firewall's view: granting only "
+        "an optional scope leaves required scopes missing, so the plugin is "
+        f"still 'installed', not 'trusted'. got {payload['trust_state']!r}"
+    )
+
+
+def test_trust_full_required_grant_records_trusted_in_audit_event(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Inverse of the partial-grant test: granting every required scope
+    should record `trust_state="trusted"` so the audit stream matches the
+    firewall's invokability decision.
+    """
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    paths = _common_paths(tmp_path)
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(paths["audit_log"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(paths["audit_log"].read_text().splitlines()[0])["payload"]
+    assert payload["trust_state"] == "trusted"
+
+
 def test_trust_uses_installed_manifest_version_when_lockfile_drifted(
     runner: CliRunner, tmp_path: Path
 ) -> None:

@@ -638,7 +638,62 @@ def invoke_plugin(
     # programs that ship their own absolute entrypoint), we fall back to
     # the caller's cwd to preserve the previous test contract.
     cmd_template = manifest.entrypoint.command
-    cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
+    # The schema only enforces ``minLength: 1`` on entrypoint.command, so
+    # a manifest may carry a whitespace-only string (which tokenises to
+    # ``[]``) or a string with an unmatched quote (which raises
+    # ``ValueError`` from ``shlex``). Both shapes are installable today
+    # and will reach this point. Without explicit handling, the
+    # ``ValueError`` would escape the firewall — skipping the required
+    # terminal ``plugin.failed`` event — and an empty token list would
+    # bubble into an opaque launcher failure. Convert both to a
+    # controlled ``plugin.failed`` outcome so dispatch always closes
+    # with a terminal event.
+    try:
+        parsed_argv = shlex.split(cmd_template)
+    except ValueError as exc:
+        message = f"entrypoint command is not parseable: {exc}"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={
+                    "correlation_id": correlation_id,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=126,
+            message=message,
+            events=tuple(emitted),
+        )
+    if not parsed_argv:
+        message = "entrypoint command is empty after tokenization"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={"correlation_id": correlation_id},
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=126,
+            message=message,
+            events=tuple(emitted),
+        )
+    cmd_argv = parsed_argv + [command_name] + list(argv)
     runner = subprocess_runner or subprocess.run
     # Capture stdout/stderr as **bytes** rather than asking subprocess
     # to decode them. The firewall only ever stores a sha256 hash of

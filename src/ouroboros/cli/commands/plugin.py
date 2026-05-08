@@ -2369,6 +2369,25 @@ def trust_command(
                 raise typer.Exit(code=1) from exc
             print_success(f"Granted: {scope} ({len(record.granted_scopes)} total scope(s))")
 
+            # Audit `trust_state` must mirror the firewall's invokability
+            # view, not the fact that *some* grant was just written. A
+            # grant whose cumulative scope set still does not satisfy
+            # every required permission leaves the plugin firewall-blocked
+            # (`inspect`/`list` show "installed"); hardcoding "trusted"
+            # here misstated the permission boundary in the audit stream
+            # and broke consumers that key off the event. Concrete
+            # regression case: a manifest with one required scope and
+            # one optional scope, where the user grants only the
+            # optional one. Compute the same predicate the firewall
+            # uses post-grant.
+            granted_after = {g.scope for g in record.granted_scopes}
+            required_scopes = {p.scope for p in manifest.permissions if p.required}
+            event_trust_state = (
+                "trusted"
+                if granted_after and not (required_scopes - granted_after)
+                else "installed"
+            )
+
             # Emit plugin.trusted via the ledger adapter shape.
             audit_event = {
                 "schema_version": "0.1",
@@ -2386,7 +2405,7 @@ def trust_command(
                     "name": "grant",
                     "argv": ["--scope", scope],
                 },
-                "trust_state": "trusted",
+                "trust_state": event_trust_state,
                 "capabilities_used": [],
                 "permissions_used": [],
                 "result": {"status": "success", "message": f"Granted scope {scope}"},
