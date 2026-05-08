@@ -860,3 +860,111 @@ async def test_run_resume_with_persisted_handle_complete_product_off_completes(
     assert result.status == "complete"
     assert state.phase is AutoPhase.COMPLETE
     assert state.ralph_job_id is None
+
+
+# ---------------------------------------------------------------------------
+# Early dispatch checkpoint — review-6.
+#
+# The Ralph tracking handle must be persisted IMMEDIATELY after the background
+# job is created, BEFORE the auto pipeline blocks on terminal completion.
+# Otherwise a process restart between dispatch and terminal would leave the
+# state with only ``ralph_lineage_id`` and ``_resume_ralph_handoff`` could
+# not poll the still-running Ralph job — reintroducing the stranded-resume
+# bug review-5 was meant to solve.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handoff_to_ralph_persists_job_id_before_terminal_poll(tmp_path) -> None:
+    """``ralph_starter`` receives an ``on_dispatched`` hook and the auto
+    pipeline checkpoints ``ralph_job_id`` synchronously inside that hook —
+    BEFORE the starter's terminal-status await returns."""
+    state = _state_at_run_phase(tmp_path)
+
+    captured: dict[str, Any] = {}
+
+    async def ralph_starter(
+        _seed: Seed,
+        *,
+        lineage_id: str,
+        on_dispatched: Any | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        # Simulate a real ``HandlerRalphStarter``: emit the dispatch
+        # envelope BEFORE returning the terminal envelope. Capture the
+        # state snapshot at the moment the checkpoint fires so the
+        # assertion can prove ``state.ralph_job_id`` was already set
+        # by the time terminal completion is reached.
+        if on_dispatched is not None:
+            on_dispatched(
+                {
+                    "job_id": "job_ralph_early",
+                    "lineage_id": lineage_id,
+                    "dispatch_mode": "job",
+                }
+            )
+        captured["job_id_at_dispatch"] = state.ralph_job_id
+        return {
+            "job_id": "job_ralph_early",
+            "lineage_id": lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    # The checkpoint hook fired BEFORE the starter returned the terminal
+    # envelope, so ``state.ralph_job_id`` was already populated when the
+    # snapshot was taken — proving the dispatch handle is durable across
+    # a hypothetical process death between dispatch and terminal.
+    assert captured["job_id_at_dispatch"] == "job_ralph_early"
+
+
+@pytest.mark.asyncio
+async def test_handoff_to_ralph_falls_back_for_legacy_starter_without_hook(tmp_path) -> None:
+    """Older ``RalphStarter`` implementations that don't accept the
+    ``on_dispatched`` keyword must still work — the pipeline retries
+    without the hook so the legacy contract is preserved (the test/library
+    callers without a job manager opt out of the early-checkpoint
+    guarantee, accepting the documented stranded-resume risk)."""
+    state = _state_at_run_phase(tmp_path)
+
+    async def legacy_ralph_starter(
+        _seed: Seed,
+        *,
+        lineage_id: str,
+        max_total_seconds: float | None = None,  # noqa: ARG001
+        per_iteration_timeout_seconds: float | None = None,  # noqa: ARG001
+    ) -> dict[str, Any]:
+        return {
+            "job_id": "job_legacy_ralph",
+            "lineage_id": lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=legacy_ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.ralph_job_id == "job_legacy_ralph"

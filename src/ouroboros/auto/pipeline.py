@@ -882,12 +882,68 @@ class AutoPipeline:
                 _MIN_RALPH_PER_ITERATION_SECONDS,
                 min(_DEFAULT_RALPH_PER_ITERATION_SECONDS, remaining),
             )
+
+        # Q00/ouroboros#773 (review-6): persist the Ralph dispatch handle as
+        # soon as the background job exists, BEFORE we await terminal
+        # completion. Without this checkpoint, a process restart, deadline
+        # trip, or client disconnect after dispatch but before terminal
+        # would leave the persisted state with only ``ralph_lineage_id`` —
+        # ``_resume_ralph_handoff`` then cannot call ``ralph_resumer``
+        # (which keys off ``ralph_job_id``) and falls back to guidance-only
+        # text, reintroducing the stranded-resume bug this PR is meant to
+        # solve. The starter callable invokes this hook BEFORE blocking on
+        # the terminal-status poll.
+        def _checkpoint_dispatch(envelope: dict[str, Any]) -> None:
+            state.ralph_job_id = _optional_str(envelope.get("job_id"))
+            state.ralph_dispatch_mode = _optional_str(envelope.get("dispatch_mode"))
+            persisted_lineage = _optional_str(envelope.get("lineage_id"))
+            if persisted_lineage:
+                state.ralph_lineage_id = persisted_lineage
+            state.last_tool_name = "ralph_starter"
+            self._save(state)
+
+        # Q00/ouroboros#773 (review-7): decide compatibility BEFORE invocation,
+        # never by retrying on a post-dispatch ``TypeError``. ``RalphHandler``
+        # creates a brand-new background job on every call and has no
+        # idempotency key (unlike the run starter's ``idempotency_key`` path),
+        # so a second invocation after a real ``TypeError`` thrown post-dispatch
+        # would create a duplicate Ralph loop mutating the same lineage.
+        # Inspect the callable's signature once and route the kwargs through
+        # the right shape on a single attempt.
+        starter_kwargs: dict[str, Any] = {
+            "lineage_id": lineage_id,
+            "max_total_seconds": max_total_seconds,
+            "per_iteration_timeout_seconds": per_iteration_timeout_seconds,
+        }
+        if _accepts_keyword(self.ralph_starter, "on_dispatched"):
+            starter_kwargs["on_dispatched"] = _checkpoint_dispatch
         try:
-            ralph_meta = await self.ralph_starter(
-                seed,
-                lineage_id=lineage_id,
-                max_total_seconds=max_total_seconds,
-                per_iteration_timeout_seconds=per_iteration_timeout_seconds,
+            ralph_call = self.ralph_starter(seed, **starter_kwargs)
+            if state.deadline_at is None:
+                ralph_meta = await ralph_call
+            else:
+                ralph_timeout = max(0.0, state.deadline_at - time.monotonic())
+                ralph_meta = await asyncio.wait_for(ralph_call, timeout=ralph_timeout)
+        except TimeoutError:
+            # Even if the deadline trips, the Ralph job may already exist
+            # server-side (the dispatch checkpoint above persisted its
+            # handle). Resume will then poll it via ``_resume_ralph_handoff``
+            # rather than treating the session as terminally lost.
+            if self._enforce_deadline(state):
+                return self._result(
+                    state,
+                    ledger,
+                    review=review,
+                    blocker=state.last_error,
+                    run_subagent=run_subagent,
+                )
+            state.mark_blocked(
+                "ralph handoff timed out before terminal status",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
         except Exception as exc:
             state.mark_failed(f"ralph handoff failed: {exc}", tool_name="ralph_starter")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -185,7 +186,20 @@ class HandlerRalphStarter:
         lineage_id: str,
         max_total_seconds: float | None = None,
         per_iteration_timeout_seconds: float | None = None,
+        on_dispatched: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        """Dispatch the Ralph loop and wait for terminal completion.
+
+        ``on_dispatched`` is invoked with the dispatch envelope *before*
+        the wait-for-terminal poll begins, so callers (notably
+        :meth:`AutoPipeline._handoff_to_ralph`) can checkpoint
+        ``ralph_job_id`` / ``ralph_dispatch_mode`` immediately after the
+        background job has been created. Without this hook, a process
+        restart, deadline trip, or client disconnect *after* dispatch but
+        *before* terminal completion would leave the persisted state with
+        only ``ralph_lineage_id`` — and resume could not poll the
+        still-running job (Q00/ouroboros#773 review-6).
+        """
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )
@@ -208,19 +222,34 @@ class HandlerRalphStarter:
         # ``delegated_to_plugin`` status. The auto pipeline records this and
         # transitions straight to COMPLETE — there is nothing to wait for.
         if status == "delegated_to_plugin" or dispatch_mode == "plugin":
-            return {
+            envelope = {
                 "job_id": None,
                 "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
                 "dispatch_mode": "plugin",
                 "terminal_status": "delegated_to_plugin",
                 "stop_reason": None,
             }
+            if on_dispatched is not None:
+                on_dispatched(envelope)
+            return envelope
         # Job mode: wait for the background job to terminate, then map the
         # final job snapshot back into the structured terminal status the
         # pipeline maps onto an auto phase.
         job_id = _optional_str(meta.get("job_id"))
         if not job_id:
             raise HandlerError("ouroboros_ralph did not return a job_id")
+        if on_dispatched is not None:
+            # Fire BEFORE we block on the terminal poll so callers can
+            # persist ``ralph_job_id`` immediately. The terminal_status /
+            # stop_reason are intentionally omitted here — they are not
+            # known until the poll returns.
+            on_dispatched(
+                {
+                    "job_id": job_id,
+                    "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
+                    "dispatch_mode": "job",
+                }
+            )
         job_manager = self.handler._job_manager  # noqa: SLF001
         terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
