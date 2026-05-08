@@ -1182,6 +1182,18 @@ def build_ralph_subagent(
     ``_subagent`` envelope and let the plugin's Task pane own execution rather
     than enqueueing an unobservable local background job.
 
+    Cross-runtime contract (#789 review-2): the in-process ``RalphLoopRunner``
+    enforces ``per_iteration_timeout_seconds`` and ``max_total_seconds`` itself
+    via ``asyncio.wait_for`` and a monotonic budget check. The plugin path
+    cannot enforce those limits server-side — execution happens inside a
+    foreign child session this server does not control — so both bounds are
+    forwarded into the prompt **and** context as instructions for the child to
+    self-enforce. Honesty about that split is encoded in the prompt
+    (``stop_reason=iteration_timeout`` / ``stop_reason=wall_clock_exhausted``
+    are framed as obligations of the child session) and in the public MCP
+    parameter descriptions so callers know plugin-mode bounds are
+    plugin-honored, not MCP-enforced.
+
     Args:
         per_iteration_timeout_seconds: Per-iteration wall-clock bound forwarded
             from the MCP handler.
@@ -1210,7 +1222,7 @@ def build_ralph_subagent(
             check the cumulative wall-clock elapsed since the loop started
             BEFORE launching each iteration and surface
             ``stop_reason=wall_clock_exhausted`` to the parent on exhaustion.
-            When ``None``, the field is omitted from prompt and context
+            When ``None``, the field is omitted from both prompt and context
             (legacy shape preserved for callers that don't care about the
             bound).
     """

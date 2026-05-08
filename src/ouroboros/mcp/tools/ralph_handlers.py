@@ -178,11 +178,16 @@ class RalphHandler:
                     name="max_total_seconds",
                     type=ToolInputType.NUMBER,
                     description=(
-                        "Total wall-clock budget for the entire Ralph loop in "
-                        "seconds. Checked at the top of every iteration BEFORE "
-                        "launching evolve_step; on exhaustion the loop stops "
-                        "with stop_reason='wall_clock_exhausted'. When omitted, "
-                        "a derived ceiling of "
+                        "Total wall-clock budget for the entire Ralph loop "
+                        "in seconds. In the in-process runner this is "
+                        "enforced by RalphLoopRunner: checked at the top of "
+                        "every iteration BEFORE launching evolve_step, and "
+                        "on exhaustion the loop stops with "
+                        "stop_reason='wall_clock_exhausted'. In OpenCode "
+                        "plugin mode the bound is forwarded to the child "
+                        "session and the plugin is expected to self-enforce; "
+                        "the MCP server cannot abort a foreign child "
+                        "process. When omitted, a derived ceiling of "
                         "max_generations * per_iteration_timeout_seconds is "
                         "auto-applied (with a WARNING log) for standalone "
                         "callers. Range: 1-86400."
@@ -359,6 +364,12 @@ class RalphHandler:
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Plugin mode: per_iteration_timeout_seconds and max_total_seconds
+            # are forwarded to the child session as instructions. The MCP
+            # server cannot enforce them server-side because execution lives
+            # in a foreign OpenCode child process this server does not own;
+            # the in-process RalphLoopRunner is the only path with hard
+            # enforcement. See build_ralph_subagent docstring (#789 review-2).
             payload = build_ralph_subagent(
                 lineage_id=config.lineage_id,
                 seed_content=config.seed_content,
