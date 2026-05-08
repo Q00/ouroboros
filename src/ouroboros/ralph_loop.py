@@ -7,6 +7,7 @@ running repeated ``evolve_step`` calls inside one background job.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -16,6 +17,8 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 _TERMINAL_SUCCESS_ACTIONS = frozenset({"converged"})
 _TERMINAL_FAILURE_ACTIONS = frozenset({"failed", "interrupted", "exhausted", "stagnated"})
+
+DEFAULT_PER_ITERATION_TIMEOUT_SECONDS = 1800.0
 
 
 class EvolveStepLike(Protocol):
@@ -35,6 +38,7 @@ class RalphLoopConfig:
     skip_qa: bool = False
     project_dir: str | None = None
     max_generations: int = 10
+    per_iteration_timeout_seconds: float = DEFAULT_PER_ITERATION_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +133,43 @@ class RalphLoopRunner:
             if config.project_dir:
                 arguments["project_dir"] = config.project_dir
 
-            result = await self.evolve_handler.handle(arguments)
+            try:
+                result = await asyncio.wait_for(
+                    self.evolve_handler.handle(arguments),
+                    timeout=config.per_iteration_timeout_seconds,
+                )
+            except TimeoutError:
+                iterations.append(
+                    RalphIteration(
+                        generation=None,
+                        action="iteration_timeout",
+                        qa_verdict=None,
+                        is_error=True,
+                    )
+                )
+                status = "failed"
+                stop_reason = "iteration_timeout"
+                if final_result is None:
+                    final_result = MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=(
+                                    "Ralph iteration "
+                                    f"{iteration_index} exceeded "
+                                    f"{config.per_iteration_timeout_seconds:.0f}s timeout."
+                                ),
+                            ),
+                        ),
+                        is_error=True,
+                        meta={
+                            "lineage_id": config.lineage_id,
+                            "action": "iteration_timeout",
+                            "generation": None,
+                        },
+                    )
+                break
+
             if result.is_err:
                 raise RuntimeError(str(result.error))
 

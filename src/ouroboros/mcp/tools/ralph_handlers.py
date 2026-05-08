@@ -28,9 +28,16 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.ralph_loop import EvolveStepLike, RalphLoopConfig, RalphLoopRunner
+from ouroboros.ralph_loop import (
+    DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
+    EvolveStepLike,
+    RalphLoopConfig,
+    RalphLoopRunner,
+)
 
 MAX_RALPH_GENERATIONS = 10
+MIN_PER_ITERATION_TIMEOUT_SECONDS = 30.0
+MAX_PER_ITERATION_TIMEOUT_SECONDS = 7200.0
 
 
 @dataclass
@@ -112,6 +119,17 @@ class RalphHandler:
                     required=False,
                     default=MAX_RALPH_GENERATIONS,
                 ),
+                MCPToolParameter(
+                    name="per_iteration_timeout_seconds",
+                    type=ToolInputType.NUMBER,
+                    description=(
+                        "Per-iteration wall-clock timeout in seconds. If a single "
+                        "evolve_step generation exceeds this, the loop stops with "
+                        "stop_reason='iteration_timeout'. Default: 1800. Range: 30-7200."
+                    ),
+                    required=False,
+                    default=DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
+                ),
             ),
         )
 
@@ -152,6 +170,33 @@ class RalphHandler:
                 )
             )
 
+        try:
+            per_iteration_timeout_seconds = float(
+                arguments.get(
+                    "per_iteration_timeout_seconds",
+                    DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            return Result.err(
+                MCPToolError(
+                    "per_iteration_timeout_seconds must be a number",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+        if (
+            per_iteration_timeout_seconds < MIN_PER_ITERATION_TIMEOUT_SECONDS
+            or per_iteration_timeout_seconds > MAX_PER_ITERATION_TIMEOUT_SECONDS
+        ):
+            return Result.err(
+                MCPToolError(
+                    "per_iteration_timeout_seconds must be between "
+                    f"{MIN_PER_ITERATION_TIMEOUT_SECONDS:g} and "
+                    f"{MAX_PER_ITERATION_TIMEOUT_SECONDS:g}",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+
         if arguments.get("delegation_depth", 0):
             return Result.err(
                 MCPToolError(
@@ -168,6 +213,7 @@ class RalphHandler:
             skip_qa=bool(arguments.get("skip_qa", False)),
             project_dir=arguments.get("project_dir"),
             max_generations=max_generations,
+            per_iteration_timeout_seconds=per_iteration_timeout_seconds,
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
