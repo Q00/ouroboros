@@ -215,6 +215,62 @@ def test_dispatch_blocked_invocation_exits_nonzero(
     )
 
 
+def test_dispatch_refuses_disabled_legacy_lockfile_entry(
+    stub_default_paths: dict[str, Path],
+) -> None:
+    """Regression for the bot's BLOCKING finding on
+    plugin_dispatch.py:194 — a lockfile entry that pre-dates the
+    trust-subject contract has empty `source_type` / `source_identity`
+    columns. ``ooo plugin disable <name>`` writes ``disabled.json``
+    keyed by a non-empty fallback subject (`subject_for_disable()`);
+    the dispatcher MUST look up disable status under the same fallback,
+    not under empty strings, otherwise the disable write lands in one
+    bucket and the dispatcher's enforcement check runs against another
+    — leaving ``ooo <name> ...`` runnable after a successful
+    ``ooo plugin disable``.
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    home_root = stub_default_paths["homes"]
+    plugin_home = home_root / "github-pr-ops"
+    plugin_home.mkdir()
+    (plugin_home / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    real_digest = canonical_tree_hash(plugin_home)
+    # Legacy lockfile row: explicit empty trust-subject columns, simulating
+    # a row written before the new fields existed.
+    Lockfile(stub_default_paths["lockfile"]).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0" * 8,
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            # NB: source_type / source_identity intentionally omitted.
+            artifact_digest=real_digest,
+        )
+    )
+    # `disable` is what produces the disabled.json under the fallback
+    # subject; emulate that exactly via the public TrustStore API.
+    TrustStore(root=stub_default_paths["trust"]).write_disable(
+        "github-pr-ops",
+        # Same values `LockEntry.subject_for_disable()` would compute
+        # for a `source_kind="local"` row with empty source columns.
+        source_type="local_path",
+        source_identity=str(plugin_home),
+    )
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None
+    runner = CliRunner()
+    result = runner.invoke(cmd, ["review", "https://example.com/pr/1"])
+    assert result.exit_code != 0, (
+        f"disabled legacy entry must refuse invocation; got "
+        f"exit_code={result.exit_code} output={result.output!r}"
+    )
+
+
 def test_dispatch_requires_confirmation_command_prompts_user(
     stub_default_paths: dict[str, Path],
 ) -> None:

@@ -89,6 +89,30 @@ class LockEntry:
             lines.append(f"artifact_digest = {_toml_str(self.artifact_digest)}")
         return lines
 
+    def subject_for_disable(self) -> tuple[str, str]:
+        """Canonical ``(source_type, source_identity)`` for disable lookup.
+
+        Older lockfile rows that pre-date the trust-subject contract have
+        empty ``source_type`` / ``source_identity`` columns. Both the
+        write path (``ooo plugin disable``) and every read path
+        (dispatcher, ``inspect``, ``list``) MUST agree on the same
+        fallback for those rows; otherwise a ``disable`` write lands
+        under one subject and the dispatcher's ``is_disabled_for_subject``
+        check runs against another, leaving the user with a "disabled"
+        plugin that ``ooo <name> ...`` still happily invokes.
+
+        Fallback rules:
+          - ``source_type``: stored value if set; else ``"plugin_home"``
+            for git installs, ``"local_path"`` otherwise.
+          - ``source_identity``: stored value if set; else the git
+            ``repository`` URL or the local ``plugin_home`` path.
+        """
+        source_type = self.source_type or (
+            "plugin_home" if self.source_kind == "git" else "local_path"
+        )
+        source_identity = self.source_identity or (self.repository or self.plugin_home)
+        return source_type, source_identity
+
 
 def _toml_str(value: str) -> str:
     """Serialize a string value as TOML basic string. Restricts content to

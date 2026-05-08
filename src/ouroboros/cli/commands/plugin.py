@@ -2592,11 +2592,15 @@ def disable_command(
     # a recovery hint instead of a raw traceback in the very command
     # operators run to repair that state.
     try:
+        # Use the canonical fallback so `disable` writes the same
+        # subject the dispatcher and inspect/list look up. Diverging
+        # fallbacks here would silently leave legacy lock entries
+        # disabled-on-disk but enabled-at-invocation.
+        subject_type, subject_identity = entry.subject_for_disable()
         trust.write_disable(
             name,
-            source_type=entry.source_type
-            or ("plugin_home" if entry.source_kind == "git" else "local_path"),
-            source_identity=entry.source_identity or (entry.repository or entry.plugin_home),
+            source_type=subject_type,
+            source_identity=subject_identity,
         )
         trust.remove(name)
     except (ValueError, OSError) as exc:

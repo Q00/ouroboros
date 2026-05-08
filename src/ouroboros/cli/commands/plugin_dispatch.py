@@ -191,10 +191,18 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
         # non-zero — the same shape every other CLI failure takes.
         try:
             record = trust.read(program.name)
+            # Use the canonical lock-entry subject so the disable
+            # lookup keys against exactly the (source_type,
+            # source_identity) tuple `ooo plugin disable` writes —
+            # legacy lockfile rows (no source_type/source_identity
+            # columns) would otherwise look up under empty strings
+            # while `disable` wrote a non-empty fallback, leaving the
+            # plugin invocable after a successful `disable`.
+            subject_type, subject_identity = entry.subject_for_disable()
             is_disabled = trust.is_disabled_for_subject(
                 program.name,
-                source_type=entry.source_type or "",
-                source_identity=entry.source_identity or "",
+                source_type=subject_type,
+                source_identity=subject_identity,
             )
         except (ValueError, OSError) as exc:
             print_error(
