@@ -7,6 +7,7 @@ longer have to own the multi-generation loop in prompt/skill pseudo-code.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from ouroboros.core.types import Result
@@ -181,6 +182,13 @@ class RalphHandler:
             return Result.err(
                 MCPToolError(
                     "per_iteration_timeout_seconds must be a number",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+        if not math.isfinite(per_iteration_timeout_seconds):
+            return Result.err(
+                MCPToolError(
+                    "per_iteration_timeout_seconds must be a finite number",
                     tool_name="ouroboros_ralph",
                 )
             )

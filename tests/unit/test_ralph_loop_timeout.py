@@ -156,6 +156,28 @@ async def test_ralph_handler_rejects_non_numeric_per_iteration_timeout() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+async def test_ralph_handler_rejects_non_finite_per_iteration_timeout(
+    bad_value: float,
+) -> None:
+    """Non-finite values bypass plain range comparisons (`NaN < 30` is False),
+    so the handler must reject them explicitly before they can leak into
+    ``asyncio.wait_for`` or the plugin-path subagent context.
+    """
+    handler = RalphHandler(evolve_handler=_ImmediateEvolveHandler())  # type: ignore[arg-type]
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_nonfinite",
+            "per_iteration_timeout_seconds": bad_value,
+        }
+    )
+
+    assert result.is_err
+    assert "per_iteration_timeout_seconds must be a finite number" in str(result.error)
+
+
+@pytest.mark.asyncio
 async def test_plugin_dispatch_forwards_per_iteration_timeout_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

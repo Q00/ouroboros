@@ -1270,10 +1270,11 @@ do not enqueue another background Ralph job."""
         "skip_qa": skip_qa,
         "project_dir": project_dir,
         "max_generations": max_generations,
-        "per_iteration_timeout_seconds": per_iteration_timeout_seconds,
         "delegation_depth": delegation_depth,
         "allow_nested_ouroboros_ralph": allow_nested_ouroboros_ralph,
     }
+    if per_iteration_timeout_seconds is not None:
+        context["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",

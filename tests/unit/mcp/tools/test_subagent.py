@@ -252,10 +252,10 @@ class TestBuildRalphSubagent:
             "skip_qa": True,
             "project_dir": "/repo",
             "max_generations": 4,
-            "per_iteration_timeout_seconds": None,
             "delegation_depth": 1,
             "allow_nested_ouroboros_ralph": False,
         }
+        assert "per_iteration_timeout_seconds" not in payload.context
 
     def test_forwards_per_iteration_timeout_to_prompt_and_context(self) -> None:
         payload = build_ralph_subagent(
