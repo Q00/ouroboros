@@ -29,7 +29,26 @@ class SeedRepairer:
     """Deterministically repair common A-grade failures."""
 
     reviewer: SeedReviewer = field(default_factory=SeedReviewer)
-    max_repair_rounds: int = 5
+    # Canonical iteration bound. ``max_repair_rounds`` is preserved as a
+    # backward-compatible alias for existing callers (CLI, MCP, persisted
+    # state). The default mirrors ``AutoPipelineState.max_repair_rounds`` at
+    # ``state.py:228`` so the repairer-layer bound matches the pipeline-layer
+    # bound the rest of the codebase already advertises.
+    max_iterations: int = 5
+    max_repair_rounds: int = field(default=5, repr=False)
+
+    def __post_init__(self) -> None:
+        # Resolve ``max_iterations`` and ``max_repair_rounds`` to a single
+        # bound so callers can use either name without surprise. When a caller
+        # passes only ``max_repair_rounds`` (legacy callsites in CLI / MCP /
+        # tests), mirror it onto ``max_iterations``. When a caller passes
+        # ``max_iterations`` (new contract), mirror it back onto
+        # ``max_repair_rounds`` so existing introspection (e.g. progress
+        # surfaces reading ``repairer.max_repair_rounds``) keeps working.
+        if self.max_iterations == 5 and self.max_repair_rounds != 5:
+            self.max_iterations = self.max_repair_rounds
+        else:
+            self.max_repair_rounds = self.max_iterations
 
     def repair_once(
         self,
@@ -119,12 +138,20 @@ class SeedRepairer:
     def converge(
         self, seed: Seed, *, ledger: SeedDraftLedger | None = None
     ) -> tuple[Seed, SeedReview, list[RepairResult]]:
-        """Review/repair until A-grade or bounded stop."""
+        """Review/repair until A-grade or bounded stop.
+
+        ``max_iterations`` caps the number of recorded repair attempts. Once
+        ``len(history) >= self.max_iterations`` the loop returns the most
+        recent reviewed ``(seed, review, history)`` without invoking the
+        reviewer again — this is the upper bound the pipeline relies on to
+        prevent unbounded LLM cost when the reviewer keeps producing the
+        same finding.
+        """
         history: list[RepairResult] = []
         previous_high_fingerprints: set[str] = set()
         current = seed
         review = self.reviewer.review(current, ledger=ledger)
-        for _ in range(self.max_repair_rounds):
+        for _ in range(self.max_iterations):
             if review.grade_result.grade == SeedGrade.A and review.may_run:
                 return current, review, history
             high = {
@@ -135,6 +162,10 @@ class SeedRepairer:
             if repair.blocker or not repair.changed:
                 return current, review, history
             current = repair.seed
+            if len(history) >= self.max_iterations:
+                # Bound hit: return the last known review without spending
+                # another reviewer call.
+                return current, review, history
             if high and high == previous_high_fingerprints:
                 review = self.reviewer.review(current, ledger=ledger)
                 return current, review, history

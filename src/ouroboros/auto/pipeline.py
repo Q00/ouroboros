@@ -294,7 +294,19 @@ class AutoPipeline:
         if state.phase == AutoPhase.REVIEW:
             reviewer = self.reviewer or SeedReviewer(self.grade_gate)
             repairer = self.repairer or SeedRepairer(reviewer=reviewer)
-            seed, review, repairs = repairer.converge(seed, ledger=ledger)
+            repair_timeout = state.phase_timeout_seconds(AutoPhase.REPAIR)
+            try:
+                seed, review, repairs = await asyncio.wait_for(
+                    asyncio.to_thread(repairer.converge, seed, ledger=ledger),
+                    timeout=repair_timeout,
+                )
+            except TimeoutError:
+                state.mark_blocked(
+                    f"repair phase exceeded {repair_timeout:.0f}s",
+                    tool_name="seed_repairer",
+                )
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
             state.seed_artifact = seed.to_dict()
             state.repair_round = len(repairs)
             state.last_grade = review.grade_result.grade.value
