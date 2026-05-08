@@ -704,6 +704,55 @@ def test_digest_fails_closed_on_escaping_symlink(tmp_path: Path) -> None:
     assert events[0]["provenance"]["exception_type"] == "EscapingSymlinkError"
 
 
+def test_digest_fails_closed_on_plugin_home_symlink_loop_runtime_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some ``Path.resolve(strict=True)`` implementations report a
+    symlink loop at ``plugin_home`` as ``RuntimeError``. The firewall
+    must still fail closed and emit the terminal audit event.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    plugin_home = tmp_path / "ph_loop"
+    plugin_home.symlink_to(plugin_home)
+    original_resolve = Path.resolve
+
+    def resolve_with_runtime_error(
+        self: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> Path:
+        if self == plugin_home:
+            raise RuntimeError(f"Symlink loop from {plugin_home!s}")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_with_runtime_error)
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-loop-runtime",
+        plugin_home=plugin_home,
+        expected_artifact_digest="sha256:" + "0" * 64,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+    assert events[0]["provenance"]["reason"] == "plugin_home_unreadable"
+    assert events[0]["provenance"]["exception_type"] == "RuntimeError"
+
+
 def test_digest_fails_closed_on_unsupported_file_type(tmp_path: Path) -> None:
     """``canonical_tree_hash`` raises ``UnsupportedFileTypeError`` for
     devices, FIFOs, and sockets inside the plugin tree. The firewall

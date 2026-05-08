@@ -592,7 +592,7 @@ def invoke_plugin(
                 message=message,
                 events=tuple(emitted),
             )
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             # Permission errors, broken symlink loops, generic I/O on
             # plugin_home: same fail-closed contract as above. Without
             # this branch the exception would escape the firewall and
