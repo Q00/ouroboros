@@ -170,7 +170,7 @@ def _detect_runtimes() -> dict[str, str | None]:
     so that users with non-PATH installs are still detected.
     """
     runtimes: dict[str, str | None] = {}
-    for name in ("claude", "codex", "opencode", "hermes"):
+    for name in ("claude", "codex", "opencode", "hermes", "goose"):
         path = shutil.which(name)
         runtimes[name] = path
 
@@ -1420,6 +1420,37 @@ def _setup_gemini(gemini_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
+def _setup_goose(goose_path: str) -> None:
+    """Configure Ouroboros for the Goose runtime."""
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
+        config_dict = {}
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "goose"
+    orch["goose_cli_path"] = goose_path
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured Goose runtime (CLI: {goose_path})")
+    print_info(f"Config saved to: {config_path}")
+
+
 def _setup_claude(claude_path: str) -> None:
     """Configure Ouroboros for the Claude Code runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
@@ -2193,7 +2224,7 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot)
+    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose)
     and configures Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
@@ -2203,6 +2234,7 @@ def setup(
     [dim]    ouroboros setup --runtime opencode   # use OpenCode[/dim]
     [dim]    ouroboros setup --runtime kiro       # use Kiro CLI[/dim]
     [dim]    ouroboros setup --runtime copilot    # use GitHub Copilot CLI[/dim]
+    [dim]    ouroboros setup --runtime goose      # use Goose[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
     [dim]    ouroboros setup default            # toggle default repos[/dim]
@@ -2367,6 +2399,12 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_copilot(copilot_path, non_interactive=non_interactive)
+    elif selected in ("goose", "goose_cli"):
+        goose_path = available.get("goose")
+        if not goose_path:
+            print_error("Goose CLI not found in PATH.")
+            raise typer.Exit(1)
+        _setup_goose(goose_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

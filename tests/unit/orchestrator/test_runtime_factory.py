@@ -334,3 +334,38 @@ class TestCreateAgentRuntime:
 
         assert isinstance(runtime, OpenCodeRuntime)
         assert runtime._opencode_mode == "subprocess"
+
+
+def test_resolve_goose_aliases() -> None:
+    """Goose aliases normalize to goose."""
+    assert resolve_agent_runtime_backend("goose") == "goose"
+    assert resolve_agent_runtime_backend("goose_cli") == "goose"
+
+
+def test_create_goose_runtime_uses_configured_cli_path() -> None:
+    """Creates Goose runtime with the configured CLI path."""
+    from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
+
+    mock_dispatcher = object()
+
+    with (
+        patch(
+            "ouroboros.orchestrator.runtime_factory.get_goose_cli_path",
+            return_value="/tmp/goose",
+        ),
+        patch(
+            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+            return_value=mock_dispatcher,
+        ) as mock_create_dispatcher,
+    ):
+        runtime = create_agent_runtime(
+            backend="goose",
+            permission_mode="auto",
+            cwd="/tmp/project",
+        )
+
+    assert isinstance(runtime, GooseCliRuntime)
+    assert runtime._cli_path == "/tmp/goose"
+    assert runtime._cwd == "/tmp/project"
+    assert runtime._skill_dispatcher is mock_dispatcher
+    assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "goose"

@@ -172,6 +172,7 @@ def backend(
     [dim]    ouroboros config backend claude    # switch to Claude Code[/dim]
     [dim]    ouroboros config backend hermes    # switch to Hermes[/dim]
     [dim]    ouroboros config backend gemini    # switch to Gemini CLI[/dim]
+    [dim]    ouroboros config backend goose     # switch to Goose[/dim]
     """
     data, config_path = _load_config()
     current = data.get("orchestrator", {}).get("runtime_backend", "unknown")
@@ -183,7 +184,7 @@ def backend(
         if cli_path:
             console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
         console.print(
-            "\n[dim]Switch with: ouroboros config backend <claude|codex|hermes|gemini>[/dim]\n"
+            "\n[dim]Switch with: ouroboros config backend <claude|codex|hermes|gemini|goose>[/dim]\n"
         )
         return
 
@@ -234,6 +235,7 @@ def backend(
         _setup_claude,
         _setup_codex,
         _setup_gemini,
+        _setup_goose,
         _setup_hermes,
     )
 
@@ -258,6 +260,8 @@ def backend(
             _setup_hermes(cli_path)
         elif new_backend == "gemini":
             _setup_gemini(cli_path)
+        elif new_backend == "goose":
+            _setup_goose(cli_path)
     except Exception as exc:
         setup_failed = True
         console.quiet = prev_quiet

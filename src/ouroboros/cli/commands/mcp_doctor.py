@@ -130,6 +130,7 @@ def check_mcp_import() -> CheckResult:
 
 
 _CLAUDE_RUNTIME_BACKENDS = frozenset({"claude", "claude_code"})
+_GOOSE_RUNTIME_BACKENDS = frozenset({"goose", "goose_cli"})
 
 
 def _get_runtime_backend() -> str:

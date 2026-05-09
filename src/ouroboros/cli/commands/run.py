@@ -67,6 +67,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     HERMES = "hermes"
     GEMINI = "gemini"
     COPILOT = "copilot"
+    GOOSE = "goose"
     KIRO = "kiro"
 
 
@@ -617,7 +618,7 @@ def workflow(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator mode (claude, codex, opencode, hermes, gemini, copilot, or kiro).",
+            help="Agent runtime backend for orchestrator mode (claude, codex, opencode, hermes, gemini, copilot, goose, or kiro).",
             case_sensitive=False,
         ),
     ] = None,

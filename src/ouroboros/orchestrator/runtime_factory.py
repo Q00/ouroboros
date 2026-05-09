@@ -11,6 +11,7 @@ from ouroboros.config import (
     get_cli_path,
     get_codex_cli_path,
     get_copilot_cli_path,
+    get_goose_cli_path,
     get_hermes_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
@@ -128,6 +129,16 @@ def create_agent_runtime(
         return CopilotCliRuntime(
             cli_path=cli_path or get_copilot_cli_path(),
             runtime_profile=get_runtime_profile(),
+            **runtime_kwargs,
+        )
+
+    if resolved_backend == "goose":
+        from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
+
+        return GooseCliRuntime(
+            cli_path=cli_path or get_goose_cli_path(),
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
             **runtime_kwargs,
         )
 

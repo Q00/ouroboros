@@ -253,6 +253,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "kiro_cli": "kiro",
     "copilot": "copilot_cli",
     "copilot_cli": "copilot_cli",
+    "goose": "goose",
+    "goose_cli": "goose",
 }
 
 

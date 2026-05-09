@@ -1508,3 +1508,27 @@ class TestRuntimeProfileConfigAccess:
         )
         with patch("ouroboros.config.loader.load_config", return_value=config):
             assert get_runtime_profile() is None
+
+
+def test_get_goose_cli_path_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Environment variable overrides config for Goose CLI path."""
+    from ouroboros.config.loader import get_goose_cli_path
+
+    monkeypatch.setenv("OUROBOROS_GOOSE_CLI_PATH", "~/bin/goose")
+    assert get_goose_cli_path() == str(Path("~/bin/goose").expanduser())
+
+
+def test_get_goose_cli_path_falls_back_to_config() -> None:
+    """Config is used when env override is absent."""
+    from ouroboros.config.loader import get_goose_cli_path
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(
+                orchestrator=OrchestratorConfig(goose_cli_path="/tmp/goose")
+            ),
+        ),
+    ):
+        assert get_goose_cli_path() == "/tmp/goose"

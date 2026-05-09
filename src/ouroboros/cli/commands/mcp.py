@@ -38,6 +38,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GEMINI = "gemini"
     KIRO = "kiro"
     COPILOT = "copilot"
+    GOOSE = "goose"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -368,7 +369,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, or kiro).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, or kiro).",
             case_sensitive=False,
         ),
     ] = None,
@@ -458,7 +459,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, or kiro).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, or kiro).",
             case_sensitive=False,
         ),
     ] = None,
