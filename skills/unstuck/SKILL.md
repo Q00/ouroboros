@@ -93,15 +93,26 @@ The handler picks one of two response shapes based on `should_dispatch_via_plugi
 | Solo (`persona=...`) | single `_subagent` envelope (one object) — `evaluation_handlers.py:1536-1563` | single `# Lateral Thinking: <approach>` block in `content` |
 | Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` in `content`, **plus** an appended hidden dispatch block carrying the same canonical N payloads (see "Inline dispatch block" below) |
 
-**Inline dispatch block (debate, inline response only).** The handler appends a versioned, sentinel-bracketed JSON dispatch block to the end of `content` so that callers can recover the canonical structured payloads even though the FastMCP adapter drops `meta` on the wire (`src/ouroboros/mcp/server/adapter.py:923`, `src/ouroboros/mcp/tools/subagent.py:141-144`). Format:
+**Inline dispatch block (debate, inline response only).** The handler appends a versioned, sentinel-bracketed dispatch block to the end of `content` so that callers can recover the canonical structured payloads even though the FastMCP adapter drops `meta` on the wire (`src/ouroboros/mcp/server/adapter.py:923`, `src/ouroboros/mcp/tools/subagent.py:141-144`). Format:
 
 ```
-<!-- ouroboros-lateral-inline-dispatch-v1
-{"dispatch_mode": "inline_fallback", "persona_count": N, "payloads": [...]}
+<!-- ouroboros-lateral-inline-dispatch-v1 base64
+<base64-encoded-JSON>
 -->
 ```
 
-The block is a HTML comment, so markdown viewers ignore it. The sentinel `ouroboros-lateral-inline-dispatch-v1` is namespaced and versioned, so user-supplied `problem_context` cannot accidentally collide with it. To recover the dispatch struct, find the substring between `<!-- ouroboros-lateral-inline-dispatch-v1\n` and `\n-->` at the end of `content`, then `JSON.parse` the captured body.
+Two pieces matter:
+
+- **Hidden HTML comment** — markdown viewers render nothing for `<!-- ... -->`, so the block doesn't pollute the human-visible output.
+- **Base64 body** — base64's alphabet is `[A-Za-z0-9+/=]`, which can never produce the sequence `-->`. So even if a user-supplied `problem_context` or `current_approach` contains `-->` (HTML/JS debugging is the obvious case), the encoded body cannot prematurely close the wrapper and leak the dispatch into the visible markdown.
+
+Decoded, the body is JSON:
+
+```json
+{"dispatch_mode": "inline_fallback", "persona_count": N, "payloads": [...]}
+```
+
+To recover: locate the substring between `<!-- ouroboros-lateral-inline-dispatch-v1 base64\n` and `\n-->` at the end of `content`, base64-decode it, then `JSON.parse`. (See `tests/unit/mcp/tools/test_lateral_think_handler.py::_extract_inline_dispatch` for the canonical extraction helper.)
 
 #### Shape A — `dispatch_mode = "plugin"` (OpenCode plugin mode only)
 
@@ -138,7 +149,7 @@ Driving fan-out from this dispatch block — instead of from the joined human-di
 - **Separator collision** — `\n\n---\n\n` can legitimately appear inside a user-supplied `problem_context` or `current_approach`, so splitting the joined text would over-fragment and corrupt prompts. The dispatch block uses a unique versioned sentinel that user content cannot collide with.
 - **Behavioral drift across runtimes** — the dispatch block carries the same canonical payloads `_subagents` carries, so debate results don't diverge by environment.
 
-1. Locate the dispatch block at the end of the MCP response's `content` text — the substring between `<!-- ouroboros-lateral-inline-dispatch-v1\n` and `\n-->`. `JSON.parse` it to get `{dispatch_mode, persona_count, payloads}`. If the block is missing (older handler that pre-dates the v1 sentinel), fall through to the constrained-runtime path below — *do not* split the joined text.
+1. Locate the dispatch block at the end of the MCP response's `content` text — the substring between `<!-- ouroboros-lateral-inline-dispatch-v1 base64\n` and `\n-->`. Base64-decode the captured body, then `JSON.parse` to get `{dispatch_mode, persona_count, payloads}`. If the block is missing (older handler that pre-dates the v1 sentinel), fall through to the constrained-runtime path below — *do not* split the joined text.
 2. Surface a short "what the lateral toolkit suggests" header to the user, with the markdown above the dispatch block, so the MCP call is visible as a real product surface, not silent.
 3. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent) — one per entry in `payloads`. Each Task receives the payload's `prompt` verbatim plus the payload's `context` so the persona is grounded. Strict isolation per Task. The user sees "Running N agents…".
 4. Wait for all N to return.
@@ -212,9 +223,9 @@ with 2 tables, you haven't found the core feature yet.
 [ToolSearch loads ouroboros_lateral_think]
 [Call ouroboros_lateral_think(personas=[hacker,researcher,simplifier,architect,contrarian], ...)]
 [Handler returns: content = N persona blocks joined by ---,
-                  followed by hidden <!-- ouroboros-lateral-inline-dispatch-v1
-                  {payloads:[...]} --> sentinel block]
-[Extract dispatch_blob via the sentinel; JSON.parse → payloads[]]
+                  followed by hidden <!-- ouroboros-lateral-inline-dispatch-v1 base64
+                  <base64 body> --> sentinel block]
+[Extract via the sentinel; base64-decode then JSON.parse → payloads[]]
 [Single message: 5 parallel Task calls — one per payloads[] entry,
  each Task receives payload.prompt + payload.context verbatim;
  the visible markdown is shown to the user as the lateral scaffold]

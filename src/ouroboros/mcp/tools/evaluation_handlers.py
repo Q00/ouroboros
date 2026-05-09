@@ -6,6 +6,7 @@ Contains handlers for drift measurement, evaluation, and lateral thinking tools:
 - LateralThinkHandler: Generates alternative thinking approaches via personas.
 """
 
+import base64
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -1466,10 +1467,18 @@ class LateralThinkHandler(BridgeAwareMixin):
             # `_subagents`. The FastMCP adapter only forwards `text_content`
             # to the wire (`adapter.py:923`); `meta` is dropped. So the
             # dispatch payload has to ride inside `content` to survive
-            # transport. We append it as a hidden HTML-comment block with a
-            # versioned sentinel — invisible in markdown rendering, and
-            # the sentinel is unique enough that user-supplied
-            # `problem_context` can never accidentally collide with it.
+            # transport.
+            #
+            # Format: a hidden HTML-comment block with a versioned sentinel,
+            # carrying the dispatch JSON base64-encoded inside the comment.
+            # Two reasons for base64:
+            #   1. Base64's alphabet is [A-Za-z0-9+/=]. It cannot contain
+            #      `-->`, so a user-supplied `problem_context` like an
+            #      HTML/JS debugging snippet that itself includes `-->`
+            #      cannot prematurely close the comment and leak the
+            #      payload into the visible markdown.
+            #   2. Base64 has no significant whitespace, so line wrapping
+            #      and trimming can't corrupt the encoded body.
             payload_dicts = [p.to_dict() for p in payloads]
             dispatch_blob = json.dumps(
                 {
@@ -1478,8 +1487,12 @@ class LateralThinkHandler(BridgeAwareMixin):
                     "payloads": payload_dicts,
                 }
             )
+            dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             content_text = (
-                f"{combined}\n\n<!-- ouroboros-lateral-inline-dispatch-v1\n{dispatch_blob}\n-->"
+                f"{combined}\n\n"
+                "<!-- ouroboros-lateral-inline-dispatch-v1 base64\n"
+                f"{dispatch_b64}\n"
+                "-->"
             )
             return Result.ok(
                 MCPToolResult(
