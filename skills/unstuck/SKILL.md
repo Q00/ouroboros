@@ -57,19 +57,34 @@ Parse the user's argument string (or your autonomous-chain intent) into a mode (
 
 Validate every persona name against the lateral pool above. If invalid, emit a brief error message naming the valid personas — do NOT silently coerce. Multiple persona tokens without the explicit `debate` keyword are rejected to keep the syntax unambiguous.
 
-### Step 2 — Always call `ouroboros_lateral_think` (routing contract)
+### Step 2 — Gather required context **before** the MCP call
+
+`ouroboros_lateral_think` hard-fails if either `problem_context` or `current_approach` is empty (`evaluation_handlers.py:1324, 1333`). A bare `ooo lateral` from a fresh session has neither — calling MCP directly would crash before any persona work. Resolve both fields *before* Step 3, in this order:
+
+1. **Reuse session state.** If a parent SKILL is invoking this one (autonomous chain) or the current Claude Code / Codex session has clearly recent stuck-point context, extract it. Build:
+   - `problem_context` — what the user is stuck on (1–3 sentences, current state of the world).
+   - `current_approach` — what has been tried so far (1–3 sentences). For a brand-new attempt, this can be `"none yet — first attempt"`.
+   - `failed_attempts` (optional) — short list of prior failures, when the user has volunteered them.
+2. **If either field is unrecoverable**, ask the user *one* short combined question before going further:
+   > "Two things I need before I run the lateral debate: (1) what are you stuck on right now, (2) what have you already tried? A sentence each is enough."
+   Wait for the answer. Do **not** invent or paraphrase past turns into these fields if you are not certain — `current_approach="not specified"` is acceptable, fabricated content is not.
+3. Only when both fields are populated, proceed to Step 3.
+
+This pre-call branch applies to solo *and* debate. Skipping it makes `ooo lateral` (no args, fresh session) reliably error.
+
+### Step 3 — Always call `ouroboros_lateral_think` (routing contract)
 
 Per the `ooo` routing contract in `src/ouroboros/codex/ouroboros.md`, every `ooo lateral` invocation MUST route through the MCP tool — solo *and* debate, in every runtime. This SKILL never substitutes a direct sub-agent fan-out for the MCP call.
 
 1. Call `ToolSearch` with query `"+ouroboros lateral"` to load `ouroboros_lateral_think` (often prefixed, e.g., `mcp__plugin_ouroboros_ouroboros__ouroboros_lateral_think`). Deferred tools won't appear until `ToolSearch` runs.
-2. Invoke the tool with the parsed mode:
+2. Invoke the tool with the parsed mode and the context from Step 2:
    - **Solo**: `persona=<one>`, `problem_context`, `current_approach`, `failed_attempts`.
    - **Debate**: `personas=[...]`, `problem_context`, `current_approach`, `failed_attempts`.
 3. If `ToolSearch` cannot load the tool, **stop and report that the MCP dispatch surface is broken** — same rule the contract applies to `ooo auto`. Do not improvise a sub-agent fan-out as a workaround; that bypasses the contract the bot review explicitly flagged.
 
-The MCP call is cheap. The handler's inline path is a *deterministic prompt builder* — it constructs per-persona reframing prompts via `LateralThinker.generate_alternative` (`src/ouroboros/mcp/tools/evaluation_handlers.py:1444+`); it does not run an LLM rollout. Calling it on every invocation costs almost nothing and gives you ready-to-dispatch persona scaffolds.
+The MCP call is cheap. The handler's inline path is a *deterministic prompt builder* — it constructs per-persona reframing prompts via `LateralThinker.generate_alternative` (`src/ouroboros/mcp/tools/evaluation_handlers.py:1444+`); it does not run an LLM rollout.
 
-### Step 3 — Branch on the handler's response shape
+### Step 4 — Branch on the handler's response shape
 
 The handler picks one of two response shapes based on `should_dispatch_via_plugin(...)` (`src/ouroboros/mcp/tools/subagent.py:186-218`). You do not choose; you observe and act. The envelope key further depends on the mode you called with — solo and debate are not symmetric:
 
@@ -105,20 +120,23 @@ Present the persona's approach summary, reframing prompt, questions to consider,
 
 ##### Debate, runtime supports sub-agent dispatch (Claude Code Task tool, Codex CLI sub-agent, etc.)
 
-This is the **default debate UX for Claude Code and Codex**. The MCP-built scaffolds become the inputs to the Task fan-out — the MCP call has already happened (Step 2), so the contract is satisfied; this step only changes how the result is *rendered* to the user.
+This is the **default debate UX for Claude Code and Codex**. The MCP call has already happened (Step 3), so the routing contract is satisfied; this step only changes how the result is *rendered* to the user.
 
-1. Split the returned markdown on `\n\n---\n\n` to recover N persona prompt blocks.
-2. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent), one per block. Each Task receives:
-   - Its persona prompt block (the scaffold returned by `ouroboros_lateral_think`).
-   - The problem context (`problem_context`, `current_approach`, `failed_attempts`) so the persona can ground its answer.
-   - Strict isolation: no other persona's output. The user sees "Running N agents…".
+The fan-out is driven by the **persona list parsed in Step 1**, not by parsing the MCP response. The inline response concatenates per-persona blocks with a `\n\n---\n\n` separator that can also legitimately appear inside a user-supplied `problem_context` or `current_approach` — splitting on it would over-fragment and feed corrupted prompts to personas. The persona list, in contrast, is fully under our control and trivially correct.
+
+1. Show the user the canonical scaffold the system computed by surfacing the MCP response text (a short "what the lateral toolkit suggests" section). This honors the MCP call as a real product surface, not just a contract checkbox.
+2. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent) — one per persona in the personas list from Step 1. Each Task receives a self-contained prompt built from data we control, never from a split of the MCP response:
+   - The persona name and its style line from the **Personas (Lateral Pool)** table at the top of this SKILL (the one already rendered above; no agent-file read needed for the well-known stateless pool).
+   - The problem context fields (`problem_context`, `current_approach`, `failed_attempts`) gathered in Step 2.
+   - A "respond ≤200 words; produce one concrete reframing + one challenge question" instruction.
+   - Strict isolation: each Task is given only its own persona's brief; no other persona's output. The user sees "Running N agents…".
 3. Wait for all N to return.
 4. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
 5. Synthesize per the **Synthesize** block below.
 
 ##### Debate, runtime cannot dispatch sub-agents (constrained subprocess, no Task surface)
 
-Present the concatenated markdown the handler returned, as-is. There is no per-persona visualization and no Round 2 cross-attack — both require a sub-agent surface. Synthesize directly from the inline text.
+Present the concatenated markdown the handler returned, as-is — no parsing required, the user reads the whole text. There is no per-persona visualization and no Round 2 cross-attack — both require a sub-agent surface. Synthesize directly from the inline text.
 
 ##### Synthesize (debate, all shapes)
 
@@ -178,11 +196,14 @@ with 2 tables, you haven't found the core feature yet.
 ```
 > ooo lateral
 
+[Step 2: Confirm problem_context + current_approach are present;
+ ask the user one short combined question if not]
 [ToolSearch loads ouroboros_lateral_think]
 [Call ouroboros_lateral_think(personas=[hacker,researcher,simplifier,architect,contrarian], ...)]
-[Handler returns inline markdown — 5 persona scaffolds joined by ---]
-[Split on --- → 5 prompt blocks]
-[Single message: 5 parallel Task calls — one block per persona, isolated]
+[Handler returns inline markdown — surfaced to the user as "scaffolds"]
+[Single message: 5 parallel Task calls — driven by the personas list,
+ each Task built from the SKILL's persona table + problem context;
+ no parsing of the MCP response is required]
 [User sees "Running 5 agents…"]
 [Round 1 returns]
 
