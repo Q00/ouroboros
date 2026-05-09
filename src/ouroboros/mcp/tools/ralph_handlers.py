@@ -151,21 +151,6 @@ class RalphHandler:
                     default=DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
                 ),
                 MCPToolParameter(
-                    name="max_total_seconds",
-                    type=ToolInputType.NUMBER,
-                    description=(
-                        "Total wall-clock budget for the entire Ralph loop in "
-                        "seconds. Checked at the top of every iteration BEFORE "
-                        "launching evolve_step; on exhaustion the loop stops "
-                        "with stop_reason='wall_clock_exhausted'. When omitted, "
-                        "a derived ceiling of "
-                        "max_generations * per_iteration_timeout_seconds is "
-                        "auto-applied (with a WARNING log) for standalone "
-                        "callers. Range: 1-86400."
-                    ),
-                    required=False,
-                ),
-                MCPToolParameter(
                     name="oscillation_window",
                     type=ToolInputType.INTEGER,
                     description=(
