@@ -1458,6 +1458,12 @@ class LateralThinkHandler(BridgeAwareMixin):
                 )
 
             combined = "\n\n---\n\n".join(sections)
+            # Expose the canonical per-persona payloads (already built above for
+            # plugin dispatch) on inline responses too, so non-plugin runtimes
+            # (Claude Code, Codex CLI, OpenCode subprocess) can drive their own
+            # sub-agent fan-out from the same structured prompts that plugin
+            # mode dispatches — instead of parsing the joined text and risking
+            # over-fragmentation when user context contains the separator.
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=combined),),
@@ -1465,6 +1471,7 @@ class LateralThinkHandler(BridgeAwareMixin):
                     meta={
                         "persona_count": len(sections),
                         "dispatch_mode": "inline_fallback",
+                        "payloads": [p.to_dict() for p in payloads],
                     },
                 )
             )

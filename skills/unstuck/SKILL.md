@@ -65,8 +65,8 @@ Validate every persona name against the lateral pool above. If invalid, emit a b
    - `problem_context` — what the user is stuck on (1–3 sentences, current state of the world).
    - `current_approach` — what has been tried so far (1–3 sentences). For a brand-new attempt, this can be `"none yet — first attempt"`.
    - `failed_attempts` (optional) — short list of prior failures, when the user has volunteered them.
-2. **If either field is unrecoverable**, ask the user *one* short combined question before going further:
-   > "Two things I need before I run the lateral debate: (1) what are you stuck on right now, (2) what have you already tried? A sentence each is enough."
+2. **If either field is unrecoverable**, ask the user *one* short combined question before going further (this applies to both solo and debate — the handler requires both fields either way):
+   > "Two things I need before lateral thinking can run: (1) what are you stuck on right now, (2) what have you already tried? A sentence each is enough."
    Wait for the answer. Do **not** invent or paraphrase past turns into these fields if you are not certain — `current_approach="not specified"` is acceptable, fabricated content is not.
 3. Only when both fields are populated, proceed to Step 3.
 
@@ -91,7 +91,7 @@ The handler picks one of two response shapes based on `should_dispatch_via_plugi
 | Mode | Plugin response | Inline response |
 |---|---|---|
 | Solo (`persona=...`) | single `_subagent` envelope (one object) — `evaluation_handlers.py:1536-1563` | single `# Lateral Thinking: <approach>` block |
-| Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` |
+| Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` in `content`, **plus** the same canonical N payloads under `meta.payloads` for structured access |
 
 #### Shape A — `dispatch_mode = "plugin"` (OpenCode plugin mode only)
 
@@ -120,19 +120,20 @@ Present the persona's approach summary, reframing prompt, questions to consider,
 
 ##### Debate, runtime supports sub-agent dispatch (Claude Code Task tool, Codex CLI sub-agent, etc.)
 
-This is the **default debate UX for Claude Code and Codex**. The MCP call has already happened (Step 3), so the routing contract is satisfied; this step only changes how the result is *rendered* to the user.
+This is the **default debate UX for Claude Code and Codex**. The MCP call has already happened (Step 3), so the routing contract is satisfied; this step only changes how the *already-built* canonical prompts are rendered to the user.
 
-The fan-out is driven by the **persona list parsed in Step 1**, not by parsing the MCP response. The inline response concatenates per-persona blocks with a `\n\n---\n\n` separator that can also legitimately appear inside a user-supplied `problem_context` or `current_approach` — splitting on it would over-fragment and feed corrupted prompts to personas. The persona list, in contrast, is fully under our control and trivially correct.
+Use the structured `meta.payloads` array on the MCP response. It carries the **same per-persona prompts that plugin mode dispatches** — produced by `build_lateral_multi_subagent` (`src/ouroboros/mcp/tools/subagent.py:955+`) and exposed on inline responses for exactly this purpose. Each payload is a `{tool_name, title, prompt, agent, model, context}` dict; `prompt` is self-contained (the canonical reframing + the "Task for you (subagent)" wrapper that asks for a concrete plan, the biggest assumption challenged, and a one-line verdict).
 
-1. Show the user the canonical scaffold the system computed by surfacing the MCP response text (a short "what the lateral toolkit suggests" section). This honors the MCP call as a real product surface, not just a contract checkbox.
-2. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent) — one per persona in the personas list from Step 1. Each Task receives a self-contained prompt built from data we control, never from a split of the MCP response:
-   - The persona name and its style line from the **Personas (Lateral Pool)** table at the top of this SKILL (the one already rendered above; no agent-file read needed for the well-known stateless pool).
-   - The problem context fields (`problem_context`, `current_approach`, `failed_attempts`) gathered in Step 2.
-   - A "respond ≤200 words; produce one concrete reframing + one challenge question" instruction.
-   - Strict isolation: each Task is given only its own persona's brief; no other persona's output. The user sees "Running N agents…".
-3. Wait for all N to return.
-4. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
-5. Synthesize per the **Synthesize** block below.
+Driving fan-out from `meta.payloads` instead of from the joined text avoids two pitfalls the bot review surfaced:
+- **Separator collision** — `\n\n---\n\n` can legitimately appear inside a user-supplied `problem_context` or `current_approach`, so splitting the joined text would over-fragment and corrupt prompts. `meta.payloads` is structured, not parsed.
+- **Behavioral drift across runtimes** — using `meta.payloads` keeps the per-persona prompt text identical to what `_subagents` carries in plugin mode (same canonical builder), so debate results don't diverge by environment.
+
+1. Read `meta.payloads` from the MCP response. If it's missing (older handler) fall through to the constrained-runtime path below — *do not* split the joined text.
+2. Surface a short "what the lateral toolkit suggests" header to the user so the MCP call is visible as a real product surface, not silent.
+3. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent) — one per entry in `meta.payloads`. Each Task receives the payload's `prompt` verbatim plus the payload's `context` so the persona is grounded. Strict isolation per Task. The user sees "Running N agents…".
+4. Wait for all N to return.
+5. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
+6. Synthesize per the **Synthesize** block below.
 
 ##### Debate, runtime cannot dispatch sub-agents (constrained subprocess, no Task surface)
 
@@ -200,10 +201,11 @@ with 2 tables, you haven't found the core feature yet.
  ask the user one short combined question if not]
 [ToolSearch loads ouroboros_lateral_think]
 [Call ouroboros_lateral_think(personas=[hacker,researcher,simplifier,architect,contrarian], ...)]
-[Handler returns inline markdown — surfaced to the user as "scaffolds"]
-[Single message: 5 parallel Task calls — driven by the personas list,
- each Task built from the SKILL's persona table + problem context;
- no parsing of the MCP response is required]
+[Handler returns: content = inline markdown (surfaced to user),
+                  meta.payloads = N canonical per-persona payloads]
+[Single message: 5 parallel Task calls — one per meta.payloads entry,
+ each Task receives payload.prompt + payload.context verbatim;
+ no parsing of the joined text is required]
 [User sees "Running 5 agents…"]
 [Round 1 returns]
 
