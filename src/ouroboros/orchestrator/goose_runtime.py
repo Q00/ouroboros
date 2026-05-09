@@ -14,10 +14,10 @@ from collections.abc import Mapping
 import os
 from pathlib import Path
 import shlex
+import shutil
 from typing import Any
 from uuid import uuid4
 
-from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.config import get_goose_cli_path
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeCapabilities, RuntimeHandle
@@ -120,14 +120,10 @@ class GooseCliRuntime(CodexCliRuntime):
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
         """Resolve the Goose CLI path from explicit, config, or PATH values."""
-        resolution = resolve_codex_cli_path(
-            explicit_cli_path=cli_path,
-            configured_cli_path=self._get_configured_cli_path(),
-            default_cli_name=self._default_cli_name,
-            logger=log,
-            log_namespace=self._log_namespace,
-        )
-        return resolution.cli_path
+        candidate = cli_path or self._get_configured_cli_path()
+        if candidate:
+            return str(Path(candidate).expanduser())
+        return shutil.which(self._default_cli_name) or self._default_cli_name
 
     def _normalize_model(self, model: str | None) -> str | None:
         candidate = super()._normalize_model(model)

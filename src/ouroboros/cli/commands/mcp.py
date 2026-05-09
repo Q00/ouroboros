@@ -47,6 +47,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
+    GOOSE = "goose"
     COPILOT = "copilot"
     OPENCODE = "opencode"
     GEMINI = "gemini"

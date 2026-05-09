@@ -15,6 +15,7 @@ from ouroboros.providers.factory import (
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
+from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
@@ -68,6 +69,11 @@ class TestResolveLLMBackend:
         """Hermes aliases normalize to hermes."""
         assert resolve_llm_backend("hermes") == "hermes"
         assert resolve_llm_backend("hermes_cli") == "hermes"
+
+    def test_resolves_goose_aliases(self) -> None:
+        """Goose aliases normalize to goose."""
+        assert resolve_llm_backend("goose") == "goose"
+        assert resolve_llm_backend("goose_cli") == "goose"
 
 
 class TestCreateLLMAdapter:
@@ -220,6 +226,17 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._cli_path == "/tmp/codex"
 
+    def test_creates_goose_adapter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Goose backend returns GooseCliLLMAdapter."""
+        monkeypatch.setattr("ouroboros.providers.factory.get_goose_cli_path", lambda: "/tmp/goose")
+
+        adapter = create_llm_adapter(backend="goose", cwd="/tmp/project", allowed_tools=["Read"])
+
+        assert isinstance(adapter, GooseCliLLMAdapter)
+        assert adapter._cli_path == "/tmp/goose"
+        assert adapter._cwd == "/tmp/project"
+        assert adapter._allowed_tools == ["Read"]
+
     def test_creates_opencode_adapter(self) -> None:
         """OpenCode backend returns OpenCodeLLMAdapter."""
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
@@ -343,6 +360,13 @@ class TestResolveLLMPermissionMode:
         """Interview needs bypassPermissions for OpenCode — read-only sandbox blocks LLM output."""
         assert (
             resolve_llm_permission_mode(backend="opencode", use_case="interview")
+            == "bypassPermissions"
+        )
+
+    def test_interview_mode_escalates_to_bypass_for_goose(self) -> None:
+        """Interview needs permissive mode for Goose CLI output/tool flows."""
+        assert (
+            resolve_llm_permission_mode(backend="goose", use_case="interview")
             == "bypassPermissions"
         )
 

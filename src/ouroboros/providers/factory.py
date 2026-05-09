@@ -12,6 +12,7 @@ from ouroboros.backends import resolve_llm_backend_name, soft_tool_enforcement_b
 from ouroboros.config import (
     get_codex_cli_path,
     get_gemini_cli_path,
+    get_goose_cli_path,
     get_hermes_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
@@ -22,6 +23,7 @@ from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
+from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
 if TYPE_CHECKING:
@@ -96,6 +98,7 @@ def resolve_llm_permission_mode(
         "codex",
         "copilot",
         "gemini",
+        "goose",
         "hermes",
         "opencode",
     ):
@@ -225,6 +228,17 @@ def create_llm_adapter(
         return HermesCliLLMAdapter(
             cli_path=cli_path or get_hermes_cli_path(),
             cwd=cwd,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    if resolved_backend == "goose":
+        return GooseCliLLMAdapter(
+            cli_path=cli_path or get_goose_cli_path(),
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
             allowed_tools=allowed_tools,
             max_turns=max_turns,
             on_message=on_message,

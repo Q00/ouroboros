@@ -116,6 +116,7 @@ class CodexCliLLMAdapter:
     _log_namespace = "codex_cli_adapter"
     _max_ouroboros_depth = DEFAULT_MAX_OUROBOROS_DEPTH
     _child_session_env_keys = DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS
+    _completion_profile_backend = "codex"
 
     def __init__(
         self,
@@ -840,7 +841,9 @@ class CodexCliLLMAdapter:
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
         """Execute a single Codex CLI completion request."""
-        profile_result = resolve_completion_profile_result(config, backend="codex")
+        profile_result = resolve_completion_profile_result(
+            config, backend=self._completion_profile_backend
+        )
         if profile_result.is_err:
             return Result.err(profile_result.error)
         resolved = profile_result.value
@@ -882,7 +885,11 @@ class CodexCliLLMAdapter:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=self._build_child_env(),
+                env=(
+                    self._build_env_for_instance()
+                    if hasattr(self, "_build_env_for_instance")
+                    else self._build_child_env()
+                ),
             )
         except FileNotFoundError as exc:
             output_path.unlink(missing_ok=True)
