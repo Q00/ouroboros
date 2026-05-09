@@ -40,7 +40,7 @@ The lateral pool is **stateless mindset personas only** — five reframing lense
 
 ## Instructions
 
-### Step 1 — Parse args → decide mode and path
+### Step 1 — Parse args → mode
 
 Parse the user's argument string (or your autonomous-chain intent) into a mode (solo / debate):
 
@@ -57,72 +57,60 @@ Parse the user's argument string (or your autonomous-chain intent) into a mode (
 
 Validate every persona name against the lateral pool above. If invalid, emit a brief error message naming the valid personas — do NOT silently coerce. Multiple persona tokens without the explicit `debate` keyword are rejected to keep the syntax unambiguous.
 
-For **debate mode**, pick the dispatch path now — the chosen path determines whether Step 2 needs to run.
+### Step 2 — Always call `ouroboros_lateral_think` (routing contract)
 
-**Path selection rule:**
-- Sub-agent dispatch available (Claude Code, Codex CLI, etc.) → **Path A** (preferred — no MCP needed for debate).
-- OpenCode plugin mode → **Path B**.
-- Neither (constrained subprocess, etc.) → **Path C** (inline).
+Per the `ooo` routing contract in `src/ouroboros/codex/ouroboros.md`, every `ooo lateral` invocation MUST route through the MCP tool — solo *and* debate, in every runtime. This SKILL never substitutes a direct sub-agent fan-out for the MCP call.
 
-The MCP path is **not** the debate-mode default for Claude Code or Codex.
+1. Call `ToolSearch` with query `"+ouroboros lateral"` to load `ouroboros_lateral_think` (often prefixed, e.g., `mcp__plugin_ouroboros_ouroboros__ouroboros_lateral_think`). Deferred tools won't appear until `ToolSearch` runs.
+2. Invoke the tool with the parsed mode:
+   - **Solo**: `persona=<one>`, `problem_context`, `current_approach`, `failed_attempts`.
+   - **Debate**: `personas=[...]`, `problem_context`, `current_approach`, `failed_attempts`.
+3. If `ToolSearch` cannot load the tool, **stop and report that the MCP dispatch surface is broken** — same rule the contract applies to `ooo auto`. Do not improvise a sub-agent fan-out as a workaround; that bypasses the contract the bot review explicitly flagged.
 
-### Step 2 — Load the MCP tool (only when required)
+The MCP call is cheap. The handler's inline path is a *deterministic prompt builder* — it constructs per-persona reframing prompts via `LateralThinker.generate_alternative` (`src/ouroboros/mcp/tools/evaluation_handlers.py:1444+`); it does not run an LLM rollout. Calling it on every invocation costs almost nothing and gives you ready-to-dispatch persona scaffolds.
 
-You need `ouroboros_lateral_think` for: **Solo mode**, and **Debate mode Path B** or **Path C**. **Debate mode Path A** does NOT call the MCP — skip this step.
+### Step 3 — Branch on the handler's response shape
 
-When you do need the MCP:
+The handler chooses one of two response shapes based on `should_dispatch_via_plugin(...)` (`src/ouroboros/mcp/tools/subagent.py:186-218`). You do not choose; you observe and act.
 
-1. Call `ToolSearch` with query `"+ouroboros lateral"` to load `ouroboros_lateral_think` (often prefixed, e.g., `mcp__plugin_ouroboros_ouroboros__ouroboros_lateral_think`).
-2. If the tool loads → call it as instructed in Step 3. If not → for solo, read the persona file directly (see "When MCP is unavailable" below); for debate, just use Path A.
+#### Shape A — `dispatch_mode = "plugin"` (OpenCode plugin mode only)
 
-Deferred tools won't appear in your immediate tool list until ToolSearch runs.
+The response includes a `_subagents` array — `[{tool_name, title, prompt, agent, model, context}, ...]`. The plugin spawns Task panes automatically.
 
-### Step 3 — Dispatch
+1. Await the per-persona results delivered back by the plugin runtime.
+2. Synthesize (debate — see below) or present the persona's reframing (solo).
 
-> **Important runtime fact**: `ouroboros_lateral_think` only emits a `_subagents` dispatch envelope when `should_dispatch_via_plugin(...)` is true (`src/ouroboros/mcp/tools/subagent.py:186-218`) — i.e., **OpenCode plugin mode only**. In Claude Code, Codex CLI, and every other runtime, the handler's inline path runs all personas internally and returns one markdown text blob (`src/ouroboros/mcp/tools/evaluation_handlers.py:1414+`). Do **not** call MCP and then wait for an envelope outside OpenCode plugin mode — it will not arrive.
+If you expected plugin mode but received inline text (no envelope), you are not actually in plugin mode — fall through to Shape B; do not wait for an envelope.
 
-#### Solo mode (any runtime)
+#### Shape B — inline response (Claude Code, Codex CLI, OpenCode subprocess, every other runtime)
 
-1. Determine the context: what is the user stuck on, what has been tried, why this persona.
-2. Call `ouroboros_lateral_think`:
-   - `problem_context`: description of the stuck situation
-   - `current_approach`: what has been tried
-   - `persona`: the chosen persona
-   - `failed_attempts`: list of previous failures (if any)
-3. Receive inline text. Present the persona's approach summary, reframing prompt, questions to consider, and a `📍 Next:` suggestion routing back to the workflow.
+The handler ran the prompt builder internally and returned ready-to-use markdown:
 
-#### Debate mode
+- Solo response: a single `# Lateral Thinking: <approach>` block followed by the reframing prompt.
+- Debate response (`dispatch_mode = "inline_fallback"`): N such blocks concatenated with `\n\n---\n\n` separators.
 
-Run the path you picked in Step 1.
+##### Solo (any runtime)
 
-##### Path A — Direct sub-agent fan-out (Claude Code, Codex CLI, any sub-agent-capable runtime)
+Present the persona's approach summary, reframing prompt, questions to consider, and a `📍 Next:` suggestion routing back to the workflow.
 
-This is the path for **most users**. The MCP is **not** called.
+##### Debate, runtime supports sub-agent dispatch (Claude Code Task tool, Codex CLI sub-agent, etc.)
 
-1. Read each member's persona definition from `src/ouroboros/agents/<persona>.md`. (Pool: `hacker`, `researcher`, `simplifier`, `architect`, `contrarian`.)
-2. In a **single message**, emit N parallel `Task` calls (general-purpose subagent), one per persona. Each Task receives:
-   - The full persona file content.
-   - The problem context (`problem_context`, `current_approach`, `failed_attempts`).
+This is the **default debate UX for Claude Code and Codex**. The MCP-built scaffolds become the inputs to the Task fan-out — the MCP call has already happened (Step 2), so the contract is satisfied; this step only changes how the result is *rendered* to the user.
+
+1. Split the returned markdown on `\n\n---\n\n` to recover N persona prompt blocks.
+2. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent), one per block. Each Task receives:
+   - Its persona prompt block (the scaffold returned by `ouroboros_lateral_think`).
+   - The problem context (`problem_context`, `current_approach`, `failed_attempts`) so the persona can ground its answer.
    - Strict isolation: no other persona's output. The user sees "Running N agents…".
 3. Wait for all N to return.
 4. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
 5. Synthesize per the **Synthesize** block below.
 
-##### Path B — MCP plugin dispatch (OpenCode plugin mode only)
+##### Debate, runtime cannot dispatch sub-agents (constrained subprocess, no Task surface)
 
-When you are running inside OpenCode in plugin mode, the plugin can fan out for you.
+Present the concatenated markdown the handler returned, as-is. There is no per-persona visualization and no Round 2 cross-attack — both require a sub-agent surface. Synthesize directly from the inline text.
 
-1. Call `ouroboros_lateral_think` with `personas=[...]`. Optional: pass `problem_context`, `current_approach`, `failed_attempts`.
-2. If `should_dispatch_via_plugin(...)` is true, the response includes a `_subagents` array — `[{tool_name, title, prompt, agent, model, context}, ...]`. The plugin spawns Task panes automatically; await the per-persona results.
-3. If for any reason the response is **inline text** (not an envelope) — you are not actually in plugin mode. Treat it as Path C below; do not wait for an envelope.
-4. (Optional) Round 2 cross-attack — same trigger and shape as Path A.
-5. Synthesize.
-
-##### Path C — Inline (any runtime, when sub-agent dispatch is unavailable)
-
-If you cannot dispatch sub-agents (e.g., constrained subprocess) and you call `ouroboros_lateral_think(personas=[...])`, the handler returns a single markdown text containing all N persona answers concatenated. Present it directly — there is no per-persona visualization, and Round 2 cross-attack is not available without sub-agents.
-
-##### Synthesize (all paths)
+##### Synthesize (debate, all shapes)
 
 Do **not** auto-emit a verdict. Present:
 
@@ -158,8 +146,9 @@ You only need this if a parent SKILL or the user explicitly requests *one* perso
 
 ## When MCP is unavailable
 
-- **Solo mode** — read `src/ouroboros/agents/<persona>.md` and answer in that role directly. No numerical analysis; prompt-based reframing only.
-- **Debate mode** — already covered by Path A above; no MCP call is required for debate on sub-agent-capable runtimes.
+The contract is "fail loud, don't substitute": if `ouroboros_lateral_think` cannot be loaded via `ToolSearch`, stop and report that the MCP dispatch surface is broken. Do not improvise either solo or debate by reading persona files directly when MCP-driven invocation was requested — that re-introduces the contract bypass the bot review flagged.
+
+The one exception, retained for documented offline use: a parent SKILL operating in degraded-offline mode that has *already* announced it cannot reach MCP MAY read `src/ouroboros/agents/<persona>.md` and adopt that persona inline for solo reframing. This is not a fallback for `ooo lateral`; it's a degraded helper for a parent SKILL that has already given up on MCP. Debate has no offline equivalent — report the broken surface and stop.
 
 ## Examples
 
@@ -175,12 +164,15 @@ with 2 tables, you haven't found the core feature yet.
 📍 Next: try this, then `ooo run` — or `ooo interview` to re-examine.
 ```
 
-### Debate (default — Path A, Claude Code / Codex CLI)
+### Debate (default — Claude Code / Codex CLI)
 ```
 > ooo lateral
 
-[Read src/ouroboros/agents/{hacker,researcher,simplifier,architect,contrarian}.md]
-[Single message: 5 parallel Task calls — one per persona, isolated]
+[ToolSearch loads ouroboros_lateral_think]
+[Call ouroboros_lateral_think(personas=[hacker,researcher,simplifier,architect,contrarian], ...)]
+[Handler returns inline markdown — 5 persona scaffolds joined by ---]
+[Split on --- → 5 prompt blocks]
+[Single message: 5 parallel Task calls — one block per persona, isolated]
 [User sees "Running 5 agents…"]
 [Round 1 returns]
 
