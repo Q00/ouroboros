@@ -7,6 +7,7 @@ Contains handlers for drift measurement, evaluation, and lateral thinking tools:
 """
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -1458,20 +1459,36 @@ class LateralThinkHandler(BridgeAwareMixin):
                 )
 
             combined = "\n\n---\n\n".join(sections)
-            # Expose the canonical per-persona payloads (already built above for
-            # plugin dispatch) on inline responses too, so non-plugin runtimes
-            # (Claude Code, Codex CLI, OpenCode subprocess) can drive their own
-            # sub-agent fan-out from the same structured prompts that plugin
-            # mode dispatches — instead of parsing the joined text and risking
-            # over-fragmentation when user context contains the separator.
+            # Expose the canonical per-persona payloads on inline responses
+            # too, so non-plugin runtimes (Claude Code, Codex CLI, OpenCode
+            # subprocess) can drive their own sub-agent fan-out from the
+            # same structured prompts that plugin mode dispatches via
+            # `_subagents`. The FastMCP adapter only forwards `text_content`
+            # to the wire (`adapter.py:923`); `meta` is dropped. So the
+            # dispatch payload has to ride inside `content` to survive
+            # transport. We append it as a hidden HTML-comment block with a
+            # versioned sentinel — invisible in markdown rendering, and
+            # the sentinel is unique enough that user-supplied
+            # `problem_context` can never accidentally collide with it.
+            payload_dicts = [p.to_dict() for p in payloads]
+            dispatch_blob = json.dumps(
+                {
+                    "dispatch_mode": "inline_fallback",
+                    "persona_count": len(sections),
+                    "payloads": payload_dicts,
+                }
+            )
+            content_text = (
+                f"{combined}\n\n<!-- ouroboros-lateral-inline-dispatch-v1\n{dispatch_blob}\n-->"
+            )
             return Result.ok(
                 MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=combined),),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=content_text),),
                     is_error=False,
                     meta={
                         "persona_count": len(sections),
                         "dispatch_mode": "inline_fallback",
-                        "payloads": [p.to_dict() for p in payloads],
+                        "payloads": payload_dicts,
                     },
                 )
             )

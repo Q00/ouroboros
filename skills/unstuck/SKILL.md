@@ -90,8 +90,18 @@ The handler picks one of two response shapes based on `should_dispatch_via_plugi
 
 | Mode | Plugin response | Inline response |
 |---|---|---|
-| Solo (`persona=...`) | single `_subagent` envelope (one object) — `evaluation_handlers.py:1536-1563` | single `# Lateral Thinking: <approach>` block |
-| Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` in `content`, **plus** the same canonical N payloads under `meta.payloads` for structured access |
+| Solo (`persona=...`) | single `_subagent` envelope (one object) — `evaluation_handlers.py:1536-1563` | single `# Lateral Thinking: <approach>` block in `content` |
+| Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` in `content`, **plus** an appended hidden dispatch block carrying the same canonical N payloads (see "Inline dispatch block" below) |
+
+**Inline dispatch block (debate, inline response only).** The handler appends a versioned, sentinel-bracketed JSON dispatch block to the end of `content` so that callers can recover the canonical structured payloads even though the FastMCP adapter drops `meta` on the wire (`src/ouroboros/mcp/server/adapter.py:923`, `src/ouroboros/mcp/tools/subagent.py:141-144`). Format:
+
+```
+<!-- ouroboros-lateral-inline-dispatch-v1
+{"dispatch_mode": "inline_fallback", "persona_count": N, "payloads": [...]}
+-->
+```
+
+The block is a HTML comment, so markdown viewers ignore it. The sentinel `ouroboros-lateral-inline-dispatch-v1` is namespaced and versioned, so user-supplied `problem_context` cannot accidentally collide with it. To recover the dispatch struct, find the substring between `<!-- ouroboros-lateral-inline-dispatch-v1\n` and `\n-->` at the end of `content`, then `JSON.parse` the captured body.
 
 #### Shape A — `dispatch_mode = "plugin"` (OpenCode plugin mode only)
 
@@ -122,15 +132,15 @@ Present the persona's approach summary, reframing prompt, questions to consider,
 
 This is the **default debate UX for Claude Code and Codex**. The MCP call has already happened (Step 3), so the routing contract is satisfied; this step only changes how the *already-built* canonical prompts are rendered to the user.
 
-Use the structured `meta.payloads` array on the MCP response. It carries the **same per-persona prompts that plugin mode dispatches** — produced by `build_lateral_multi_subagent` (`src/ouroboros/mcp/tools/subagent.py:955+`) and exposed on inline responses for exactly this purpose. Each payload is a `{tool_name, title, prompt, agent, model, context}` dict; `prompt` is self-contained (the canonical reframing + the "Task for you (subagent)" wrapper that asks for a concrete plan, the biggest assumption challenged, and a one-line verdict).
+Recover the structured dispatch from the inline dispatch block appended to `content` (see the "Inline dispatch block" note above the table). Each entry under `payloads[]` is a `{tool_name, title, prompt, agent, model, context}` dict; `prompt` is self-contained — it carries the **same canonical reframing plus the "Task for you (subagent)" wrapper** that plugin mode dispatches via `_subagents` (asking for a concrete plan, the biggest assumption challenged, and a one-line verdict). Same builder, byte-identical prompts across runtimes.
 
-Driving fan-out from `meta.payloads` instead of from the joined text avoids two pitfalls the bot review surfaced:
-- **Separator collision** — `\n\n---\n\n` can legitimately appear inside a user-supplied `problem_context` or `current_approach`, so splitting the joined text would over-fragment and corrupt prompts. `meta.payloads` is structured, not parsed.
-- **Behavioral drift across runtimes** — using `meta.payloads` keeps the per-persona prompt text identical to what `_subagents` carries in plugin mode (same canonical builder), so debate results don't diverge by environment.
+Driving fan-out from this dispatch block — instead of from the joined human-display text — avoids two pitfalls the bot review surfaced:
+- **Separator collision** — `\n\n---\n\n` can legitimately appear inside a user-supplied `problem_context` or `current_approach`, so splitting the joined text would over-fragment and corrupt prompts. The dispatch block uses a unique versioned sentinel that user content cannot collide with.
+- **Behavioral drift across runtimes** — the dispatch block carries the same canonical payloads `_subagents` carries, so debate results don't diverge by environment.
 
-1. Read `meta.payloads` from the MCP response. If it's missing (older handler) fall through to the constrained-runtime path below — *do not* split the joined text.
-2. Surface a short "what the lateral toolkit suggests" header to the user so the MCP call is visible as a real product surface, not silent.
-3. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent) — one per entry in `meta.payloads`. Each Task receives the payload's `prompt` verbatim plus the payload's `context` so the persona is grounded. Strict isolation per Task. The user sees "Running N agents…".
+1. Locate the dispatch block at the end of the MCP response's `content` text — the substring between `<!-- ouroboros-lateral-inline-dispatch-v1\n` and `\n-->`. `JSON.parse` it to get `{dispatch_mode, persona_count, payloads}`. If the block is missing (older handler that pre-dates the v1 sentinel), fall through to the constrained-runtime path below — *do not* split the joined text.
+2. Surface a short "what the lateral toolkit suggests" header to the user, with the markdown above the dispatch block, so the MCP call is visible as a real product surface, not silent.
+3. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent) — one per entry in `payloads`. Each Task receives the payload's `prompt` verbatim plus the payload's `context` so the persona is grounded. Strict isolation per Task. The user sees "Running N agents…".
 4. Wait for all N to return.
 5. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
 6. Synthesize per the **Synthesize** block below.
@@ -201,11 +211,13 @@ with 2 tables, you haven't found the core feature yet.
  ask the user one short combined question if not]
 [ToolSearch loads ouroboros_lateral_think]
 [Call ouroboros_lateral_think(personas=[hacker,researcher,simplifier,architect,contrarian], ...)]
-[Handler returns: content = inline markdown (surfaced to user),
-                  meta.payloads = N canonical per-persona payloads]
-[Single message: 5 parallel Task calls — one per meta.payloads entry,
+[Handler returns: content = N persona blocks joined by ---,
+                  followed by hidden <!-- ouroboros-lateral-inline-dispatch-v1
+                  {payloads:[...]} --> sentinel block]
+[Extract dispatch_blob via the sentinel; JSON.parse → payloads[]]
+[Single message: 5 parallel Task calls — one per payloads[] entry,
  each Task receives payload.prompt + payload.context verbatim;
- no parsing of the joined text is required]
+ the visible markdown is shown to the user as the lateral scaffold]
 [User sees "Running 5 agents…"]
 [Round 1 returns]
 
