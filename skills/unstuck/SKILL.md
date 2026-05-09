@@ -71,16 +71,26 @@ The MCP call is cheap. The handler's inline path is a *deterministic prompt buil
 
 ### Step 3 — Branch on the handler's response shape
 
-The handler chooses one of two response shapes based on `should_dispatch_via_plugin(...)` (`src/ouroboros/mcp/tools/subagent.py:186-218`). You do not choose; you observe and act.
+The handler picks one of two response shapes based on `should_dispatch_via_plugin(...)` (`src/ouroboros/mcp/tools/subagent.py:186-218`). You do not choose; you observe and act. The envelope key further depends on the mode you called with — solo and debate are not symmetric:
+
+| Mode | Plugin response | Inline response |
+|---|---|---|
+| Solo (`persona=...`) | single `_subagent` envelope (one object) — `evaluation_handlers.py:1536-1563` | single `# Lateral Thinking: <approach>` block |
+| Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` |
 
 #### Shape A — `dispatch_mode = "plugin"` (OpenCode plugin mode only)
 
-The response includes a `_subagents` array — `[{tool_name, title, prompt, agent, model, context}, ...]`. The plugin spawns Task panes automatically.
+The plugin runtime spawns Task panes automatically from whichever envelope the handler emitted. You only need to read the right key and await the result(s):
 
-1. Await the per-persona results delivered back by the plugin runtime.
-2. Synthesize (debate — see below) or present the persona's reframing (solo).
+##### Solo (plugin)
 
-If you expected plugin mode but received inline text (no envelope), you are not actually in plugin mode — fall through to Shape B; do not wait for an envelope.
+The response carries a single `_subagent` object (singular) — `{tool_name, title, prompt, agent, model, context}` — produced by `build_subagent_result` (`evaluation_handlers.py:1554+`). The plugin spawns one Task pane. Await its single result, then present the persona's reframing.
+
+##### Debate (plugin)
+
+The response carries a `_subagents` array (plural) — `[{tool_name, title, prompt, agent, model, context}, ...]` — produced by `build_multi_subagent_result` (`evaluation_handlers.py:1419+`). The plugin spawns N Task panes in parallel. Await all N results, then synthesize per the **Synthesize** block below.
+
+If you expected plugin mode but the response is inline text (neither `_subagent` nor `_subagents`), you are not actually in plugin mode — fall through to Shape B; do not wait for an envelope that will not arrive.
 
 #### Shape B — inline response (Claude Code, Codex CLI, OpenCode subprocess, every other runtime)
 
