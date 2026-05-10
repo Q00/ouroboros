@@ -568,7 +568,28 @@ class JobManager:
         """
         await self._ensure_initialized()
         candidates: list[JobSnapshot] = []
-        for job_id in list(self._known_job_ids):
+        candidate_job_ids = set(self._known_job_ids)
+        offset = 0
+        while True:
+            created_events = await self._event_store.query_events(
+                event_type="mcp.job.created",
+                limit=100,
+                offset=offset,
+            )
+            if not created_events:
+                break
+            for event in created_events:
+                links = event.data.get("links") or {}
+                if links.get("lineage_id") != lineage_id:
+                    continue
+                if job_type is not None and event.data.get("job_type") != job_type:
+                    continue
+                candidate_job_ids.add(event.aggregate_id)
+            if len(created_events) < 100:
+                break
+            offset += 100
+
+        for job_id in candidate_job_ids:
             try:
                 snapshot = await self.get_snapshot(job_id)
             except ValueError:
@@ -579,6 +600,7 @@ class JobManager:
                 continue
             if job_type is not None and snapshot.job_type != job_type:
                 continue
+            self._known_job_ids.add(job_id)
             candidates.append(snapshot)
         if not candidates:
             return None

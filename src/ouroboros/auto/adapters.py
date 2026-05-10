@@ -211,7 +211,11 @@ class HandlerRalphStarter:
                         "status": "reattaching",
                     }
                 )
-            terminal_meta = await _wait_for_job_terminal(job_manager, existing_job_id)
+            terminal_meta = await _wait_for_job_terminal(
+                job_manager,
+                existing_job_id,
+                timeout_seconds=max_total_seconds,
+            )
             terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
             stop_reason = _optional_str(terminal_meta.get("stop_reason"))
             return {
@@ -276,7 +280,11 @@ class HandlerRalphStarter:
                 }
             )
         job_manager = self.handler._job_manager  # noqa: SLF001
-        terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
+        terminal_meta = await _wait_for_job_terminal(
+            job_manager,
+            job_id,
+            timeout_seconds=max_total_seconds,
+        )
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
         return {
@@ -289,7 +297,11 @@ class HandlerRalphStarter:
 
 
 async def _wait_for_job_terminal(
-    job_manager: JobManager, job_id: str, *, poll_interval: float = 0.05
+    job_manager: JobManager,
+    job_id: str,
+    *,
+    poll_interval: float = 0.05,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Poll the job manager until ``job_id`` reaches a terminal state.
 
@@ -299,6 +311,8 @@ async def _wait_for_job_terminal(
     own terminal status (e.g. ``"failed"`` for an exception path) when the
     inner ralph result did not provide one.
     """
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout_seconds is None else loop.time() + max(0.0, timeout_seconds)
     while True:
         snapshot = await job_manager.get_snapshot(job_id)
         if snapshot.is_terminal:
@@ -308,7 +322,15 @@ async def _wait_for_job_terminal(
                 "completed" if snapshot.status is JobStatus.COMPLETED else "failed",
             )
             return meta
-        await asyncio.sleep(poll_interval)
+        now = loop.time()
+        if deadline is not None and now >= deadline:
+            return {
+                "status": "failed",
+                "stop_reason": "wall_clock_exhausted",
+                "job_id": job_id,
+            }
+        sleep_for = poll_interval if deadline is None else min(poll_interval, deadline - now)
+        await asyncio.sleep(max(0.0, sleep_for))
 
 
 def load_seed(path: str | Path) -> Seed:

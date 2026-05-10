@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.adapters import HandlerRalphStarter
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import (
@@ -39,6 +40,8 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.mcp.job_manager import JobManager, JobStatus
+from ouroboros.persistence.event_store import EventStore
 
 
 def _build_seed(seed_id: str = "seed_test_001") -> Seed:
@@ -494,6 +497,54 @@ async def test_ralph_handoff_resume_reattaches_existing_job(tmp_path) -> None:
     assert result.status == "complete"
     assert state.phase is AutoPhase.COMPLETE
     assert state.ralph_job_id == "job_ralph_existing"
+
+
+@pytest.mark.asyncio
+async def test_handler_ralph_starter_times_out_stale_persisted_job(tmp_path) -> None:
+    """Reattaching to a persisted non-running job must honor max_total_seconds."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    await store.initialize()
+
+    class _RalphHandlerStub:
+        _job_manager = manager
+
+        async def handle(self, _arguments: dict[str, Any]) -> Any:
+            raise AssertionError("stale existing job must not dispatch a new Ralph loop")
+
+    try:
+        await manager._append_event(  # noqa: SLF001 - focused persisted-job regression setup
+            "mcp.job.created",
+            "job_stale_persisted",
+            {
+                "job_type": "ralph",
+                "status": JobStatus.RUNNING.value,
+                "message": "Running Ralph loop before process restart",
+                "links": {
+                    "session_id": None,
+                    "execution_id": None,
+                    "lineage_id": "ralph-seed_test_001-deadbeef",
+                },
+            },
+        )
+        starter = HandlerRalphStarter(_RalphHandlerStub())  # type: ignore[arg-type]
+
+        result = await starter(
+            _build_seed(),
+            lineage_id="ralph-seed_test_001-deadbeef",
+            existing_job_id="job_stale_persisted",
+            max_total_seconds=0.01,
+        )
+
+        assert result == {
+            "job_id": "job_stale_persisted",
+            "lineage_id": "ralph-seed_test_001-deadbeef",
+            "dispatch_mode": "job",
+            "terminal_status": "failed",
+            "stop_reason": "wall_clock_exhausted",
+        }
+    finally:
+        await store.close()
 
 
 def test_complete_product_is_persisted_in_state_round_trip(tmp_path) -> None:
