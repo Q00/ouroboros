@@ -282,7 +282,7 @@ class InterviewEngine:
     model_is_explicit: bool = field(default=False, init=False)
     temperature: float = 0.7
     max_tokens: int = 2048
-    _MAX_TOTAL_PROMPT_CHARS = 4800
+    _MAX_TOTAL_PROMPT_CHARS = 16000
     _MAX_SYSTEM_PROMPT_CHARS = 3500
     _MIN_SYSTEM_PROMPT_CHARS = 1200
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
@@ -919,7 +919,7 @@ class InterviewEngine:
     # Agent SDK CLI can return empty responses when the combined prompt
     # (system_prompt + conversation history) exceeds an internal threshold.
     # Cap each user response to keep the total prompt within safe limits.
-    _MAX_USER_RESPONSE_CHARS = 800
+    _MAX_USER_RESPONSE_CHARS = 4000
 
     def _build_conversation_history(
         self,
