@@ -262,6 +262,10 @@ class HandlerRalphStarter:
             "dispatch_mode": "job",
             "terminal_status": terminal_status,
             "stop_reason": stop_reason,
+            # RFC #809 Phase 2.1: surface the Ralph job's result_text so
+            # ``AutoPipeline._evaluate_or_complete`` can grade it against
+            # the Seed AC via ``HandlerEvaluator``.
+            "result_text": _optional_str(terminal_meta.get("__result_text__")),
         }
 
 
@@ -294,6 +298,10 @@ class HandlerRalphPoller:
             "dispatch_mode": "job",
             "terminal_status": terminal_status,
             "stop_reason": stop_reason,
+            # RFC #809 Phase 2.1: surface the Ralph job's result_text so a
+            # resumed RALPH_HANDOFF checkpoint can still grade the artifact
+            # via EVALUATE — same contract as the starter path.
+            "result_text": _optional_str(terminal_meta.get("__result_text__")),
         }
 
 
@@ -384,6 +392,13 @@ async def _wait_for_job_terminal(
     the returned mapping is always populated — it falls back to the job's
     own terminal status (e.g. ``"failed"`` for an exception path) when the
     inner ralph result did not provide one.
+
+    Surfaces the snapshot's ``result_text`` under the synthetic
+    ``__result_text__`` key so callers (notably the Ralph adapter ⇒ EVALUATE
+    pipeline path) can grade the human-readable artifact without having to
+    re-poll the job manager themselves. The key is namespaced with
+    leading/trailing underscores to avoid colliding with any
+    Ralph-supplied meta key.
     """
     while True:
         snapshot = await job_manager.get_snapshot(job_id)
@@ -393,6 +408,8 @@ async def _wait_for_job_terminal(
                 "status",
                 "completed" if snapshot.status is JobStatus.COMPLETED else "failed",
             )
+            if snapshot.result_text is not None:
+                meta["__result_text__"] = snapshot.result_text
             return meta
         await asyncio.sleep(poll_interval)
 

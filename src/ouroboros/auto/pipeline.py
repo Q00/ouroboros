@@ -1736,6 +1736,14 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.RUN
     if tool_name == "ralph_starter":
         return AutoPhase.RALPH_HANDOFF
+    if tool_name == "evaluator":
+        # RFC #809 Phase 2.1: when the evaluator times out or the QA handler
+        # returns a transient infrastructure error, the session is marked
+        # BLOCKED with this tool name. ``--resume`` must dispatch back into
+        # EVALUATE so the cached verdict (if present) or a fresh evaluator
+        # call (if not) can drive the session forward instead of leaving it
+        # stranded in a non-resumable BLOCKED state.
+        return AutoPhase.EVALUATE
     return None
 
 

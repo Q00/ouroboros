@@ -611,3 +611,93 @@ async def test_handler_evaluator_maps_qa_error_to_evaluate_result() -> None:
     assert result.verdict == "fail"
     assert result.error is not None
     assert "qa unreachable" in result.error.lower()
+
+
+# ---------------------------------------------------------------------------
+# Ralph adapter must surface result_text so production EVALUATE can fire
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wait_for_job_terminal_surfaces_result_text() -> None:
+    """The Ralph adapter pulls ``snapshot.result_text`` so EVALUATE has an
+    artifact to grade in production. Before this fix the adapter only
+    returned ``result_meta`` and real MCP/CLI runs skipped EVALUATE."""
+    from ouroboros.auto.adapters import _wait_for_job_terminal
+    from ouroboros.mcp.job_manager import JobStatus
+
+    class _StubSnapshot:
+        def __init__(self) -> None:
+            self.is_terminal = True
+            self.status = JobStatus.COMPLETED
+            self.result_meta: dict[str, Any] = {"status": "completed", "stop_reason": "ok"}
+            self.result_text = "stdout: hello\nexit_code: 0"
+
+    class _StubJobManager:
+        async def get_snapshot(self, _job_id: str) -> _StubSnapshot:
+            return _StubSnapshot()
+
+    meta = await _wait_for_job_terminal(_StubJobManager(), "job_X")  # type: ignore[arg-type]
+    assert meta["status"] == "completed"
+    assert meta["__result_text__"] == "stdout: hello\nexit_code: 0"
+
+
+@pytest.mark.asyncio
+async def test_handler_ralph_starter_returns_result_text() -> None:
+    """The production ``HandlerRalphStarter`` chain must propagate the
+    artifact into the dict the pipeline reads (`result_text` key) so
+    EVALUATE actually fires for real Ralph runs."""
+    from ouroboros.auto.adapters import HandlerRalphStarter
+    from ouroboros.mcp.job_manager import JobStatus
+
+    class _StubSnapshot:
+        def __init__(self) -> None:
+            self.is_terminal = True
+            self.status = JobStatus.COMPLETED
+            self.result_meta: dict[str, Any] = {"status": "completed", "stop_reason": "qa passed"}
+            self.result_text = "ralph artifact text"
+
+    class _StubJobManager:
+        async def get_snapshot(self, _job_id: str) -> _StubSnapshot:
+            return _StubSnapshot()
+
+    class _StubRalphHandler:
+        _job_manager = _StubJobManager()
+
+        async def handle(self, _arguments: dict[str, Any]):  # noqa: ANN201
+            from ouroboros.core.types import Result
+            from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="dispatched"),),
+                    is_error=False,
+                    meta={
+                        "job_id": "job_ralph_X",
+                        "lineage_id": "lineage_X",
+                        "dispatch_mode": "job",
+                        "status": "running",
+                    },
+                )
+            )
+
+    starter = HandlerRalphStarter(_StubRalphHandler())  # type: ignore[arg-type]
+    result = await starter(_build_seed(), lineage_id="lineage_X")
+    assert result["result_text"] == "ralph artifact text"
+    assert result["terminal_status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Evaluator tool name must be recoverable on --resume
+# ---------------------------------------------------------------------------
+
+
+def test_recoverable_phase_for_evaluator_tool() -> None:
+    """When evaluator times out or returns a transient error, the session
+    is marked BLOCKED with ``tool_name="evaluator"``. ``--resume`` must
+    dispatch back into EVALUATE so the session is genuinely recoverable
+    (the cached verdict or a fresh evaluator call drives progress).
+    """
+    from ouroboros.auto.pipeline import _recoverable_phase_for_tool
+
+    assert _recoverable_phase_for_tool("evaluator") is AutoPhase.EVALUATE
