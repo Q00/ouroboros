@@ -1105,14 +1105,22 @@ class AutoPipeline:
         """
         assert self.evaluator is not None  # noqa: S101 — guarded by caller
 
-        # Resolve the artifact: prefer the freshly-passed text from the Ralph
-        # snapshot; on EVALUATE-phase resume the caller passes None and we
-        # rely entirely on the cached verdict.
-        if ralph_result_text:
-            import hashlib
+        # Resolve the artifact:
+        # 1. Fresh call from the Ralph terminal path → use ``ralph_result_text``
+        # 2. EVALUATE-phase resume after a prior call → use the persisted
+        #    ``state.evaluate_artifact`` so a timeout/transient-error path is
+        #    genuinely recoverable (without persistence, ``--resume`` had no
+        #    artifact to grade and dropped into a permanent BLOCKED).
+        import hashlib
 
+        if ralph_result_text:
             artifact = ralph_result_text
             artifact_hash = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
+        elif state.evaluate_artifact:
+            artifact = state.evaluate_artifact
+            artifact_hash = (
+                state.evaluate_artifact_hash or hashlib.sha256(artifact.encode("utf-8")).hexdigest()
+            )
         else:
             artifact = ""
             artifact_hash = state.evaluate_artifact_hash
@@ -1152,6 +1160,15 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
 
+        # Persist the artifact + hash BEFORE invoking the evaluator so any
+        # subsequent timeout / exception / transient QA error leaves a
+        # recoverable trail on disk. The artifact must be stored verbatim
+        # (no truncation) so the recomputed hash on resume matches the one
+        # persisted here — truncation would silently invalidate the cache.
+        state.evaluate_artifact = artifact
+        state.evaluate_artifact_hash = artifact_hash
+        self._save(state)
+
         phase_timeout = state.phase_timeout_seconds(AutoPhase.EVALUATE)
         try:
             eval_result = await asyncio.wait_for(
@@ -1178,7 +1195,6 @@ class AutoPipeline:
                 f"evaluator reported transient error: {eval_result.error}",
                 tool_name="evaluator",
             )
-            state.evaluate_artifact_hash = artifact_hash
             self._save(state)
             return self._result(
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent

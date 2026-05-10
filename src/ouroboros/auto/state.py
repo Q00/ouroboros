@@ -339,6 +339,15 @@ class AutoPipelineState:
     last_qa_differences: list[str] = field(default_factory=list)
     last_qa_suggestions: list[str] = field(default_factory=list)
     evaluate_artifact_hash: str | None = None
+    # The actual artifact text graded during EVALUATE. Persisted verbatim
+    # on first entry into ``_run_evaluate`` so a timeout / exception /
+    # transient QA error leaves a recoverable trail: on ``--resume`` the
+    # pipeline re-enters EVALUATE with this artifact rather than dropping
+    # into the "no cached verdict and no artifact" BLOCKED branch. Stored
+    # without truncation so the recomputed hash on resume matches the
+    # persisted ``evaluate_artifact_hash`` — truncation would silently
+    # invalidate the cache.
+    evaluate_artifact: str | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -618,6 +627,7 @@ class AutoPipelineState:
         payload.setdefault("last_qa_differences", [])
         payload.setdefault("last_qa_suggestions", [])
         payload.setdefault("evaluate_artifact_hash", None)
+        payload.setdefault("evaluate_artifact", None)
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -789,6 +799,9 @@ class AutoPipelineState:
             or not self.evaluate_artifact_hash.strip()
         ):
             msg = "evaluate_artifact_hash must be a non-empty string or null"
+            raise ValueError(msg)
+        if self.evaluate_artifact is not None and not isinstance(self.evaluate_artifact, str):
+            msg = "evaluate_artifact must be a string or null"
             raise ValueError(msg)
         if self.provenance is not None:
             if not isinstance(self.provenance, dict):

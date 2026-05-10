@@ -701,3 +701,103 @@ def test_recoverable_phase_for_evaluator_tool() -> None:
     from ouroboros.auto.pipeline import _recoverable_phase_for_tool
 
     assert _recoverable_phase_for_tool("evaluator") is AutoPhase.EVALUATE
+
+
+# ---------------------------------------------------------------------------
+# Evaluator durability: artifact must persist across timeout → resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_evaluator_timeout_persists_artifact_for_resume(tmp_path) -> None:
+    """After an evaluator timeout, ``state.evaluate_artifact`` must hold the
+    artifact text so ``--resume`` can re-grade it instead of falling into
+    the "no cached verdict and no artifact" BLOCKED branch."""
+    state = _state_at_run_phase(tmp_path)
+    state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
+
+    async def hanging_evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        await asyncio.sleep(10)
+        return EvaluateResult(passed=True, score=1.0, verdict="pass")
+
+    pipeline_timeout = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="ralph artifact payload"),
+        complete_product=True,
+        evaluator=hanging_evaluator,
+    )
+
+    await pipeline_timeout.run(state)
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "evaluator"
+    assert state.evaluate_artifact == "ralph artifact payload"
+    assert state.evaluate_artifact_hash is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(tmp_path) -> None:
+    """Simulating the full resume contract: an evaluator that times out on
+    first call, then succeeds on a retry. The persisted artifact allows
+    ``_run_evaluate`` to re-grade on resume — the recovery path that the
+    earlier review iteration silently broke."""
+    state = _state_at_run_phase(tmp_path)
+    state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
+    call_count = 0
+
+    async def flaky_evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            await asyncio.sleep(10)  # times out
+        return EvaluateResult(
+            passed=True, score=0.91, verdict="pass", differences=(), suggestions=()
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="durable ralph artifact"),
+        complete_product=True,
+        evaluator=flaky_evaluator,
+    )
+
+    # First call → evaluator times out → BLOCKED but artifact persisted
+    await pipeline.run(state)
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.evaluate_artifact == "durable ralph artifact"
+    assert call_count == 1
+
+    # Simulate resume by re-entering EVALUATE directly (production resume
+    # uses ``_recoverable_phase_for_tool("evaluator") == EVALUATE`` which we
+    # just verified above). The pipeline pulls the persisted artifact from
+    # state and re-invokes the evaluator.
+    state.phase = AutoPhase.EVALUATE
+    state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 60
+    result = await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text=None,  # caller passes None on resume
+        stop_reason=None,
+    )
+    assert result.status == "complete"
+    assert state.last_qa_verdict == "pass"
+    assert call_count == 2  # evaluator was re-invoked with the persisted artifact
+
+
+def test_state_round_trips_evaluate_artifact(tmp_path) -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.evaluate_artifact = "persisted artifact"
+    state.evaluate_artifact_hash = "deadbeef"
+    store = AutoStore(tmp_path)
+    store.save(state)
+    reloaded = store.load(state.auto_session_id)
+    assert reloaded.evaluate_artifact == "persisted artifact"
+    assert reloaded.evaluate_artifact_hash == "deadbeef"
