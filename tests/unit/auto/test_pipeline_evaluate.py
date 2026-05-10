@@ -801,3 +801,154 @@ def test_state_round_trips_evaluate_artifact(tmp_path) -> None:
     reloaded = store.load(state.auto_session_id)
     assert reloaded.evaluate_artifact == "persisted artifact"
     assert reloaded.evaluate_artifact_hash == "deadbeef"
+
+
+# ---------------------------------------------------------------------------
+# Cache correctness: a new artifact must not inherit stale verdict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_new_artifact_does_not_inherit_stale_verdict(tmp_path) -> None:
+    """If artifact A was graded pass, then artifact B enters EVALUATE and
+    the evaluator times out, ``--resume`` must NOT reuse A's verdict
+    against B. The pipeline clears stale qa fields whenever the artifact
+    hash changes."""
+    state = _state_at_run_phase(tmp_path)
+    state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
+
+    call_count = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return EvaluateResult(passed=True, score=0.95, verdict="pass")
+        # Second call (for artifact B) hangs → times out
+        await asyncio.sleep(10)
+        return EvaluateResult(passed=True, score=1.0, verdict="pass")
+
+    pipeline_a = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact A"),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    # Pass artifact A — verdict cached.
+    await pipeline_a.run(state)
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.last_qa_verdict == "pass"
+    a_hash = state.evaluate_artifact_hash
+
+    # Now feed artifact B directly into _run_evaluate. The evaluator times
+    # out, leaving state in BLOCKED. Critical: the stale "pass" verdict
+    # from A must be cleared so a future cache check cannot mistakenly
+    # reuse it for B.
+    state.phase = AutoPhase.EVALUATE
+    await pipeline_a._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text="artifact B (different)",
+        stop_reason=None,
+    )
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_qa_verdict is None  # stale verdict cleared
+    assert state.last_qa_score is None
+    assert state.evaluate_artifact_hash != a_hash
+    assert state.evaluate_artifact == "artifact B (different)"
+
+
+# ---------------------------------------------------------------------------
+# Empty Ralph artifact must still be graded (not silent false-pass)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_ralph_artifact_still_enters_evaluate(tmp_path) -> None:
+    """``ralph_result_text == ""`` is a valid graded artifact; the gate
+    used ``ralph_result_text is not None`` (not truthiness) so the
+    pipeline does not silently mark an empty-output run as a pass."""
+    state = _state_at_run_phase(tmp_path)
+    eval_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal eval_calls
+        eval_calls += 1
+        # An empty artifact should fail QA against AC like "Command prints
+        # stable output". Return fail to make the contract explicit.
+        return EvaluateResult(
+            passed=False,
+            score=0.10,
+            verdict="fail",
+            differences=("artifact is empty",),
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text=""),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    result = await pipeline.run(state)
+    assert eval_calls == 1
+    assert state.phase is AutoPhase.BLOCKED
+    assert result.last_qa_verdict == "fail"
+
+
+# ---------------------------------------------------------------------------
+# Resume capability advertises EVALUATE recoverability
+# ---------------------------------------------------------------------------
+
+
+def test_resume_capability_advertises_evaluate_as_resumable(tmp_path) -> None:
+    """An EVALUATE-blocked session with the persisted artifact in place
+    must report ``RESUME`` capability so the CLI/MCP surfaces emit the
+    resume hint. Previously the method fell through to ``NONE`` for
+    EVALUATE-blocked states — a public-surface contract bug."""
+    from ouroboros.auto.state import AutoResumeCapability
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = AutoPhase.BLOCKED
+    state.last_tool_name = "evaluator"
+    state.evaluate_artifact = "some artifact text"
+    state.evaluate_artifact_hash = "abc123"
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_evaluate_blocked_without_artifact_is_none(tmp_path) -> None:
+    """Without a persisted artifact AND without a cached verdict, EVALUATE
+    has nothing to drive forward on resume — capability must be NONE."""
+    from ouroboros.auto.state import AutoResumeCapability
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = AutoPhase.BLOCKED
+    state.last_tool_name = "evaluator"
+    # No evaluate_artifact, no last_qa_verdict
+    assert state.resume_capability() is AutoResumeCapability.NONE
+
+
+def test_resume_capability_evaluate_blocked_with_cached_verdict_is_resumable(tmp_path) -> None:
+    """A cached verdict + hash is enough to drive the resume to COMPLETE
+    (cache-hit short-circuit), so capability is RESUME even without the
+    raw artifact text."""
+    from ouroboros.auto.state import AutoResumeCapability
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = AutoPhase.BLOCKED
+    state.last_tool_name = "evaluator"
+    state.evaluate_artifact_hash = "abc123"
+    state.last_qa_verdict = "pass"
+    state.last_qa_score = 0.92
+    assert state.resume_capability() is AutoResumeCapability.RESUME

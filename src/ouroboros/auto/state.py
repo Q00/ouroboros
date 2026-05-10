@@ -576,6 +576,17 @@ class AutoPipelineState:
                 return AutoResumeCapability.PARTIAL_RESUME
             return AutoResumeCapability.NONE
 
+        # EVALUATE phase (RFC #809 Phase 2.1). Recovery requires either the
+        # persisted artifact (so the evaluator can re-grade) OR a cached
+        # verdict matching the persisted hash (so the cache hit drives the
+        # decision without re-invoking the LLM). Neither present → NONE.
+        if recoverable == AutoPhase.EVALUATE:
+            if self.evaluate_artifact or (
+                self.evaluate_artifact_hash is not None and self.last_qa_verdict is not None
+            ):
+                return AutoResumeCapability.RESUME
+            return AutoResumeCapability.NONE
+
         return AutoResumeCapability.NONE  # defensive
 
     def to_dict(self) -> dict[str, Any]:

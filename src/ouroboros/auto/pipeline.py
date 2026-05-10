@@ -1018,7 +1018,7 @@ class AutoPipeline:
                 review=review,
                 run_subagent=run_subagent,
                 stop_reason=stop_reason,
-                ralph_result_text=_optional_str(ralph_meta.get("result_text")),
+                ralph_result_text=_artifact_text(ralph_meta.get("result_text")),
             )
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
@@ -1059,7 +1059,12 @@ class AutoPipeline:
         :meth:`_run_evaluate`. Otherwise falls back to the pre-Phase-2.1
         behaviour: transition to COMPLETE directly.
         """
-        if self.evaluator is not None and state.complete_product and ralph_result_text:
+        if self.evaluator is not None and state.complete_product and ralph_result_text is not None:
+            # ``is not None`` not truthiness: an empty-but-valid Ralph
+            # artifact is still a graded artifact. Skipping EVALUATE on
+            # ``""`` would produce a silent false-pass for runs whose output
+            # is intentionally empty, violating the
+            # "complete_product + evaluator → graded COMPLETE" contract.
             state.transition(AutoPhase.EVALUATE, "evaluating ralph artifact against seed AC")
             self._save(state)
             return await self._run_evaluate(
@@ -1107,23 +1112,22 @@ class AutoPipeline:
 
         # Resolve the artifact:
         # 1. Fresh call from the Ralph terminal path → use ``ralph_result_text``
+        #    (``is not None`` so an empty-but-valid artifact still grades)
         # 2. EVALUATE-phase resume after a prior call → use the persisted
         #    ``state.evaluate_artifact`` so a timeout/transient-error path is
         #    genuinely recoverable (without persistence, ``--resume`` had no
         #    artifact to grade and dropped into a permanent BLOCKED).
         import hashlib
 
-        if ralph_result_text:
+        artifact: str | None = None
+        if ralph_result_text is not None:
             artifact = ralph_result_text
-            artifact_hash = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
-        elif state.evaluate_artifact:
+        elif state.evaluate_artifact is not None:
             artifact = state.evaluate_artifact
-            artifact_hash = (
-                state.evaluate_artifact_hash or hashlib.sha256(artifact.encode("utf-8")).hexdigest()
-            )
-        else:
-            artifact = ""
+        if artifact is None:
             artifact_hash = state.evaluate_artifact_hash
+        else:
+            artifact_hash = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
 
         cache_hit = (
             artifact_hash is not None
@@ -1147,7 +1151,7 @@ class AutoPipeline:
                 from_cache=True,
             )
 
-        if not artifact:
+        if artifact is None:
             # Resume in EVALUATE with no cached verdict and no fresh artifact —
             # we cannot move forward deterministically. Mark blocked so an
             # operator can attach or re-supply context.
@@ -1165,6 +1169,18 @@ class AutoPipeline:
         # recoverable trail on disk. The artifact must be stored verbatim
         # (no truncation) so the recomputed hash on resume matches the one
         # persisted here — truncation would silently invalidate the cache.
+        #
+        # Critical: when the artifact has CHANGED (hash differs from the
+        # previously persisted one), the stale verdict from the previous
+        # artifact MUST be cleared. Otherwise, if the evaluator times out
+        # or transiently errors after persisting the new hash, ``--resume``
+        # would see ``hash(new) == hash(new)`` paired with the verdict from
+        # ``hash(old)`` and incorrectly take the cache-hit path.
+        if state.evaluate_artifact_hash != artifact_hash:
+            state.last_qa_score = None
+            state.last_qa_verdict = None
+            state.last_qa_differences = []
+            state.last_qa_suggestions = []
         state.evaluate_artifact = artifact
         state.evaluate_artifact_hash = artifact_hash
         self._save(state)
@@ -1370,7 +1386,7 @@ class AutoPipeline:
                 review=review,
                 run_subagent=None,
                 stop_reason=stop_reason,
-                ralph_result_text=_optional_str(ralph_meta.get("result_text")),
+                ralph_result_text=_artifact_text(ralph_meta.get("result_text")),
                 resumed=True,
             )
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
@@ -1783,3 +1799,15 @@ def _first_nonempty(*values: str | None) -> str | None:
 
 def _optional_str(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _artifact_text(value: object) -> str | None:
+    """Return ``value`` verbatim when it is a string (including ``""``), else None.
+
+    Distinct from :func:`_optional_str` because an artifact graded by EVALUATE
+    is a valid input even when empty: a Ralph job whose output is
+    intentionally empty must still be evaluated against the Seed AC. Returning
+    None for ``""`` would cause ``_evaluate_or_complete`` to skip EVALUATE
+    and silently transition to COMPLETE.
+    """
+    return value if isinstance(value, str) else None
