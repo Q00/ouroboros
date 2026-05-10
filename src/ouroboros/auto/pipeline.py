@@ -1186,13 +1186,31 @@ class AutoPipeline:
         self._save(state)
 
         phase_timeout = state.phase_timeout_seconds(AutoPhase.EVALUATE)
+        # Cap the per-phase budget by the remaining top-level pipeline
+        # deadline (Q00/ouroboros#779). Without this cap a late EVALUATE
+        # entry could block past ``deadline_at`` and report
+        # ``"evaluator timed out"`` instead of the canonical
+        # ``pipeline_timeout`` blocker every other long-running phase
+        # produces.
+        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
         try:
             eval_result = await asyncio.wait_for(
-                self.evaluator(seed, artifact), timeout=phase_timeout
+                self.evaluator(seed, artifact), timeout=capped_timeout
             )
         except TimeoutError:
+            # If the deadline expired during the call, surface the canonical
+            # pipeline-timeout blocker so resume / status surfaces see the
+            # same shape as every other deadline trip in the pipeline.
+            if self._enforce_deadline(state):
+                return self._result(
+                    state,
+                    ledger,
+                    review=review,
+                    blocker=state.last_error,
+                    run_subagent=run_subagent,
+                )
             state.mark_blocked(
-                f"evaluator timed out after {phase_timeout:.0f}s",
+                f"evaluator timed out after {capped_timeout:.0f}s",
                 tool_name="evaluator",
             )
             self._save(state)

@@ -1021,6 +1021,45 @@ async def test_handler_ralph_starter_preserves_empty_result_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluator_respects_top_level_pipeline_deadline(tmp_path) -> None:
+    """If only N seconds remain on the pipeline deadline when EVALUATE is
+    entered, the evaluator call must be capped at ``min(N, phase_timeout)``
+    and a deadline trip during the call must surface the canonical
+    ``pipeline_timeout`` blocker (tool_name=``pipeline_deadline``), not the
+    per-phase ``evaluator timed out`` message. This keeps EVALUATE inside
+    the same budget framework as every other long-running phase."""
+    import time as _time
+
+    from ouroboros.auto.pipeline import PIPELINE_DEADLINE_TOOL_NAME
+
+    state = _state_at_run_phase(tmp_path)
+    # Force a near-expired deadline: 0.1 seconds from now.
+    state.deadline_at = _time.monotonic() + 0.1
+    # Per-phase timeout is much larger, so the deadline must dominate.
+    state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 90
+
+    async def hanging_evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        await asyncio.sleep(10)
+        return EvaluateResult(passed=True, score=1.0, verdict="pass")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="ralph artifact"),
+        complete_product=True,
+        evaluator=hanging_evaluator,
+    )
+
+    result = await pipeline.run(state)
+    assert result.status == "blocked"
+    # Deadline trip uses the canonical tool name, NOT "evaluator"
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
+
+
+@pytest.mark.asyncio
 async def test_handler_ralph_poller_preserves_empty_result_text() -> None:
     """Same contract on the resume poller path."""
     from ouroboros.auto.adapters import HandlerRalphPoller
