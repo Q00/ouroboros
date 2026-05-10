@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Any, Protocol
 
+from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.interview_driver import AutoInterviewDriver
@@ -45,6 +46,10 @@ class RunStarter(Protocol):
 RalphStarter = Callable[..., Awaitable[dict[str, Any]]]
 SeedSaver = Callable[[Seed], str]
 SeedLoader = Callable[[str], Seed]
+# Evaluator contract: takes a Seed and the run artifact (typically a
+# JobSnapshot.result_text from Ralph's terminal snapshot), returns a typed
+# EvaluateResult. See HandlerEvaluator for the production implementation.
+Evaluator = Callable[[Seed, str], Awaitable[EvaluateResult]]
 
 # Ralph stop_reason values that map to a recoverable BLOCKED auto phase
 # rather than a hard FAILED. Pinned by Q00/ouroboros#773 and asserted by
@@ -115,6 +120,11 @@ class AutoPipelineResult:
     ralph_job_id: str | None = None
     ralph_lineage_id: str | None = None
     ralph_dispatch_mode: str | None = None
+    # RFC #809 Phase 2.1 — EVALUATE phase QA verdict surfaced to MCP/CLI.
+    last_qa_score: float | None = None
+    last_qa_verdict: str | None = None
+    last_qa_differences: tuple[str, ...] = ()
+    last_qa_suggestions: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -172,6 +182,14 @@ class AutoPipeline:
     # the legacy guidance-only behavior.
     ralph_resumer: RalphStarter | None = None
     complete_product: bool = False
+    # RFC #809 Phase 2.1 — when set AND ``complete_product`` is True, the
+    # pipeline inserts an EVALUATE phase between the Ralph terminal verdict
+    # and the COMPLETE transition. The evaluator grades the Ralph artifact
+    # against the Seed's acceptance criteria via ``ouroboros_qa``. On QA
+    # pass the pipeline still reaches COMPLETE; on QA fail it transitions
+    # to BLOCKED with the QA differences/suggestions in ``last_error``.
+    # See :class:`HandlerEvaluator` in adapters.py for the production wiring.
+    evaluator: Evaluator | None = None
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
@@ -464,7 +482,21 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase == AutoPhase.RALPH_HANDOFF:
-            return await self._resume_ralph_handoff(state, ledger, review=review)
+            return await self._resume_ralph_handoff(state, ledger, seed, review=review)
+
+        if state.phase == AutoPhase.EVALUATE:
+            # Re-enter the evaluator. ``_run_evaluate`` is idempotent via the
+            # artifact-hash cache, so a resumed session with the same artifact
+            # and a persisted verdict short-circuits without re-calling QA.
+            return await self._run_evaluate(
+                state,
+                ledger,
+                seed,
+                review=review,
+                run_subagent=None,
+                ralph_result_text=None,
+                stop_reason=None,
+            )
 
         if self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
@@ -979,12 +1011,15 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, review=review, run_subagent=run_subagent)
         if terminal_status == "completed":
-            state.transition(
-                AutoPhase.COMPLETE,
-                f"ralph loop completed ({stop_reason or 'qa passed'})",
+            return await self._evaluate_or_complete(
+                state,
+                ledger,
+                seed,
+                review=review,
+                run_subagent=run_subagent,
+                stop_reason=stop_reason,
+                ralph_result_text=_optional_str(ralph_meta.get("result_text")),
             )
-            self._save(state)
-            return self._result(state, ledger, review=review, run_subagent=run_subagent)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
@@ -1004,10 +1039,216 @@ class AutoPipeline:
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
         )
 
+    async def _evaluate_or_complete(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+        stop_reason: str | None,
+        ralph_result_text: str | None,
+        resumed: bool = False,
+    ) -> AutoPipelineResult:
+        """Branch between EVALUATE and COMPLETE after a Ralph terminal verdict.
+
+        Inserted by RFC #809 Phase 2.1. When ``self.evaluator`` is wired AND
+        the session is in complete-product mode AND Ralph produced a
+        ``result_text`` artifact, transitions to EVALUATE and invokes
+        :meth:`_run_evaluate`. Otherwise falls back to the pre-Phase-2.1
+        behaviour: transition to COMPLETE directly.
+        """
+        if self.evaluator is not None and state.complete_product and ralph_result_text:
+            state.transition(AutoPhase.EVALUATE, "evaluating ralph artifact against seed AC")
+            self._save(state)
+            return await self._run_evaluate(
+                state,
+                ledger,
+                seed,
+                review=review,
+                run_subagent=run_subagent,
+                ralph_result_text=ralph_result_text,
+                stop_reason=stop_reason,
+            )
+        message_prefix = "resumed ralph loop completed" if resumed else "ralph loop completed"
+        state.transition(
+            AutoPhase.COMPLETE,
+            f"{message_prefix} ({stop_reason or 'qa passed'})",
+        )
+        self._save(state)
+        return self._result(state, ledger, review=review, run_subagent=run_subagent)
+
+    async def _run_evaluate(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+        ralph_result_text: str | None,
+        stop_reason: str | None,
+    ) -> AutoPipelineResult:
+        """Run the EVALUATE phase: grade the run artifact against the Seed AC.
+
+        Idempotent on resume — when ``state.evaluate_artifact_hash`` matches a
+        freshly-computed hash of the current artifact AND a verdict was
+        already persisted, the cached verdict is reused without re-invoking
+        the LLM judge. A different artifact (e.g. Ralph re-ran on resume)
+        forces re-evaluation.
+
+        On QA pass → COMPLETE with the verdict in the progress message.
+        On QA fail → BLOCKED with the verdict + top-3 differences/suggestions
+        in the blocker text. On timeout / handler error → BLOCKED with
+        ``tool_name="evaluator"`` so the session remains resumable.
+        """
+        assert self.evaluator is not None  # noqa: S101 — guarded by caller
+
+        # Resolve the artifact: prefer the freshly-passed text from the Ralph
+        # snapshot; on EVALUATE-phase resume the caller passes None and we
+        # rely entirely on the cached verdict.
+        if ralph_result_text:
+            import hashlib
+
+            artifact = ralph_result_text
+            artifact_hash = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
+        else:
+            artifact = ""
+            artifact_hash = state.evaluate_artifact_hash
+
+        cache_hit = (
+            artifact_hash is not None
+            and state.evaluate_artifact_hash == artifact_hash
+            and state.last_qa_verdict is not None
+        )
+        if cache_hit:
+            cached_passed = bool(state.last_qa_verdict == "pass")
+            cached_score = state.last_qa_score or 0.0
+            return self._finalize_evaluate(
+                state,
+                ledger,
+                review=review,
+                run_subagent=run_subagent,
+                passed=cached_passed,
+                score=cached_score,
+                verdict=state.last_qa_verdict or "fail",
+                differences=tuple(state.last_qa_differences),
+                suggestions=tuple(state.last_qa_suggestions),
+                stop_reason=stop_reason,
+                from_cache=True,
+            )
+
+        if not artifact:
+            # Resume in EVALUATE with no cached verdict and no fresh artifact —
+            # we cannot move forward deterministically. Mark blocked so an
+            # operator can attach or re-supply context.
+            state.mark_blocked(
+                "EVALUATE resume found no cached verdict and no run artifact to re-grade",
+                tool_name="evaluator",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+
+        phase_timeout = state.phase_timeout_seconds(AutoPhase.EVALUATE)
+        try:
+            eval_result = await asyncio.wait_for(
+                self.evaluator(seed, artifact), timeout=phase_timeout
+            )
+        except TimeoutError:
+            state.mark_blocked(
+                f"evaluator timed out after {phase_timeout:.0f}s",
+                tool_name="evaluator",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+        except Exception as exc:
+            state.mark_blocked(f"evaluator raised: {exc}", tool_name="evaluator")
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+
+        if eval_result.error:
+            state.mark_blocked(
+                f"evaluator reported transient error: {eval_result.error}",
+                tool_name="evaluator",
+            )
+            state.evaluate_artifact_hash = artifact_hash
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+
+        state.last_qa_score = float(eval_result.score)
+        state.last_qa_verdict = str(eval_result.verdict)
+        state.last_qa_differences = list(eval_result.differences)
+        state.last_qa_suggestions = list(eval_result.suggestions)
+        state.evaluate_artifact_hash = artifact_hash
+        self._save(state)
+
+        return self._finalize_evaluate(
+            state,
+            ledger,
+            review=review,
+            run_subagent=run_subagent,
+            passed=eval_result.passed,
+            score=eval_result.score,
+            verdict=eval_result.verdict,
+            differences=eval_result.differences,
+            suggestions=eval_result.suggestions,
+            stop_reason=stop_reason,
+            from_cache=False,
+        )
+
+    def _finalize_evaluate(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+        passed: bool,
+        score: float,
+        verdict: str,
+        differences: tuple[str, ...],
+        suggestions: tuple[str, ...],
+        stop_reason: str | None,
+        from_cache: bool,
+    ) -> AutoPipelineResult:
+        """Transition out of EVALUATE based on the resolved QA verdict."""
+        cache_suffix = " [cached]" if from_cache else ""
+        if passed:
+            state.transition(
+                AutoPhase.COMPLETE,
+                f"evaluator passed: {verdict} (score {score:.2f}){cache_suffix}"
+                + (f"; ralph stop_reason={stop_reason}" if stop_reason else ""),
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, run_subagent=run_subagent)
+
+        diff_preview = "; ".join(differences[:3]) if differences else ""
+        sug_preview = "; ".join(suggestions[:3]) if suggestions else ""
+        summary_parts = [f"evaluator did not pass: {verdict} (score {score:.2f}){cache_suffix}"]
+        if diff_preview:
+            summary_parts.append(f"differences: {diff_preview}")
+        if sug_preview:
+            summary_parts.append(f"suggestions: {sug_preview}")
+        state.mark_blocked("; ".join(summary_parts), tool_name="evaluator")
+        self._save(state)
+        return self._result(
+            state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+        )
+
     async def _resume_ralph_handoff(
         self,
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
+        seed: Seed,
         *,
         review: SeedReview | None,
     ) -> AutoPipelineResult:
@@ -1040,7 +1281,7 @@ class AutoPipeline:
             return self._result(state, ledger, review=review)
 
         if self.ralph_resumer is not None and state.ralph_job_id:
-            return await self._poll_ralph_job(state, ledger, review=review)
+            return await self._poll_ralph_job(state, ledger, seed, review=review)
 
         handle = state.ralph_job_id or state.ralph_lineage_id
         if handle:
@@ -1063,6 +1304,7 @@ class AutoPipeline:
         self,
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
+        seed: Seed,
         *,
         review: SeedReview | None,
     ) -> AutoPipelineResult:
@@ -1105,12 +1347,16 @@ class AutoPipeline:
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
         if terminal_status == "completed":
-            state.transition(
-                AutoPhase.COMPLETE,
-                f"resumed ralph loop completed ({stop_reason or 'qa passed'})",
+            return await self._evaluate_or_complete(
+                state,
+                ledger,
+                seed,
+                review=review,
+                run_subagent=None,
+                stop_reason=stop_reason,
+                ralph_result_text=_optional_str(ralph_meta.get("result_text")),
+                resumed=True,
             )
-            self._save(state)
-            return self._result(state, ledger, review=review)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
@@ -1218,6 +1464,10 @@ class AutoPipeline:
             ralph_job_id=state.ralph_job_id,
             ralph_lineage_id=state.ralph_lineage_id,
             ralph_dispatch_mode=state.ralph_dispatch_mode,
+            last_qa_score=state.last_qa_score,
+            last_qa_verdict=state.last_qa_verdict,
+            last_qa_differences=tuple(state.last_qa_differences),
+            last_qa_suggestions=tuple(state.last_qa_suggestions),
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.auto.adapters import (
+    HandlerEvaluator,
     HandlerInterviewBackend,
     HandlerRalphPoller,
     HandlerRalphStarter,
@@ -38,6 +39,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import (
     ContentType,
@@ -326,6 +328,18 @@ class AutoHandler:
         # ``EventStore``) — without that share the poller would query a
         # fresh, empty job table.
         ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
+        # RFC #809 Phase 2.1 — wire the QA-backed evaluator only when the
+        # session is in complete-product mode. Outside that mode the chain
+        # is RUN → COMPLETE (async run handoff) so there is no synchronous
+        # artifact to grade; instantiating QAHandler would be wasted setup.
+        evaluator = None
+        if complete_product:
+            qa_handler = QAHandler(
+                llm_backend=self.llm_backend,
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            )
+            evaluator = HandlerEvaluator(qa_handler)
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -344,6 +358,7 @@ class AutoHandler:
             ralph_starter=ralph_starter,
             ralph_resumer=ralph_resumer,
             complete_product=complete_product,
+            evaluator=evaluator,
         )
         return await pipeline.run(state)
 
@@ -402,6 +417,17 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["ralph_lineage_id"] = result.ralph_lineage_id
     if result.ralph_dispatch_mode:
         meta["ralph_dispatch_mode"] = result.ralph_dispatch_mode
+    # RFC #809 Phase 2.1 — surface the EVALUATE verdict when present. None
+    # signals "EVALUATE did not run" so clients can distinguish "not graded"
+    # from "graded and failed".
+    if result.last_qa_score is not None:
+        meta["last_qa_score"] = result.last_qa_score
+    if result.last_qa_verdict is not None:
+        meta["last_qa_verdict"] = result.last_qa_verdict
+    if result.last_qa_differences:
+        meta["last_qa_differences"] = list(result.last_qa_differences)
+    if result.last_qa_suggestions:
+        meta["last_qa_suggestions"] = list(result.last_qa_suggestions)
     # Always emit the ledger-provenance surface so MCP clients can distinguish
     # "computed and empty" (no resolved sections yet, or no per-source split
     # available) from "field not provided at all".  Empty containers are part
@@ -680,6 +706,18 @@ def _format_result(result: AutoPipelineResult) -> str:
             lines.append(f"  job_id: {result.ralph_job_id}")
         if result.ralph_lineage_id:
             lines.append(f"  lineage_id: {result.ralph_lineage_id}")
+    # RFC #809 Phase 2.1 — render the EVALUATE verdict when present so resume
+    # surfaces tell the user whether the session converged on AC verification
+    # or stalled with QA findings the operator must act on.
+    if result.last_qa_verdict is not None:
+        score = f"{result.last_qa_score:.2f}" if result.last_qa_score is not None else "n/a"
+        lines.append(f"QA verdict: {result.last_qa_verdict} (score {score})")
+        if result.last_qa_differences:
+            lines.append("  differences:")
+            lines.extend(f"  - {item}" for item in result.last_qa_differences[:3])
+        if result.last_qa_suggestions:
+            lines.append("  suggestions:")
+            lines.extend(f"  - {item}" for item in result.last_qa_suggestions[:3])
     if result.assumptions:
         lines.append("Assumptions:")
         lines.extend(f"- {item}" for item in result.assumptions)

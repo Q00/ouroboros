@@ -168,8 +168,12 @@ def test_state_machine_allows_run_to_ralph_handoff() -> None:
 
 
 def test_state_machine_allows_ralph_handoff_terminal_transitions() -> None:
-    """RALPH_HANDOFF must be terminal-bound to COMPLETE/BLOCKED/FAILED."""
+    """RALPH_HANDOFF must reach COMPLETE/BLOCKED/FAILED. EVALUATE is the
+    intermediate verification gate added by RFC #809 Phase 2.1, but it is
+    not itself terminal — the assertion checks that every direct successor
+    of RALPH_HANDOFF is either terminal or the EVALUATE bridge."""
     assert _ALLOWED_TRANSITIONS[AutoPhase.RALPH_HANDOFF] == {
+        AutoPhase.EVALUATE,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,

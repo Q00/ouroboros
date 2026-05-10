@@ -22,6 +22,7 @@ class AutoPhase(StrEnum):
     REPAIR = "repair"
     RUN = "run"
     RALPH_HANDOFF = "ralph_handoff"
+    EVALUATE = "evaluate"
     COMPLETE = "complete"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -59,6 +60,7 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.REVIEW.value: 90,
     AutoPhase.REPAIR.value: 90,
     AutoPhase.RUN.value: 60,
+    AutoPhase.EVALUATE.value: 90,
 }
 
 # Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
@@ -200,6 +202,12 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.FAILED,
     },
     AutoPhase.RALPH_HANDOFF: {
+        AutoPhase.EVALUATE,
+        AutoPhase.COMPLETE,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    },
+    AutoPhase.EVALUATE: {
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
@@ -211,6 +219,7 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.REVIEW,
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
+        AutoPhase.EVALUATE,
     },
     AutoPhase.FAILED: {
         AutoPhase.INTERVIEW,
@@ -218,6 +227,7 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.REVIEW,
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
+        AutoPhase.EVALUATE,
     },
 }
 
@@ -318,6 +328,17 @@ class AutoPipelineState:
     # ``REQUIRED_SECTIONS`` at construction time by the MCP handler — only
     # known section keys with non-empty string values land here.
     user_preferences: dict[str, str] = field(default_factory=dict)
+    # QA verdict captured during the EVALUATE phase (RFC #809 Phase 2.1).
+    # Persisted so a resumed session reuses the verdict without re-invoking
+    # the LLM-driven judge when the underlying artifact has not changed.
+    # ``evaluate_artifact_hash`` is a sha256 of the run artifact that was
+    # graded: if the hash on resume matches the cached one, the cached
+    # verdict is honored; otherwise the evaluator re-runs.
+    last_qa_score: float | None = None
+    last_qa_verdict: str | None = None
+    last_qa_differences: list[str] = field(default_factory=list)
+    last_qa_suggestions: list[str] = field(default_factory=list)
+    evaluate_artifact_hash: str | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -592,6 +613,11 @@ class AutoPipelineState:
         payload.setdefault("deadline_at", None)
         payload.setdefault("deadline_at_epoch", None)
         payload.setdefault("user_preferences", {})
+        payload.setdefault("last_qa_score", None)
+        payload.setdefault("last_qa_verdict", None)
+        payload.setdefault("last_qa_differences", [])
+        payload.setdefault("last_qa_suggestions", [])
+        payload.setdefault("evaluate_artifact_hash", None)
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -738,6 +764,32 @@ class AutoPipelineState:
                     "MCP handler which validates against REQUIRED_SECTIONS"
                 )
                 raise ValueError(msg)
+        if self.last_qa_score is not None and (
+            isinstance(self.last_qa_score, bool) or not isinstance(self.last_qa_score, int | float)
+        ):
+            msg = "last_qa_score must be a number or null"
+            raise ValueError(msg)
+        if self.last_qa_verdict is not None and (
+            not isinstance(self.last_qa_verdict, str) or not self.last_qa_verdict.strip()
+        ):
+            msg = "last_qa_verdict must be a non-empty string or null"
+            raise ValueError(msg)
+        if not isinstance(self.last_qa_differences, list) or any(
+            not isinstance(item, str) for item in self.last_qa_differences
+        ):
+            msg = "last_qa_differences must be a list of strings"
+            raise ValueError(msg)
+        if not isinstance(self.last_qa_suggestions, list) or any(
+            not isinstance(item, str) for item in self.last_qa_suggestions
+        ):
+            msg = "last_qa_suggestions must be a list of strings"
+            raise ValueError(msg)
+        if self.evaluate_artifact_hash is not None and (
+            not isinstance(self.evaluate_artifact_hash, str)
+            or not self.evaluate_artifact_hash.strip()
+        ):
+            msg = "evaluate_artifact_hash must be a non-empty string or null"
+            raise ValueError(msg)
         if self.provenance is not None:
             if not isinstance(self.provenance, dict):
                 msg = "provenance must be an object or null"

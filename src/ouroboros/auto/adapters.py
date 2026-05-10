@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
+from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import MCPToolResult
 
@@ -293,6 +295,83 @@ class HandlerRalphPoller:
             "terminal_status": terminal_status,
             "stop_reason": stop_reason,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluateResult:
+    """Structured result returned by :class:`HandlerEvaluator`.
+
+    Mirrors the relevant subset of ``ouroboros_qa``'s response meta so the
+    pipeline can persist the verdict on :class:`AutoPipelineState` and reuse
+    it on resume without re-invoking the LLM judge.
+
+    ``error`` is non-empty when the QA handler returned a transient failure
+    (resumable). The pipeline treats this as a BLOCKED state, not FAILED.
+    """
+
+    passed: bool
+    score: float
+    verdict: str
+    differences: tuple[str, ...] = ()
+    suggestions: tuple[str, ...] = ()
+    error: str | None = None
+
+
+class HandlerEvaluator:
+    """Callable QA evaluator backed by ``ouroboros_qa`` :class:`QAHandler`.
+
+    Builds a ``quality_bar`` from the Seed's acceptance criteria using the
+    exact phrasing established by ``evolution_handlers.py`` ("The execution
+    must satisfy all acceptance criteria"). Grades a run artifact against
+    that bar with ``pass_threshold=0.80`` and returns a typed
+    :class:`EvaluateResult`. The artifact is opaque to the adapter — callers
+    pull it from the appropriate runtime surface (e.g. the Ralph terminal
+    job snapshot's ``result_text``).
+
+    The adapter is intentionally thin so :class:`AutoPipeline._run_evaluate`
+    owns the decision policy (transition to COMPLETE vs mark_blocked, cache
+    by artifact hash for resume idempotency, etc.).
+    """
+
+    def __init__(self, qa_handler: QAHandler) -> None:
+        self.qa_handler = qa_handler
+
+    async def __call__(self, seed: Seed, run_artifact: str) -> EvaluateResult:
+        if seed.acceptance_criteria:
+            ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
+            quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
+                ac_lines
+            )
+        else:
+            quality_bar = "The execution must satisfy the seed's intent."
+
+        seed_yaml = yaml.dump(
+            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
+        result = await self.qa_handler.handle(
+            {
+                "artifact": run_artifact,
+                "artifact_type": "test_output",
+                "quality_bar": quality_bar,
+                "seed_content": seed_yaml,
+                "pass_threshold": 0.80,
+            }
+        )
+        if result.is_err:
+            return EvaluateResult(
+                passed=False,
+                score=0.0,
+                verdict="fail",
+                error=str(result.error),
+            )
+        meta = result.value.meta or {}
+        return EvaluateResult(
+            passed=bool(meta.get("passed", False)),
+            score=float(meta.get("score", 0.0)),
+            verdict=str(meta.get("verdict", "fail")),
+            differences=tuple(meta.get("differences", ()) or ()),
+            suggestions=tuple(meta.get("suggestions", ()) or ()),
+        )
 
 
 async def _wait_for_job_terminal(
