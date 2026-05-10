@@ -264,8 +264,12 @@ class HandlerRalphStarter:
             "stop_reason": stop_reason,
             # RFC #809 Phase 2.1: surface the Ralph job's result_text so
             # ``AutoPipeline._evaluate_or_complete`` can grade it against
-            # the Seed AC via ``HandlerEvaluator``.
-            "result_text": _optional_str(terminal_meta.get("__result_text__")),
+            # the Seed AC via ``HandlerEvaluator``. ``""`` is a VALID graded
+            # artifact (a Ralph run with intentionally empty output must
+            # still be graded), so route through ``_artifact_text`` —
+            # ``_optional_str`` would collapse the empty string to None and
+            # silently skip EVALUATE.
+            "result_text": _artifact_text(terminal_meta.get("__result_text__")),
         }
 
 
@@ -300,8 +304,10 @@ class HandlerRalphPoller:
             "stop_reason": stop_reason,
             # RFC #809 Phase 2.1: surface the Ralph job's result_text so a
             # resumed RALPH_HANDOFF checkpoint can still grade the artifact
-            # via EVALUATE — same contract as the starter path.
-            "result_text": _optional_str(terminal_meta.get("__result_text__")),
+            # via EVALUATE — same contract as the starter path. ``""`` is a
+            # VALID graded artifact, so use ``_artifact_text`` rather than
+            # ``_optional_str``.
+            "result_text": _artifact_text(terminal_meta.get("__result_text__")),
         }
 
 
@@ -474,3 +480,15 @@ def _extract_seed_yaml(text: str) -> str:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _artifact_text(value: object) -> str | None:
+    """Return ``value`` verbatim when it is a string (including ``""``), else None.
+
+    Distinct from :func:`_optional_str` because an artifact graded by
+    EVALUATE is a valid input even when empty: a Ralph job whose output is
+    intentionally empty must still be evaluated against the Seed AC.
+    Returning ``None`` for ``""`` would silently skip EVALUATE and produce a
+    false-pass — the bug fixed by RFC #809 Phase 2.1.
+    """
+    return value if isinstance(value, str) else None

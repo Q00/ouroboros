@@ -952,3 +952,95 @@ def test_resume_capability_evaluate_blocked_with_cached_verdict_is_resumable(tmp
     state.last_qa_verdict = "pass"
     state.last_qa_score = 0.92
     assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_resume_capability_evaluate_blocked_with_empty_artifact_is_resumable(tmp_path) -> None:
+    """An empty-string artifact is a valid graded input — resume capability
+    must use ``is not None``, not truthiness. Previously a session blocked
+    after persisting ``""`` was incorrectly reported as non-resumable."""
+    from ouroboros.auto.state import AutoResumeCapability
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = AutoPhase.BLOCKED
+    state.last_tool_name = "evaluator"
+    state.evaluate_artifact = ""  # empty but persisted
+    state.evaluate_artifact_hash = "hash_of_empty"
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+# ---------------------------------------------------------------------------
+# Ralph adapter empty-artifact contract (production path, not stubs)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_ralph_starter_preserves_empty_result_text() -> None:
+    """Production ``HandlerRalphStarter`` must propagate ``""`` (an empty-
+    but-valid artifact) as a real string into the pipeline. ``_optional_str``
+    would have collapsed it to None and silently skipped EVALUATE — the
+    very false-pass this PR claims to fix."""
+    from ouroboros.auto.adapters import HandlerRalphStarter
+    from ouroboros.mcp.job_manager import JobStatus
+
+    class _StubSnapshot:
+        def __init__(self) -> None:
+            self.is_terminal = True
+            self.status = JobStatus.COMPLETED
+            self.result_meta: dict[str, Any] = {"status": "completed", "stop_reason": "qa passed"}
+            self.result_text = ""  # intentionally empty artifact
+
+    class _StubJobManager:
+        async def get_snapshot(self, _job_id: str) -> _StubSnapshot:
+            return _StubSnapshot()
+
+    class _StubRalphHandler:
+        _job_manager = _StubJobManager()
+
+        async def handle(self, _arguments: dict[str, Any]):  # noqa: ANN201
+            from ouroboros.core.types import Result
+            from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="dispatched"),),
+                    is_error=False,
+                    meta={
+                        "job_id": "job_ralph_empty",
+                        "lineage_id": "lineage_empty",
+                        "dispatch_mode": "job",
+                        "status": "running",
+                    },
+                )
+            )
+
+    starter = HandlerRalphStarter(_StubRalphHandler())  # type: ignore[arg-type]
+    result = await starter(_build_seed(), lineage_id="lineage_empty")
+    # Critical: result_text must be ``""`` (a string), NOT None.
+    assert result["result_text"] == ""
+    assert isinstance(result["result_text"], str)
+
+
+@pytest.mark.asyncio
+async def test_handler_ralph_poller_preserves_empty_result_text() -> None:
+    """Same contract on the resume poller path."""
+    from ouroboros.auto.adapters import HandlerRalphPoller
+    from ouroboros.mcp.job_manager import JobStatus
+
+    class _StubSnapshot:
+        def __init__(self) -> None:
+            self.is_terminal = True
+            self.status = JobStatus.COMPLETED
+            self.result_meta: dict[str, Any] = {"status": "completed"}
+            self.result_text = ""
+
+    class _StubJobManager:
+        async def get_snapshot(self, _job_id: str) -> _StubSnapshot:
+            return _StubSnapshot()
+
+    class _StubRalphHandler:
+        _job_manager = _StubJobManager()
+
+    poller = HandlerRalphPoller(_StubRalphHandler())  # type: ignore[arg-type]
+    result = await poller(job_id="job_empty")
+    assert result["result_text"] == ""
+    assert isinstance(result["result_text"], str)

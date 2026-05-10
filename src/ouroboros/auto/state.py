@@ -580,8 +580,12 @@ class AutoPipelineState:
         # persisted artifact (so the evaluator can re-grade) OR a cached
         # verdict matching the persisted hash (so the cache hit drives the
         # decision without re-invoking the LLM). Neither present → NONE.
+        #
+        # ``is not None`` rather than truthiness on ``evaluate_artifact``:
+        # an empty-string artifact is a valid graded input, so a session
+        # blocked after persisting ``""`` is still resumable.
         if recoverable == AutoPhase.EVALUATE:
-            if self.evaluate_artifact or (
+            if self.evaluate_artifact is not None or (
                 self.evaluate_artifact_hash is not None and self.last_qa_verdict is not None
             ):
                 return AutoResumeCapability.RESUME
