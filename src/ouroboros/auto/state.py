@@ -336,6 +336,13 @@ class AutoPipelineState:
     # verdict is honored; otherwise the evaluator re-runs.
     last_qa_score: float | None = None
     last_qa_verdict: str | None = None
+    # The QA handler's canonical pass condition is ``score >= pass_threshold``
+    # (see ``QAHandler``), which can be True even when ``verdict`` is
+    # ``"revise"``. Persist the boolean separately so the EVALUATE cache
+    # resume path reuses the authoritative passed flag instead of
+    # re-deriving from verdict text (the LLM's free-form verdict string
+    # is not the source of truth for the pass decision).
+    last_qa_passed: bool | None = None
     last_qa_differences: list[str] = field(default_factory=list)
     last_qa_suggestions: list[str] = field(default_factory=list)
     evaluate_artifact_hash: str | None = None
@@ -586,7 +593,7 @@ class AutoPipelineState:
         # blocked after persisting ``""`` is still resumable.
         if recoverable == AutoPhase.EVALUATE:
             if self.evaluate_artifact is not None or (
-                self.evaluate_artifact_hash is not None and self.last_qa_verdict is not None
+                self.evaluate_artifact_hash is not None and self.last_qa_passed is not None
             ):
                 return AutoResumeCapability.RESUME
             return AutoResumeCapability.NONE
@@ -639,6 +646,7 @@ class AutoPipelineState:
         payload.setdefault("user_preferences", {})
         payload.setdefault("last_qa_score", None)
         payload.setdefault("last_qa_verdict", None)
+        payload.setdefault("last_qa_passed", None)
         payload.setdefault("last_qa_differences", [])
         payload.setdefault("last_qa_suggestions", [])
         payload.setdefault("evaluate_artifact_hash", None)
@@ -798,6 +806,9 @@ class AutoPipelineState:
             not isinstance(self.last_qa_verdict, str) or not self.last_qa_verdict.strip()
         ):
             msg = "last_qa_verdict must be a non-empty string or null"
+            raise ValueError(msg)
+        if self.last_qa_passed is not None and not isinstance(self.last_qa_passed, bool):
+            msg = "last_qa_passed must be a boolean or null"
             raise ValueError(msg)
         if not isinstance(self.last_qa_differences, list) or any(
             not isinstance(item, str) for item in self.last_qa_differences

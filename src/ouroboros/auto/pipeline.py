@@ -1129,21 +1129,25 @@ class AutoPipeline:
         else:
             artifact_hash = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
 
+        # Cache hit requires the persisted ``last_qa_passed`` boolean — the
+        # canonical pass decision derived from ``score >= pass_threshold``
+        # by the QA handler. Using ``last_qa_verdict == "pass"`` as the
+        # cache key would silently reclassify a ``passed=True`` /
+        # ``verdict="revise"`` result as BLOCKED on resume, breaking
+        # idempotent resume behaviour.
         cache_hit = (
             artifact_hash is not None
             and state.evaluate_artifact_hash == artifact_hash
-            and state.last_qa_verdict is not None
+            and state.last_qa_passed is not None
         )
         if cache_hit:
-            cached_passed = bool(state.last_qa_verdict == "pass")
-            cached_score = state.last_qa_score or 0.0
             return self._finalize_evaluate(
                 state,
                 ledger,
                 review=review,
                 run_subagent=run_subagent,
-                passed=cached_passed,
-                score=cached_score,
+                passed=bool(state.last_qa_passed),
+                score=state.last_qa_score or 0.0,
                 verdict=state.last_qa_verdict or "fail",
                 differences=tuple(state.last_qa_differences),
                 suggestions=tuple(state.last_qa_suggestions),
@@ -1174,11 +1178,12 @@ class AutoPipeline:
         # previously persisted one), the stale verdict from the previous
         # artifact MUST be cleared. Otherwise, if the evaluator times out
         # or transiently errors after persisting the new hash, ``--resume``
-        # would see ``hash(new) == hash(new)`` paired with the verdict from
-        # ``hash(old)`` and incorrectly take the cache-hit path.
+        # would see ``hash(new) == hash(new)`` paired with the cached pass
+        # flag from ``hash(old)`` and incorrectly take the cache-hit path.
         if state.evaluate_artifact_hash != artifact_hash:
             state.last_qa_score = None
             state.last_qa_verdict = None
+            state.last_qa_passed = None
             state.last_qa_differences = []
             state.last_qa_suggestions = []
         state.evaluate_artifact = artifact
@@ -1236,6 +1241,12 @@ class AutoPipeline:
 
         state.last_qa_score = float(eval_result.score)
         state.last_qa_verdict = str(eval_result.verdict)
+        # Persist the canonical pass flag explicitly (score >= threshold
+        # per the QA contract). Resume reuses this boolean rather than
+        # re-deriving ``passed`` from the verdict string — verdicts and
+        # the passed flag can diverge (e.g. score 0.85, threshold 0.80
+        # ⇒ passed=True but verdict="revise" when the LLM is conservative).
+        state.last_qa_passed = bool(eval_result.passed)
         state.last_qa_differences = list(eval_result.differences)
         state.last_qa_suggestions = list(eval_result.suggestions)
         state.evaluate_artifact_hash = artifact_hash

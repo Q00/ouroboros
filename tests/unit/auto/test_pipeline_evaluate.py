@@ -940,7 +940,7 @@ def test_resume_capability_evaluate_blocked_without_artifact_is_none(tmp_path) -
 
 
 def test_resume_capability_evaluate_blocked_with_cached_verdict_is_resumable(tmp_path) -> None:
-    """A cached verdict + hash is enough to drive the resume to COMPLETE
+    """A cached pass flag + hash is enough to drive the resume to COMPLETE
     (cache-hit short-circuit), so capability is RESUME even without the
     raw artifact text."""
     from ouroboros.auto.state import AutoResumeCapability
@@ -950,8 +950,61 @@ def test_resume_capability_evaluate_blocked_with_cached_verdict_is_resumable(tmp
     state.last_tool_name = "evaluator"
     state.evaluate_artifact_hash = "abc123"
     state.last_qa_verdict = "pass"
+    state.last_qa_passed = True
     state.last_qa_score = 0.92
     assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+@pytest.mark.asyncio
+async def test_evaluate_cache_reuses_passed_flag_for_revise_verdict(tmp_path) -> None:
+    """End-to-end async version: ``passed=True, verdict="revise"`` must
+    yield COMPLETE on first call AND cached COMPLETE on resume."""
+    state = _state_at_run_phase(tmp_path)
+    eval_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal eval_calls
+        eval_calls += 1
+        return EvaluateResult(
+            passed=True,
+            score=0.85,
+            verdict="revise",  # NOT "pass" — verdict diverges from passed flag
+            differences=("minor formatting issue",),
+            suggestions=("trim trailing whitespace",),
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="some artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    # First call: passed=True with verdict="revise" should still COMPLETE.
+    result = await pipeline.run(state)
+    assert result.status == "complete"
+    assert state.last_qa_passed is True
+    assert state.last_qa_verdict == "revise"
+    assert eval_calls == 1
+
+    # Simulated resume — cache must use last_qa_passed (True), not the
+    # verdict string. Reset phase to EVALUATE so we can call _run_evaluate
+    # directly (production resume gets here via _recoverable_phase_for_tool).
+    state.phase = AutoPhase.EVALUATE
+    resume_result = await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text=None,
+        stop_reason=None,
+    )
+    assert resume_result.status == "complete"  # NOT blocked
+    assert eval_calls == 1  # cache hit, evaluator NOT re-invoked
 
 
 def test_resume_capability_evaluate_blocked_with_empty_artifact_is_resumable(tmp_path) -> None:
