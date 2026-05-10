@@ -198,16 +198,91 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    **When in doubt, use PATH 2.** It's safer to ask the user than to guess.
 
 3. **Send the answer back to MCP**:
+
+   **Payload format — preserve the user's reasoning, do NOT compress to one line.**
+   MCP cannot read code, browse the web, or call tools. The text you send is
+   the only context MCP has when generating the next question. A one-line
+   answer collapses the user's reasoning, constraints, and scope decisions
+   into a label, which degrades both the next question's quality and the
+   ambiguity scoring. Send the user's full reasoning, structured.
+
+   Single-line answers are OK only for **PATH 1a auto-confirmed facts** and
+   for short PATH 2 answers that have no reasoning or constraints attached
+   (e.g., "Yes" / "No" / "Python 3.12"). Everything else must be sent as a
+   multi-section payload below.
+
    ```
    Tool: ouroboros_interview
    Arguments:
      session_id: <session ID>
-     answer: "[from-code][auto-confirmed] Python 3.12, FastAPI (pyproject.toml)"
-             or "[from-code] JWT-based auth in src/auth/jwt.py"
-             or "[from-user] Stripe Billing"
-             or "[from-research] Stripe: 100 read ops/sec live mode"
+     answer: |
+       [from-user][refined]
+       Decision: Stripe Billing.
+
+       Reasoning:
+       - Subscription is the core business model.
+       - Stripe bundles invoice/dunning/tax — avoids building those.
+
+       Constraints (user-stated):
+       - 30% Korean MAU, KRW required.
+       - Revenue recognition automation OUT OF SCOPE this quarter.
+
+       Out of scope (user-stated):
+       - Refund policy changes, tax-invoice issuance.
+
+       Codebase context (main session verified):
+       - src/billing/ does not exist yet.
+       - src/payments/toss_adapter.py is one-shot KRW only.
    ```
+
+   Short-answer cases (single-line OK):
+   ```
+   "[from-code][auto-confirmed] Python 3.12, FastAPI (pyproject.toml)"
+   "[from-user] Yes"
+   ```
+
+   The `[from-refined]` marker (or appending `[refined]` to existing prefixes)
+   signals that the answer has been through the Refine gate (see Step 4).
    MCP records the answer, generates the next question, and returns it.
+
+4. **Refine before forwarding** (free-text answers only):
+
+   When the user gives a free-text answer that carries reasoning, constraints,
+   or scope decisions, do NOT forward it to MCP unmodified and do NOT compress
+   it to a label. Structure it into the multi-section payload above, then ask
+   the user a single AskUserQuestion to confirm nothing is lost:
+
+   ```json
+   {
+     "questions": [{
+       "question": "I structured your answer as follows before sending it to MCP:\n\n<multi-section payload>\n\nIs anything missing or misrepresented?",
+       "header": "Refine — preserve the structure of your answer",
+       "options": [
+         {"label": "Send as-is", "description": "The structure captures my answer faithfully"},
+         {"label": "Add to Constraints", "description": "I want to add a constraint I forgot"},
+         {"label": "Add to Out of scope", "description": "I want to mark something explicitly out of scope"},
+         {"label": "Rewrite", "description": "Let me re-state the answer"}
+       ],
+       "multiSelect": false
+     }]
+   }
+   ```
+
+   The Refine gate replaces "compress to one line" with "preserve the user's
+   reasoning, surface anything missing." It is skipped for:
+   - PATH 1a auto-confirmed facts
+   - PATH 1b / PATH 4 confirmation answers where the user picked a pre-built
+     option (the structure is already explicit)
+   - Short PATH 2 answers (e.g., "Yes" / single proper noun) with no
+     reasoning attached
+
+   Refine-passed answers count as direct user judgment — they reset the
+   Dialectic Rhythm Guard counter to 0 (see below).
+
+5. **Mark the answer as Refine-passed**:
+   Append `[refined]` to the prefix when sending the structured payload to
+   MCP (e.g., `[from-user][refined]`). MCP treats refined answers as
+   high-confidence ground truth for ambiguity scoring.
 
 6. **Keep a visible ambiguity ledger**:
    Track independent ambiguity tracks (scope, constraints, outputs, verification).
@@ -229,10 +304,41 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Explain the gap briefly and ask the single highest-impact follow-up question,
    routed through PATH 2 or PATH 3 as appropriate.
 
-9. **Prefer stopping over over-interviewing**:
-   When the Seed-ready Acceptance Guard passes, suggest `ooo seed`.
+9. **Restate gate** (only after Seed-ready Acceptance Guard passes):
 
-10. After completion, suggest the next step:
+   Once the Acceptance Guard passes, do not jump straight to `ooo seed`.
+   First restate the agreed goal as a single sentence and ask the user to
+   confirm it captures the decision. This is the one place where compression
+   to a single line is the goal — every other answer in the interview was
+   sent to MCP in full multi-section form (see Step 3), and now we collapse
+   the accumulated agreement into a one-line goal that another person could
+   read and arrive at the same outcome.
+
+   ```json
+   {
+     "questions": [{
+       "question": "Based on the answers we agreed on, here is a one-sentence restatement of the goal:\n\n  goal: <one-sentence restatement>\n\nIf someone else read only this line, would they arrive at the same outcome you have in mind?",
+       "header": "Restate — one-line goal before seed",
+       "options": [
+         {"label": "Yes, generate seed", "description": "The line captures the goal; proceed to ooo seed"},
+         {"label": "Adjust wording", "description": "The intent is right but I want to change words"},
+         {"label": "Missing scope", "description": "A condition or boundary is missing from the line"}
+       ],
+       "multiSelect": false
+     }]
+   }
+   ```
+
+   Only after the user accepts the restated line do you suggest `ooo seed`.
+   If the user picks "Adjust wording" or "Missing scope", revise the line and
+   ask once more — do not loop more than twice; if alignment is not reached,
+   route back to PATH 2 with a targeted question instead of forcing a goal
+   line.
+
+10. **Prefer stopping over over-interviewing**:
+   When the Restate gate passes, suggest `ooo seed`.
+
+11. After completion, suggest the next step:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 #### Dialectic Rhythm Guard
@@ -275,10 +381,16 @@ If the MCP tool is NOT available, fall back to agent-based interview:
    - Track multiple independent ambiguity threads
    - Revisit unresolved threads every few rounds
    - Do not let one detailed subtopic crowd out the rest of the original request
-7. Prefer closure only after applying the Seed-ready Acceptance Guard above. Ask whether to move to `ooo seed` rather than continuing to generate narrower questions.
-8. Continue until the user says "done"
-9. Interview results live in conversation context (not persisted)
-10. After completion, suggest the next step in `📍 Next:` format:
+7. **Apply the Refine gate** (Path A Step 4) to free-text user answers before
+   absorbing them into your running understanding. The structure preservation
+   matters less here than in Path A (no MCP relay), but the "did I miss any
+   reasoning, constraints, or scope?" check still surfaces gaps.
+8. Prefer closure only after applying the Seed-ready Acceptance Guard above.
+   Then **apply the Restate gate** (Path A Step 9): collapse the agreed answers
+   into a one-sentence goal and confirm with the user before suggesting `ooo seed`.
+9. Continue until the user says "done"
+10. Interview results live in conversation context (not persisted)
+11. After completion, suggest the next step in `📍 Next:` format:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 ## Interviewer Behavior
