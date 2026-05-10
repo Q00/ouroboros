@@ -3012,7 +3012,15 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     resume_handle=self._inherited_runtime_handle,
                 ):
                     if message.content:
-                        response_text = message.content
+                        # Some runtimes (notably Goose stream-json) emit assistant text
+                        # as token/delta chunks.  The decomposition parser needs the
+                        # full response, so accumulate chunks for Goose while preserving
+                        # the previous last-message behavior for runtimes that emit
+                        # complete assistant messages.
+                        if getattr(self._adapter, "runtime_backend", "") == "goose":
+                            response_text += message.content
+                        else:
+                            response_text = message.content
 
             # Parse response
             response_text = response_text.strip()

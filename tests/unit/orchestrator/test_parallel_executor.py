@@ -6058,3 +6058,48 @@ class TestParallelACExecutor:
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
         assert result.runtime_handle.metadata == resume_handle.metadata
+
+
+@pytest.mark.asyncio
+async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
+    """Goose stream-json emits token chunks; decomposition must parse accumulated output."""
+
+    class _GooseChunkRuntime:
+        runtime_backend = "goose"
+
+        async def execute_task(
+            self,
+            prompt: str,
+            tools: list[str] | None = None,
+            system_prompt: str | None = None,
+            resume_handle: RuntimeHandle | None = None,
+            resume_session_id: str | None = None,
+        ):
+            del prompt, tools, system_prompt, resume_handle, resume_session_id
+            for chunk in (
+                '["Sub-AC 1: inspect the implementation", ',
+                '"Sub-AC 2: write a focused regression test", ',
+                '"Sub-AC 3: document the result"]',
+            ):
+                yield AgentMessage(type="assistant", content=chunk)
+
+    executor = ParallelACExecutor(
+        adapter=_GooseChunkRuntime(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+    )
+
+    result = await executor._try_decompose_ac(
+        ac_content="Investigate, test, and document sub-AC behavior.",
+        ac_index=0,
+        seed_goal="Verify Goose sub-AC support",
+        tools=[],
+        system_prompt="system",
+    )
+
+    assert result == [
+        "Sub-AC 1: inspect the implementation",
+        "Sub-AC 2: write a focused regression test",
+        "Sub-AC 3: document the result",
+    ]
