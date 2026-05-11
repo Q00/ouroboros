@@ -58,8 +58,11 @@ _DISPATCH_TEMPLATE_EXACT_PATTERN = re.compile(
     r"^\$(?P<name>[A-Za-z_][A-Za-z0-9_]*|1)(?![A-Za-z0-9_])$"
 )
 _INTEGER_OPTION_PATTERN = re.compile(r"^[+-]?\d+$")
-_BOOLEAN_OPTION_NAMES = frozenset({"skip_run"})
-_VALUE_OPTION_NAMES = frozenset({"resume", "max_interview_rounds", "max_repair_rounds"})
+_DECIMAL_OPTION_PATTERN = re.compile(r"^[+-]?(?:(?:\d+\.\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$")
+_BOOLEAN_OPTION_NAMES = frozenset({"complete_product", "skip_run"})
+_VALUE_OPTION_NAMES = frozenset(
+    {"resume", "max_interview_rounds", "max_repair_rounds", "pipeline_timeout_seconds"}
+)
 _CONTROL_OPTION_NAMES = _BOOLEAN_OPTION_NAMES | _VALUE_OPTION_NAMES
 # Windows literal path payloads (drive-letter `C:\…` or UNC `\\server\share\…`)
 # must skip shell tokenization — `shlex.split` treats backslash as an escape and
@@ -365,7 +368,7 @@ def _starts_with_quoted_payload(remainder: str | None) -> bool:
     return bool(remainder and remainder.lstrip().startswith(("'", '"')))
 
 
-def _coerce_named_option_value(value: str | bool) -> str | int | bool:
+def _coerce_named_option_value(value: str | bool) -> str | int | float | bool:
     """Coerce deterministic CLI-style option values for MCP JSON payloads."""
     if isinstance(value, bool):
         return value
@@ -376,6 +379,10 @@ def _coerce_named_option_value(value: str | bool) -> str | int | bool:
         return False
     if _INTEGER_OPTION_PATTERN.fullmatch(value.strip()) is not None:
         return int(value)
+    if _DECIMAL_OPTION_PATTERN.fullmatch(value.strip()) is not None:
+        numeric_value = float(value)
+        if math.isfinite(numeric_value):
+            return numeric_value
     return value
 
 
@@ -418,10 +425,12 @@ def _extract_dispatch_template_values(
     values: dict[str, Any] = {
         "1": first_argument or "",
         "CWD": str(cwd),
+        "complete_product": "",
         "resume": "",
         "skip_run": "",
         "max_interview_rounds": "",
         "max_repair_rounds": "",
+        "pipeline_timeout_seconds": "",
     }
     for option_name in extra_value_option_names:
         values.setdefault(option_name, "")

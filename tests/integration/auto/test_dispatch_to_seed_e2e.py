@@ -278,11 +278,14 @@ def _install_auto_handler_stubs(
             captured["seed_saver"] = seed_saver
             captured["seed_loader"] = seed_loader
             captured["skip_run"] = skip_run
+            captured["complete_product"] = _.get("complete_product")
 
         async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
             captured["state_goal"] = state.goal
             captured["state_cwd"] = state.cwd
             captured["state_skip_run"] = state.skip_run
+            captured["state_complete_product"] = state.complete_product
+            captured["state_pipeline_timeout_seconds"] = state.pipeline_timeout_seconds
             state.transition(AutoPhase.INTERVIEW, "stubbed interview start")
             state.interview_session_id = "interview_dispatch_e2e_runtime"
             state.transition(AutoPhase.SEED_GENERATION, "stubbed seed generation")
@@ -405,7 +408,12 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     with patch(
         "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
     ) as mock_exec:
-        messages = [message async for message in runtime.execute_task(f"ooo auto {user_goal}")]
+        messages = [
+            message
+            async for message in runtime.execute_task(
+                f'ooo auto "{user_goal}" --complete-product --pipeline-timeout-seconds 600.5'
+            )
+        ]
 
     # The runtime must NOT spawn the codex subprocess for a successful skill
     # intercept — the dispatch path is the only thing under test.
@@ -418,16 +426,18 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert intercept.mcp_tool == "ouroboros_auto"
     assert intercept.command_prefix == "ooo auto"
 
-    # The runtime contract requires ``goal`` and ``cwd`` to be substituted from
-    # the dispatched command and runtime cwd. Other frontmatter keys
-    # (``resume``, ``max_*``, ``skip_run``) are optional from the runtime's
-    # perspective and may legitimately be added/removed in a backward-compatible
-    # manner. Use a superset assertion on the required keys plus value asserts
-    # on the substituted ones so this test does not freeze the full frontmatter
-    # shape.
+    # The runtime contract requires documented packaged auto placeholders to be
+    # present and normalized before AutoHandler receives them.
     args = arguments_log[0]
-    assert {"goal", "cwd"} <= set(args.keys()), (
-        f"packaged ooo auto frontmatter must declare goal/cwd mcp_args; got {sorted(args.keys())!r}"
+    assert {
+        "goal",
+        "cwd",
+        "complete_product",
+        "pipeline_timeout_seconds",
+        "user_preferences",
+    } <= set(args.keys()), (
+        "packaged ooo auto frontmatter must declare documented mcp_args; "
+        f"got {sorted(args.keys())!r}"
     )
     assert args["goal"] == user_goal, (
         f"resolve_skill_dispatch must inject the user goal via $goal; got {args!r}"
@@ -435,6 +445,10 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert args["cwd"] == str(cwd), (
         f"resolve_skill_dispatch must inject runtime cwd via $CWD; got {args!r}"
     )
+    assert args["complete_product"] is True
+    assert args["pipeline_timeout_seconds"] == 600.5
+    assert isinstance(args["pipeline_timeout_seconds"], float)
+    assert args["user_preferences"] == ""
 
     # AutoHandler._run actually executed: stub AutoPipeline observed the state.
     assert captured.get("state_goal") == user_goal, (
@@ -443,6 +457,9 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert captured.get("state_cwd") == str(cwd), (
         "AutoHandler._run must thread runtime cwd into AutoPipelineState"
     )
+    assert captured.get("complete_product") is True
+    assert captured.get("state_complete_product") is True
+    assert captured.get("state_pipeline_timeout_seconds") == 600.5
 
     # The runtime must yield a single final result message carrying the Seed.
     assert len(messages) == 1, f"expected single dispatch result, got {messages!r}"
