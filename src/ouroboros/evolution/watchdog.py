@@ -96,8 +96,8 @@ class GenerationProgressWatchdog:
         (b) Awaits the cancelled task and swallows ``CancelledError`` so the
             inner coroutine has a chance to run its ``except CancelledError``
             cleanup block before control returns here.
-        (c) Emits ``lineage.generation.watchdog_decision`` and
-            ``control.directive.emitted`` events that carry
+        (c) Emits a ``lineage.generation.watchdog_decision`` event whose
+            details carry
             ``cancellation_mode = WATCHDOG_CANCELLATION_MODE``.
 
         *Cooperative* because the inner task observes the ``CancelledError``
