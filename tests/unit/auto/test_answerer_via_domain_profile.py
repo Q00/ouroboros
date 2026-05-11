@@ -157,6 +157,18 @@ class TestVagueTermLookupUsesProfile:
         answer = answerer.answer("Something completely unrelated xyzzy", ledger)
         assert answer.generic_default is True
 
+    def test_vague_term_does_not_match_inside_larger_word(self):
+        profile = _make_profile(
+            classifier=_NeverClassifier(),
+            vague_terms={"easy", "clean"},
+        )
+        answerer = AutoAnswerer(active_profile=profile)
+        ledger = _ledger()
+
+        answer = answerer.answer("How should we cleanup the easiest path?", ledger)
+
+        assert answer.generic_default is True
+
     def test_vague_term_absent_without_profile(self):
         """Without a profile, vague-term injection never happens."""
         answerer = AutoAnswerer(active_profile=None)

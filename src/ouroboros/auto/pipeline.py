@@ -253,9 +253,11 @@ class AutoPipeline:
         # answerer.  Resolve name → DomainProfile via DEFAULT_REGISTRY and
         # inject it so intent classification, vague-term detection, and
         # verifiable-predicate repair all delegate to the profile when active.
-        # When the name is None or not found, ``active_profile=None`` is set
-        # which preserves the hardcoded coding-domain safety hatch verbatim.
-        # Guard with getattr so test doubles that omit ``answerer`` are skipped.
+        # When the name is None, ``active_profile=None`` preserves the
+        # hardcoded coding-domain safety hatch verbatim.  A non-empty name that
+        # cannot be resolved is a bad durable session contract and fails loudly
+        # instead of silently downgrading to coding defaults. Guard with getattr
+        # so test doubles that omit ``answerer`` are skipped.
         _answerer = getattr(self.interview_driver, "answerer", None)
         if _answerer is not None:
             _apply_active_profile(state, _answerer)
@@ -2159,9 +2161,10 @@ def _artifact_text(value: object) -> str | None:
 def _apply_active_profile(state: AutoPipelineState, answerer: AutoAnswerer) -> None:
     """Resolve ``state.active_domain_profile_name`` and inject into ``answerer``.
 
-    When the name is ``None`` or not found in ``DEFAULT_REGISTRY``, sets
-    ``answerer.active_profile = None`` so the hardcoded safety hatch runs.
-    This is intentionally a no-op for sessions that never activated a profile.
+    ``None`` is the only value that activates the hardcoded safety hatch.  A
+    non-empty persisted profile name is durable session intent; if the registry
+    cannot resolve it, fail loudly instead of silently downgrading to the coding
+    fallback and authoring Seed content under the wrong domain.
     When ``answerer`` does not have an ``active_profile`` attribute (e.g. a
     test double), the call is silently skipped.
     """
@@ -2169,6 +2172,9 @@ def _apply_active_profile(state: AutoPipelineState, answerer: AutoAnswerer) -> N
         return
     name = getattr(state, "active_domain_profile_name", None)
     if name:
-        answerer.active_profile = DEFAULT_REGISTRY.get(name)
+        profile = DEFAULT_REGISTRY.get(name)
+        if profile is None:
+            raise ValueError(f"active domain profile is not registered: {name}")
+        answerer.active_profile = profile
     else:
         answerer.active_profile = None

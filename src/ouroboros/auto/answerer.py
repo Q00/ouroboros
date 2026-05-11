@@ -164,13 +164,12 @@ class AutoAnswerer:
             else:
                 intents = _classify_question_intents(question)
             # -- DUAL-PATH HOOK 2: vague-term detection -----------------------
-            # When a profile is active, any term from its ``vague_terms`` set
-            # that appears in the lowered question signals that the AC is
-            # under-specified.  We inject VERIFICATION so the answerer steers
-            # the user toward observable behavior rather than accepting vague
-            # language.  The hardcoded path has no equivalent check (there are
-            # no inline vague-term lists in this file), so this is additive.
-            if any(term in lowered for term in self.active_profile.vague_terms):
+            # When a profile is active, whole vague terms from its
+            # ``vague_terms`` set signal that the AC is under-specified.  Use a
+            # boundary-aware check so common terms like ``clean`` or ``easy`` do
+            # not match unrelated words such as ``cleanup`` or ``easiest`` and
+            # accidentally override the normal routing priority.
+            if _contains_profile_vague_term(lowered, self.active_profile.vague_terms):
                 intents = frozenset(intents | {QuestionIntent.VERIFICATION})
         else:
             # Safety hatch: original hardcoded coding-domain classification.
@@ -843,6 +842,23 @@ _INTENT_CUES: Mapping[QuestionIntent, tuple[str, ...]] = {
 
 def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", question.casefold()).strip()
+
+
+def _contains_profile_vague_term(lowered_question: str, vague_terms: frozenset[str]) -> bool:
+    """Return True when a profile vague term appears as a whole term.
+
+    Profile terms are authored as human words/phrases. Treat them as lexical
+    units instead of raw substrings so ``clean`` does not match ``cleanup`` and
+    ``easy`` does not match ``easiest``.
+    """
+    for term in vague_terms:
+        normalized = _normalize_question(term)
+        if not normalized:
+            continue
+        pattern = rf"(?<!\w){re.escape(normalized)}(?!\w)"
+        if re.search(pattern, lowered_question):
+            return True
+    return False
 
 
 def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
