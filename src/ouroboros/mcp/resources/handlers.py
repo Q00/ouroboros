@@ -43,7 +43,8 @@ _SECRET_FIELD_NAMES = frozenset(
     }
 )
 _SECRET_FLAG_PATTERN = re.compile(
-    r"(?i)(--(?:api[-_]?key|token|password|secret|private[-_]?key)(?:=|\s+))([^\s,;]+)"
+    r"(?i)(--(?:api[-_]?key|token|password|secret|private[-_]?key)(?:=|\s+))"
+    r"(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;]+)"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(

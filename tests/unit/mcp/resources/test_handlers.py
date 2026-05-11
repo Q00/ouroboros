@@ -443,6 +443,8 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
                 "api_key": "sk-live-SECRET456",
                 "nested": {"password": "correct horse battery staple"},
                 "tool_input_preview": "command: deploy --api-key sk-live-SECRET123",
+                "quoted_password_preview": 'command: login --password "correct horse battery staple"',
+                "quoted_secret_preview": "command: run --secret 'multi word value'",
                 "safe_count": 3,
             },
         )
@@ -456,12 +458,15 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert "sk-live-SECRET456" not in text
     assert "correct horse battery staple" not in text
     assert "sk-live-SECRET123" not in text
+    assert "multi word value" not in text
 
     payload = json.loads(text)
     data = payload["events"][0]["data"]
     assert data["api_key"] == "[redacted]"
     assert data["nested"]["password"] == "[redacted]"
     assert data["tool_input_preview"] == "command: deploy --api-key [redacted]"
+    assert data["quoted_password_preview"] == "command: login --password [redacted]"
+    assert data["quoted_secret_preview"] == "command: run --secret [redacted]"
     assert data["safe_count"] == 3
 
     await store.close()
