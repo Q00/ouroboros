@@ -22,12 +22,13 @@ from typing import Any
 import pytest
 
 from ouroboros.core.types import Result
-from ouroboros.mcp.job_manager import JobLinks, JobStatus
+from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import run_with_agent_process
+from ouroboros.persistence.event_store import EventStore
 
 
 class _FakeEventStore:
@@ -511,3 +512,34 @@ async def test_production_start_surfaces_classify_interrupted_results_as_cancell
     assert _directives(store)[-1] == "cancel", surface
     assert _directive_intents(store)[-1] == expected_intent
     assert _lifecycle_statuses(store)[-1] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_job_manager_classifies_status_only_cancelled_result_as_cancelled() -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    job_manager = JobManager(store)
+
+    try:
+
+        async def _cancelled_result() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="cancelled"),),
+                is_error=True,
+                meta={"status": "cancelled"},
+            )
+
+        snapshot = await job_manager.start_job(
+            job_type="execute_seed",
+            initial_message="Queued execution",
+            runner=_cancelled_result(),
+        )
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while not snapshot.is_terminal and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+            snapshot = await job_manager.get_snapshot(snapshot.job_id)
+
+        assert snapshot.status is JobStatus.CANCELLED
+        assert snapshot.result_meta["status"] == "cancelled"
+    finally:
+        await store.close()

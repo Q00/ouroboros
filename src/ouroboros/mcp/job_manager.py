@@ -193,12 +193,19 @@ class JobManager:
             snapshot = await self.get_snapshot(job_id)
             terminal_type = "mcp.job.completed"
             terminal_status = JobStatus.COMPLETED
+            result_meta = getattr(result, "meta", {})
+            terminal_kind = None
+            if isinstance(result_meta, dict):
+                terminal_kind = result_meta.get("action") or result_meta.get("status")
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 terminal_type = "mcp.job.cancelled"
                 terminal_status = JobStatus.CANCELLED
-            elif getattr(result, "meta", {}).get("action") == "interrupted":
+            elif terminal_kind == "interrupted":
                 terminal_type = "mcp.job.interrupted"
                 terminal_status = JobStatus.INTERRUPTED
+            elif terminal_kind in {"cancel", "cancelled"}:
+                terminal_type = "mcp.job.cancelled"
+                terminal_status = JobStatus.CANCELLED
             elif getattr(result, "is_error", False):
                 terminal_type = "mcp.job.failed"
                 terminal_status = JobStatus.FAILED
