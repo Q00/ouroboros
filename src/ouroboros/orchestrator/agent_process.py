@@ -259,6 +259,9 @@ class AgentProcessHandle:
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     _cancel_reason: str = "cancel requested"
     _emit_directive: Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None = None
+    _pause_checkpoint_store: CheckpointStore | None = field(default=None, repr=False)
+    _pause_checkpoint_reason: str | None = field(default=None, repr=False)
+    _pause_checkpoint_requested: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         # The paused-event is "set" when the loop is *not* paused so a
@@ -282,11 +285,11 @@ class AgentProcessHandle:
         and resumes only when :meth:`resume` is called. No-op when the
         process has already terminated.
 
-        Slice 2 (#518): also persists a checkpoint so the pause survives
-        a process restart. Callers can supply an optional *store*; if
-        omitted the default :class:`CheckpointStore` location is used.
-        Persistence failures are logged as warnings and never raised —
-        the in-memory flag is the authoritative source.
+        Slice 2 (#518): records the checkpoint store/reason for durable
+        pause acknowledgement. The checkpoint itself is written only when
+        the work loop reaches :meth:`wait_unpaused` and enters
+        :attr:`AgentProcessStatus.PAUSED`, so restart recovery reflects
+        acknowledged lifecycle truth rather than a merely requested pause.
 
         Note: ``process_id`` is UUID4 hex (32 hex chars, no separators)
         which contains only ``[0-9a-f]`` — safe for :class:`CheckpointStore`
@@ -295,31 +298,9 @@ class AgentProcessHandle:
         if self._status in _TERMINAL_STATUSES or self.should_cancel():
             return
         self._paused_event.clear()
-
-        # Persist pause state so a restarted process can detect it.
-        _checkpoint_store = store if store is not None else CheckpointStore()
-        try:
-            _checkpoint_store.initialize()
-            checkpoint = CheckpointData.create(
-                seed_id=self.process_id,
-                phase="agent_process_paused",
-                state={
-                    "status": "paused",
-                    "reason": reason,
-                    "paused_at": datetime.now(UTC).isoformat(),
-                },
-            )
-            result = _checkpoint_store.save(checkpoint)
-            if result.is_err:
-                logger.warning(
-                    "agent_process.pause_checkpoint_save_failed",
-                    extra={"process_id": self.process_id, "error": str(result.error)},
-                )
-        except Exception:  # noqa: BLE001 — fault-tolerant; in-memory flag is authoritative
-            logger.warning(
-                "agent_process.pause_checkpoint_save_failed",
-                extra={"process_id": self.process_id},
-            )
+        self._pause_checkpoint_store = store
+        self._pause_checkpoint_reason = reason
+        self._pause_checkpoint_requested = True
 
     async def resume(
         self,
@@ -341,29 +322,19 @@ class AgentProcessHandle:
         if self._status is AgentProcessStatus.PAUSED:
             await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
 
-        # Overwrite the paused checkpoint so load_persisted_pause returns False.
-        _checkpoint_store = store if store is not None else CheckpointStore()
-        try:
-            _checkpoint_store.initialize()
-            checkpoint = CheckpointData.create(
-                seed_id=self.process_id,
-                phase="agent_process_running",
-                state={
-                    "status": "running",
-                    "resumed_at": datetime.now(UTC).isoformat(),
-                },
-            )
-            result = _checkpoint_store.save(checkpoint)
-            if result.is_err:
-                logger.warning(
-                    "agent_process.resume_checkpoint_save_failed",
-                    extra={"process_id": self.process_id, "error": str(result.error)},
-                )
-        except Exception:  # noqa: BLE001 — fault-tolerant
-            logger.warning(
-                "agent_process.resume_checkpoint_save_failed",
-                extra={"process_id": self.process_id},
-            )
+        # Overwrite any acknowledged paused checkpoint so restart recovery
+        # no longer treats this process as paused.
+        checkpoint_store = store if store is not None else self._pause_checkpoint_store
+        self._save_lifecycle_checkpoint(
+            phase="agent_process_running",
+            status="running",
+            event_key="resumed_at",
+            log_key="resume",
+            store=checkpoint_store,
+        )
+        self._pause_checkpoint_store = checkpoint_store
+        self._pause_checkpoint_reason = None
+        self._pause_checkpoint_requested = False
 
     async def cancel(self, reason: str = "cancel requested") -> None:
         """Request a cooperative cancel.
@@ -454,6 +425,14 @@ class AgentProcessHandle:
         """
         if self.should_pause() and self._status is AgentProcessStatus.RUNNING:
             await self._set_status(AgentProcessStatus.PAUSED, reason="pause acknowledged")
+            self._save_lifecycle_checkpoint(
+                phase="agent_process_paused",
+                status="paused",
+                event_key="paused_at",
+                log_key="pause",
+                reason=self._pause_checkpoint_reason,
+                store=self._pause_checkpoint_store,
+            )
         await self._paused_event.wait()
         if self._status is AgentProcessStatus.PAUSED and not self.should_cancel():
             await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
@@ -491,6 +470,14 @@ class AgentProcessHandle:
         self._status = AgentProcessStatus.FAILED
         if self._emit_directive is not None:
             await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
+        if self._pause_checkpoint_requested:
+            self._save_lifecycle_checkpoint(
+                phase="agent_process_failed",
+                status="failed",
+                event_key="failed_at",
+                log_key="terminal",
+                store=self._pause_checkpoint_store,
+            )
         self._completed_event.set()
 
     async def _mark_cancelled(self) -> None:
@@ -512,7 +499,52 @@ class AgentProcessHandle:
         if directive is not None and self._emit_directive is not None:
             await self._emit_directive(directive, reason, new_status)
         if new_status in _TERMINAL_STATUSES:
+            if self._pause_checkpoint_requested:
+                self._save_lifecycle_checkpoint(
+                    phase=f"agent_process_{new_status.value}",
+                    status=new_status.value,
+                    event_key=f"{new_status.value}_at",
+                    log_key="terminal",
+                    store=self._pause_checkpoint_store,
+                )
             self._completed_event.set()
+
+    def _save_lifecycle_checkpoint(
+        self,
+        *,
+        phase: str,
+        status: str,
+        event_key: str,
+        log_key: str,
+        reason: str | None = None,
+        store: CheckpointStore | None = None,
+    ) -> None:
+        """Best-effort durable lifecycle checkpoint for restart recovery."""
+        checkpoint_store = store if store is not None else CheckpointStore()
+        try:
+            checkpoint_store.initialize()
+            state: dict[str, str | None] = {
+                "status": status,
+                event_key: datetime.now(UTC).isoformat(),
+            }
+            if reason is not None:
+                state["reason"] = reason
+            checkpoint = CheckpointData.create(
+                seed_id=self.process_id,
+                phase=phase,
+                state=state,
+            )
+            result = checkpoint_store.save(checkpoint)
+            if result.is_err:
+                logger.warning(
+                    f"agent_process.{log_key}_checkpoint_save_failed",
+                    extra={"process_id": self.process_id, "error": str(result.error)},
+                )
+        except Exception:  # noqa: BLE001 — fault-tolerant; in-memory state is authoritative
+            logger.warning(
+                f"agent_process.{log_key}_checkpoint_save_failed",
+                extra={"process_id": self.process_id},
+            )
 
 
 @dataclass(frozen=True, slots=True)

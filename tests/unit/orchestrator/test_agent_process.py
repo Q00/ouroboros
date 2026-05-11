@@ -584,7 +584,7 @@ class _ErroringCheckpointStore(CheckpointStore):
 
 @pytest.mark.asyncio
 async def test_pause_persists_state_via_checkpoint_store(tmp_path: Path) -> None:
-    """pause() must write an agent_process_paused checkpoint so load_persisted_pause returns True."""
+    """Acknowledged pause must persist so load_persisted_pause returns True."""
     ck_store = CheckpointStore(base_path=tmp_path)
     process = AgentProcess(event_store=None)
     started = asyncio.Event()
@@ -599,11 +599,68 @@ async def test_pause_persists_state_via_checkpoint_store(tmp_path: Path) -> None
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     await handle.pause(store=ck_store)
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
 
     assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is True
 
     await handle.cancel(reason="end test")
     await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_pause_request_does_not_persist_until_acknowledged(tmp_path: Path) -> None:
+    """Restart recovery must not restore a merely requested, unacknowledged pause."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work(handle):  # noqa: ARG001 - intentionally ignores pause checkpoints until released
+        started.set()
+        await release.wait()
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=ck_store)
+
+    assert handle.should_pause() is True
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
+
+    await handle.cancel(reason="end test")
+    release.set()
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_cancel_clears_persisted_pause_checkpoint(tmp_path: Path) -> None:
+    """A paused-then-cancelled process must not restart as paused."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+    saw_cancel = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while True:
+            await handle.wait_unpaused()
+            if handle.should_cancel():
+                saw_cancel.set()
+                return
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=ck_store)
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is True
+
+    await handle.cancel(reason="cancel while paused")
+    await asyncio.wait_for(saw_cancel.wait(), timeout=1.0)
+    await handle.wait_until_complete(timeout=1.0)
+
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
 
 
 @pytest.mark.asyncio
@@ -648,8 +705,10 @@ async def test_pause_swallows_checkpoint_save_error() -> None:
     handle = await process.spawn(intent="ralph", work_fn=work)
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
-    # Must not raise even though the store always errors.
+    # Must not raise even though the store always errors once the loop
+    # acknowledges the pause and attempts to persist it.
     await handle.pause(store=erroring_store)
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
 
     # In-memory flag must still be set.
     assert handle.should_pause() is True
