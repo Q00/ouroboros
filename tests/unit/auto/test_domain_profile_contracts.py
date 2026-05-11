@@ -336,6 +336,22 @@ def test_registry_union_predicates_ignores_detector_exceptions() -> None:
 
 
 def test_default_registry_is_a_profile_registry_singleton() -> None:
-    # PR-2 will register the coding profile here; avoid asserting transient
-    # global emptiness in this contract-only test module.
     assert isinstance(DEFAULT_REGISTRY, DomainProfileRegistry)
+
+
+def test_default_registry_bootstraps_coding_profile() -> None:
+    profile = DEFAULT_REGISTRY.get("coding")
+
+    assert profile is not None
+    assert profile.name == "coding"
+    assert "runtime_context" in profile.safe_defaults
+    assert profile.intent_classifier.supported_intents()
+
+
+def test_default_registry_detects_coding_project(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+
+    best = DEFAULT_REGISTRY.detect_best(tmp_path)
+
+    assert best is not None
+    assert best.name == "coding"

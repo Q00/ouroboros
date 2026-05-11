@@ -257,8 +257,71 @@ class DomainProfileRegistry:
         return tuple(result)
 
 
-#: Module-level singleton registry.  PR-2 will register the ``coding`` profile here.
-DEFAULT_REGISTRY: DomainProfileRegistry = DomainProfileRegistry()
+class _CodingRepoContextExtractor:
+    """Minimal built-in coding profile repo context extractor.
+
+    Full repository fact extraction remains owned by the auto answerer / driver
+    integration.  The profile still needs a concrete extractor so the built-in
+    ``coding`` profile can satisfy the DomainProfile contract at production
+    bootstrap time.
+    """
+
+    def extract(self, cwd: Path) -> dict[str, Any]:  # noqa: ARG002
+        return {}
+
+
+class _CodingIntentClassifier:
+    """Minimal classifier surface for the built-in coding profile."""
+
+    _SUPPORTED = frozenset(
+        {
+            "acceptance_criteria",
+            "actor_io",
+            "failure_modes",
+            "non_goals",
+            "product_behavior",
+            "runtime_context",
+            "verification",
+            "verification_plan",
+        }
+    )
+
+    def classify(self, question: str) -> str | None:  # noqa: ARG002
+        return None
+
+    def supported_intents(self) -> frozenset[str]:
+        return self._SUPPORTED
+
+
+def _coding_detector(cwd: Path) -> float:
+    """Return a conservative confidence that *cwd* is a coding project."""
+    coding_markers = (
+        ".git",
+        "pyproject.toml",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "src",
+        "tests",
+    )
+    return 0.8 if any((cwd / marker).exists() for marker in coding_markers) else 0.0
+
+
+def _build_coding_profile() -> DomainProfile:
+    """Construct the built-in profile used by auto-mode production bootstrap."""
+    from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS
+
+    return DomainProfile(
+        name="coding",
+        repo_context_extractor=_CodingRepoContextExtractor(),
+        verifiable_predicates=(),
+        intent_classifier=_CodingIntentClassifier(),
+        vague_terms=frozenset({"easy", "clean", "simple", "fast", "robust"}),
+        safe_defaults=_SAFE_DEFAULTS,
+        detector=_coding_detector,
+    )
 
 
 def _detector_confidence(profile: DomainProfile, cwd: Path) -> float:
@@ -266,3 +329,8 @@ def _detector_confidence(profile: DomainProfile, cwd: Path) -> float:
         return profile.detector(cwd)
     except Exception:
         return 0.0
+
+
+#: Module-level singleton registry with the built-in ``coding`` profile registered.
+DEFAULT_REGISTRY: DomainProfileRegistry = DomainProfileRegistry()
+DEFAULT_REGISTRY.register(_build_coding_profile())
