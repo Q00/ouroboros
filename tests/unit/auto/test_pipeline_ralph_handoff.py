@@ -9,13 +9,16 @@ pre-#773 result shape.
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import UTC, datetime
 import time
 from typing import Any
 
 import pytest
 
+from ouroboros.auto.adapters import HandlerRalphPoller
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
+from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.pipeline import (
     _RALPH_BLOCKED_STOP_REASONS,
     PIPELINE_DEADLINE_TOOL_NAME,
@@ -38,6 +41,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.mcp.job_manager import JobLinks, JobSnapshot, JobStatus
 
 
 def _build_seed(seed_id: str = "seed_test_001") -> Seed:
@@ -749,6 +753,43 @@ async def test_ralph_handoff_resume_polls_persisted_job_blocks_on_timeout(tmp_pa
 
     assert result.status == "blocked"
     assert state.last_error == "iteration_timeout"
+    assert state.last_tool_name == "ralph_starter"
+
+
+@pytest.mark.asyncio
+async def test_ralph_handoff_resume_polls_cancelled_job_to_blocked(tmp_path) -> None:
+    """Resume poll preserves a cancelled Ralph job as a user blocker."""
+    state = _state_in_ralph_handoff(tmp_path)
+
+    class _CancelledJobManager:
+        async def get_snapshot(self, job_id: str) -> JobSnapshot:
+            now = datetime.now(UTC)
+            return JobSnapshot(
+                job_id=job_id,
+                job_type="ralph",
+                status=JobStatus.CANCELLED,
+                message="Job cancelled",
+                created_at=now,
+                updated_at=now,
+                links=JobLinks(lineage_id=state.ralph_lineage_id),
+                result_meta={"status": "failed", "stop_reason": "stale runner metadata"},
+            )
+
+    handler = type("_Handler", (), {"_job_manager": _CancelledJobManager()})()
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_resumer=HandlerRalphPoller(handler),
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_error == RALPH_CANCEL_BLOCKER_REASON
     assert state.last_tool_name == "ralph_starter"
 
 

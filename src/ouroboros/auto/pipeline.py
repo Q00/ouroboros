@@ -14,6 +14,7 @@ from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
+from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
@@ -1008,6 +1009,12 @@ class AutoPipeline:
             )
             self._save(state)
             return self._result(state, ledger, review=review, run_subagent=run_subagent)
+        if terminal_status == "cancelled":
+            state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
@@ -1134,6 +1141,10 @@ class AutoPipeline:
             )
             self._save(state)
             return self._result(state, ledger, review=review)
+        if terminal_status == "cancelled":
+            state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)

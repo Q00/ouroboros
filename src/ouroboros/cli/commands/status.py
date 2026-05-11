@@ -49,6 +49,7 @@ def _format_auto_status(state) -> str:
         state.ralph_lineage_id is not None
         and state.ralph_job_id is None
         and state.ralph_dispatch_mode != "plugin"
+        and not is_terminal
     )
 
     if state.ralph_dispatch_mode == "plugin":

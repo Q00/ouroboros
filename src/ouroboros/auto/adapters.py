@@ -360,10 +360,15 @@ async def _wait_for_job_terminal(
         snapshot = await job_manager.get_snapshot(job_id)
         if snapshot.is_terminal:
             meta = dict(snapshot.result_meta or {})
-            meta.setdefault(
-                "status",
-                "completed" if snapshot.status is JobStatus.COMPLETED else "failed",
-            )
+            terminal_status = _terminal_job_status(snapshot.status)
+            if snapshot.status is JobStatus.CANCELLED:
+                # Job-level cancellation is authoritative. A cancellation can
+                # race with stale/partial result metadata from the runner, and
+                # auto resume must preserve the user-cancelled outcome instead
+                # of flattening it into FAILED/COMPLETE.
+                meta["status"] = terminal_status
+            else:
+                meta.setdefault("status", terminal_status)
             return meta
         if deadline is not None:
             remaining = deadline - loop.time()
@@ -376,6 +381,14 @@ async def _wait_for_job_terminal(
             await asyncio.sleep(min(poll_interval, remaining))
             continue
         await asyncio.sleep(poll_interval)
+
+
+def _terminal_job_status(status: JobStatus) -> str:
+    if status is JobStatus.COMPLETED:
+        return "completed"
+    if status is JobStatus.CANCELLED:
+        return "cancelled"
+    return "failed"
 
 
 def load_seed(path: str | Path) -> Seed:

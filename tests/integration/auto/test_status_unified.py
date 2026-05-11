@@ -276,6 +276,8 @@ def test_gap_window_reports_pending_starting_ralph(tmp_path) -> None:
 
 def test_terminal_lineage_without_job_is_not_gap_window(tmp_path) -> None:
     """Terminal sessions must not be rendered as pending Ralph handoff."""
+    from ouroboros.cli.commands.status import _format_auto_status
+
     state = _state_at_ralph_handoff(tmp_path, with_job_id=False)
     state.mark_blocked("ralph handoff failed before job id", tool_name="ralph_starter")
     AutoStore(tmp_path).save(state)
@@ -290,6 +292,11 @@ def test_terminal_lineage_without_job_is_not_gap_window(tmp_path) -> None:
     assert "pending" not in meta
     assert "ralph" not in meta
     assert "Pending: starting ralph" not in result.value.content[0].text
+
+    cli_text = _format_auto_status(state)
+    assert "Phase: blocked" in cli_text
+    assert "Ralph (pending):" not in cli_text
+    assert "pending: starting ralph" not in cli_text
 
 
 @pytest.mark.asyncio
