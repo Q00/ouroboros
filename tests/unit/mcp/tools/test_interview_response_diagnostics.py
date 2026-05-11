@@ -311,9 +311,7 @@ async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
     assert diagnostic.data["round_number"] == 2
     assert diagnostic.data["payload_chars"] == len(outcome.value.content[0].text)
     assert diagnostic.data["transcript_chars"] == (
-        len("What should this tool do?")
-        + len("It creates reports.")
-        + len("Who uses it first?")
+        len("What should this tool do?") + len("It creates reports.") + len("Who uses it first?")
     )
     assert diagnostic.data["ambiguity_prefix_present"] is False
     assert diagnostic.data["is_length_guard"] is False
