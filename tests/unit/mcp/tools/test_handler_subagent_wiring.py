@@ -63,9 +63,19 @@ class TestQAHandlerSubagentDispatch:
         result = await handler.handle({"quality_bar": "good"})
         assert result.is_err
 
+    async def test_still_validates_non_string_artifact(self, handler) -> None:
+        result = await handler.handle({"artifact": [], "quality_bar": "good"})
+        assert result.is_err
+
     async def test_still_validates_missing_quality_bar(self, handler) -> None:
         result = await handler.handle({"artifact": "code"})
         assert result.is_err
+
+    async def test_empty_artifact_reaches_qa_evaluation(self, handler) -> None:
+        result = await handler.handle({"artifact": "", "quality_bar": "good"})
+        assert result.is_ok
+        ctx = result.value.meta["_subagent"]["context"]
+        assert ctx["artifact"] == ""
 
     async def test_context_includes_arguments(self, handler) -> None:
         result = await handler.handle(
