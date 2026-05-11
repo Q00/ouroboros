@@ -140,11 +140,13 @@ The `emitted_by` field distinguishes the source surface. The `directive` field
 is determined per-surface as follows.
 
 Target types follow `CANONICAL_CONTROL_TARGET_TYPES` where an existing durable
-target has the right resume semantics (`session`, `execution`, `lineage`,
-`agent_process`, `contract`, `execution_node`). This RFC also introduces the
-additive `lineage_generation` target for generation-local watchdog decisions;
-`ControlContract.target_type` is advisory rather than closed, so additive Agent
-OS targets may be documented without changing stored event schemas.
+target has the right replay semantics (`session`, `execution`, `lineage`,
+`agent_process`, `contract`, `execution_node`). Generation-local watchdog
+decisions still aggregate under `target_type="lineage"`, `target_id=lineage_id`
+so `EventStore.replay_lineage(lineage_id)` and existing lineage projectors see
+the interleaved directive stream. Their generation scope is expressed by the
+required `generation_number` correlation field and idempotency key, not by a
+new aggregate type.
 
 ### Mapping table
 
@@ -212,14 +214,15 @@ maps `timeout_kind` directly to `Directive.RETRY` or `Directive.CANCEL`. If
 #836 introduces watchdog-specific helper wiring, it must either call
 `step_action_to_directive(...)` with the same retry budget the evolution loop
 would use, or accept the already-computed directive from the loop. The watchdog
-event appends `control.directive.emitted` with
-`emitted_by="generation.watchdog"` on a generation-scoped target:
-`target_type="lineage_generation"`,
-`target_id=f"{lineage_id}:{generation_number}"`, `lineage_id=lineage_id`, and
+event appends `control.directive.emitted` under the existing lineage aggregate:
+`emitted_by="generation.watchdog"`, `target_type="lineage"`,
+`target_id=lineage_id`, `lineage_id=lineage_id`, and
 `generation_number=generation_number`. `extra` includes `timeout_kind`,
-thresholds, and the watchdog decision metadata needed for audit. This target is
-generation-local even when the directive is terminal; a watchdog `CANCEL` bricks
-only that failed generation attempt, not the whole lineage chain.
+thresholds, and the watchdog decision metadata needed for audit. This preserves
+`EventStore.replay_lineage(lineage_id)` visibility while making the decision
+generation-local: lineage resume readers must treat a watchdog directive with a
+`generation_number` as scoped to that generation and must not interpret a
+watchdog `CANCEL` as canceling the whole lineage chain.
 
 The watchdog source owns source-specific directive identity for
 `GenerationWatchdogTimeout` instances raised by `GenerationProgressWatchdog`,
@@ -246,11 +249,15 @@ decision.
 
 ### Auto pipeline timeout mapping
 
-Phase timeouts in `src/ouroboros/auto/pipeline.py` catch `asyncio.TimeoutError`
-and update mutable `AutoPipelineState`. Every auto-pipeline `except
-TimeoutError` branch that marks the state blocked, enforces the pipeline
-deadline, or returns early must emit exactly one source-specific
-`control.directive.emitted` event at the timeout decision point. A timeout that
+Auto timeout decisions are not confined to `src/ouroboros/auto/pipeline.py`.
+Most phase timeouts catch `asyncio.TimeoutError` in the pipeline and update
+mutable `AutoPipelineState`, but interview timeouts are decided inside
+`src/ouroboros/auto/interview_driver.py`: `_with_timeout()` raises the
+tool-specific timeout, and `run()` catches it, marks the interview session
+blocked, saves state, and returns a blocked result. Every auto timeout branch at
+the actual decision site—pipeline `except TimeoutError` branches and the
+interview driver timeout handlers that mark blocked/save/return—must emit
+exactly one source-specific `control.directive.emitted` event. A timeout that
 blocks a resumable auto phase on the same `auto_session_id` emits
 `Directive.WAIT`, not terminal `Directive.CANCEL`. `Directive.CANCEL` is
 reserved for explicit terminal termination: deadline-enforced aborts, explicit
@@ -303,19 +310,23 @@ inspecting `extra`.
 must match the actual run outcome at that site. `Directive.CANCEL` is terminal;
 `Directive.RETRY` and `Directive.WAIT` are not. No site may emit a terminal
 directive and then continue executing or resume the same target. A terminal
-`Directive.CANCEL` must brick only the target it truly terminates: an
-execution-scoped MCP timeout cancels that execution target, a
-generation-scoped watchdog terminal outcome cancels only the
-`lineage_generation` target for that `lineage_id`/`generation_number`, and a
-session-scoped auto `CANCEL` is valid only when the auto session is truly
-terminal, deadline-enforced, or non-resumable.
+`Directive.CANCEL` must brick only the decision scope it truly terminates: an
+execution-scoped MCP timeout cancels that execution target, a watchdog terminal
+outcome stored on the lineage aggregate cancels only the correlated
+`generation_number` within that lineage, and a session-scoped auto `CANCEL` is
+valid only when the auto session is truly terminal, deadline-enforced, or
+non-resumable.
 
 **I4 — Resume combines the trailing directive with local state.** On session
 resume, the control-plane consumer reads the last `control.directive.emitted`
 event for the relevant target before deciding whether to continue or abort.
 This links to #578 item 4 (resume-path directive consumption). A terminal
-`CANCEL` directive on resume is authoritative only for the target it actually
-terminates and must not be generalized to unrelated resumable state. A
+`CANCEL` directive on resume is authoritative only for the target and
+correlation scope it actually terminates and must not be generalized to
+unrelated resumable state. For lineage replay, consumers selecting generation
+resume behavior must filter lineage-aggregate directives by
+`generation_number`; a generation-scoped watchdog `CANCEL` is not a lineage-wide
+cancel. A
 non-terminal `WAIT` directive means the owning surface is blocked and resume
 must use the directive `extra` plus local state, such as `extra.phase` and the
 recorded resume tool, to continue on the same durable target when the blocker
@@ -388,15 +399,17 @@ throughout the pipeline.
 
 ### Phase 2b — Remaining auto-pipeline timeout branches
 
-Extend the same auto-pipeline helper to every other `except TimeoutError`
-branch that marks blocked or returns early: interview, seed generation, repair,
-review, Ralph handoff, Ralph poll, evaluator, and lateral thinker. This phase
-is still additive and small-blast-radius because it changes only emission at
-existing timeout decision points; it does not alter phase ordering, retry
-counts, state transitions, or resume behavior. Resumable blocked phase
-timeouts emit `Directive.WAIT` on `target_type="session"` with `extra.phase`,
-resume tool information, and any phase handles needed to resume on the same
-`auto_session_id`; `Directive.CANCEL` is reserved for explicit
+Extend the same emission helper to every other auto timeout decision site that
+marks blocked or returns early: seed generation, repair, review, Ralph handoff,
+Ralph poll, evaluator, and lateral thinker in `auto/pipeline.py`, plus the
+interview timeout handlers in `auto/interview_driver.py` that already catch the
+timeout, mark the interview session blocked, save state, and return a blocked
+result. This phase is still additive and small-blast-radius because it changes
+only emission at existing timeout decision points; it does not alter phase
+ordering, retry counts, state transitions, or resume behavior. Resumable blocked
+phase timeouts emit `Directive.WAIT` on `target_type="session"` with
+`extra.phase`, resume tool information, and any phase handles needed to resume
+on the same `auto_session_id`; `Directive.CANCEL` is reserved for explicit
 terminal/deadline-enforced/non-resumable termination.
 
 ### Phase 3 — Watchdog timeout (deferred to #836)
@@ -413,9 +426,8 @@ must also make `emit_decision(...)` return or preserve the persisted
 idempotency key, attach it to `GenerationWatchdogTimeout` before re-raise, and
 derive the `generation.watchdog` directive `idempotency_key` from that stable
 decision id plus `lineage_id`, `generation_number`, and `timeout_kind` on the
-`lineage_generation` target. `evolve_step` and generic evolver emission must
-check the propagated key and skip generic emission for the same watchdog
-decision.
+lineage aggregate. `evolve_step` and generic evolver emission must check the
+propagated key and skip generic emission for the same watchdog decision.
 
 ## Non-goals
 
