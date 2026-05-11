@@ -10,10 +10,11 @@ import threading
 import time
 from typing import Any, Protocol
 
-from ouroboros.auto.adapters import EvaluateResult
+from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.seed_repairer import SeedRepairer
@@ -50,6 +51,10 @@ SeedLoader = Callable[[str], Seed]
 # JobSnapshot.result_text from Ralph's terminal snapshot), returns a typed
 # EvaluateResult. See HandlerEvaluator for the production implementation.
 Evaluator = Callable[[Seed, str], Awaitable[EvaluateResult]]
+# LateralThinker contract: invoked as keyword-only call with the persona +
+# QA-failure shape + run artifact, returns a typed LateralResult. See
+# HandlerLateralThinker for the production implementation.
+LateralThinker = Callable[..., Awaitable[LateralResult]]
 
 # Ralph stop_reason values that map to a recoverable BLOCKED auto phase
 # rather than a hard FAILED. Pinned by Q00/ouroboros#773 and asserted by
@@ -125,6 +130,10 @@ class AutoPipelineResult:
     last_qa_verdict: str | None = None
     last_qa_differences: tuple[str, ...] = ()
     last_qa_suggestions: tuple[str, ...] = ()
+    # RFC #809 Phase 2.2 — UNSTUCK_LATERAL persona output surfaced to MCP/CLI.
+    last_lateral_persona: str | None = None
+    last_lateral_approach_summary: str | None = None
+    last_lateral_text: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -190,6 +199,15 @@ class AutoPipeline:
     # to BLOCKED with the QA differences/suggestions in ``last_error``.
     # See :class:`HandlerEvaluator` in adapters.py for the production wiring.
     evaluator: Evaluator | None = None
+    # RFC #809 Phase 2.2 — when set AND ``complete_product`` is True AND the
+    # evaluator reports ``passed=False``, the pipeline inserts an
+    # UNSTUCK_LATERAL phase between EVALUATE and the BLOCKED transition.
+    # The lateral thinker invokes a persona-driven prompt via
+    # ``ouroboros_lateral_think`` so the operator (or a future automated
+    # recovery layer) sees a reframing of the verification gap instead of
+    # the raw QA differences. See :class:`HandlerLateralThinker` in
+    # adapters.py for the production wiring.
+    lateral_thinker: LateralThinker | None = None
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
@@ -369,7 +387,15 @@ class AutoPipeline:
             AutoPhase.REVIEW,
             AutoPhase.RUN,
             AutoPhase.RALPH_HANDOFF,
+            # RFC #809 Phase 2.1/2.2 — EVALUATE and UNSTUCK_LATERAL are
+            # resumable phases. Their dedicated resume handlers below
+            # (around lines 505 / 519) re-enter ``_run_evaluate`` /
+            # ``_run_lateral`` which are idempotent via persisted artifact
+            # hashes. Without these entries in the allowlist, a session
+            # recovered to either phase from BLOCKED/FAILED would be
+            # immediately re-blocked here before reaching its handler.
             AutoPhase.EVALUATE,
+            AutoPhase.UNSTUCK_LATERAL,
         }:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
@@ -489,6 +515,29 @@ class AutoPipeline:
             # Re-enter the evaluator. ``_run_evaluate`` is idempotent via the
             # artifact-hash cache, so a resumed session with the same artifact
             # and a persisted verdict short-circuits without re-calling QA.
+            #
+            # If the current process does not wire an evaluator (e.g. the
+            # MCP handler skipped wiring in plugin mode), we cannot re-enter
+            # ``_run_evaluate`` — it asserts ``self.evaluator is not None``.
+            # Fall back to a Phase-2.1-shaped BLOCKED summary using the
+            # persisted QA fields so a session that ran EVALUATE in a
+            # previous process can resume without a top-level tool crash.
+            # Matches the symmetric guard the UNSTUCK_LATERAL branch below
+            # already has for ``self.lateral_thinker``.
+            if self.evaluator is None:
+                state.mark_blocked(
+                    state.last_error
+                    or (
+                        "EVALUATE resume found no evaluator wired in this process; "
+                        "complete-product chains in plugin mode skip the auto-pipeline "
+                        "evaluator (the existing Ralph plugin delegation handles QA "
+                        "out-of-band). Re-run in non-plugin mode to grade the artifact "
+                        "inline."
+                    ),
+                    tool_name="evaluator",
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
             return await self._run_evaluate(
                 state,
                 ledger,
@@ -497,6 +546,32 @@ class AutoPipeline:
                 run_subagent=None,
                 ralph_result_text=None,
                 stop_reason=None,
+            )
+
+        if state.phase == AutoPhase.UNSTUCK_LATERAL:
+            # Re-enter the lateral advisor. ``_run_lateral`` is idempotent
+            # via ``lateral_input_hash``: matching hash + cached persona text
+            # short-circuits without re-invoking the lateral_think tool.
+            if self.lateral_thinker is None:
+                # Lateral not wired on this process — fall back to the
+                # Phase 2.1 BLOCKED summary using the persisted QA fields.
+                state.mark_blocked(
+                    state.last_error or "EVALUATE failed; lateral thinker not configured",
+                    tool_name="evaluator",
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+            return await self._run_lateral(
+                state,
+                ledger,
+                seed,
+                qa_score=state.last_qa_score or 0.0,
+                qa_verdict=state.last_qa_verdict or "fail",
+                qa_differences=tuple(state.last_qa_differences),
+                qa_suggestions=tuple(state.last_qa_suggestions),
+                cache_suffix="",
+                review=review,
+                run_subagent=None,
             )
 
         if self._enforce_deadline(state):
@@ -1142,7 +1217,7 @@ class AutoPipeline:
             and state.last_qa_passed is not None
         )
         if cache_hit:
-            return self._finalize_evaluate(
+            return await self._finalize_evaluate(
                 state,
                 ledger,
                 review=review,
@@ -1154,6 +1229,7 @@ class AutoPipeline:
                 suggestions=tuple(state.last_qa_suggestions),
                 stop_reason=stop_reason,
                 from_cache=True,
+                seed=seed,
             )
 
         if artifact is None:
@@ -1187,6 +1263,16 @@ class AutoPipeline:
             state.last_qa_passed = None
             state.last_qa_differences = []
             state.last_qa_suggestions = []
+            # The lateral cache also references this artifact (its
+            # ``current_approach`` payload includes the run artifact), so a
+            # stale persona suggestion produced for the old artifact must
+            # not be reused. Invalidating here keeps the lateral and QA
+            # caches in lockstep — a fresh EVALUATE on a new artifact will
+            # transition through a fresh UNSTUCK_LATERAL too.
+            state.last_lateral_persona = None
+            state.last_lateral_approach_summary = None
+            state.last_lateral_text = None
+            state.lateral_input_hash = None
         state.evaluate_artifact = artifact
         state.evaluate_artifact_hash = artifact_hash
         self._save(state)
@@ -1253,7 +1339,7 @@ class AutoPipeline:
         state.evaluate_artifact_hash = artifact_hash
         self._save(state)
 
-        return self._finalize_evaluate(
+        return await self._finalize_evaluate(
             state,
             ledger,
             review=review,
@@ -1265,9 +1351,10 @@ class AutoPipeline:
             suggestions=eval_result.suggestions,
             stop_reason=stop_reason,
             from_cache=False,
+            seed=seed,
         )
 
-    def _finalize_evaluate(
+    async def _finalize_evaluate(
         self,
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
@@ -1281,8 +1368,17 @@ class AutoPipeline:
         suggestions: tuple[str, ...],
         stop_reason: str | None,
         from_cache: bool,
+        seed: Seed | None = None,
     ) -> AutoPipelineResult:
-        """Transition out of EVALUATE based on the resolved QA verdict."""
+        """Transition out of EVALUATE based on the resolved QA verdict.
+
+        On QA pass → COMPLETE. On QA fail, if a lateral thinker is wired
+        and ``state.complete_product`` is true, transition to UNSTUCK_LATERAL
+        and invoke the persona-driven advisor (RFC #809 Phase 2.2); the
+        final transition to BLOCKED carries the persona's summary in
+        addition to the raw QA differences. Otherwise fall back to the
+        Phase 2.1 behaviour: BLOCKED with QA differences only.
+        """
         cache_suffix = " [cached]" if from_cache else ""
         if passed:
             state.transition(
@@ -1293,6 +1389,25 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, review=review, run_subagent=run_subagent)
 
+        if self.lateral_thinker is not None and state.complete_product and seed is not None:
+            state.transition(
+                AutoPhase.UNSTUCK_LATERAL,
+                "QA failed; invoking lateral persona for verification reframing",
+            )
+            self._save(state)
+            return await self._run_lateral(
+                state,
+                ledger,
+                seed,
+                qa_score=score,
+                qa_verdict=verdict,
+                qa_differences=differences,
+                qa_suggestions=suggestions,
+                cache_suffix=cache_suffix,
+                review=review,
+                run_subagent=run_subagent,
+            )
+
         diff_preview = "; ".join(differences[:3]) if differences else ""
         sug_preview = "; ".join(suggestions[:3]) if suggestions else ""
         summary_parts = [f"evaluator did not pass: {verdict} (score {score:.2f}){cache_suffix}"]
@@ -1301,6 +1416,194 @@ class AutoPipeline:
         if sug_preview:
             summary_parts.append(f"suggestions: {sug_preview}")
         state.mark_blocked("; ".join(summary_parts), tool_name="evaluator")
+        self._save(state)
+        return self._result(
+            state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+        )
+
+    async def _run_lateral(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        qa_score: float,
+        qa_verdict: str,
+        qa_differences: tuple[str, ...],
+        qa_suggestions: tuple[str, ...],
+        cache_suffix: str,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+    ) -> AutoPipelineResult:
+        """Invoke the persona-driven lateral advisor and finalize as BLOCKED.
+
+        Phase 2.2 advisory layer — when ``ouroboros_qa`` rules the run
+        artifact did not satisfy the Seed AC, this method picks a persona
+        deterministically from the QA-failure shape (via
+        :func:`select_persona_for_qa_failure`) and asks
+        ``ouroboros_lateral_think`` for a reframing prompt. The persona's
+        output is persisted on :class:`AutoPipelineState` and surfaced in
+        the final BLOCKED message so the operator (or a future P2.2b
+        automated recovery layer) sees actionable next steps rather than
+        the raw QA differences.
+
+        Idempotent on resume: same persona + same QA shape hashes to the
+        same ``lateral_input_hash``; a cache hit returns the persisted
+        persona text without re-invoking the tool.
+
+        On timeout / handler error / transient adapter error → BLOCKED with
+        ``tool_name="lateral_thinker"`` so the resume contract (mapped by
+        ``_recoverable_phase_for_tool``) lets ``--resume`` re-enter
+        UNSTUCK_LATERAL.
+        """
+        import hashlib
+
+        assert self.lateral_thinker is not None  # noqa: S101 — guarded by caller
+
+        persona = select_persona_for_qa_failure(qa_differences, qa_suggestions)
+        # Include the evaluate artifact hash in the cache key. The lateral
+        # prompt's ``current_approach`` payload incorporates the run
+        # artifact, so two EVALUATE rounds that grade different artifacts
+        # but produce the same QA differences/suggestions must NOT share a
+        # lateral cache entry — the persona's advice references the
+        # specific artifact, and stale advice for the wrong artifact would
+        # mislead the operator. The evaluate-artifact hash is the same one
+        # ``_run_evaluate`` already uses to invalidate the QA cache; adding
+        # it here keeps the two caches in lockstep.
+        cache_key = "|".join(
+            (
+                persona.value,
+                state.evaluate_artifact_hash or "",
+                "::".join(qa_differences),
+                "::".join(qa_suggestions),
+            )
+        )
+        input_hash = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+
+        cache_hit = (
+            state.lateral_input_hash == input_hash
+            and state.last_lateral_text is not None
+            and state.last_lateral_persona == persona.value
+        )
+        if cache_hit:
+            return self._finalize_lateral(
+                state,
+                ledger,
+                review=review,
+                run_subagent=run_subagent,
+                qa_score=qa_score,
+                qa_verdict=qa_verdict,
+                qa_differences=qa_differences,
+                qa_suggestions=qa_suggestions,
+                cache_suffix=cache_suffix,
+                from_cache=True,
+            )
+
+        # Persist hash + persona BEFORE the call so a timeout/error path
+        # leaves a recoverable trail. The actual persona text is filled in
+        # after the call returns.
+        state.lateral_input_hash = input_hash
+        state.last_lateral_persona = persona.value
+        state.last_lateral_approach_summary = None
+        state.last_lateral_text = None
+        self._save(state)
+
+        run_artifact = state.evaluate_artifact or ""
+        phase_timeout = state.phase_timeout_seconds(AutoPhase.UNSTUCK_LATERAL)
+        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
+        try:
+            lateral_result = await asyncio.wait_for(
+                self.lateral_thinker(
+                    persona=persona,
+                    qa_differences=qa_differences,
+                    qa_suggestions=qa_suggestions,
+                    run_artifact=run_artifact,
+                ),
+                timeout=capped_timeout,
+            )
+        except TimeoutError:
+            if self._enforce_deadline(state):
+                return self._result(
+                    state,
+                    ledger,
+                    review=review,
+                    blocker=state.last_error,
+                    run_subagent=run_subagent,
+                )
+            state.mark_blocked(
+                f"lateral_thinker timed out after {capped_timeout:.0f}s",
+                tool_name="lateral_thinker",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+        except Exception as exc:
+            state.mark_blocked(f"lateral_thinker raised: {exc}", tool_name="lateral_thinker")
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+
+        if lateral_result.error:
+            state.mark_blocked(
+                f"lateral_thinker reported transient error: {lateral_result.error}",
+                tool_name="lateral_thinker",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
+
+        state.last_lateral_persona = lateral_result.persona or persona.value
+        state.last_lateral_approach_summary = lateral_result.approach_summary
+        state.last_lateral_text = lateral_result.text
+        self._save(state)
+
+        return self._finalize_lateral(
+            state,
+            ledger,
+            review=review,
+            run_subagent=run_subagent,
+            qa_score=qa_score,
+            qa_verdict=qa_verdict,
+            qa_differences=qa_differences,
+            qa_suggestions=qa_suggestions,
+            cache_suffix=cache_suffix,
+            from_cache=False,
+        )
+
+    def _finalize_lateral(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+        qa_score: float,
+        qa_verdict: str,
+        qa_differences: tuple[str, ...],
+        qa_suggestions: tuple[str, ...],
+        cache_suffix: str,
+        from_cache: bool,
+    ) -> AutoPipelineResult:
+        """Build the BLOCKED summary that surfaces the persona's reframing."""
+        lateral_suffix = " [lateral cached]" if from_cache else ""
+        persona_name = state.last_lateral_persona or "unknown"
+        approach = state.last_lateral_approach_summary or ""
+        summary_parts = [
+            f"evaluator did not pass: {qa_verdict} (score {qa_score:.2f}){cache_suffix}",
+            f"lateral persona {persona_name}{lateral_suffix}: {approach}"
+            if approach
+            else f"lateral persona {persona_name}{lateral_suffix} consulted",
+        ]
+        diff_preview = "; ".join(qa_differences[:3]) if qa_differences else ""
+        if diff_preview:
+            summary_parts.append(f"differences: {diff_preview}")
+        sug_preview = "; ".join(qa_suggestions[:3]) if qa_suggestions else ""
+        if sug_preview:
+            summary_parts.append(f"suggestions: {sug_preview}")
+        state.mark_blocked("; ".join(summary_parts), tool_name="lateral_thinker")
         self._save(state)
         return self._result(
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
@@ -1530,6 +1833,9 @@ class AutoPipeline:
             last_qa_verdict=state.last_qa_verdict,
             last_qa_differences=tuple(state.last_qa_differences),
             last_qa_suggestions=tuple(state.last_qa_suggestions),
+            last_lateral_persona=state.last_lateral_persona,
+            last_lateral_approach_summary=state.last_lateral_approach_summary,
+            last_lateral_text=state.last_lateral_text,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
@@ -1806,6 +2112,12 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         # call (if not) can drive the session forward instead of leaving it
         # stranded in a non-resumable BLOCKED state.
         return AutoPhase.EVALUATE
+    if tool_name == "lateral_thinker":
+        # RFC #809 Phase 2.2: timeout / transient error in the lateral
+        # advisor blocks with this tool name. Resume re-enters
+        # UNSTUCK_LATERAL where the cached persona suggestion (if any)
+        # short-circuits or a fresh lateral_think call retries.
+        return AutoPhase.UNSTUCK_LATERAL
     return None
 
 

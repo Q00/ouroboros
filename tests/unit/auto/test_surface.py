@@ -1013,65 +1013,6 @@ async def test_auto_handler_preserves_plugin_mode_for_execution_handoff(
 
 
 @pytest.mark.asyncio
-async def test_auto_handler_complete_product_uses_subprocess_qa_evaluator_for_plugin_mode(
-    monkeypatch, tmp_path
-) -> None:
-    from ouroboros.auto.pipeline import AutoPipelineResult
-    from ouroboros.auto.state import AutoStore
-    from ouroboros.mcp.tools import auto_handler as auto_module
-    from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
-
-    captured: dict[str, object] = {}
-
-    class FakePipeline:
-        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003
-            evaluator = kwargs["evaluator"]
-            run_starter = kwargs["run_starter"]
-            ralph_starter = kwargs["ralph_starter"]
-            ralph_resumer = kwargs["ralph_resumer"]
-
-            captured["authoring_mode"] = driver.backend.handler.opencode_mode
-            captured["run_mode"] = run_starter.handler.opencode_mode
-            captured["execute_mode"] = run_starter.handler.execute_handler.opencode_mode
-            captured["ralph_mode"] = ralph_starter.handler.opencode_mode
-            captured["ralph_resumer_mode"] = ralph_resumer.handler.opencode_mode
-            captured["complete_product"] = kwargs["complete_product"]
-            captured["evaluator_present"] = evaluator is not None
-            captured["qa_runtime"] = evaluator.qa_handler.agent_runtime_backend
-            captured["qa_mode"] = evaluator.qa_handler.opencode_mode
-
-        async def run(self, run_state):  # noqa: ANN001
-            captured["state_mode"] = run_state.opencode_mode
-            return AutoPipelineResult(
-                status="complete",
-                auto_session_id=run_state.auto_session_id,
-                phase="complete",
-            )
-
-    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
-    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
-
-    result = await AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin").handle(
-        {"goal": "Build a CLI", "cwd": str(tmp_path), "complete_product": True}
-    )
-
-    assert result.is_ok
-    assert captured == {
-        "authoring_mode": "subprocess",
-        "run_mode": "plugin",
-        "execute_mode": "plugin",
-        "ralph_mode": "plugin",
-        "ralph_resumer_mode": "plugin",
-        "complete_product": True,
-        "evaluator_present": True,
-        "qa_runtime": "opencode",
-        "qa_mode": "subprocess",
-        "state_mode": "plugin",
-    }
-    assert should_dispatch_via_plugin("opencode", captured["qa_mode"]) is False
-
-
-@pytest.mark.asyncio
 async def test_auto_handler_fresh_session_persists_resolved_runtime(monkeypatch, tmp_path) -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.auto.state import AutoStore

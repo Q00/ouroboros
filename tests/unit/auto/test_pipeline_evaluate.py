@@ -158,7 +158,10 @@ def _ralph_starter(*, result_text: str = "stdout: ok\nexit_code: 0"):
 
 def test_evaluate_phase_in_allowed_transitions() -> None:
     assert AutoPhase.EVALUATE in _ALLOWED_TRANSITIONS[AutoPhase.RALPH_HANDOFF]
+    # EVALUATE can reach COMPLETE/BLOCKED/FAILED directly, or bridge through
+    # UNSTUCK_LATERAL on QA fail (RFC #809 Phase 2.2).
     assert _ALLOWED_TRANSITIONS[AutoPhase.EVALUATE] == {
+        AutoPhase.UNSTUCK_LATERAL,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
@@ -613,6 +616,41 @@ async def test_handler_evaluator_maps_qa_error_to_evaluate_result() -> None:
     assert "qa unreachable" in result.error.lower()
 
 
+@pytest.mark.asyncio
+async def test_handler_evaluator_empty_artifact_synthesizes_fail_without_calling_qa() -> None:
+    """The real ``QAHandler`` rejects empty artifacts with
+    ``"artifact is required"``. The adapter must synthesize the
+    "empty run output is a graded failure" verdict locally instead of
+    routing through QA (which would land in the transient-error path)."""
+    stub = _StubQAHandler()
+    evaluator = HandlerEvaluator(stub)
+
+    result = await evaluator(_build_seed(), "")
+
+    assert result.passed is False
+    assert result.verdict == "fail"
+    assert "empty" in " ".join(result.differences).lower()
+    # QA was NOT called for the empty path
+    assert stub.last_arguments is None
+
+
+@pytest.mark.asyncio
+async def test_handler_evaluator_detects_plugin_delegation_envelope() -> None:
+    """In plugin mode ``QAHandler`` returns a delegation envelope
+    (``status="delegated_to_subagent"``) instead of a final verdict. The
+    adapter must NOT silently treat the envelope as ``passed=False``;
+    instead it returns an error result so the pipeline can surface it as
+    a recoverable BLOCKED rather than a misleading "QA said fail" state."""
+    stub = _StubQAHandler(meta={"status": "delegated_to_subagent", "dispatch_mode": "plugin"})
+    evaluator = HandlerEvaluator(stub)
+
+    result = await evaluator(_build_seed(), "some artifact")
+
+    assert result.passed is False
+    assert result.error is not None
+    assert "delegation" in result.error.lower()
+
+
 # ---------------------------------------------------------------------------
 # Ralph adapter must surface result_text so production EVALUATE can fire
 # ---------------------------------------------------------------------------
@@ -790,35 +828,6 @@ async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(tm
     assert result.status == "complete"
     assert state.last_qa_verdict == "pass"
     assert call_count == 2  # evaluator was re-invoked with the persisted artifact
-
-
-@pytest.mark.asyncio
-async def test_pipeline_run_resumes_evaluate_with_persisted_artifact(tmp_path) -> None:
-    state = _state_at_run_phase(tmp_path)
-    state.phase = AutoPhase.EVALUATE
-    state.evaluate_artifact = "persisted Ralph artifact"
-    eval_calls: list[str] = []
-
-    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
-        eval_calls.append(artifact)
-        return EvaluateResult(passed=True, score=0.91, verdict="pass")
-
-    pipeline = AutoPipeline(
-        _StubInterviewDriver(),
-        _seed_generator_unused,
-        run_starter=_run_starter_ok,
-        reviewer=_PassReviewer(),
-        ralph_starter=_ralph_starter(result_text="should not be used"),
-        complete_product=True,
-        evaluator=evaluator,
-    )
-
-    result = await pipeline.run(state)
-
-    assert result.status == "complete"
-    assert state.phase is AutoPhase.COMPLETE
-    assert eval_calls == ["persisted Ralph artifact"]
-    assert state.last_qa_verdict == "pass"
 
 
 def test_state_round_trips_evaluate_artifact(tmp_path) -> None:

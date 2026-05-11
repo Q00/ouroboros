@@ -15,10 +15,12 @@ from ouroboros.core.seed import Seed
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import MCPToolResult
+from ouroboros.resilience.lateral import ThinkingPersona
 
 
 class HandlerError(RuntimeError):
@@ -351,6 +353,21 @@ class HandlerEvaluator:
         self.qa_handler = qa_handler
 
     async def __call__(self, seed: Seed, run_artifact: str) -> EvaluateResult:
+        # Empty Ralph artifact: ``QAHandler`` rejects ``""`` with
+        # ``"artifact is required"``. The auto pipeline's intent is that an
+        # empty run output still counts as a graded failure (the AC like
+        # "Command prints stable output" cannot be satisfied by empty
+        # stdout), so synthesize the verdict directly without round-tripping
+        # to the QA tool.
+        if not run_artifact:
+            return EvaluateResult(
+                passed=False,
+                score=0.0,
+                verdict="fail",
+                differences=("run artifact was empty",),
+                suggestions=("ensure the run produces observable output",),
+            )
+
         if seed.acceptance_criteria:
             ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
             quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
@@ -379,6 +396,25 @@ class HandlerEvaluator:
                 error=str(result.error),
             )
         meta = result.value.meta or {}
+        # Plugin-mode delegation envelope: ``QAHandler`` returns
+        # ``status="delegated_to_subagent"`` with no ``passed`` / ``score``
+        # fields when ``should_dispatch_via_plugin`` is on. The auto pipeline
+        # cannot wait for the out-of-band Task pane to complete inline, so
+        # treat the envelope as a transient error rather than silently
+        # interpreting "no passed field" as ``passed=False``. The MCP handler
+        # also avoids wiring this adapter in plugin mode (see
+        # ``auto_handler._run``), but this guard makes the contract safe for
+        # any caller that constructs the adapter directly.
+        if str(meta.get("status", "")) == "delegated_to_subagent":
+            return EvaluateResult(
+                passed=False,
+                score=0.0,
+                verdict="fail",
+                error=(
+                    "QAHandler returned a plugin-delegation envelope; the auto pipeline "
+                    "cannot grade artifacts via out-of-band subagent dispatch in this phase"
+                ),
+            )
         return EvaluateResult(
             passed=bool(meta.get("passed", False)),
             score=float(meta.get("score", 0.0)),
@@ -386,6 +422,134 @@ class HandlerEvaluator:
             differences=tuple(meta.get("differences", ()) or ()),
             suggestions=tuple(meta.get("suggestions", ()) or ()),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class LateralResult:
+    """Structured result returned by :class:`HandlerLateralThinker`.
+
+    Mirrors the inline-fallback subset of ``ouroboros_lateral_think``'s
+    response meta + content text. The pipeline persists these fields on
+    :class:`AutoPipelineState` so a resumed session honors the cached
+    persona suggestion without re-invoking the lateral_think tool.
+
+    ``error`` is non-empty when the handler returned a transient failure
+    (resumable). The pipeline treats it as BLOCKED, not FAILED.
+    """
+
+    persona: str
+    approach_summary: str
+    text: str
+    error: str | None = None
+
+
+class HandlerLateralThinker:
+    """Callable lateral thinker backed by ``ouroboros_lateral_think``.
+
+    Wraps :class:`LateralThinkHandler` in single-persona mode. Builds
+    ``problem_context`` from the QA verdict's differences/suggestions and
+    ``current_approach`` from the run artifact, then calls the handler and
+    maps the inline-fallback response (the path the auto pipeline actually
+    takes — multi-persona plugin dispatch requires runtime context the
+    auto pipeline does not own today) onto a typed :class:`LateralResult`.
+
+    Phase 2.2 ships single-persona advisory only. Multi-persona parallel
+    dispatch via OpenCode plugin bridges is deferred to P2.2b.
+    """
+
+    def __init__(self, handler: LateralThinkHandler) -> None:
+        self.handler = handler
+
+    async def __call__(
+        self,
+        *,
+        persona: ThinkingPersona,
+        qa_differences: tuple[str, ...],
+        qa_suggestions: tuple[str, ...],
+        run_artifact: str,
+    ) -> LateralResult:
+        problem_context = _build_lateral_problem_context(qa_differences, qa_suggestions)
+        current_approach = _build_lateral_current_approach(run_artifact)
+        result = await self.handler.handle(
+            {
+                "persona": persona.value,
+                "problem_context": problem_context,
+                "current_approach": current_approach,
+            }
+        )
+        if result.is_err:
+            return LateralResult(
+                persona=persona.value,
+                approach_summary="",
+                text="",
+                error=str(result.error),
+            )
+        value = result.value
+        meta = value.meta or {}
+        # Plugin-mode / multi-persona-fanout delegation envelope: the handler
+        # returns ``status="delegated_to_subagent"`` (or ``dispatch_mode=
+        # "plugin"``) when it dispatches to an OpenCode Task pane. The auto
+        # pipeline's Phase 2.2 advisory layer is synchronous and cannot wait
+        # for that out-of-band response; treat the envelope as a transient
+        # error so the session blocks with ``tool_name="lateral_thinker"``
+        # (resumable) rather than persisting an empty/placeholder advice.
+        if (
+            str(meta.get("status", "")) == "delegated_to_subagent"
+            or str(meta.get("dispatch_mode", "")) == "plugin"
+        ):
+            return LateralResult(
+                persona=persona.value,
+                approach_summary="",
+                text="",
+                error=(
+                    "lateral_think returned a plugin-delegation envelope; the auto "
+                    "pipeline cannot consume out-of-band subagent persona output in "
+                    "Phase 2.2 (single-persona inline mode only)"
+                ),
+            )
+        text = value.content[0].text if value.content else ""
+        return LateralResult(
+            persona=str(meta.get("persona", persona.value)),
+            approach_summary=str(meta.get("approach_summary", "")),
+            text=text,
+        )
+
+
+def _build_lateral_problem_context(
+    qa_differences: tuple[str, ...], qa_suggestions: tuple[str, ...]
+) -> str:
+    """Build the ``problem_context`` payload from QA verdict shape."""
+    lines = ["EVALUATE failed: the run output did not satisfy the Seed acceptance criteria."]
+    if qa_differences:
+        lines.append("")
+        lines.append("QA differences:")
+        lines.extend(f"- {item}" for item in qa_differences)
+    if qa_suggestions:
+        lines.append("")
+        lines.append("QA suggestions:")
+        lines.extend(f"- {item}" for item in qa_suggestions)
+    return "\n".join(lines)
+
+
+def _build_lateral_current_approach(run_artifact: str) -> str:
+    """Build the ``current_approach`` payload from the run artifact.
+
+    Keeps a bounded preview of the run artifact so an enormous ralph stdout
+    dump doesn't dominate the lateral_think prompt token budget. The preview
+    is head-biased (verdicts and exit-status lines that matter live near the
+    top) and the artifact's tail is summarised with a length indicator.
+    """
+    preview_bytes = 4_000
+    if len(run_artifact) <= preview_bytes:
+        body = run_artifact
+    else:
+        body = (
+            f"{run_artifact[:preview_bytes]}\n\n"
+            f"... [truncated, full artifact is {len(run_artifact)} characters]"
+        )
+    return (
+        f"Most recent run artifact (the work the Seed produced and that QA just rejected):\n{body}"
+    )
 
 
 async def _wait_for_job_terminal(

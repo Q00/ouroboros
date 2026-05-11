@@ -11,6 +11,7 @@ from typing import Any
 from ouroboros.auto.adapters import (
     HandlerEvaluator,
     HandlerInterviewBackend,
+    HandlerLateralThinker,
     HandlerRalphPoller,
     HandlerRalphStarter,
     HandlerRunStarter,
@@ -38,6 +39,7 @@ from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
@@ -332,15 +334,33 @@ class AutoHandler:
         # session is in complete-product mode. Outside that mode the chain
         # is RUN → COMPLETE (async run handoff) so there is no synchronous
         # artifact to grade; instantiating QAHandler would be wasted setup.
+        #
+        # Plugin-mode skip: ``QAHandler`` / ``LateralThinkHandler`` dispatch
+        # to OpenCode Task panes when ``opencode_mode == "plugin"``. The
+        # auto pipeline's Phase 2.1/2.2 advisory layer is synchronous and
+        # cannot consume out-of-band subagent output, so we leave both
+        # adapters unwired in plugin mode. The chain then falls back to
+        # the pre-Phase-2.1 behaviour (RUN → RALPH_HANDOFF → COMPLETE) —
+        # the existing Ralph plugin delegation continues to drive
+        # complete-product sessions in OpenCode Task panes as before.
         evaluator = None
-        if complete_product:
-            qa_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
+        lateral_thinker = None
+        opencode_plugin_mode = opencode_mode == "plugin"
+        if complete_product and not opencode_plugin_mode:
             qa_handler = QAHandler(
                 llm_backend=self.llm_backend,
                 agent_runtime_backend=runtime_backend,
-                opencode_mode=qa_opencode_mode,
+                opencode_mode=opencode_mode,
             )
             evaluator = HandlerEvaluator(qa_handler)
+            # RFC #809 Phase 2.2 — wire the persona-driven lateral advisor
+            # alongside the evaluator. Same gating: only when complete-product
+            # is on and we are NOT in plugin mode.
+            lateral_handler = LateralThinkHandler(
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            )
+            lateral_thinker = HandlerLateralThinker(lateral_handler)
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -360,6 +380,7 @@ class AutoHandler:
             ralph_resumer=ralph_resumer,
             complete_product=complete_product,
             evaluator=evaluator,
+            lateral_thinker=lateral_thinker,
         )
         return await pipeline.run(state)
 
@@ -429,6 +450,15 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["last_qa_differences"] = list(result.last_qa_differences)
     if result.last_qa_suggestions:
         meta["last_qa_suggestions"] = list(result.last_qa_suggestions)
+    # RFC #809 Phase 2.2 — surface the UNSTUCK_LATERAL persona advisory when
+    # present so clients can distinguish "QA failed and lateral surfaced a
+    # reframing" from "QA failed without lateral context".
+    if result.last_lateral_persona is not None:
+        meta["last_lateral_persona"] = result.last_lateral_persona
+    if result.last_lateral_approach_summary is not None:
+        meta["last_lateral_approach_summary"] = result.last_lateral_approach_summary
+    if result.last_lateral_text is not None:
+        meta["last_lateral_text"] = result.last_lateral_text
     # Always emit the ledger-provenance surface so MCP clients can distinguish
     # "computed and empty" (no resolved sections yet, or no per-source split
     # available) from "field not provided at all".  Empty containers are part
@@ -719,6 +749,11 @@ def _format_result(result: AutoPipelineResult) -> str:
         if result.last_qa_suggestions:
             lines.append("  suggestions:")
             lines.extend(f"  - {item}" for item in result.last_qa_suggestions[:3])
+    # RFC #809 Phase 2.2 — render the lateral persona advisory when present.
+    if result.last_lateral_persona is not None:
+        lines.append(f"Lateral persona: {result.last_lateral_persona}")
+        if result.last_lateral_approach_summary:
+            lines.append(f"  approach: {result.last_lateral_approach_summary}")
     if result.assumptions:
         lines.append("Assumptions:")
         lines.extend(f"- {item}" for item in result.assumptions)

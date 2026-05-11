@@ -23,6 +23,7 @@ class AutoPhase(StrEnum):
     RUN = "run"
     RALPH_HANDOFF = "ralph_handoff"
     EVALUATE = "evaluate"
+    UNSTUCK_LATERAL = "unstuck_lateral"
     COMPLETE = "complete"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -61,6 +62,7 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.REPAIR.value: 90,
     AutoPhase.RUN.value: 60,
     AutoPhase.EVALUATE.value: 90,
+    AutoPhase.UNSTUCK_LATERAL.value: 60,
 }
 
 # Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
@@ -208,6 +210,12 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.FAILED,
     },
     AutoPhase.EVALUATE: {
+        AutoPhase.UNSTUCK_LATERAL,
+        AutoPhase.COMPLETE,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    },
+    AutoPhase.UNSTUCK_LATERAL: {
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
@@ -220,6 +228,7 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
         AutoPhase.EVALUATE,
+        AutoPhase.UNSTUCK_LATERAL,
     },
     AutoPhase.FAILED: {
         AutoPhase.INTERVIEW,
@@ -228,6 +237,7 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
         AutoPhase.EVALUATE,
+        AutoPhase.UNSTUCK_LATERAL,
     },
 }
 
@@ -355,6 +365,16 @@ class AutoPipelineState:
     # persisted ``evaluate_artifact_hash`` — truncation would silently
     # invalidate the cache.
     evaluate_artifact: str | None = None
+    # RFC #809 Phase 2.2 — UNSTUCK_LATERAL persona output captured after an
+    # EVALUATE fail. Persisted so a resumed session reuses the persona
+    # suggestion without re-invoking the lateral_think tool when nothing
+    # has changed. ``lateral_input_hash`` is sha256 of
+    # ``f"{persona}:{differences}:{suggestions}"`` — if the hash on resume
+    # matches the persisted one, the cached persona text is honored.
+    last_lateral_persona: str | None = None
+    last_lateral_approach_summary: str | None = None
+    last_lateral_text: str | None = None
+    lateral_input_hash: str | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -598,6 +618,26 @@ class AutoPipelineState:
                 return AutoResumeCapability.RESUME
             return AutoResumeCapability.NONE
 
+        # UNSTUCK_LATERAL phase (RFC #809 Phase 2.2). Recovery requires the
+        # persisted lateral input hash so the cache short-circuit can return
+        # the cached persona suggestion without re-invoking the lateral_think
+        # tool. If the cache is empty but the QA fail context is intact,
+        # resume can still classify a persona and re-run lateral.
+        if recoverable == AutoPhase.UNSTUCK_LATERAL:
+            if self.lateral_input_hash is not None or self.last_lateral_text is not None:
+                return AutoResumeCapability.RESUME
+            # ``_run_lateral`` can drive forward as long as we have ANY
+            # QA-fail signal (differences OR suggestions); both feed the
+            # persona's ``problem_context``. Earlier this branch required
+            # ``differences`` specifically, which suppressed the resume
+            # hint for suggestions-only failures even though resume would
+            # actually work.
+            if self.last_qa_passed is False and (
+                self.last_qa_differences or self.last_qa_suggestions
+            ):
+                return AutoResumeCapability.RESUME
+            return AutoResumeCapability.NONE
+
         return AutoResumeCapability.NONE  # defensive
 
     def to_dict(self) -> dict[str, Any]:
@@ -651,6 +691,10 @@ class AutoPipelineState:
         payload.setdefault("last_qa_suggestions", [])
         payload.setdefault("evaluate_artifact_hash", None)
         payload.setdefault("evaluate_artifact", None)
+        payload.setdefault("last_lateral_persona", None)
+        payload.setdefault("last_lateral_approach_summary", None)
+        payload.setdefault("last_lateral_text", None)
+        payload.setdefault("lateral_input_hash", None)
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -828,6 +872,24 @@ class AutoPipelineState:
             raise ValueError(msg)
         if self.evaluate_artifact is not None and not isinstance(self.evaluate_artifact, str):
             msg = "evaluate_artifact must be a string or null"
+            raise ValueError(msg)
+        if self.last_lateral_persona is not None and (
+            not isinstance(self.last_lateral_persona, str) or not self.last_lateral_persona.strip()
+        ):
+            msg = "last_lateral_persona must be a non-empty string or null"
+            raise ValueError(msg)
+        if self.last_lateral_approach_summary is not None and not isinstance(
+            self.last_lateral_approach_summary, str
+        ):
+            msg = "last_lateral_approach_summary must be a string or null"
+            raise ValueError(msg)
+        if self.last_lateral_text is not None and not isinstance(self.last_lateral_text, str):
+            msg = "last_lateral_text must be a string or null"
+            raise ValueError(msg)
+        if self.lateral_input_hash is not None and (
+            not isinstance(self.lateral_input_hash, str) or not self.lateral_input_hash.strip()
+        ):
+            msg = "lateral_input_hash must be a non-empty string or null"
             raise ValueError(msg)
         if self.provenance is not None:
             if not isinstance(self.provenance, dict):
