@@ -264,8 +264,11 @@ reserved for explicit terminal termination: deadline-enforced aborts, explicit
 terminal decisions, and non-resumable failures that must not be resumed on the
 same auto session. Non-terminal `Directive.RETRY` branches must first persist
 and commit, or atomically commit with the directive emission, the retry-pending
-state transition that makes the retry durable. A non-terminal `RETRY` event
-must never become durable without the corresponding durable retry marker. The
+state transition that makes the retry durable. Non-terminal `Directive.WAIT`
+branches must first persist, or atomically persist with the directive emission,
+the blocked-state fields and resume handle that make the wait resumable. A
+non-terminal `RETRY` or `WAIT` event must never become durable without the
+corresponding durable local state it asks the resume path to honor. The
 event target is always `target_type="session"`,
 `target_id=state.auto_session_id`; `extra` should include the current
 `state.phase.value`, the timeout seconds used by the bounded call when
@@ -278,17 +281,25 @@ phase-specific handle fields needed for resume
 Under the current auto resume model, blocked interview, seed generation,
 repair, review, Ralph handoff, Ralph poll, evaluator, and lateral-thinker phase
 timeouts are resumable when the auto session remains blocked with a resume tool
-on the same `auto_session_id`; those sites emit `Directive.WAIT` with
-`extra.phase`, resume tool information, and phase handles needed to resume. The
+on the same `auto_session_id`; those sites emit `Directive.WAIT` only after the blocked
+state, resume tool, and phase handles have been saved or atomically committed
+with the event. The event `extra` repeats `extra.phase`, resume tool
+information, and phase handles needed to resume. The
 run-handoff branch has the only currently defined auto-pipeline timeout
 `Directive.RETRY`: first `"unknown_timeout"` while no retry has been attempted
-emits `Directive.RETRY` and records the durable retry marker. After that, a
+emits `Directive.RETRY` and records the durable retry marker. `run_start_attempted`
+alone is not that marker: it is set before the bounded `run_starter(...)` call
+and can predate a timeout decision. The retry marker is the committed
+transition to `run_handoff_status == "unknown_timeout"` (plus the same
+`auto_session_id`/idempotency-key context), because that transition is the
+state resume readers use to prove the first unknown handoff is retryable. After
+that, a
 retried `"unknown_timeout"` or `"unknown_retry_failed"` emits `Directive.WAIT`
 when the state is blocked awaiting user or upstream resume on the same
 `auto_session_id`; it emits `Directive.CANCEL` only when deadline enforcement
 or another explicit terminal path makes the auto attempt truly terminal. For
 the first `auto.run_handoff` `RETRY`, the persisted
-`run_start_attempted`/`run_handoff_status` transition is the retry-pending
+`run_handoff_status == "unknown_timeout"` transition is the retry-pending
 marker and must be durable before, or atomically with,
 `control.directive.emitted`.
 
