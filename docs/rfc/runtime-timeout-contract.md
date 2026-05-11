@@ -100,12 +100,14 @@ object's `last_error`, phase, resume tool, and run/Ralph handoff fields.
 The three surfaces described above share no control-plane representation:
 
 1. **Three exception types** — `MCPTimeoutError`, `GenerationWatchdogTimeout`,
-   and `asyncio.TimeoutError` (re-raised by the auto pipeline) — carry
-   incompatible fields and are caught at different abstraction levels.
+   and `asyncio.TimeoutError` (handled in place by the auto pipeline and
+   returned as blocked or early-return state) — carry incompatible fields and
+   are caught at different abstraction levels.
 
 2. **Three cancellation mechanisms** — the MCP layer retries internally then
-   raises; the watchdog cancels the async task then persists a lineage event;
-   the auto pipeline writes to a mutable `state` object and returns early.
+   returns a terminal tool error; the watchdog cancels the async task then
+   persists a lineage event; the auto pipeline writes to a mutable `state`
+   object and returns early.
 
 3. **No shared source-specific signal** — these timeout surfaces do not emit a
    consistent `control.directive.emitted` event at the timeout decision point. A
@@ -136,9 +138,8 @@ is determined per-surface as follows.
 
 | Surface | `emitted_by` | `directive` | Condition |
 |---|---|---|---|
-| MCP tool timeout | `"mcp.tool_timeout"` | `Directive.RETRY` | adapter exposes caller-visible retry with `MAX_RETRIES` budget remaining |
-| MCP tool timeout | `"mcp.tool_timeout"` | `Directive.CANCEL` | `MAX_RETRIES` budget exhausted and terminal tool error returned |
-| Watchdog timeout | `"generation.watchdog"` | mapped by `watchdog_timeout_to_directive` (proposed in #836) | budget-dependent |
+| MCP tool timeout | `"mcp.tool_timeout"` | `Directive.CANCEL` | `MAX_RETRIES`/adapter retry envelope exhausted and terminal tool error returned |
+| Watchdog timeout | `"generation.watchdog"` | same directive the evolution loop would emit for the failed generation outcome via `step_action_to_directive(...)` | generation retry/resilience-budget dependent |
 | Auto interview timeout | `"auto.interview"` | `Directive.CANCEL` | `interview_driver.run(...)` times out and the pipeline marks blocked or returns early |
 | Auto seed-generation timeout | `"auto.seed_generation"` | `Directive.CANCEL` | `seed_generator(...)` times out and the pipeline marks blocked or returns early |
 | Auto repair timeout | `"auto.repair"` | `Directive.CANCEL` | `repairer.converge(...)` times out and the pipeline marks blocked or returns early |
@@ -152,48 +153,65 @@ is determined per-surface as follows.
 
 ### MCP tool timeout mapping
 
-`MCPTimeoutError` sets `is_retriable=True`. The authoritative retry budget for
-MCP timeout directives is the adapter retry envelope in
-`src/ouroboros/orchestrator/mcp_tools.py`: `MAX_RETRIES` and the surrounding
-`retry_async(..., attempts=MAX_RETRIES)` policy. This budget applies to both
-raised timeout paths (`asyncio.TimeoutError` caught by `retry_async`) and
-manager-originated `Result.err(MCPTimeoutError)` values. The manager path must
-be lifted into the same envelope or explicitly consume the same counter at the
-`Result.err` decision point; it must not define a second retry budget.
+`MCPTimeoutError` sets `is_retriable=True`, but Phase 1 must not translate that
+flag into `Directive.RETRY`. The MCP adapter's retry envelope in
+`src/ouroboros/orchestrator/mcp_tools.py` is currently in-memory:
+`_call_with_retry(...)` uses `retry_async(..., attempts=MAX_RETRIES)` for raised
+timeout paths, and manager-originated `Result.err(MCPTimeoutError)` values flow
+through the generic `call_failed` conversion. Neither path persists a
+retry-pending token or state that a resume consumer could later consult.
 
-`Directive.RETRY` is emitted only when the adapter exposes a caller-visible
-retry decision before the terminal result, with retry budget remaining under
-that envelope. Internal retry attempts hidden inside a single tool invocation
-do not each emit. `Directive.CANCEL` is emitted when the same budget is
-exhausted and the adapter returns the terminal non-retriable tool error, such
-as the existing `orchestrator.mcp_tools.timeout_after_retries` path. The event
-target is `target_type="execution"` with `execution_id` from the surrounding
-context.
+For current Phase 1, MCP internal retries are therefore invisible to the
+directive journal. The MCP surface emits exactly one timeout directive, and
+only at the terminal caller-visible decision point: `Directive.CANCEL` when the
+`MAX_RETRIES`/adapter envelope is exhausted and the adapter returns the
+terminal tool error, such as the existing
+`orchestrator.mcp_tools.timeout_after_retries` path. Manager-originated
+`Result.err(MCPTimeoutError)` values may be normalized into the same terminal
+adapter envelope, but they still must not emit `Directive.RETRY` without a
+durable retry token. A future MCP retry directive is allowed only if the MCP
+surface first adds persisted retry-pending state that satisfies I4/I5. The
+event target is `target_type="execution"` with `execution_id` from the
+surrounding context.
 
 ### Watchdog timeout mapping
 
 `GenerationWatchdogTimeout` is already handled in the `watch()` method of
-`GenerationProgressWatchdog` (`src/ouroboros/evolution/watchdog.py:65–91`).
-Issue #836 proposes a `watchdog_timeout_to_directive` helper that maps
-`timeout_kind` to `Directive.RETRY` (transient; material progress recoverable)
-or `Directive.CANCEL` (safety or idle threshold exceeded). The watchdog site
-calls this helper immediately after its existing `emit_decision()` call and
-appends the corresponding `control.directive.emitted` event with
-`emitted_by="generation.watchdog"`. Target: `target_type="lineage"`,
-`target_id=lineage_id`.
+`GenerationProgressWatchdog` (`src/ouroboros/evolution/watchdog.py:65–91`) and
+returned to the evolution loop as a failed generation outcome. The watchdog
+source-specific emission must preserve the current generation control contract:
+the directive for a watchdog timeout is the same directive the existing
+evolution loop would have emitted for that failed generation outcome via
+`step_action_to_directive(StepAction.FAILED, retry_budget_remaining=...)`.
+That means the generation retry/resilience budget decides `Directive.RETRY`
+versus `Directive.CANCEL`; `timeout_kind` is metadata/classification in
+`extra`, not the authority for the directive value.
 
-The watchdog owns directive emission for `GenerationWatchdogTimeout` instances
-raised by `GenerationProgressWatchdog`. A caller that catches the bubbled
-exception, including the current `evolve_step` path that can emit a generic
-`emitted_by="evolver"` directive, must not emit a second directive for the same
-watchdog timeout. The deduplication key is the timeout decision identity:
-`target_type`, `target_id`, timeout source (`GenerationWatchdogTimeout` /
-`generation.watchdog`), `timeout_kind`, and the triggering watchdog decision
-event or timestamp recorded with the existing lineage watchdog decision. If a
-source-specific `generation.watchdog` directive exists for that key, the
-generic evolver timeout directive is suppressed or replaced. A generic evolver
-timeout directive is allowed only when no source-specific timeout directive
-already exists for the same timeout decision.
+Issue #836 should therefore avoid a `watchdog_timeout_to_directive` helper that
+maps `timeout_kind` directly to `Directive.RETRY` or `Directive.CANCEL`. If
+#836 introduces watchdog-specific helper wiring, it must either call
+`step_action_to_directive(...)` with the same retry budget the evolution loop
+would use, or accept the already-computed directive from the loop. The watchdog
+event appends `control.directive.emitted` with
+`emitted_by="generation.watchdog"`, `target_type="lineage"`,
+`target_id=lineage_id`, and `extra` including `timeout_kind`, thresholds, and
+the watchdog decision metadata needed for audit.
+
+The watchdog source owns source-specific directive identity for
+`GenerationWatchdogTimeout` instances raised by `GenerationProgressWatchdog`,
+but it must not suppress or bypass the generation retry-budget semantics. A
+caller that catches the bubbled exception, including the current `evolve_step`
+path that can emit a generic `emitted_by="evolver"` directive for a failed
+generation, must not emit a second directive for the same watchdog timeout. The
+deduplication key is the timeout decision identity: `target_type`, `target_id`,
+timeout source (`GenerationWatchdogTimeout` / `generation.watchdog`),
+`timeout_kind`, and the triggering watchdog decision event or timestamp
+recorded with the existing lineage watchdog decision. If a source-specific
+`generation.watchdog` directive exists for that key, the generic evolver
+directive for the same failed generation is suppressed or replaced while
+preserving the directive value that `step_action_to_directive(...)` and the
+resilience budget selected. A generic evolver directive is allowed only when no
+source-specific timeout directive already exists for the same timeout decision.
 
 ### Auto pipeline timeout mapping
 
@@ -246,7 +264,8 @@ non-terminal `RETRY` directive is actionable only while the corresponding
 persisted local retry-pending state or token still indicates that the retry is
 pending; if the owning surface has since succeeded or transitioned state, that
 local state supersedes the stale trailing `RETRY` without requiring a success
-directive.
+directive. The current MCP Phase 1 contract has no such persisted token, so MCP
+does not emit `Directive.RETRY`.
 
 **I5 — Retry success clears actionability without success spam.** If a
 timed-out operation succeeds on a subsequent attempt, no additional
@@ -255,7 +274,9 @@ surface instead clears or updates its persisted retry-pending state or token as
 part of the normal success/state transition. The earlier `RETRY` remains in the
 directive journal as the recorded timeout decision, but it is no longer
 actionable on resume once local state shows that the retry has completed or the
-operation has moved to a later state. This keeps the directive journal as a
+operation has moved to a later state. Surfaces without persisted
+retry-pending state, including current MCP Phase 1, must keep internal retry
+attempts out of the directive journal. This keeps the directive journal as a
 decision log, not a full-trace log.
 
 ## Migration plan
@@ -266,12 +287,13 @@ independently deployable. No flag day required.
 ### Phase 1 — MCP tool timeout (smallest blast radius)
 
 `MCPTimeoutError` is produced by the manager and consumed within the
-orchestrator layer. No lineage state is touched on this path. First decide
-whether manager timeouts should be raised into `retry_async` or handled from the
-returned `Result.err(MCPTimeoutError)` value; emit `control.directive.emitted`
-from that caller-visible decision site. Requires passing `execution_id` into
-the emission context; this context is already available via the surrounding
-tool-invocation frame.
+orchestrator layer. No lineage state is touched on this path. Phase 1 emits
+only terminal MCP timeout directives because `_call_with_retry(...)` and
+`Result.err(MCPTimeoutError)` do not persist retry-pending state. Emit one
+terminal `Directive.CANCEL` from the caller-visible terminal decision site when
+the `MAX_RETRIES`/adapter envelope is exhausted and a terminal tool error is
+returned. Requires passing `execution_id` into the emission context; this
+context is already available via the surrounding tool-invocation frame.
 
 ### Phase 2 — Auto handoff timeout
 
@@ -294,10 +316,12 @@ counts, state transitions, or resume behavior.
 ### Phase 3 — Watchdog timeout (deferred to #836)
 
 `GenerationProgressWatchdog.watch()` already calls `emit_decision()`. Phase 3
-adds the `watchdog_timeout_to_directive` function (proposed in #836) and
-appends the corresponding `control.directive.emitted` call alongside the
-existing lineage event. This phase is deferred because #836 must first settle
-the `timeout_kind → Directive` mapping.
+adds the source-specific `control.directive.emitted` call alongside the
+existing lineage event without changing the generation retry-budget contract.
+#836 must not map `timeout_kind` directly to `Directive.RETRY` or
+`Directive.CANCEL`; it should preserve the directive that the failed generation
+would receive through `step_action_to_directive(...)` with the active
+resilience budget, and record `timeout_kind` only in `extra`.
 
 ## Non-goals
 
