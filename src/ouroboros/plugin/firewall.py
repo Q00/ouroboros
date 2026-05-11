@@ -196,15 +196,10 @@ def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
             pending_value_redact = True
             continue
         # High-confidence value-shaped match (Bearer …, gh*_…, sk-…,
-        # AKIA…, JWT-shaped).  Shells commonly split an Authorization
-        # header into ``Bearer`` and the opaque credential tail; redact
-        # both adjacent tokens as the same logical secret rather than
-        # letting the tail land in audit events.
-        if token == "Bearer":
-            redacted.append(_REDACTED)
-            fired = True
-            pending_bearer_tail_redact = True
-            continue
+        # AKIA…, JWT-shaped).  Split ``Bearer`` auth values are only
+        # treated as secret context when introduced by a known secret flag
+        # above; a standalone literal ``Bearer`` may be ordinary user input
+        # and must not hide subsequent real flags from prompts/audit logs.
         if _is_secret_value(token):
             redacted.append(_REDACTED)
             fired = True

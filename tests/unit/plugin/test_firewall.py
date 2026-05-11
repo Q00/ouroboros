@@ -942,19 +942,57 @@ def test_argv_no_redaction_keeps_argv_verbatim(tmp_path: Path) -> None:
         scope="github:read",
         granted_by="u",
     )
+    clean_argv = ["https://example.com/pr/1", "Bearer", "--force", "plain-tail"]
     events: list[dict] = []
     invoke_plugin(
         program,
         command_name="review",
-        argv=["https://example.com/pr/1", "--verbose"],
+        argv=clean_argv,
         trust_record=trust,
         event_sink=events.append,
         correlation_id="corr-clean",
         subprocess_runner=_fake_runner(stdout="ok"),
     )
     invoked = next(e for e in events if e["event_type"] == "plugin.invoked")
-    assert invoked["command"]["argv"] == ["https://example.com/pr/1", "--verbose"]
+    assert invoked["command"]["argv"] == clean_argv
     assert "argv_sha256" not in invoked.get("provenance", {})
+
+
+def test_confirmation_prompt_keeps_standalone_bearer_arguments(
+    tmp_path: Path,
+) -> None:
+    """A literal ``Bearer`` token is not secret context by itself.
+
+    Regression catch for the bot design note on PR #857: over-redacting
+    ``["Bearer", "--force"]`` would hide real destructive flags from the
+    user-visible confirmation prompt and from audit argv.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    prompts: list[str] = []
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="merge",
+        argv=["Bearer", "--force"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-standalone-bearer",
+        confirm=lambda prompt: prompts.append(prompt) or False,
+        subprocess_runner=_fake_runner(),
+    )
+
+    assert result.status == "blocked"
+    assert prompts
+    assert "Action: merge Bearer --force" in prompts[0]
+    failed = next(e for e in events if e["event_type"] == "plugin.failed")
+    assert failed["command"]["argv"] == ["Bearer", "--force"]
+    assert "argv_sha256" not in failed.get("provenance", {})
 
 
 def test_subprocess_invoked_with_plugin_home_as_cwd(tmp_path: Path) -> None:
