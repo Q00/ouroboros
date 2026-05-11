@@ -13,6 +13,11 @@ from typing import Any, Protocol
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.grading import GradeGate, deterministic_floor
+from ouroboros.auto.handoff_contract import (
+    IDEMPOTENCY_KWARG_NAME,
+    RETRY_GUIDANCE_PHRASE,
+    UNKNOWN_HANDOFF_STATUSES,
+)
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
 from ouroboros.auto.ledger import SeedDraftLedger
@@ -89,9 +94,6 @@ _MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
 # the top-level pipeline deadline contract pinned by Q00/ouroboros#779.
 _MIN_RALPH_PER_ITERATION_SECONDS = 30.0
 _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
-
-
-_RETRY_GUIDANCE_PHRASE = "retried once with idempotency key"
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,7 +749,7 @@ class AutoPipeline:
         idempotency_key = state.auto_session_id
         prior_retry_exhausted = (
             state.run_handoff_guidance is not None
-            and _RETRY_GUIDANCE_PHRASE in state.run_handoff_guidance
+            and RETRY_GUIDANCE_PHRASE in state.run_handoff_guidance
         ) or (
             # Conservative non-retryable guard. Covers two cases:
             #   1. Pre-#787 sessions persisted before ``run_handoff_status``
@@ -764,7 +766,7 @@ class AutoPipeline:
             #      path: ``unknown_retry_failed`` lands here too because
             #      it's not a retryable status.
             bool(state.run_start_attempted)
-            and state.run_handoff_status not in {"unknown_no_handle", "unknown_timeout"}
+            and state.run_handoff_status not in UNKNOWN_HANDOFF_STATUSES
         )
         if prior_retry_exhausted:
             blocker_text = state.last_error or state.run_handoff_guidance
@@ -777,10 +779,9 @@ class AutoPipeline:
         # (``run_start_attempted=True`` plus an ``unknown_*`` status), the
         # first iteration of this loop *is* the retry — the prior
         # pipeline.run() call already used the initial attempt slot.
-        retried = bool(state.run_start_attempted) and state.run_handoff_status in {
-            "unknown_no_handle",
-            "unknown_timeout",
-        }
+        retried = (
+            bool(state.run_start_attempted) and state.run_handoff_status in UNKNOWN_HANDOFF_STATUSES
+        )
         attempted_at_entry = state.run_start_attempted
         while True:
             state.run_start_attempted = True
@@ -789,7 +790,7 @@ class AutoPipeline:
             run_start_timeout = self._deadline_capped_timeout(state, self.run_start_timeout_seconds)
             try:
                 run_kwargs: dict[str, Any] = {}
-                if _accepts_keyword(self.run_starter, "idempotency_key"):
+                if _accepts_keyword(self.run_starter, IDEMPOTENCY_KWARG_NAME):
                     run_kwargs["idempotency_key"] = idempotency_key
                 run_meta = await asyncio.wait_for(
                     self.run_starter(seed, **run_kwargs),
@@ -805,11 +806,11 @@ class AutoPipeline:
                 if retried:
                     state.run_handoff_guidance = (
                         f"{state.run_handoff_guidance or ''} "
-                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}"
+                        f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}"
                     ).strip()
                     state.mark_blocked(
                         f"run start timed out after {self.run_start_timeout_seconds:.0f}s; "
-                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}",
+                        f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}",
                         tool_name="run_starter",
                     )
                     self._save(state)
@@ -832,11 +833,11 @@ class AutoPipeline:
                     state.run_handoff_status = "unknown_retry_failed"
                     state.run_handoff_guidance = (
                         f"{state.run_handoff_guidance or 'Run starter retry raised an exception'} "
-                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}"
+                        f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}"
                     ).strip()
                     state.mark_blocked(
                         f"run start failed on retry: {exc}; "
-                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}",
+                        f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}",
                         tool_name="run_starter",
                     )
                     # Leave state.run_start_attempted=True so the caller's
@@ -891,10 +892,10 @@ class AutoPipeline:
                 # can detect that the bound is already spent.
                 guidance = state.run_handoff_guidance or "Run starter returned no tracking handle"
                 state.run_handoff_guidance = (
-                    f"{guidance} {_RETRY_GUIDANCE_PHRASE} {idempotency_key}"
+                    f"{guidance} {RETRY_GUIDANCE_PHRASE} {idempotency_key}"
                 ).strip()
                 state.mark_blocked(
-                    f"{guidance} {_RETRY_GUIDANCE_PHRASE} {idempotency_key}",
+                    f"{guidance} {RETRY_GUIDANCE_PHRASE} {idempotency_key}",
                     tool_name="run_starter",
                 )
                 self._save(state)
@@ -1856,10 +1857,10 @@ class AutoPipeline:
         )
         if handle is None:
             return None
-        if not state.run_start_attempted or state.run_handoff_status not in {
-            "unknown_no_handle",
-            "unknown_timeout",
-        }:
+        if (
+            not state.run_start_attempted
+            or state.run_handoff_status not in UNKNOWN_HANDOFF_STATUSES
+        ):
             msg = (
                 "Attach requires an auto session with unknown run handoff status "
                 "after a prior run start attempt"
@@ -1921,10 +1922,10 @@ class AutoPipeline:
                     AutoPhase.COMPLETE, "reconciled existing attached execution handle"
                 )
             return True, None
-        if not state.run_start_attempted or state.run_handoff_status not in {
-            "unknown_no_handle",
-            "unknown_timeout",
-        }:
+        if (
+            not state.run_start_attempted
+            or state.run_handoff_status not in UNKNOWN_HANDOFF_STATUSES
+        ):
             msg = (
                 "Reconciliation requires an auto session with unknown run handoff "
                 "status after a prior run start attempt"
