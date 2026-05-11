@@ -343,11 +343,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    once more. Do not send the payload to MCP while the user is still telling
    you that required text is missing or the answer should be rewritten. If the
    second Refine response again says "Add to Constraints", "Add to Out of
-   scope", or "Rewrite", ask a targeted PATH 2 follow-up for the exact missing
-   text and withhold the MCP answer until the user either supplies that text or
-   explicitly accepts the structured payload. Never infer omitted content from
-   the option label, and prefer stopping over forwarding a payload the user has
-   identified as incomplete.
+   scope", "Add context", or "Rewrite", ask a targeted PATH 2 follow-up for the
+   exact missing text and withhold the MCP answer until the user either
+   supplies that text or explicitly accepts the structured payload. The
+   `Add context` option is handled identically to the other three on the
+   second pass — never infer omitted content from the option label, and prefer
+   stopping over forwarding a payload the user has identified as incomplete.
 
 5. **Mark the answer as Refine-passed**:
    Append `[refined]` to the prefix when sending the structured payload to
@@ -425,9 +426,17 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Treat the follow-up text as a real interview correction, not a local-only
    wording tweak. Route the follow-up text through the Refine gate before
    forwarding it: build the same structured multi-section payload from Step 3
-   with `answer_summary` describing the corrected one-line goal, `reasoning`
-   preserving why the wording/scope changed, and `constraints`, `out_of_scope`,
-   or `open_questions` populated from the user's correction where applicable.
+   using the canonical five-section schema —
+   - **Decision**: the corrected one-line goal verbatim.
+   - **Reasoning**: why the wording/scope changed (carry over the user's
+     correction text, do not paraphrase).
+   - **Constraints (user-stated)**: any constraint introduced or tightened
+     by the correction.
+   - **Out of scope (user-stated)**: anything the correction marks as
+     explicitly excluded.
+   - **Codebase context (main session verified)**: the file paths, configs,
+     or facts the main session checked while preparing the restated goal, or
+     omit the section entirely if no code reference is involved.
    Send that structured restate correction back to MCP with
    `[from-user][refined]`, preserving the corrected goal line and the user's
    stated wording or missing scope. Because this is a post-seed-ready follow-up
