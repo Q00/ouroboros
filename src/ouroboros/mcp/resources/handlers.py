@@ -43,7 +43,15 @@ _SECRET_FIELD_NAMES = frozenset(
     }
 )
 _SECRET_FLAG_PATTERN = re.compile(
-    r"(?i)(--(?:api[-_]?key|token|password|secret|private[-_]?key)(?:=|\s+))"
+    r"(?i)(--(?:"
+    r"api[-_]?key"
+    r"|(?:access|auth|bearer|github|gh|refresh)[-_]?token"
+    r"|token"
+    r"|password"
+    r"|(?:client[-_]?)?secret"
+    r"|credentials?"
+    r"|private[-_]?key"
+    r")(?:=|\s+))"
     r"(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;]+)"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
