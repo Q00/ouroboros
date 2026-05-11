@@ -338,10 +338,10 @@ async def test_no_progress_timeout_emits_unstuck_directive() -> None:
 
 
 @pytest.mark.asyncio
-async def test_timeout_preserved_when_control_directive_append_fails(
+async def test_timeout_preserved_when_watchdog_decision_batch_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The additive control event must not mask the watchdog timeout."""
+    """Directive decisions are atomic and must not mask the watchdog timeout."""
     clock = _FakeMonotonicClock()
     monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
@@ -354,18 +354,19 @@ async def test_timeout_preserved_when_control_directive_append_fails(
         generation_safety_timeout_seconds=0.1,
         watchdog_poll_seconds=0.005,
     )
-    original_append = event_store.append
 
-    async def append_with_control_failure(event: BaseEvent) -> None:
-        if event.type == "control.directive.emitted":
-            raise PersistenceError(
-                "control directive append failed",
-                operation="append",
-                details={"event_type": event.type},
-            )
-        await original_append(event)
+    async def append_batch_failure(events: list[BaseEvent]) -> None:
+        assert [event.type for event in events] == [
+            "lineage.generation.watchdog_decision",
+            "control.directive.emitted",
+        ]
+        raise PersistenceError(
+            "watchdog decision batch failed",
+            operation="append_batch",
+            details={"event_types": [event.type for event in events]},
+        )
 
-    monkeypatch.setattr(event_store, "append", append_with_control_failure)
+    monkeypatch.setattr(event_store, "append_batch", append_batch_failure)
 
     async def long_work() -> str:
         try:
@@ -380,9 +381,7 @@ async def test_timeout_preserved_when_control_directive_append_fails(
 
     assert exc_info.value.timeout_kind == "safety_timeout"
     events = await event_store.replay("lineage", lineage_id)
-    decision_events = [e for e in events if e.type == "lineage.generation.watchdog_decision"]
-    assert len(decision_events) == 1
-    assert decision_events[0].data["details"]["directive"] == "cancel"
+    assert [e for e in events if e.type == "lineage.generation.watchdog_decision"] == []
     assert [e for e in events if e.type == "control.directive.emitted"] == []
 
 

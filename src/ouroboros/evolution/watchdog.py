@@ -141,12 +141,20 @@ class GenerationProgressWatchdog:
             # keeps the legacy ``watchdog_decision`` event flowing
             # untouched.
             directive = watchdog_timeout_to_directive(exc.timeout_kind)
-            await self.emit_decision(
-                action="timeout",
-                reason=exc.message,
-                details=exc.details,
-                directive=directive,
-            )
+            try:
+                await self.emit_decision(
+                    action="timeout",
+                    reason=exc.message,
+                    details=exc.details,
+                    directive=directive,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist watchdog decision for lineage %s generation %s",
+                    self.lineage_id,
+                    self.generation_number,
+                    exc_info=True,
+                )
             raise
         except asyncio.CancelledError:
             task.cancel()
@@ -199,7 +207,8 @@ class GenerationProgressWatchdog:
         """Persist a watchdog control decision for status/debug surfaces.
 
         When *directive* is provided (issue #578), two events are
-        appended in order:
+        appended atomically with ``EventStore.append_batch()`` and in
+        this order:
 
         1. ``lineage.generation.watchdog_decision`` carries the
            timeout details with the resolved directive embedded in
@@ -234,45 +243,35 @@ class GenerationProgressWatchdog:
         else:
             decision_details = details
 
-        await self.event_store.append(
-            lineage_generation_watchdog_decision(
-                self.lineage_id,
-                self.generation_number,
-                action,
-                reason,
-                execution_id=self.execution_id,
-                details=decision_details,
-            )
+        decision_event = lineage_generation_watchdog_decision(
+            self.lineage_id,
+            self.generation_number,
+            action,
+            reason,
+            execution_id=self.execution_id,
+            details=decision_details,
         )
 
         if directive is None:
+            await self.event_store.append(decision_event)
             return
 
-        try:
-            await self.event_store.append(
-                create_control_directive_emitted_event(
-                    target_type="lineage",
-                    target_id=self.lineage_id,
-                    emitted_by="watchdog",
-                    directive=directive,
-                    reason=reason,
-                    lineage_id=self.lineage_id,
-                    generation_number=self.generation_number,
-                    execution_id=self.execution_id,
-                    extra={
-                        "watchdog_action": action,
-                        "timeout_kind": (details or {}).get("timeout_kind"),
-                        "is_terminal": is_terminal_directive(directive),
-                    },
-                )
-            )
-        except Exception:
-            logger.warning(
-                "Failed to persist watchdog control directive for lineage %s generation %s",
-                self.lineage_id,
-                self.generation_number,
-                exc_info=True,
-            )
+        directive_event = create_control_directive_emitted_event(
+            target_type="lineage",
+            target_id=self.lineage_id,
+            emitted_by="watchdog",
+            directive=directive,
+            reason=reason,
+            lineage_id=self.lineage_id,
+            generation_number=self.generation_number,
+            execution_id=self.execution_id,
+            extra={
+                "watchdog_action": action,
+                "timeout_kind": (details or {}).get("timeout_kind"),
+                "is_terminal": is_terminal_directive(directive),
+            },
+        )
+        await self.event_store.append_batch([decision_event, directive_event])
 
     def _record_event(self, event: BaseEvent) -> None:
         if event.id in self._seen_event_ids:
