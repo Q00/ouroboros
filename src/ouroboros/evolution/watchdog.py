@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 import time
-from typing import Any
+from typing import Any, Final
 
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import OuroborosError
@@ -20,6 +20,10 @@ from ouroboros.evolution.material_progress import (
 )
 from ouroboros.persistence.event_store import EventStore
 
+#: v0 cancellation contract (see docs/contributing/watchdog-cancellation.md).
+#: Kept as a named constant so projectors and tests can assert the mode without
+#: hardcoding the string.
+WATCHDOG_CANCELLATION_MODE: Final[str] = "cooperative_direct_one_stage"
 
 class GenerationWatchdogTimeout(OuroborosError):
     """Raised when a generation watchdog threshold is exceeded."""
@@ -80,7 +84,34 @@ class GenerationProgressWatchdog:
     _baseline_initialized: bool = False
 
     async def watch[T](self, awaitable: Awaitable[T]) -> T:
-        """Run *awaitable* until it finishes or watchdog policy cancels it."""
+        """Run *awaitable* until it finishes or watchdog policy cancels it.
+
+        Cancellation contract (v0 — ``cooperative_direct_one_stage``):
+
+        When a threshold is exceeded the watchdog:
+
+        (a) Calls ``task.cancel()`` directly — one stage, no escalation.
+            There is no SIGTERM-then-SIGKILL style two-stage sequence; a
+            single ``CancelledError`` injection is the entire escalation path.
+        (b) Awaits the cancelled task and swallows ``CancelledError`` so the
+            inner coroutine has a chance to run its ``except CancelledError``
+            cleanup block before control returns here.
+        (c) Emits ``lineage.generation.watchdog_decision`` and
+            ``control.directive.emitted`` events that carry
+            ``cancellation_mode = WATCHDOG_CANCELLATION_MODE``.
+
+        *Cooperative* because the inner task observes the ``CancelledError``
+        and can react (e.g. flush state).  *Direct* because no
+        ``AgentProcess`` intermediary is involved — the watchdog holds the
+        asyncio task handle and cancels it inline.  *One-stage* because there
+        is no escalation from a soft signal to a hard kill.
+
+        To introduce two-stage escalation in the future, add a
+        ``SIGTERM``-equivalent soft-cancel step, give the inner task a
+        configurable grace period, then hard-cancel if still running.  Update
+        ``WATCHDOG_CANCELLATION_MODE`` and the doc in
+        ``docs/contributing/watchdog-cancellation.md`` accordingly.
+        """
         await self.initialize_baseline()
         task: asyncio.Task[T] = asyncio.create_task(awaitable)
         try:
@@ -153,7 +184,15 @@ class GenerationProgressWatchdog:
         reason: str,
         details: dict[str, Any] | None = None,
     ) -> None:
-        """Persist a watchdog control decision for status/debug surfaces."""
+        """Persist a watchdog control decision for status/debug surfaces.
+
+        The stored event always includes ``cancellation_mode`` in its
+        ``details`` dict so downstream projectors and tests can assert which
+        cancellation contract was in effect without inspecting the source.
+        """
+        merged: dict[str, Any] = {"cancellation_mode": WATCHDOG_CANCELLATION_MODE}
+        if details:
+            merged.update(details)
         await self.event_store.append(
             lineage_generation_watchdog_decision(
                 self.lineage_id,
@@ -161,7 +200,7 @@ class GenerationProgressWatchdog:
                 action,
                 reason,
                 execution_id=self.execution_id,
-                details=details,
+                details=merged,
             )
         )
 
@@ -450,4 +489,5 @@ class GenerationProgressWatchdog:
 __all__ = [
     "GenerationProgressWatchdog",
     "GenerationWatchdogTimeout",
+    "WATCHDOG_CANCELLATION_MODE",
 ]

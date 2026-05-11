@@ -18,6 +18,7 @@ from ouroboros.events.lineage import lineage_generation_failed
 from ouroboros.evolution.loop import EvolutionaryLoop, StepAction
 import ouroboros.evolution.watchdog as watchdog_module
 from ouroboros.evolution.watchdog import (
+    WATCHDOG_CANCELLATION_MODE,
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
 )
@@ -562,3 +563,37 @@ async def test_parent_cancellation_cancels_watched_generation() -> None:
     with pytest.raises(asyncio.CancelledError):
         await parent
     await asyncio.wait_for(child_cancelled.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_no_material_progress_timeout_emits_cancellation_mode() -> None:
+    """watchdog_decision event carries cancellation_mode after a no-progress timeout."""
+    event_store = await _store()
+    lineage_id = "lin-cancel-mode"
+    execution_id = "exec-cancel-mode"
+    watchdog = _watchdog(
+        event_store,
+        lineage_id=lineage_id,
+        execution_id=execution_id,
+        generation_no_progress_timeout_seconds=0.07,
+    )
+
+    async def busy_work() -> str:
+        try:
+            while True:
+                await asyncio.sleep(0.02)
+                await event_store.append(_workflow_progress(execution_id, completed_count=0))
+        except asyncio.CancelledError:
+            raise
+
+    with pytest.raises(GenerationWatchdogTimeout) as exc_info:
+        await watchdog.watch(busy_work())
+
+    assert exc_info.value.timeout_kind == "no_material_progress_timeout"
+
+    events = await event_store.replay("lineage", lineage_id)
+    decision_events = [e for e in events if e.type == "lineage.generation.watchdog_decision"]
+    assert decision_events, "expected at least one watchdog_decision event"
+    details = decision_events[-1].data.get("details", {})
+    assert details.get("cancellation_mode") == WATCHDOG_CANCELLATION_MODE
+    assert details["cancellation_mode"] == "cooperative_direct_one_stage"
