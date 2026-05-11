@@ -19,9 +19,11 @@ This RFC anchors the three PRs:
 2. `feat/interview-refine-restate` — encode the Refine and Restate gates
    into `skills/interview/SKILL.md` so the main session sends multi-section
    answers and confirms a one-line goal before seed generation.
-3. `feat/interview-adapter-isolation` — force `strict_mcp_config=True` on
-   the `ClaudeCodeAdapter` used by `InterviewEngine` so the spawned
-   `claude` subprocess does not boot ouroboros-mcp recursively.
+3. `feat/interview-adapter-isolation` — explicitly request
+   `strict_mcp_config=True` at nested MCP interview handler / adapter-factory
+   boundaries so the spawned `claude` subprocess does not boot
+   ouroboros-mcp recursively, while CLI and PM flows keep their normal
+   project/plugin MCP visibility.
 
 ## Context: the interview is the main session's question, not the LLM's
 
@@ -189,12 +191,13 @@ docstring states:
 > ouroboros MCP server (notably the interview policy path); generic
 > ``allowed_tools`` envelopes keep MCP-tool access intact."
 
-The interview policy path **never set this flag**. As a result, every
-LLM call from `InterviewEngine` spawned a `claude` subprocess that
-discovered the project `.mcp.json` and booted ouroboros-mcp inside the
-subprocess. For interviews running inside the ouroboros repository
-itself this produced a self-spawn loop: ouroboros-mcp → interview tool
-→ `claude` subprocess → ouroboros-mcp → ...
+The nested MCP interview handler must set this flag when it constructs
+the question-generation adapter. Without that explicit opt-in, LLM
+calls from the handler can spawn a `claude` subprocess that discovers
+the project `.mcp.json` and boots ouroboros-mcp inside the subprocess.
+For interviews running inside the ouroboros repository itself this
+produces a self-spawn loop: ouroboros-mcp → interview tool → `claude`
+subprocess → ouroboros-mcp → ...
 
 The boot cost accumulated per round. We measured the same 3-round
 interview in the same cwd:
@@ -210,57 +213,57 @@ useful error.
 
 ### Decision
 
-`InterviewEngine.__post_init__` automatically wraps any adapter that
-exposes a `with_strict_mcp_config()` method. The wrapper returns an
-adapter clone with `strict_mcp_config=True` set; if the adapter is
-already strict the wrapper returns `self` (idempotent). Adapters
-without the method (`anthropic`, `litellm`, etc.) are untouched.
+The nested MCP interview handler requests `strict_mcp_config=True`
+when it calls the LLM adapter factory. This keeps isolation scoped to
+the recursive MCP entrypoint. `InterviewEngine` itself does not wrap or
+mutate adapters, because CLI and PM interview flows may intentionally
+need project or plugin `.mcp.json` entries to remain reachable.
 
 `ClaudeCodeAdapter` gains a `with_strict_mcp_config()` factory method
 that copies its construction parameters and returns a new instance.
-This avoids mutating an adapter shared with non-interview phases.
+This avoids mutating an adapter shared with non-interview phases and
+gives explicit callers a small helper for scoped opt-in.
 
 The implementation surface is small:
 
 ```python
-# src/ouroboros/bigbang/interview.py — InterviewEngine.__post_init__
-self._isolate_adapter_for_question_generation()
-
-def _isolate_adapter_for_question_generation(self) -> None:
-    wrap = getattr(self.llm_adapter, "with_strict_mcp_config", None)
-    if callable(wrap):
-        self.llm_adapter = wrap()
+# src/ouroboros/mcp/tools/authoring_handlers.py — nested MCP handler
+adapter = create_llm_adapter(
+    ...,
+    use_case="interview",
+    strict_mcp_config=True,
+)
 ```
 
 ```python
 # src/ouroboros/providers/claude_code_adapter.py — new method
-def with_strict_mcp_config(self) -> "ClaudeCodeAdapter":
+def with_strict_mcp_config(self) -> ClaudeCodeAdapter:
     if self._strict_mcp_config:
         return self
     return ClaudeCodeAdapter(... strict_mcp_config=True)
 ```
 
-### Why force, not opt-in
+### Why explicit opt-in
 
-The interview LLM has **no legitimate use** for plugin MCP servers — by
-design it does not read code, browse the web, or call tools. Forcing
-isolation removes a footgun that has been present since
-`strict_mcp_config` was introduced and never actually used.
+The nested MCP interview LLM has **no legitimate use** for plugin MCP
+servers — by design it does not read code, browse the web, or call
+tools. Explicit isolation at that boundary removes the recursion
+footgun while preserving non-nested CLI and PM behavior.
 
 If a future use case needs interview-time access to an external MCP
 server, that should be modeled as a new explicit option (a sibling of
-`strict_mcp_config`), not as accidental inheritance from project state.
+`strict_mcp_config`) on the nested handler/factory path.
 
 ### Evidence
 
 Unit:
 
-- `InterviewEngine(llm_adapter=raw_adapter)` — `engine.llm_adapter` is a
-  new instance with `_strict_mcp_config=True`.
-- `InterviewEngine(llm_adapter=already_strict)` — `engine.llm_adapter is
-  already_strict` (idempotent).
-- `InterviewEngine(llm_adapter=non_claude_adapter)` — adapter unchanged
-  (no `with_strict_mcp_config` method).
+- `InterviewEngine(llm_adapter=adapter_with_helper)` — `engine.llm_adapter`
+  is the original adapter and `with_strict_mcp_config()` is not called.
+- Nested MCP `InterviewHandler.handle()` calls `create_llm_adapter()` with
+  `use_case="interview"` and `strict_mcp_config=True`.
+- `ClaudeCodeAdapter.with_strict_mcp_config()` returns a strict clone and
+  returns `self` when already strict (idempotent).
 
 Real LLM (cwd intentionally pointing at ouroboros-gemini3, which has
 `.mcp.json`):
@@ -298,10 +301,9 @@ All three PRs are backward compatible:
 - **PR 1** changes only constant values; no API changes. Worst case is
   reverting two integers.
 - **PR 2** is a documentation-only change to `skills/interview/SKILL.md`.
-- **PR 3** adds a method to `ClaudeCodeAdapter` and one call in
-  `InterviewEngine.__post_init__`. Adapters without the method are
-  untouched. The change is observable to operators only as faster,
-  more reliable interviews.
+- **PR 3** adds a method to `ClaudeCodeAdapter` and keeps the
+  `strict_mcp_config=True` opt-in at the nested MCP handler/factory
+  boundary. CLI and PM interview flows remain unchanged.
 
 We recommend landing in this order:
 
@@ -317,8 +319,9 @@ We recommend landing in this order:
 ## Open Questions
 
 - Should `with_strict_mcp_config` be promoted onto the base `LLMAdapter`
-  protocol with a default `return self`? Current implementation uses
-  duck typing via `getattr`, which is enough for now.
+  protocol with a default `return self`? Current implementation keeps it
+  as a ClaudeCodeAdapter helper for explicit callers, which is enough for
+  now.
 - Should `_MAX_TOTAL_PROMPT_CHARS` become an env-overridable config so
   power users can tune it without a code change? Likely yes if Change 1
   proves stable across adapters.

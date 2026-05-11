@@ -221,10 +221,11 @@ class TestInterviewEngineInit:
         assert not state_dir.exists()
 
         mock_adapter = MagicMock()
-        InterviewEngine(llm_adapter=mock_adapter, state_dir=state_dir)
+        engine = InterviewEngine(llm_adapter=mock_adapter, state_dir=state_dir)
 
         assert state_dir.exists()
         assert state_dir.is_dir()
+        assert engine.llm_adapter is mock_adapter
 
     def test_default_state_dir(self) -> None:
         """InterviewEngine uses default state directory."""
@@ -233,6 +234,17 @@ class TestInterviewEngineInit:
 
         expected_dir = Path.home() / ".ouroboros" / "data"
         assert engine.state_dir == expected_dir
+
+    def test_init_does_not_wrap_adapter_with_strict_mcp_config_helper(self, tmp_path: Path) -> None:
+        """InterviewEngine keeps adapter isolation scoped to explicit callers."""
+        wrapped_adapter = MagicMock()
+        adapter = MagicMock()
+        adapter.with_strict_mcp_config.return_value = wrapped_adapter
+
+        engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path)
+
+        assert engine.llm_adapter is adapter
+        adapter.with_strict_mcp_config.assert_not_called()
 
 
 class TestInterviewEngineStartInterview:

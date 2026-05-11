@@ -172,15 +172,12 @@ class ClaudeCodeAdapter:
             timeout_seconds=self._timeout,
         )
 
-    def with_strict_mcp_config(self) -> "ClaudeCodeAdapter":
+    def with_strict_mcp_config(self) -> ClaudeCodeAdapter:
         """Return an adapter clone with ``strict_mcp_config=True``.
 
-        Question-generation paths (notably ``InterviewEngine``) must prevent
-        the spawned ``claude`` subprocess from booting plugin-provided MCP
-        servers, including ouroboros's own ``.mcp.json``. Without this guard,
-        the interview adapter recursively spawns ouroboros-mcp on every call
-        and accumulates latency (observed 11s → 38s → 102s+ over three
-        rounds, eventually exceeding the configured timeout).
+        Nested MCP question-generation paths must prevent the spawned
+        ``claude`` subprocess from booting plugin-provided MCP servers,
+        including ouroboros's own ``.mcp.json``.
 
         Returns ``self`` when already strict (idempotent).
         """

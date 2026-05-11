@@ -253,6 +253,48 @@ class TestExecuteSingleRequestSystemPrompt:
 class TestAdapterOverheadReductions:
     """Test per-call overhead optimizations in ClaudeCodeAdapter."""
 
+    def test_with_strict_mcp_config_clones_adapter_config(self) -> None:
+        """Explicit strict-MCP opt-in returns a configured clone."""
+        allowed_tools = ["Read"]
+
+        def on_message(message_type: str, content: str) -> None:
+            assert message_type
+            assert content
+
+        adapter = ClaudeCodeAdapter(
+            permission_mode="acceptEdits",
+            cli_path="/bin/sh",
+            cwd="/tmp/project",
+            allowed_tools=allowed_tools,
+            max_turns=3,
+            on_message=on_message,
+            timeout=12.5,
+        )
+
+        strict_adapter = adapter.with_strict_mcp_config()
+
+        assert strict_adapter is not adapter
+        assert adapter._strict_mcp_config is False
+        assert strict_adapter._strict_mcp_config is True
+        assert strict_adapter._permission_mode == adapter._permission_mode
+        assert strict_adapter._cli_path == adapter._cli_path
+        assert strict_adapter._cwd == adapter._cwd
+        assert strict_adapter._allowed_tools == adapter._allowed_tools
+        assert strict_adapter._allowed_tools is not adapter._allowed_tools
+        assert strict_adapter._max_turns == adapter._max_turns
+        assert strict_adapter._on_message is on_message
+        assert strict_adapter._timeout == adapter._timeout
+
+        allowed_tools.append("Grep")
+        assert adapter._allowed_tools == ["Read"]
+        assert strict_adapter._allowed_tools == ["Read"]
+
+    def test_with_strict_mcp_config_is_idempotent(self) -> None:
+        """Already-strict adapters are returned unchanged."""
+        adapter = ClaudeCodeAdapter(strict_mcp_config=True)
+
+        assert adapter.with_strict_mcp_config() is adapter
+
     @pytest.mark.asyncio
     async def test_version_check_skip_env_defaults_to_one(self) -> None:
         """CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK defaults to '1' when OUROBOROS_SKIP_VERSION_CHECK is unset."""

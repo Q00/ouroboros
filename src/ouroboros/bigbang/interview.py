@@ -295,26 +295,6 @@ class InterviewEngine:
         if self.model is None:
             self.model = get_clarification_model()
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self._isolate_adapter_for_question_generation()
-
-    def _isolate_adapter_for_question_generation(self) -> None:
-        """Force the interview-time adapter into MCP-isolated mode.
-
-        The interview LLM only generates Socratic questions and does not need
-        codebase reads, web access, or plugin MCP servers — those are the
-        main session's responsibility (see ``commands/interview.md`` PATH
-        routing). When the adapter's spawned ``claude`` subprocess discovers
-        ouroboros's own ``.mcp.json`` it boots ouroboros-mcp recursively on
-        every call, producing self-spawn latency that accumulates per round
-        (observed 11s → 38s → 102s+). Forcing ``strict_mcp_config=True`` on
-        the interview adapter prevents that recursion at the source.
-
-        Only adapters that expose ``with_strict_mcp_config`` are wrapped;
-        other adapters (e.g. anthropic, litellm) are left untouched.
-        """
-        wrap = getattr(self.llm_adapter, "with_strict_mcp_config", None)
-        if callable(wrap):
-            self.llm_adapter = wrap()
 
     def _state_file_path(self, interview_id: str) -> Path:
         """Get the path to the state file for an interview.
