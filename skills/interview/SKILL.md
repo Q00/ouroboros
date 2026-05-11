@@ -155,6 +155,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      }
      ```
    - Prefix answer with `[from-code]` when sending to MCP
+   - If the user picks "Yes, correct", send the concise factual answer with
+     `[from-code]` and do not apply the Refine gate
+   - If the user corrects the finding or adds reasoning, constraints, or scope,
+     route that free-text answer through the Refine gate and send the
+     multi-section payload with `[from-user][refined]` (the human is now the
+     source of the corrected answer)
    - Increment the auto-confirm counter (see Dialectic Rhythm Guard below)
 
    **PATH 2 — Human Judgment** (decisions only humans can make):
@@ -192,6 +198,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      }
      ```
    - Prefix answer with `[from-research]` when sending to MCP
+   - If the user picks "Yes, correct", send the concise factual answer with
+     `[from-research]` and do not apply the Refine gate
+   - If the user corrects the finding or adds reasoning, constraints, or scope,
+     route that free-text answer through the Refine gate and send the
+     multi-section payload with `[from-user][refined]` (the human is now the
+     source of the corrected answer)
    - **Facts, not decisions**: "Stripe rate limit is 100 req/s" is research.
      "We should use Stripe" is a DECISION — route to PATH 2.
 
@@ -206,10 +218,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    into a label, which degrades both the next question's quality and the
    ambiguity scoring. Send the user's full reasoning, structured.
 
-   Single-line answers are OK only for **PATH 1a auto-confirmed facts** and
-   for short PATH 2 answers that have no reasoning or constraints attached
-   (e.g., "Yes" / "No" / "Python 3.12"). Everything else must be sent as a
-   multi-section payload below.
+   Single-line answers are OK only for **PATH 1a auto-confirmed facts**,
+   **PATH 1b / PATH 4 pre-built option confirmations** where the factual
+   answer is already explicit, and short PATH 2 answers that have no reasoning
+   or constraints attached (e.g., "Yes" / "No" / "Python 3.12"). User
+   corrections, free-text reasoning, constraints, or scope decisions must be
+   sent as the multi-section payload below after the Refine gate.
 
    ```
    Tool: ouroboros_interview
@@ -238,12 +252,15 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Short-answer cases (single-line OK):
    ```
    "[from-code][auto-confirmed] Python 3.12, FastAPI (pyproject.toml)"
+   "[from-code] JWT-based auth in src/auth/jwt.py"
+   "[from-research] Stripe allows 100 read ops/sec and 25 write ops/sec in live mode"
    "[from-user] Yes"
    ```
 
-   The `[from-refined]` marker (or appending `[refined]` to existing prefixes)
-   signals that the answer has been through the Refine gate (see Step 4).
-   MCP records the answer, generates the next question, and returns it.
+   Append `[refined]` to an existing valid prefix (`[from-code]`,
+   `[from-user]`, or `[from-research]`) only when the answer has been through
+   the Refine gate (see Step 4). MCP records the answer, generates the next
+   question, and returns it.
 
 4. **Refine before forwarding** (free-text answers only):
 
