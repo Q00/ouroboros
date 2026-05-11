@@ -158,6 +158,56 @@ async def test_question_failure_event_uses_compact_provider_error(
 
 
 @pytest.mark.asyncio
+async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_path: Path) -> None:
+    """Provider compact diagnostics are not automatically safe for lifecycle events."""
+    provider_error = ProviderError(
+        "Claude Agent SDK request failed in /Users/alice/workspace/project",
+        provider="claude_code",
+        details={
+            "error_type": "RuntimeError",
+            "session_id": "claude-session-1",
+            "stderr": "trace mentions /Users/alice/.claude/config.json",
+            "claudecode_present": True,
+            "claude_code_entrypoint": "/Users/alice/bin/claude",
+            "configured_cli_path": "/opt/homebrew/bin/claude",
+            "cwd": "/Users/alice/workspace/project",
+            "env_override_keys": ["ANTHROPIC_API_KEY"],
+        },
+    )
+
+    mock_store = AsyncMock()
+    engine = _FakeInterviewEngine(state_dir=tmp_path, question_error=provider_error)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=mock_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle({"initial_context": "Build a CLI", "cwd": str(tmp_path)})
+    await handler.close()
+
+    assert outcome.is_ok
+    failed_events = [
+        call.args[0]
+        for call in mock_store.append.await_args_list
+        if getattr(call.args[0], "type", None) == "interview.failed"
+    ]
+    assert failed_events, "question-generation failure must emit interview.failed"
+    event_error = failed_events[-1].data["error"]
+    assert "Claude Agent SDK request failed" in event_error
+    assert "error_type: RuntimeError" in event_error
+    assert "session_id: claude-session-1" in event_error
+    assert "/Users/alice" not in event_error
+    assert "/opt/homebrew" not in event_error
+    assert "configured_cli_path" not in event_error
+    assert "cwd:" not in event_error
+    assert "stderr" not in event_error
+    assert "claude_code_entrypoint" not in event_error
+
+
+@pytest.mark.asyncio
 async def test_subprocess_handler_honours_caller_supplied_interview_id(tmp_path: Path) -> None:
     """The auto driver pre-allocates an id; the handler must use it verbatim."""
 

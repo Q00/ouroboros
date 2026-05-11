@@ -270,20 +270,68 @@ def _ambiguity_warning_for_failed_question(
     return ""
 
 
+_INTERVIEW_EVENT_ERROR_DETAIL_KEYS = (
+    "error_type",
+    "session_id",
+    "failure_category",
+    "auth_plane",
+    "openai_responses_endpoint_seen",
+    "returncode",
+    "subtype",
+    "stop_reason",
+    "partial_rejected",
+    "content_length",
+    "timeout_seconds",
+    "attempt",
+    "depth",
+)
+
+_INTERVIEW_EVENT_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<!:)"
+    r"(?:"
+    r"~[/\\][^\s,;:'\")\]}]+"
+    r"|/[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)+"
+    r"|[A-Za-z]:\\[^\s,;:'\")\]}]+"
+    r")"
+)
+
+
+def _redact_interview_event_error_text(text: str) -> str:
+    """Remove local path-shaped substrings from persisted interview event text."""
+    return _INTERVIEW_EVENT_ABSOLUTE_PATH_RE.sub("[redacted path]", text)
+
+
 def _format_interview_failure_event_error(error: Any) -> str:
     """Return an event-safe error string for interview failure events.
 
     Provider errors can carry rich machine diagnostics in ``details``.  Those
-    details are intentionally useful for structured callers, but ``str(error)``
-    renders the whole dict and can copy local auth paths (for example
-    ``CODEX_HOME`` / ``HOME``) into persisted interview lifecycle events.
-    Prefer the provider's compact formatter for event text while leaving the
-    original error object untouched for logs and structured callers.
+    details are intentionally useful for structured callers, but event text is a
+    persisted/user-adjacent surface.  Render only the provider message plus an
+    explicit allowlist of scalar, non-path diagnostic fields; keep path-bearing
+    fields such as ``cwd`` and ``configured_cli_path`` in the original error
+    object for internal diagnostics only.
     """
-    formatter = getattr(error, "format_details", None)
-    if callable(formatter):
-        return formatter()
-    return str(error)
+    message = getattr(error, "message", None)
+    if not isinstance(message, str) or not message:
+        message = str(error)
+    rendered = [_redact_interview_event_error_text(message)]
+
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        for key in _INTERVIEW_EVENT_ERROR_DETAIL_KEYS:
+            value = details.get(key)
+            if value is None or isinstance(value, dict | list | tuple | set):
+                continue
+            rendered.append(f"{key}: {_redact_interview_event_error_text(str(value))}")
+
+    provider = getattr(error, "provider", None)
+    if provider:
+        rendered.append(f"provider: {_redact_interview_event_error_text(str(provider))}")
+    status_code = getattr(error, "status_code", None)
+    if status_code is not None:
+        rendered.append(f"status_code: {status_code}")
+
+    return "\n".join(rendered)
 
 
 def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
