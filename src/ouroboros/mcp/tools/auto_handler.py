@@ -334,10 +334,11 @@ class AutoHandler:
         # artifact to grade; instantiating QAHandler would be wasted setup.
         evaluator = None
         if complete_product:
+            qa_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
             qa_handler = QAHandler(
                 llm_backend=self.llm_backend,
                 agent_runtime_backend=runtime_backend,
-                opencode_mode=opencode_mode,
+                opencode_mode=qa_opencode_mode,
             )
             evaluator = HandlerEvaluator(qa_handler)
         pipeline = AutoPipeline(
