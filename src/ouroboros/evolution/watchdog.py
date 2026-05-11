@@ -89,8 +89,9 @@ class GenerationProgressWatchdog:
     durably persisted.  The production loop treats
     ``GenerationWatchdogTimeout`` as ``StepAction.FAILED``; replay consumers
     read the trailing directive via ``event_store.replay("lineage", lineage_id)``.
-    That directive is ``Directive.RETRY`` by default, or ``Directive.CANCEL``
-    once the retry budget is exhausted.
+    Because the watchdog timeout path does not currently pass a real
+    ``retry_budget_remaining`` value, that directive follows the default
+    ``StepAction.FAILED`` mapping to ``Directive.RETRY``.
     The watchdog itself is stateless across attempts: each new instance starts
     fresh ``initialize_baseline()`` cursors, so stale events from the previous
     attempt are not double-counted as activity or material progress.
