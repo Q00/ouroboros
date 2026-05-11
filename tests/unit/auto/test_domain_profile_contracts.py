@@ -218,8 +218,15 @@ def test_registry_union_predicates_applies_threshold() -> None:
     assert "wcag_contrast" not in codes
 
 
-def test_default_registry_starts_empty() -> None:
-    # DEFAULT_REGISTRY is a module-level singleton; PR-2 registers coding here.
-    # At this point (PR-1) it must be empty.
-    assert DEFAULT_REGISTRY.all() == ()
-    assert DEFAULT_REGISTRY.detect_best(Path("/tmp")) is None
+def test_default_registry_contains_coding_after_pr2(tmp_path: Path) -> None:
+    # DEFAULT_REGISTRY is a module-level singleton.  PR-2 registers the
+    # built-in ``coding`` profile; importing the profiles package is enough.
+    import ouroboros.auto.profiles  # noqa: F401 — trigger registration
+
+    from ouroboros.auto.profiles.coding import CODING_PROFILE
+
+    assert DEFAULT_REGISTRY.get("coding") is CODING_PROFILE
+    # detect_best only returns a profile when the detector scores > 0.0;
+    # create a pyproject.toml marker so the coding detector fires.
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='t'\n")
+    assert DEFAULT_REGISTRY.detect_best(tmp_path) is CODING_PROFILE
