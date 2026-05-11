@@ -2,7 +2,16 @@
 
 ## Status
 
-**Proposed (2026-05-11).**
+**Accepted (2026-05-11).** Implemented via #822 (adapter isolation), #823
+(prompt budget), and #824 (Refine/Restate gates), all merged 2026-05-11.
+
+Scope note on Change 3: the merged implementation applies
+`strict_mcp_config=True` at the nested MCP handler boundary
+(`mcp/tools/authoring_handlers.py`) rather than globally in
+`InterviewEngine.__post_init__`. CLI and PM interview entrypoints retain
+their existing plugin/project `.mcp.json` behavior. A stricter
+default-on policy for those entrypoints is deferred pending empirical
+self-spawn measurements outside the MCP host (see follow-up).
 
 Three coupled changes harden the interview phase against silent answer
 truncation, single-line answer compression, and self-spawn recursion of
