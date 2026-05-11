@@ -16,9 +16,10 @@ second built-in profile.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
@@ -29,6 +30,27 @@ __all__ = [
     "RepoContextExtractor",
     "VerifiablePredicate",
 ]
+
+
+def _freeze_safe_default_value(value: Any) -> Any:
+    """Recursively freeze common mutable containers used by safe defaults."""
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_safe_default_value(nested) for key, nested in value.items()}
+        )
+    if isinstance(value, tuple):
+        return tuple(_freeze_safe_default_value(item) for item in value)
+    if isinstance(value, list):
+        return tuple(_freeze_safe_default_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_safe_default_value(item) for item in value)
+    return value
+
+
+def _freeze_safe_defaults(safe_defaults: Mapping[str, Any]) -> Mapping[str, Any]:
+    return MappingProxyType(
+        {key: _freeze_safe_default_value(value) for key, value in safe_defaults.items()}
+    )
 
 
 @runtime_checkable
@@ -111,6 +133,7 @@ class DomainProfile:
     safe_defaults:
         Domain-specific defaults keyed by ledger section.  PR-5 will
         introduce a richer ``_DefaultSpec`` shape; ``Any`` is intentional here.
+        Common mutable containers are recursively frozen at construction time.
     detector:
         A callable ``(cwd: Path) -> float`` returning a confidence in
         [0.0, 1.0] that *cwd* belongs to this domain.
@@ -121,8 +144,11 @@ class DomainProfile:
     verifiable_predicates: tuple[VerifiablePredicate, ...]
     intent_classifier: IntentClassifier
     vague_terms: frozenset[str]
-    safe_defaults: dict[str, Any]
+    safe_defaults: Mapping[str, Any]
     detector: Callable[[Path], float]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "safe_defaults", _freeze_safe_defaults(self.safe_defaults))
 
     def find_verifiable_predicate(self, criterion: str) -> VerifiablePredicate | None:
         """Return the first predicate whose ``matches`` returns True, or None."""

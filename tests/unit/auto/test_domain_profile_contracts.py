@@ -7,6 +7,7 @@ imported; every fixture is a minimal inline stub.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,7 @@ def _make_profile(
     name: str = "coding",
     confidence: float = 0.8,
     predicates: tuple[VerifiablePredicate, ...] = (),
+    safe_defaults: Mapping[str, Any] | None = None,
 ) -> DomainProfile:
     return DomainProfile(
         name=name,
@@ -73,7 +75,9 @@ def _make_profile(
         verifiable_predicates=predicates,
         intent_classifier=_SimpleClassifier(),
         vague_terms=frozenset({"easy", "clean"}),
-        safe_defaults={"runtime_context": "existing project"},
+        safe_defaults=(
+            safe_defaults if safe_defaults is not None else {"runtime_context": "existing project"}
+        ),
         detector=lambda _cwd: confidence,
     )
 
@@ -116,6 +120,37 @@ def test_domain_profile_is_frozen() -> None:
     profile = _make_profile()
     with pytest.raises(FrozenInstanceError):
         profile.name = "mutated"  # type: ignore[misc]
+
+
+def test_domain_profile_safe_defaults_are_deeply_frozen() -> None:
+    source_defaults: dict[str, Any] = {
+        "runtime_context": {
+            "summary": "existing project",
+            "commands": ["pytest"],
+            "tags": {"contract"},
+        },
+    }
+    profile = _make_profile(safe_defaults=source_defaults)
+
+    with pytest.raises(TypeError):
+        profile.safe_defaults["acceptance_criteria"] = "specific"  # type: ignore[index]
+
+    runtime_context = profile.safe_defaults["runtime_context"]
+    assert isinstance(runtime_context, Mapping)
+    with pytest.raises(TypeError):
+        runtime_context["summary"] = "mutated"  # type: ignore[index]
+
+    commands = runtime_context["commands"]
+    assert commands == ("pytest",)
+    with pytest.raises(TypeError):
+        commands[0] = "ruff"  # type: ignore[index]
+
+    assert runtime_context["tags"] == frozenset({"contract"})
+
+    source_defaults["runtime_context"]["summary"] = "mutated outside profile"
+    source_defaults["runtime_context"]["commands"].append("ruff")
+    assert runtime_context["summary"] == "existing project"
+    assert runtime_context["commands"] == ("pytest",)
 
 
 def test_find_verifiable_predicate_returns_first_match() -> None:
@@ -218,8 +253,7 @@ def test_registry_union_predicates_applies_threshold() -> None:
     assert "wcag_contrast" not in codes
 
 
-def test_default_registry_starts_empty() -> None:
-    # DEFAULT_REGISTRY is a module-level singleton; PR-2 registers coding here.
-    # At this point (PR-1) it must be empty.
-    assert DEFAULT_REGISTRY.all() == ()
-    assert DEFAULT_REGISTRY.detect_best(Path("/tmp")) is None
+def test_default_registry_is_a_profile_registry_singleton() -> None:
+    # PR-2 will register the coding profile here; avoid asserting transient
+    # global emptiness in this contract-only test module.
+    assert isinstance(DEFAULT_REGISTRY, DomainProfileRegistry)
