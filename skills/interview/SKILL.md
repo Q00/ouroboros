@@ -453,7 +453,10 @@ not the codebase or external docs. Auto-confirmed answers especially need this
 guard: if the AI answers too many questions on its own, the user loses awareness
 of what the AI is assuming about their project.
 
-Reset the counter whenever user answers directly (PATH 2 or PATH 3).
+Reset the counter whenever user answers directly (PATH 2 or PATH 3), or when a
+PATH 1b / PATH 4 correction is routed through the Refine gate and sent as
+`[from-user][refined]`. Only accepted code/research confirmations advance the
+non-user streak.
 
 #### Retry on Failure
 
@@ -487,6 +490,12 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 8. Prefer closure only after applying the Seed-ready Acceptance Guard above.
    Then **apply the Restate gate** (Path A Step 9): collapse the agreed answers
    into a one-sentence goal and confirm with the user before suggesting `ooo seed`.
+   In fallback mode there is no MCP state to refresh, so if the user picks
+   "Adjust wording" or "Missing scope", ask the same follow-up questions from
+   Step 9, apply the correction directly to the local interview ledger and
+   one-sentence goal, rerun the Seed-ready Acceptance Guard locally, and ask the
+   Restate gate again with the corrected goal line. Do not try to "send it back
+   to MCP" in Path B; the conversation context is the source of truth.
 9. Continue until the user says "done"
 10. Interview results live in conversation context (not persisted)
 11. After completion, suggest the next step in `📍 Next:` format:
