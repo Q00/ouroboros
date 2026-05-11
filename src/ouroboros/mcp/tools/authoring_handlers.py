@@ -1515,7 +1515,7 @@ class InterviewHandler:
                         round_number=len(state.rounds),
                         payload_chars=len(start_response_text),
                         transcript_chars=_compute_transcript_chars(state),
-                        ambiguity_prefix_present=display_question.startswith("(ambiguity:"),
+                        ambiguity_prefix_present=start_response_text.startswith("(ambiguity:"),
                         is_length_guard=is_length_guard,
                     )
                 )
@@ -1588,7 +1588,7 @@ class InterviewHandler:
                             round_number=len(state.rounds),
                             payload_chars=len(resume_response_text),
                             transcript_chars=_compute_transcript_chars(state),
-                            ambiguity_prefix_present=display_question.startswith("(ambiguity:"),
+                            ambiguity_prefix_present=resume_response_text.startswith("(ambiguity:"),
                             is_length_guard=resume_is_length_guard,
                         )
                     )
@@ -1975,7 +1975,7 @@ class InterviewHandler:
                         round_number=len(state.rounds),
                         payload_chars=len(answer_response_text),
                         transcript_chars=_compute_transcript_chars(state),
-                        ambiguity_prefix_present=display_question.startswith("(ambiguity:"),
+                        ambiguity_prefix_present=answer_response_text.startswith("(ambiguity:"),
                         is_length_guard=answer_is_length_guard,
                     )
                 )

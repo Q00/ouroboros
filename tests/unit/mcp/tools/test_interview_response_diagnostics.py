@@ -77,6 +77,22 @@ class _StubInterviewEngine:
     async def ask_next_question(self, state: InterviewState) -> Result[str, MCPServerError]:
         return Result.ok(self.next_question)
 
+    async def record_response(
+        self,
+        state: InterviewState,
+        user_response: str,
+        question: str,
+    ) -> Result[InterviewState, MCPServerError]:
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=question,
+                user_response=user_response,
+            )
+        )
+        state.mark_updated()
+        return Result.ok(state)
+
     async def save_state(self, state: InterviewState) -> Result[Path, MCPServerError]:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self.state_dir / f"interview_{state.interview_id}.json"
@@ -207,3 +223,97 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
     assert diagnostic.data["is_length_guard"] is False
     # Transcript chars must include the pending question text length.
     assert diagnostic.data["transcript_chars"] >= len("What is the main goal?")
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_ambiguity_prefix_reflects_full_response_text(
+    tmp_path: Path,
+) -> None:
+    """The diagnostic flag is about the emitted body, not the embedded question."""
+    pending_state = InterviewState(
+        interview_id="interview_resume00000002",
+        initial_context="ctx",
+        status=InterviewStatus.IN_PROGRESS,
+        ambiguity_score=0.42,
+    )
+    pending_state.rounds.append(
+        InterviewRound(
+            round_number=1,
+            question="What is the main goal?",
+            user_response=None,
+        )
+    )
+
+    event_store = _CapturingEventStore()
+    engine = _StubInterviewEngine(state_dir=tmp_path, initial_state=pending_state)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=event_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle({"session_id": pending_state.interview_id})
+    assert outcome.is_ok
+    response_text = outcome.value.content[0].text
+    assert response_text.startswith("Session ")
+    assert "(ambiguity: 0.42)" in response_text
+    await _drain_bg_tasks(handler)
+
+    diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
+    assert diagnostic is not None
+    assert diagnostic.data["ambiguity_prefix_present"] is False
+
+
+@pytest.mark.asyncio
+async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
+    """Answer path: recording an answer and returning the next question emits diagnostics."""
+    pending_state = InterviewState(
+        interview_id="interview_answer00000001",
+        initial_context="ctx",
+        status=InterviewStatus.IN_PROGRESS,
+    )
+    pending_state.rounds.append(
+        InterviewRound(
+            round_number=1,
+            question="What should this tool do?",
+            user_response=None,
+        )
+    )
+
+    event_store = _CapturingEventStore()
+    engine = _StubInterviewEngine(
+        state_dir=tmp_path,
+        initial_state=pending_state,
+        next_question="Who uses it first?",
+    )
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=event_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {"session_id": pending_state.interview_id, "answer": "It creates reports."}
+    )
+    assert outcome.is_ok
+    assert outcome.value.content[0].text == (
+        f"Session {pending_state.interview_id}\n\nWho uses it first?"
+    )
+    await _drain_bg_tasks(handler)
+
+    diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
+    assert diagnostic is not None
+    assert diagnostic.data["response_kind"] == "answer"
+    assert diagnostic.data["round_number"] == 2
+    assert diagnostic.data["payload_chars"] == len(outcome.value.content[0].text)
+    assert diagnostic.data["transcript_chars"] == (
+        len("What should this tool do?")
+        + len("It creates reports.")
+        + len("Who uses it first?")
+    )
+    assert diagnostic.data["ambiguity_prefix_present"] is False
+    assert diagnostic.data["is_length_guard"] is False

@@ -98,7 +98,8 @@ def interview_response_emitted(
         round_number: Round count at emission time (``len(state.rounds)``).
         payload_chars: Total characters in the response text body.
         transcript_chars: Sum of ``len(question) + len(user_response)`` for
-            every completed round in ``state.rounds``.
+            every round in ``state.rounds``, including pending questions with
+            no response yet.
         ambiguity_prefix_present: ``True`` when the response text begins
             with ``(ambiguity: ...)``.
         is_length_guard: ``True`` when the response carries the
