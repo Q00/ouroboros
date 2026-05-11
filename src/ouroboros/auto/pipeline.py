@@ -274,10 +274,26 @@ class AutoPipeline:
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
+            retry_ralph_handoff = (
+                resume_phase is AutoPhase.RALPH_HANDOFF
+                and state.last_error != RALPH_CANCEL_BLOCKER_REASON
+            )
             state.recover(
                 resume_phase,
                 f"resuming {resume_phase.value} after {previous_phase.value}: {state.last_error or 'no error recorded'}",
             )
+            if retry_ralph_handoff:
+                # Resumable Ralph blockers (for example iteration_timeout)
+                # should retry Ralph after the operator fixes the cause. Do
+                # not poll/reuse the terminal job that produced the blocker;
+                # otherwise --resume loops back to the same terminal status.
+                # User-cancelled jobs are excluded above so their explicit
+                # cancellation blocker remains preserved and non-retried.
+                state.ralph_job_id = None
+                state.ralph_lineage_id = None
+                state.ralph_dispatch_mode = None
+                state.run_handoff_guidance = None
+                state.run_handoff_status = "ralph_retry_after_blocker"
             # Legacy auto sessions saved before #779 had no
             # ``deadline_at_epoch``, and ``from_dict()`` deliberately leaves
             # the deadline unset for terminal phases. After recovering them
@@ -468,6 +484,15 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase == AutoPhase.RALPH_HANDOFF:
+            if state.run_handoff_status == "ralph_retry_after_blocker" and not state.ralph_job_id:
+                return await self._handoff_to_ralph(
+                    state,
+                    ledger,
+                    seed,
+                    review,
+                    run_subagent=None,
+                    reattach_terminal=False,
+                )
             return await self._resume_ralph_handoff(state, ledger, review=review)
 
         if self._enforce_deadline(state):
@@ -851,6 +876,8 @@ class AutoPipeline:
         seed: Seed,
         review: SeedReview | None,
         run_subagent: dict[str, Any] | None,
+        *,
+        reattach_terminal: bool = True,
     ) -> AutoPipelineResult:
         """Run the RUN → RALPH_HANDOFF → terminal-phase chain.
 
@@ -865,10 +892,16 @@ class AutoPipeline:
         assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
         lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
         state.ralph_lineage_id = lineage_id
-        state.transition(
-            AutoPhase.RALPH_HANDOFF,
-            f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
-        )
+        if state.phase is AutoPhase.RALPH_HANDOFF:
+            state.mark_progress(
+                f"retrying grade {state.last_grade or state.required_grade} Seed in Ralph loop",
+                tool_name="ralph_starter",
+            )
+        else:
+            state.transition(
+                AutoPhase.RALPH_HANDOFF,
+                f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
+            )
         self._save(state)
         max_total_seconds: float | None = None
         per_iteration_timeout_seconds: float | None = None
@@ -941,6 +974,8 @@ class AutoPipeline:
         }
         if _accepts_keyword(self.ralph_starter, "on_dispatched"):
             starter_kwargs["on_dispatched"] = _checkpoint_dispatch
+        if _accepts_keyword(self.ralph_starter, "reattach_terminal"):
+            starter_kwargs["reattach_terminal"] = reattach_terminal
         try:
             ralph_call = self.ralph_starter(seed, **starter_kwargs)
             if state.deadline_at is None:
