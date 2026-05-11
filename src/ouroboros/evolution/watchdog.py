@@ -9,9 +9,15 @@ import time
 from typing import Any
 
 from ouroboros.config.models import RuntimeControlsConfig
+from ouroboros.core.directive import Directive
 from ouroboros.core.errors import OuroborosError
 from ouroboros.events.base import BaseEvent
+from ouroboros.events.control import create_control_directive_emitted_event
 from ouroboros.events.lineage import lineage_generation_watchdog_decision
+from ouroboros.evolution.directive_mapping import (
+    is_terminal_directive,
+    watchdog_timeout_to_directive,
+)
 from ouroboros.persistence.event_store import EventStore
 
 _LINEAGE_MATERIAL_EVENTS = frozenset(
@@ -124,10 +130,19 @@ class GenerationProgressWatchdog:
                 await task
             except asyncio.CancelledError:
                 pass
+            # Issue #578 — directive mapping. Resolve the timeout kind
+            # onto the shared ``Directive`` vocabulary so the watchdog's
+            # decision joins the same control-plane lane as
+            # ``StepAction``-level directives emitted by the evolution
+            # loop. ``None`` (forward-compat for unknown timeout kinds)
+            # keeps the legacy ``watchdog_decision`` event flowing
+            # untouched.
+            directive = watchdog_timeout_to_directive(exc.timeout_kind)
             await self.emit_decision(
                 action="timeout",
                 reason=exc.message,
                 details=exc.details,
+                directive=directive,
             )
             raise
         except asyncio.CancelledError:
@@ -176,8 +191,46 @@ class GenerationProgressWatchdog:
         action: str,
         reason: str,
         details: dict[str, Any] | None = None,
+        directive: Directive | None = None,
     ) -> None:
-        """Persist a watchdog control decision for status/debug surfaces."""
+        """Persist a watchdog control decision for status/debug surfaces.
+
+        When *directive* is provided (issue #578), two events are
+        appended in order:
+
+        1. ``lineage.generation.watchdog_decision`` carries the
+           timeout details with the resolved directive embedded in
+           ``details["directive"]`` so existing consumers that already
+           filter by this event type can pick up the directive without
+           subscribing to a second stream.
+        2. ``control.directive.emitted`` is the dedicated control-plane
+           record, aggregated by ``(target_type="lineage",
+           target_id=self.lineage_id)`` so it interleaves with
+           ``StepAction``-level directives the evolution loop emits on
+           the same lineage. ``emitted_by="watchdog"`` lets projectors
+           distinguish watchdog-sourced directives from evolver-sourced
+           ones at a glance.
+
+        ``directive=None`` preserves the pre-#578 behaviour: only the
+        watchdog_decision event is persisted. This keeps callers that
+        emit non-timeout decisions (or that don't yet have a directive
+        mapping for their timeout kind) working unchanged.
+        """
+        decision_details: dict[str, Any] | None
+        if directive is not None and details is not None:
+            decision_details = {
+                **details,
+                "directive": directive.value,
+                "directive_is_terminal": is_terminal_directive(directive),
+            }
+        elif directive is not None:
+            decision_details = {
+                "directive": directive.value,
+                "directive_is_terminal": is_terminal_directive(directive),
+            }
+        else:
+            decision_details = details
+
         await self.event_store.append(
             lineage_generation_watchdog_decision(
                 self.lineage_id,
@@ -185,7 +238,28 @@ class GenerationProgressWatchdog:
                 action,
                 reason,
                 execution_id=self.execution_id,
-                details=details,
+                details=decision_details,
+            )
+        )
+
+        if directive is None:
+            return
+
+        await self.event_store.append(
+            create_control_directive_emitted_event(
+                target_type="lineage",
+                target_id=self.lineage_id,
+                emitted_by="watchdog",
+                directive=directive,
+                reason=reason,
+                lineage_id=self.lineage_id,
+                generation_number=self.generation_number,
+                execution_id=self.execution_id,
+                extra={
+                    "watchdog_action": action,
+                    "timeout_kind": (details or {}).get("timeout_kind"),
+                    "is_terminal": is_terminal_directive(directive),
+                },
             )
         )
 

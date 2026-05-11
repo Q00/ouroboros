@@ -241,8 +241,142 @@ async def test_busy_run_without_material_progress_times_out() -> None:
 
     assert exc_info.value.timeout_kind == "no_material_progress_timeout"
     events = await event_store.replay("lineage", lineage_id)
-    assert any(event.type == "lineage.generation.watchdog_decision" for event in events)
-    assert events[-1].type == "lineage.generation.watchdog_decision"
+    # The watchdog_decision event is the legacy contract — kept so
+    # status surfaces that already filter by this type continue
+    # working. Per #578, the watchdog also now emits a
+    # control.directive.emitted event after the decision, so we no
+    # longer assert the decision event is *last* — only that it is
+    # present and ordered before the directive event.
+    decision_idx = next(
+        (
+            i
+            for i, event in enumerate(events)
+            if event.type == "lineage.generation.watchdog_decision"
+        ),
+        None,
+    )
+    assert decision_idx is not None
+    directive_idx = next(
+        (i for i, event in enumerate(events) if event.type == "control.directive.emitted"),
+        None,
+    )
+    assert directive_idx is not None
+    assert decision_idx < directive_idx
+
+
+@pytest.mark.asyncio
+async def test_no_progress_timeout_emits_unstuck_directive() -> None:
+    """Issue #578 directive-mapping contract.
+
+    A ``no_material_progress_timeout`` is the canonical stagnation
+    pattern (events flowing but no material progress accruing), so
+    the watchdog must surface its decision as ``Directive.UNSTUCK``
+    on the control plane — not as an opaque timeout error.
+
+    Pins three things:
+
+    1. The legacy ``lineage.generation.watchdog_decision`` event
+       still lands (existing consumers keep working), and its
+       ``details`` now carries the resolved directive so single-
+       stream consumers do not have to subscribe to a second event.
+    2. A dedicated ``control.directive.emitted`` event lands keyed
+       on the lineage aggregate, with ``emitted_by="watchdog"`` so
+       projectors can attribute the directive to its source.
+    3. ``is_terminal`` matches the directive (UNSTUCK is non-
+       terminal — the lineage can recover via a lateral persona).
+    """
+    event_store = await _store()
+    lineage_id = "lin-578-unstuck"
+    execution_id = "exec-578-unstuck"
+    watchdog = _watchdog(
+        event_store,
+        lineage_id=lineage_id,
+        execution_id=execution_id,
+        generation_no_progress_timeout_seconds=0.07,
+    )
+
+    async def busy_work() -> str:
+        await event_store.append(_workflow_progress(execution_id, completed_count=0))
+        try:
+            while True:
+                await asyncio.sleep(0.02)
+                await event_store.append(_workflow_progress(execution_id, completed_count=0))
+        except asyncio.CancelledError:
+            raise
+
+    with pytest.raises(GenerationWatchdogTimeout):
+        await watchdog.watch(busy_work())
+
+    events = await event_store.replay("lineage", lineage_id)
+
+    # Legacy event still present and now carries the directive.
+    decision_events = [e for e in events if e.type == "lineage.generation.watchdog_decision"]
+    assert len(decision_events) == 1
+    decision_details = decision_events[0].data.get("details") or {}
+    assert decision_details.get("directive") == "unstuck"
+    assert decision_details.get("directive_is_terminal") is False
+
+    # Dedicated control-plane event lands on the lineage aggregate.
+    directive_events = [e for e in events if e.type == "control.directive.emitted"]
+    assert len(directive_events) == 1
+    directive_event = directive_events[0]
+    assert directive_event.aggregate_type == "lineage"
+    assert directive_event.aggregate_id == lineage_id
+    assert directive_event.data["target_type"] == "lineage"
+    assert directive_event.data["target_id"] == lineage_id
+    assert directive_event.data["emitted_by"] == "watchdog"
+    assert directive_event.data["directive"] == "unstuck"
+    # Watchdog correlation fields propagate so a projector filtering
+    # by execution / generation does not have to join back to the
+    # lineage state event.
+    assert directive_event.data["execution_id"] == execution_id
+    assert directive_event.data["generation_number"] == 1
+    # ``extra`` carries the source watchdog metadata for debugging.
+    extra = directive_event.data.get("extra") or {}
+    assert extra.get("watchdog_action") == "timeout"
+    assert extra.get("timeout_kind") == "no_material_progress_timeout"
+
+
+@pytest.mark.asyncio
+async def test_directive_emission_alphabet_matches_watchdog_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the cross-module invariant for #578.
+
+    ``WATCHDOG_TIMEOUT_KINDS`` (in ``evolution.directive_mapping``) is
+    the public alphabet the directive mapping promises to cover.
+    ``GenerationProgressWatchdog._raise_timeout`` is the only site
+    that constructs ``GenerationWatchdogTimeout`` instances. If the
+    watchdog grows a new threshold name without adding it to the
+    alphabet, the new timeout will silently fall through to "no
+    directive emitted" (because the mapping returns ``None``), and
+    the control plane loses the decision.
+
+    This test snapshots the watchdog's actual raise sites by
+    inspecting the source bytecode constants — a brittle but
+    intentional canary so the alphabet drift is caught at test time
+    rather than in production replay.
+    """
+    from ouroboros.evolution.directive_mapping import WATCHDOG_TIMEOUT_KINDS
+    from ouroboros.evolution.watchdog import GenerationProgressWatchdog
+
+    # ``_raise_if_threshold_exceeded`` is the only site that names
+    # each timeout kind as a string literal — the kind strings get
+    # passed positionally into ``_raise_timeout``. Walk the
+    # function's bytecode constants to enumerate the alphabet the
+    # watchdog actually raises today.
+    decision_site = GenerationProgressWatchdog._raise_if_threshold_exceeded
+    raised_kinds = {
+        const
+        for const in decision_site.__code__.co_consts
+        if isinstance(const, str) and const.endswith("timeout")
+    }
+    # Every kind the watchdog raises must have an entry in the
+    # public alphabet, and every alphabet entry must be a real
+    # raise site — the two sets must be equal.
+    assert raised_kinds == WATCHDOG_TIMEOUT_KINDS, (
+        f"watchdog raises {raised_kinds} but alphabet is {WATCHDOG_TIMEOUT_KINDS}"
+    )
 
 
 @pytest.mark.asyncio
