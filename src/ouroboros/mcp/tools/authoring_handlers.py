@@ -294,11 +294,22 @@ _INTERVIEW_EVENT_ABSOLUTE_PATH_RE = re.compile(
     r"|[A-Za-z]:\\[^\r\n,;:'\")\]}]+"
     r")"
 )
+_INTERVIEW_EVENT_URL_RE = re.compile(r"https?://[^\s,;:'\")\]}]+")
 
 
 def _redact_interview_event_error_text(text: str) -> str:
     """Remove local path-shaped substrings from persisted interview event text."""
-    return _INTERVIEW_EVENT_ABSOLUTE_PATH_RE.sub("[redacted path]", text)
+    urls: list[str] = []
+
+    def protect_url(match: re.Match[str]) -> str:
+        urls.append(match.group(0))
+        return f"__INTERVIEW_EVENT_URL_{len(urls) - 1}__"
+
+    protected = _INTERVIEW_EVENT_URL_RE.sub(protect_url, text)
+    redacted = _INTERVIEW_EVENT_ABSOLUTE_PATH_RE.sub("[redacted path]", protected)
+    for index, url in enumerate(urls):
+        redacted = redacted.replace(f"__INTERVIEW_EVENT_URL_{index}__", url)
+    return redacted
 
 
 def _format_interview_failure_event_error(error: Any) -> str:

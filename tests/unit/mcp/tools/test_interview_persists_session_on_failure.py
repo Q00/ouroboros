@@ -161,7 +161,7 @@ async def test_question_failure_event_uses_compact_provider_error(
 async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_path: Path) -> None:
     """Provider compact diagnostics are not automatically safe for lifecycle events."""
     provider_error = ProviderError(
-        "Claude Agent SDK request failed in /Users/alice/workspace/project, /tmp, and C:\\Program Files\\Claude\\claude.exe",
+        "Claude Agent SDK request failed in /Users/alice/workspace/project, /tmp, C:\\Program Files\\Claude\\claude.exe, and https://api.openai.com/v1/responses",
         provider="claude_code",
         details={
             "error_type": "RuntimeError",
@@ -205,6 +205,7 @@ async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_pat
     assert "C:" not in event_error
     assert "Program Files" not in event_error
     assert r"Files\Claude" not in event_error
+    assert "https://api.openai.com/v1/responses" in event_error
     assert "configured_cli_path" not in event_error
     assert "cwd:" not in event_error
     assert "stderr" not in event_error
