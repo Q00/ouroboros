@@ -338,6 +338,12 @@ class AutoPipelineState:
     # ``REQUIRED_SECTIONS`` at construction time by the MCP handler — only
     # known section keys with non-empty string values land here.
     user_preferences: dict[str, str] = field(default_factory=dict)
+    # Active domain profile name resolved at session start (PR-3, #809 P3).
+    # The DomainProfile instance itself is not stored here because it contains
+    # callables that are not JSON-serializable. Downstream phases recover the
+    # profile via ``DEFAULT_REGISTRY.get(active_domain_profile_name)``.
+    # None means no profile was activated (current baked-in behavior persists).
+    active_domain_profile_name: str | None = None
     # QA verdict captured during the EVALUATE phase (RFC #809 Phase 2.1).
     # Persisted so a resumed session reuses the verdict without re-invoking
     # the LLM-driven judge when the underlying artifact has not changed.
@@ -695,6 +701,7 @@ class AutoPipelineState:
         payload.setdefault("last_lateral_approach_summary", None)
         payload.setdefault("last_lateral_text", None)
         payload.setdefault("lateral_input_hash", None)
+        payload.setdefault("active_domain_profile_name", None)
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -931,6 +938,7 @@ class AutoPipelineState:
             "pending_question",
             "last_tool_name",
             "last_error",
+            "active_domain_profile_name",
         )
         for field_name in optional_string_fields:
             value = getattr(self, field_name)
