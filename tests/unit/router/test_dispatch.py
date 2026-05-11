@@ -540,7 +540,6 @@ def test_packaged_auto_resolves_documented_chat_dispatch_flags(tmp_path: Path) -
     assert isinstance(result.mcp_args["pipeline_timeout_seconds"], float)
     assert result.mcp_args["max_interview_rounds"] == 3
     assert result.mcp_args["skip_run"] is True
-    assert result.mcp_args["user_preferences"] == ""
 
 
 def test_packaged_auto_absent_new_flags_default_false_compatible(tmp_path: Path) -> None:

@@ -11,7 +11,6 @@ mcp_args:
   skip_run: "$skip_run"
   complete_product: "$complete_product"
   pipeline_timeout_seconds: "$pipeline_timeout_seconds"
-  user_preferences: "$user_preferences"
 ---
 
 # /ouroboros:auto
@@ -51,6 +50,8 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 | `--resume <id>` | `resume=<id>` | string |
 
 `--max-generations` is **not** a flag for `ooo auto`; it belongs to `ooo ralph`. When `complete_product=true`, the chained Ralph uses its built-in default (10 generations) bounded by `pipeline_timeout_seconds` or Ralph's own per-iteration / wall-clock budgets.
+
+`--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
 
 ## Behavior
 

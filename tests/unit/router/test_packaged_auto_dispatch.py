@@ -23,6 +23,5 @@ def test_packaged_auto_skill_dispatches_to_ouroboros_auto(tmp_path: Path) -> Non
         "skip_run": True,
         "complete_product": "",
         "pipeline_timeout_seconds": "",
-        "user_preferences": "",
     }
     assert result.first_argument == "Audit the open PRs --skip-run"

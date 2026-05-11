@@ -434,7 +434,6 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
         "cwd",
         "complete_product",
         "pipeline_timeout_seconds",
-        "user_preferences",
     } <= set(args.keys()), (
         "packaged ooo auto frontmatter must declare documented mcp_args; "
         f"got {sorted(args.keys())!r}"
@@ -448,7 +447,6 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert args["complete_product"] is True
     assert args["pipeline_timeout_seconds"] == 600.5
     assert isinstance(args["pipeline_timeout_seconds"], float)
-    assert args["user_preferences"] == ""
 
     # AutoHandler._run actually executed: stub AutoPipeline observed the state.
     assert captured.get("state_goal") == user_goal, (
