@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
@@ -21,6 +22,8 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import MCPToolResult
 from ouroboros.resilience.lateral import ThinkingPersona
+
+_SAFE_SEED_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class HandlerError(RuntimeError):
@@ -596,12 +599,32 @@ def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
     """Persist an auto-generated Seed in the standard seed directory."""
     directory = seeds_dir or (Path.home() / ".ouroboros" / "seeds")
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{seed.metadata.seed_id}.yaml"
+    seed_id = _safe_seed_id_for_filename(seed.metadata.seed_id)
+    path = directory / f"{seed_id}.yaml"
+    _require_path_inside_directory(path, directory)
     path.write_text(
         yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
     return str(path)
+
+
+def _safe_seed_id_for_filename(seed_id: str) -> str:
+    """Return a seed id that is safe to interpolate into a filename."""
+    candidate = seed_id.strip()
+    if not candidate or not _SAFE_SEED_ID_PATTERN.fullmatch(candidate):
+        msg = f"Seed id is not safe for persistence filename: {seed_id!r}"
+        raise HandlerError(msg)
+    return candidate
+
+
+def _require_path_inside_directory(path: Path, directory: Path) -> None:
+    """Fail closed if a computed seed path escapes the seed directory."""
+    resolved_directory = directory.resolve()
+    resolved_path = path.resolve()
+    if resolved_path.parent != resolved_directory:
+        msg = f"Seed path escapes seed directory: {resolved_path}"
+        raise HandlerError(msg)
 
 
 def _turn_from_result(
