@@ -157,10 +157,22 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - Prefix answer with `[from-code]` when sending to MCP
    - If the user picks "Yes, correct", send the concise factual answer with
      `[from-code]` and do not apply the Refine gate
-   - If the user corrects the finding or adds reasoning, constraints, or scope,
-     route that free-text answer through the Refine gate and send the
-     multi-section payload with `[from-user][refined]` (the human is now the
-     source of the corrected answer)
+   - If the user picks "No, let me correct", immediately ask a second
+     AskUserQuestion to collect the corrected answer as free text:
+     ```json
+     {
+       "questions": [{
+         "question": "What should I send instead for this MCP question?\n\nMCP asks: What auth method does the project use?\n\nInclude any reasoning, constraints, or scope that should be preserved.",
+         "header": "Q<N> — Correction"
+       }]
+     }
+     ```
+   - Route the correction text through the Refine gate before sending it to
+     MCP. Send the multi-section payload with `[from-user][refined]` (the
+     human is now the source of the corrected answer).
+   - If the user supplies a correction directly without using the option, treat
+     that free text the same way: Refine first, then send with
+     `[from-user][refined]`.
    - Increment the auto-confirm counter (see Dialectic Rhythm Guard below)
 
    **PATH 2 — Human Judgment** (decisions only humans can make):
@@ -200,10 +212,22 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - Prefix answer with `[from-research]` when sending to MCP
    - If the user picks "Yes, correct", send the concise factual answer with
      `[from-research]` and do not apply the Refine gate
-   - If the user corrects the finding or adds reasoning, constraints, or scope,
-     route that free-text answer through the Refine gate and send the
-     multi-section payload with `[from-user][refined]` (the human is now the
-     source of the corrected answer)
+   - If the user picks "No, let me correct", immediately ask a second
+     AskUserQuestion to collect the corrected answer as free text:
+     ```json
+     {
+       "questions": [{
+         "question": "What should I send instead for this MCP question?\n\nMCP asks: What rate limits does the Stripe API have?\n\nInclude any source correction, reasoning, constraints, or scope that should be preserved.",
+         "header": "Q<N> — Research Correction"
+       }]
+     }
+     ```
+   - Route the correction text through the Refine gate before sending it to
+     MCP. Send the multi-section payload with `[from-user][refined]` (the
+     human is now the source of the corrected answer).
+   - If the user supplies a correction directly without using the option, treat
+     that free text the same way: Refine first, then send with
+     `[from-user][refined]`.
    - **Facts, not decisions**: "Stripe rate limit is 100 req/s" is research.
      "We should use Stripe" is a DECISION — route to PATH 2.
 
@@ -347,10 +371,33 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    ```
 
    Only after the user accepts the restated line do you suggest `ooo seed`.
-   If the user picks "Adjust wording" or "Missing scope", revise the line and
-   ask once more — do not loop more than twice; if alignment is not reached,
-   route back to PATH 2 with a targeted question instead of forcing a goal
-   line.
+   If the user picks "Adjust wording", immediately ask a second AskUserQuestion
+   to collect the replacement wording:
+   ```json
+   {
+     "questions": [{
+       "question": "How should the one-sentence goal be worded instead?\n\nCurrent line:\n  goal: <one-sentence restatement>",
+       "header": "Restate — Wording"
+     }]
+   }
+   ```
+
+   If the user picks "Missing scope", immediately ask a second AskUserQuestion
+   to collect the missing condition or boundary:
+   ```json
+   {
+     "questions": [{
+       "question": "What scope, condition, or boundary is missing from the one-sentence goal?\n\nCurrent line:\n  goal: <one-sentence restatement>",
+       "header": "Restate — Scope"
+     }]
+   }
+   ```
+
+   Use the follow-up text only to revise the one-line Restate goal; do not send
+   Restate corrections through the Refine gate and do not mark them `[refined]`
+   unless you route back to PATH 2. After revising, ask the Restate gate once
+   more. Do not loop more than twice; if alignment is not reached, route back
+   to PATH 2 with a targeted question instead of forcing a goal line.
 
 10. **Prefer stopping over over-interviewing**:
    When the Restate gate passes, suggest `ooo seed`.
