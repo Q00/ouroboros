@@ -6,6 +6,10 @@ Closes #516 and pins the decision matrix the maintainer alignment in
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
+
 from ouroboros.core.directive import Directive
 from ouroboros.evolution.directive_mapping import (
     WATCHDOG_TIMEOUT_KINDS,
@@ -14,6 +18,7 @@ from ouroboros.evolution.directive_mapping import (
     watchdog_timeout_to_directive,
 )
 from ouroboros.evolution.loop import StepAction
+from ouroboros.evolution.watchdog import GenerationProgressWatchdog
 
 
 class TestStepActionMapping:
@@ -127,3 +132,29 @@ class TestWatchdogTimeoutMapping:
         every kind in the constant."""
         for kind in WATCHDOG_TIMEOUT_KINDS:
             assert watchdog_timeout_to_directive(kind) is not None, kind
+
+    def test_timeout_alphabet_matches_watchdog_raise_sites(self) -> None:
+        """Pin the mapping alphabet to the watchdog's actual timeout raises.
+
+        This catches drift in either direction: adding a new
+        ``_raise_timeout("...")`` call without extending the directive
+        alphabet, or leaving a stale mapping kind after the watchdog stops
+        raising it.
+        """
+        tree = ast.parse(
+            textwrap.dedent(
+                inspect.getsource(GenerationProgressWatchdog._raise_if_threshold_exceeded)
+            )
+        )
+        raised_kinds = {
+            call.args[0].value
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "_raise_timeout"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+        }
+
+        assert raised_kinds == set(WATCHDOG_TIMEOUT_KINDS)
