@@ -1131,6 +1131,29 @@ def list_command(
         typer.echo(json.dumps(rows, indent=2))
         return
 
+    # Operator-facing diagnostic: when any row's trust file failed to
+    # parse, the table column flips to ``trust_unreadable`` but does NOT
+    # carry the underlying parser message. Surface it on stderr so the
+    # operator sees both (a) which plugin's trust file is broken and
+    # (b) the literal recovery action, without polluting stdout (which
+    # remains the structured table for ``less`` / ``column`` /
+    # screenshotting). The ``--json`` path already exposes the same
+    # information via the ``trust_read_error`` field, so we only emit
+    # the stderr warning on the human surface. ``typer.echo(..., err=True)``
+    # resolves ``sys.stderr`` at call time, which is what
+    # ``CliRunner(mix_stderr=False)`` needs to capture the warning under
+    # test.
+    unreadable = [row for row in rows if row.get("trust_read_error") is not None]
+    for row in unreadable:
+        typer.echo(
+            f"warning: trust file for {row['name']!r} is unreadable "
+            f"({row['trust_read_error']}); the row is shown with "
+            f"trust_state=trust_unreadable and empty scopes. Inspect or "
+            f"replace the file, then re-grant scopes via "
+            f"`ooo plugin trust {row['name']} --scope <...>`.",
+            err=True,
+        )
+
     table = create_table(title="Installed UserLevel plugins")
     for column in ("name", "version", "source", "trust", "scopes"):
         table.add_column(column)
