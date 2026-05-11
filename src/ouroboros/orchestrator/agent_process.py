@@ -549,7 +549,13 @@ async def run_with_agent_process[T](
             result_box.append(result)
             if getattr(result, "is_error", False):
                 reason = getattr(result, "text_content", None) or f"{intent} returned is_error=True"
-                await handle._mark_failed(reason=str(reason)[:500])
+                meta = getattr(result, "meta", {})
+                action = meta.get("action") if isinstance(meta, dict) else None
+                if action in {"cancel", "cancelled", "interrupted"}:
+                    await handle.cancel(reason=str(reason)[:500])
+                    await handle._mark_cancelled()
+                else:
+                    await handle._mark_failed(reason=str(reason)[:500])
         except BaseException as exc:  # noqa: BLE001 - preserve the original runner failure
             error_box.append(exc)
             raise
@@ -569,6 +575,8 @@ async def run_with_agent_process[T](
         raise
 
     if final_status is AgentProcessStatus.CANCELLED:
+        if result_box:
+            return result_box[0]
         raise asyncio.CancelledError(f"{intent} cancelled")
     if final_status is AgentProcessStatus.FAILED:
         if result_box:

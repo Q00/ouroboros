@@ -58,6 +58,14 @@ def _directive_intents(store: _FakeEventStore) -> list[str]:
     ]
 
 
+def _lifecycle_statuses(store: _FakeEventStore) -> list[str]:
+    return [
+        e.data["extra"]["lifecycle_status"]
+        for e in store.appended
+        if getattr(e, "type", None) == "control.directive.emitted"
+    ]
+
+
 @dataclass
 class _CompletedJobSnapshot:
     job_id: str
@@ -157,8 +165,9 @@ class _FakeExecuteHandler:
     agent_runtime_backend: str | None = None
     llm_backend: str | None = None
 
-    def __init__(self, *, is_error: bool = False) -> None:
+    def __init__(self, *, is_error: bool = False, action: str | None = None) -> None:
         self.is_error = is_error
+        self.action = action or ("failed" if is_error else "completed")
 
     async def handle(
         self,
@@ -174,7 +183,7 @@ class _FakeExecuteHandler:
                 content=(MCPContentItem(type=ContentType.TEXT, text="execute ok"),),
                 is_error=self.is_error,
                 meta={
-                    "action": "failed" if self.is_error else "completed",
+                    "action": self.action,
                     "seed_content": arguments["seed_content"],
                     "execution_id": execution_id,
                     "session_id": session_id_override,
@@ -433,3 +442,58 @@ async def test_run_with_agent_process_cleans_up_work_task_on_timeout() -> None:
     directives = _directives(store)
     assert directives[0] == "continue"
     assert directives[-1] == "cancel"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "expected_intent"),
+    [
+        ("evolve_step", "evolve_step"),
+        ("ralph", "ralph"),
+        ("execute_seed", "execute_seed"),
+    ],
+)
+async def test_production_start_surfaces_classify_interrupted_results_as_cancelled(
+    surface: str, expected_intent: str
+) -> None:
+    """Interrupted result-level errors stay distinct from failed work."""
+    store = _FakeEventStore()
+    job_manager = _InlineJobManager()
+
+    if surface == "evolve_step":
+        handler = StartEvolveStepHandler(
+            evolve_handler=_FakeEvolveHandler(is_error=True, action="interrupted"),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle(
+            {"lineage_id": "lin_interrupted", "seed_content": "goal: test"}
+        )
+    elif surface == "ralph":
+        handler = RalphHandler(
+            evolve_handler=_FakeEvolveHandler(is_error=True, action="interrupted"),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_interrupted",
+                "seed_content": "goal: test",
+                "max_generations": 1,
+                "per_iteration_timeout_seconds": 30,
+                "max_total_seconds": 30,
+            }
+        )
+    else:
+        handler = StartExecuteSeedHandler(
+            execute_handler=_FakeExecuteHandler(is_error=True, action="interrupted"),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle({"seed_content": "goal: test"})
+
+    assert result.is_ok, surface
+    assert job_manager.runner_results[0].is_error is True
+    assert _directives(store)[-1] == "cancel", surface
+    assert _directive_intents(store)[-1] == expected_intent
+    assert _lifecycle_statuses(store)[-1] == "cancelled"
