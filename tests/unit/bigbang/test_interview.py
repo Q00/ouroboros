@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import (
-    AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS,
     AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS,
+    AGENT_SDK_CLI_FIXED_FRAMING_CHARS,
+    AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS,
     AGENT_SDK_CLI_SAFE_PROMPT_CHARS,
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
@@ -27,6 +28,13 @@ from ouroboros.providers.base import (
 )
 
 EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS = 16_000
+
+
+def estimated_agent_sdk_cli_prompt_chars(messages: list) -> int:
+    """Mirror the tested CLI prompt envelope: raw content plus framing reserve."""
+    return AGENT_SDK_CLI_FIXED_FRAMING_CHARS + sum(
+        len(message.content) + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS for message in messages
+    )
 
 
 def create_mock_completion_response(
@@ -302,23 +310,20 @@ class TestInterviewEngineAskNextQuestion:
     """Test InterviewEngine.ask_next_question method."""
 
     def test_total_prompt_cap_stays_within_empirical_cli_ceiling(self) -> None:
-        """Raw prompt cap plus adapter headroom must stay below the observed ceiling."""
+        """Serialized prompt budget must stay below the observed CLI ceiling."""
         assert (
             AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS
             == EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
-        assert AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS > 0
+        assert AGENT_SDK_CLI_FIXED_FRAMING_CHARS > 0
+        assert AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS > 0
         assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS > 4_800
         assert (
-            AGENT_SDK_CLI_SAFE_PROMPT_CHARS + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
-            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+            AGENT_SDK_CLI_FIXED_FRAMING_CHARS + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
+            < EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
         assert (
-            InterviewEngine._MAX_TOTAL_PROMPT_CHARS + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
-            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
-        )
-        assert (
-            InterviewEngine._MAX_TOTAL_PROMPT_CHARS < EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+            InterviewEngine._MAX_TOTAL_PROMPT_CHARS == EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
 
     @pytest.mark.asyncio
@@ -396,8 +401,7 @@ class TestInterviewEngineAskNextQuestion:
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
         assert (
-            sum(len(message.content) for message in messages)
-            + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            estimated_agent_sdk_cli_prompt_chars(messages)
             <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
         assert "Initial context continues in the first user message" in messages[0].content
@@ -429,8 +433,7 @@ class TestInterviewEngineAskNextQuestion:
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
         assert (
-            sum(len(message.content) for message in messages)
-            + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            estimated_agent_sdk_cli_prompt_chars(messages)
             <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
         assert messages[1].role == MessageRole.USER
@@ -547,12 +550,40 @@ class TestInterviewEngineAskNextQuestion:
         messages = mock_adapter.complete.call_args[0][0]
         prompt_content = "\n".join(message.content for message in messages)
         assert (
-            sum(len(message.content) for message in messages)
-            + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            estimated_agent_sdk_cli_prompt_chars(messages)
             <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
         assert "Additional initial context omitted" in prompt_content
         assert "TAIL_MARKER" in prompt_content
+
+    @pytest.mark.asyncio
+    async def test_many_short_history_messages_stay_under_serialized_cli_cap(self) -> None:
+        """Per-message CLI framing is budgeted, not just raw content length."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_many_short_turns",
+            initial_context="Build a CLI tool",
+        )
+        for i in range(80):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=i + 1,
+                    question=f"Q{i}",
+                    user_response=f"A{i}",
+                )
+            )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert (
+            estimated_agent_sdk_cli_prompt_chars(messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
 
     @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:

@@ -51,18 +51,19 @@ INITIAL_CONTEXT_SUMMARY_REQUIRED = (
 )
 PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE = "\n\n[Context truncated for prompt safety.]"
 # Empirically, the local Agent SDK CLI path can return empty completions when
-# interview question prompts grow beyond roughly this combined character count.
-# This is the observed failure ceiling, not the production raw-message budget:
-# CLI adapters add their own framing around ``message.content`` before sending
-# the real prompt.
+# interview question prompts grow beyond roughly this serialized prompt size.
+# This is the observed failure ceiling, not a raw ``message.content`` budget:
+# CLI adapters add section headers, role prefixes, separators, and final
+# response instructions around each message before sending the real prompt.
 AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS = 16_000
-# Reserve explicit space for adapter-added framing below the observed ceiling.
-# The remaining safe cap still preserves much richer interview answers than
-# the original 4,800-character limit while avoiding an edge-of-cliff budget.
-AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS = 1_000
-AGENT_SDK_CLI_SAFE_PROMPT_CHARS = (
-    AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS - AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
-)
+# Conservative serialization reserves used by interview prompt budgeting. The
+# fixed reserve covers adapter section headers/tool/execution instructions; the
+# per-message reserve covers role prefixes and separators so long interviews
+# with many short turns cannot pass raw-content checks while crossing the
+# observed CLI empty-response cliff after serialization.
+AGENT_SDK_CLI_FIXED_FRAMING_CHARS = 1_500
+AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS = 128
+AGENT_SDK_CLI_SAFE_PROMPT_CHARS = AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS
 
 
 class InterviewPerspective(StrEnum):
@@ -424,17 +425,28 @@ class InterviewEngine:
         preserve_prefix_messages = (
             1 if len(effective_initial_context) > self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS else 0
         )
+        history_budget = (
+            self._MAX_TOTAL_PROMPT_CHARS
+            - self._MIN_SYSTEM_PROMPT_CHARS
+            - AGENT_SDK_CLI_FIXED_FRAMING_CHARS
+            - AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
+        )
         conversation_history = self._trim_messages_to_budget(
             conversation_history,
-            max_chars=self._MAX_TOTAL_PROMPT_CHARS - self._MIN_SYSTEM_PROMPT_CHARS,
+            max_chars=history_budget,
             preserve_prefix_messages=preserve_prefix_messages,
         )
 
-        # Generate next question
-        history_chars = sum(len(message.content) for message in conversation_history)
+        # Generate next question. Budget against estimated serialized CLI
+        # prompt cost, not raw message content, because CLI adapters add
+        # framing around every message before sending prompts to the model.
+        history_cost = self._message_budget_cost(conversation_history)
         system_prompt_budget = min(
             self._MAX_SYSTEM_PROMPT_CHARS,
-            self._MAX_TOTAL_PROMPT_CHARS - history_chars,
+            self._MAX_TOTAL_PROMPT_CHARS
+            - AGENT_SDK_CLI_FIXED_FRAMING_CHARS
+            - AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
+            - history_cost,
         )
         system_prompt = self._build_system_prompt(
             state,
@@ -986,6 +998,12 @@ class InterviewEngine:
 
         return messages
 
+    def _message_budget_cost(self, messages: list[Message]) -> int:
+        """Estimate serialized CLI prompt cost for message content and framing."""
+        return sum(
+            len(message.content) + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS for message in messages
+        )
+
     def _trim_messages_to_budget(
         self,
         messages: list[Message],
@@ -993,23 +1011,25 @@ class InterviewEngine:
         max_chars: int,
         preserve_prefix_messages: int = 0,
     ) -> list[Message]:
-        """Keep durable prefix messages plus newest conversation within a budget."""
-        if sum(len(message.content) for message in messages) <= max_chars:
+        """Keep durable prefix messages plus newest conversation within a CLI budget."""
+        if self._message_budget_cost(messages) <= max_chars:
             return messages
 
         prefix = messages[:preserve_prefix_messages]
         remaining_messages = messages[preserve_prefix_messages:]
-        prefix_chars = sum(len(message.content) for message in prefix)
+        prefix_chars = self._message_budget_cost(prefix)
         if prefix_chars >= max_chars:
             retained_prefix: list[Message] = []
             used_prefix_chars = 0
             for message in prefix:
-                remaining = max_chars - used_prefix_chars
+                remaining = max_chars - used_prefix_chars - AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
                 if remaining <= 0:
                     break
                 if len(message.content) <= remaining:
                     retained_prefix.append(message)
-                    used_prefix_chars += len(message.content)
+                    used_prefix_chars += (
+                        len(message.content) + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
+                    )
                 else:
                     retained_prefix.append(
                         Message(role=message.role, content=message.content[:remaining])
@@ -1020,12 +1040,12 @@ class InterviewEngine:
         retained: list[Message] = []
         used_chars = prefix_chars
         for message in reversed(remaining_messages):
-            remaining = max_chars - used_chars
+            remaining = max_chars - used_chars - AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
             if remaining <= 0:
                 break
             if len(message.content) <= remaining:
                 retained.append(message)
-                used_chars += len(message.content)
+                used_chars += len(message.content) + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
             else:
                 retained.append(Message(role=message.role, content=message.content[-remaining:]))
                 break
