@@ -688,6 +688,7 @@ class AutoPipelineState:
         payload.setdefault("ralph_lineage_id", None)
         payload.setdefault("ralph_dispatch_mode", None)
         payload.setdefault("complete_product", False)
+        payload.setdefault("active_domain_profile_name", None)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
         payload.setdefault("seed_origin", SeedOrigin.NONE.value)

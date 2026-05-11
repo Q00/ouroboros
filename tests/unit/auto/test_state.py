@@ -282,6 +282,19 @@ def test_store_load_rejects_truncated_state_without_default_backfill(tmp_path) -
         store.load(state.auto_session_id)
 
 
+def test_legacy_state_without_active_domain_profile_loads(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data.pop("active_domain_profile_name")
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    loaded = store.load(state.auto_session_id)
+
+    assert loaded.active_domain_profile_name is None
+
+
 def test_store_load_rejects_session_id_mismatch(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
