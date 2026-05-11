@@ -154,6 +154,16 @@ class StepResult:
         return self.action == StepAction.INTERRUPTED
 
 
+def _watchdog_timeout_step_action(timeout_kind: str) -> StepAction:
+    """Return the public ``evolve_step`` action matching a watchdog directive."""
+    directive = watchdog_timeout_to_directive(timeout_kind)
+    if directive is None:
+        return StepAction.FAILED
+    if is_terminal_directive(directive):
+        return StepAction.EXHAUSTED
+    return StepAction.STAGNATED
+
+
 class EvolutionaryLoop:
     """Manages the evolutionary cycle across generations.
 
@@ -316,6 +326,7 @@ class EvolutionaryLoop:
         lineage_id: str,
         generation_number: int,
         phase: str,
+        action: StepAction | None = None,
     ) -> None:
         """Emit ``control.directive.emitted`` for a mapped watchdog timeout."""
         directive = watchdog_timeout_to_directive(exc.timeout_kind)
@@ -336,6 +347,7 @@ class EvolutionaryLoop:
                     "timeout_kind": exc.timeout_kind,
                     "watchdog_details": dict(exc.details),
                     "is_terminal": is_terminal_directive(directive),
+                    **({"step_action": action.value} if action is not None else {}),
                 },
             )
         )
@@ -460,6 +472,7 @@ class EvolutionaryLoop:
                         lineage_id=lineage.lineage_id,
                         generation_number=generation_number,
                     ),
+                    action=_watchdog_timeout_step_action(gen_result.error.timeout_kind),
                 )
                 break
 
@@ -803,6 +816,7 @@ class EvolutionaryLoop:
                 ontology_similarity=0.0,
                 generation=generation_number,
             )
+            watchdog_action = _watchdog_timeout_step_action(gen_result.error.timeout_kind)
             await self._emit_watchdog_timeout_directive(
                 gen_result.error,
                 lineage_id=lineage.lineage_id,
@@ -811,13 +825,14 @@ class EvolutionaryLoop:
                     lineage_id=lineage.lineage_id,
                     generation_number=generation_number,
                 ),
+                action=watchdog_action,
             )
             return Result.ok(
                 StepResult(
                     generation_result=failed_gen,
                     convergence_signal=conv_signal,
                     lineage=lineage,
-                    action=StepAction.FAILED,
+                    action=watchdog_action,
                     next_generation=generation_number,
                 )
             )

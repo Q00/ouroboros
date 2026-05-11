@@ -897,9 +897,34 @@ class TestWatchdogDirectiveEmission:
         assert directive.data["execution_id"] == "evolve:lin_run_watchdog:generation:1"
         assert directive.data["extra"]["timeout_kind"] == "no_material_progress_timeout"
         assert directive.data["extra"]["is_terminal"] is False
+        assert directive.data["extra"]["step_action"] == StepAction.STAGNATED.value
         assert directive.data["extra"]["watchdog_details"]["timeout_kind"] == (
             "no_material_progress_timeout"
         )
+
+    @pytest.mark.asyncio
+    async def test_evolve_step_watchdog_no_material_progress_returns_stagnated(self) -> None:
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_step_no_material")
+        timeout = make_watchdog_timeout(
+            "no_material_progress_timeout",
+            "lin_step_no_material",
+        )
+        loop = EvolutionaryLoop(event_store=store)
+        loop._run_generation_with_watchdog = AsyncMock(return_value=Result.err(timeout))
+
+        result = await loop.evolve_step("lin_step_no_material", initial_seed=seed)
+
+        assert result.is_ok
+        assert result.value.action is StepAction.STAGNATED
+        events = await store.replay_lineage("lin_step_no_material")
+        directives = [event for event in events if event.type == "control.directive.emitted"]
+        assert len(directives) == 1
+        directive = directives[0]
+        assert directive.data["directive"] == Directive.UNSTUCK.value
+        assert directive.data["is_terminal"] is False
+        assert directive.data["extra"]["timeout_kind"] == "no_material_progress_timeout"
+        assert directive.data["extra"]["step_action"] == StepAction.STAGNATED.value
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("timeout_kind", ["safety_timeout", "idle_timeout"])
@@ -916,7 +941,7 @@ class TestWatchdogDirectiveEmission:
         result = await loop.evolve_step("lin_step_watchdog", initial_seed=seed)
 
         assert result.is_ok
-        assert result.value.action is StepAction.FAILED
+        assert result.value.action is StepAction.EXHAUSTED
         events = await store.replay_lineage("lin_step_watchdog")
         directives = [event for event in events if event.type == "control.directive.emitted"]
         assert len(directives) == 1
@@ -928,6 +953,7 @@ class TestWatchdogDirectiveEmission:
         assert directive.data["execution_id"] == "evolve:lin_step_watchdog:generation:1"
         assert directive.data["extra"]["timeout_kind"] == timeout_kind
         assert directive.data["extra"]["is_terminal"] is True
+        assert directive.data["extra"]["step_action"] == StepAction.EXHAUSTED.value
         assert directive.data["extra"]["watchdog_details"]["timeout_kind"] == timeout_kind
 
 
