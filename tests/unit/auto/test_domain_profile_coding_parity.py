@@ -14,7 +14,7 @@ from types import MappingProxyType
 import pytest
 
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
-from ouroboros.auto.grading import VAGUE_TERMS
+from ouroboros.auto.grading import VAGUE_TERMS, _is_observable  # noqa: PLC2701
 from ouroboros.auto.profiles.coding import CODING_PROFILE
 from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
 
@@ -82,10 +82,11 @@ def test_safe_defaults_mapping_is_immutable() -> None:
         ("What are the acceptance criteria?", "acceptance_criteria"),
         ("Which framework does this project use?", "runtime_context"),
         ("Who are the actors and what are the inputs?", "actor_io"),
+        ("Can users verify their email?", "product_behavior"),
     ],
 )
 def test_intent_classifier_matches_existing_classifier(question: str, expected_intent: str) -> None:
-    """intent_classifier.classify() must agree with _classify_question_intents."""
+    """intent_classifier.classify() must agree with existing answer routing."""
     from ouroboros.auto.answerer import _classify_question_intents  # noqa: PLC2701
 
     raw_intents = _classify_question_intents(question)
@@ -96,6 +97,7 @@ def test_intent_classifier_matches_existing_classifier(question: str, expected_i
     assert profile_result in raw_values, (
         f"classify({question!r}) returned {profile_result!r}; raw classifier returned {raw_values}"
     )
+    assert profile_result == expected_intent
     assert expected_intent in raw_values
 
 
@@ -129,6 +131,9 @@ def test_intent_classifier_supported_intents() -> None:
         ("ruff check passes", "lint_clean"),
         ("mypy reports no type errors", "type_check_clean"),
         ("type check clean with pyright", "type_check_clean"),
+        ("GET /health responds with HTTP status 200", "observable_behavior"),
+        ("CLI stdout contains created habits", "observable_behavior"),
+        ("Export writes a JSON artifact file", "observable_behavior"),
     ],
 )
 def test_predicate_matches_known_criteria(criterion: str, expected_code: str) -> None:
@@ -144,6 +149,20 @@ def test_predicate_repair_template_returns_string() -> None:
         result = predicate.repair_template("some criterion text")
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+def test_observable_predicate_matches_grading_observable_contract() -> None:
+    """The profile must accept every AC that the current grading gate accepts."""
+    criteria = (
+        "`habit list` prints stable stdout containing created habits",
+        "The API endpoint returns response status 200",
+        "The command writes an artifact file to disk",
+        "stderr contains the validation error for invalid input",
+        "DELETE /items/{id} responds with HTTP 204",
+    )
+    for criterion in criteria:
+        assert _is_observable(criterion), criterion
+        assert CODING_PROFILE.find_verifiable_predicate(criterion) is not None, criterion
 
 
 def test_predicate_codes_are_unique() -> None:

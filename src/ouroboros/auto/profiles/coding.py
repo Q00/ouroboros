@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY, DomainProfile
-from ouroboros.auto.grading import VAGUE_TERMS
+from ouroboros.auto.grading import VAGUE_TERMS, _is_observable  # noqa: PLC2701
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
 
@@ -100,6 +100,18 @@ class _TypeCheckCleanPredicate:
         return f"Type checker reports zero errors: {criterion}"
 
 
+class _ObservableBehaviorPredicate:
+    """Fallback predicate that mirrors grading._is_observable()."""
+
+    code = "observable_behavior"
+
+    def matches(self, criterion: str) -> bool:
+        return _is_observable(criterion)
+
+    def repair_template(self, criterion: str) -> str:
+        return f"Mention command output, file/artifact, API response, or test result: {criterion}"
+
+
 # ---------------------------------------------------------------------------
 # IntentClassifier adapter
 # ---------------------------------------------------------------------------
@@ -127,26 +139,39 @@ class _CodingIntentClassifier:
 
     def classify(self, question: str) -> str | None:
         # Import locally to avoid a circular import at module load time.
-        from ouroboros.auto.answerer import _classify_question_intents  # noqa: PLC2701
+        from ouroboros.auto.answerer import (  # noqa: PLC2701
+            QuestionIntent,
+            _classify_question_intents,
+            _has_user_verify_feature_shape,
+            _normalize_question,
+            _should_preserve_runtime_route,
+        )
 
         intents = _classify_question_intents(question)
         if not intents:
             return None
-        # Return the highest-priority intent using the same priority order
-        # as AutoAnswerer.answer().
-        priority = [
-            "non_goals",
-            "verification",
-            "acceptance_criteria",
-            "runtime_context",
-            "product_behavior",
-            "actor_io",
-        ]
-        for label in priority:
-            for intent in intents:
-                if intent.value == label:
-                    return label
-        # Fallback: return any matched intent value
+
+        # Mirror AutoAnswerer.answer()'s route order, including the
+        # user-facing verify-feature demotion that keeps questions like
+        # "Can users verify their email?" on the product_behavior path.
+        lowered = _normalize_question(question)
+        demote_for_user_verify = (
+            QuestionIntent.PRODUCT_BEHAVIOR in intents and _has_user_verify_feature_shape(lowered)
+        )
+        if QuestionIntent.NON_GOALS in intents:
+            return QuestionIntent.NON_GOALS.value
+        if QuestionIntent.VERIFICATION in intents and not demote_for_user_verify:
+            return QuestionIntent.VERIFICATION.value
+        if QuestionIntent.ACCEPTANCE_CRITERIA in intents and not demote_for_user_verify:
+            return QuestionIntent.ACCEPTANCE_CRITERIA.value
+        if QuestionIntent.RUNTIME_CONTEXT in intents and _should_preserve_runtime_route(lowered):
+            return QuestionIntent.RUNTIME_CONTEXT.value
+        if QuestionIntent.PRODUCT_BEHAVIOR in intents:
+            return QuestionIntent.PRODUCT_BEHAVIOR.value
+        if QuestionIntent.ACTOR_IO in intents:
+            return QuestionIntent.ACTOR_IO.value
+        if QuestionIntent.RUNTIME_CONTEXT in intents:
+            return QuestionIntent.RUNTIME_CONTEXT.value
         return next(iter(intents)).value
 
     def supported_intents(self) -> frozenset[str]:
@@ -207,6 +232,7 @@ CODING_PROFILE: DomainProfile = DomainProfile(
         _TestPassPredicate(),
         _LintCleanPredicate(),
         _TypeCheckCleanPredicate(),
+        _ObservableBehaviorPredicate(),
     ),
     intent_classifier=_CodingIntentClassifier(),
     vague_terms=frozenset(VAGUE_TERMS),
