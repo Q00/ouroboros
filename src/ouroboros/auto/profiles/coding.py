@@ -213,11 +213,22 @@ def _build_safe_defaults() -> MappingProxyType[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_CODING_MARKERS = (
+    "pyproject.toml",
+    "package.json",
+    "go.mod",
+    "Cargo.toml",
+    "pom.xml",
+    "build.gradle",
+    "settings.gradle",
+    "composer.json",
+    "Gemfile",
+)
+
+
 def _coding_detector(cwd: Path) -> float:
     """Return 1.0 if the directory looks like a coding project, else 0.0."""
-    if (cwd / "pyproject.toml").is_file():
-        return 1.0
-    return 0.0
+    return 1.0 if any((cwd / marker).is_file() for marker in _CODING_MARKERS) else 0.0
 
 
 # ---------------------------------------------------------------------------

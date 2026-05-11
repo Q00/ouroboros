@@ -219,9 +219,8 @@ def test_registry_union_predicates_applies_threshold() -> None:
 
 
 def test_default_registry_contains_coding_after_pr2(tmp_path: Path) -> None:
-    # DEFAULT_REGISTRY is a module-level singleton.  PR-2 registers the
-    # built-in ``coding`` profile; importing the profiles package is enough.
-    import ouroboros.auto.profiles  # noqa: F401 — trigger registration
+    # DEFAULT_REGISTRY is a module-level singleton.  Importing domain_profile
+    # alone should expose built-in default profiles to callers.
     from ouroboros.auto.profiles.coding import CODING_PROFILE
 
     assert DEFAULT_REGISTRY.get("coding") is CODING_PROFILE

@@ -215,5 +215,13 @@ class DomainProfileRegistry:
         return tuple(result)
 
 
-#: Module-level singleton registry.  PR-2 will register the ``coding`` profile here.
+#: Module-level singleton registry.  Built-in profiles are imported below so
+#: callers that use ``DEFAULT_REGISTRY`` directly see the default registrations
+#: without needing an additional ``ouroboros.auto.profiles`` side-effect import.
 DEFAULT_REGISTRY: DomainProfileRegistry = DomainProfileRegistry()
+
+# Import built-ins after ``DEFAULT_REGISTRY`` exists.  The profile modules import
+# this module to access the registry and contracts, so keeping this at the end
+# avoids an incomplete-initialization cycle while still satisfying the public
+# default-registry contract.
+import ouroboros.auto.profiles  # noqa: E402,F401

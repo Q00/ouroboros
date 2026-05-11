@@ -190,10 +190,17 @@ def test_detector_returns_one_for_pyproject(tmp_path: Path) -> None:
     assert CODING_PROFILE.detector(tmp_path) == 1.0
 
 
-def test_detector_returns_zero_for_package_json_without_pyproject(tmp_path: Path) -> None:
-    """detector only scores repos the current extractor can inspect."""
+def test_detector_returns_one_for_package_json(tmp_path: Path) -> None:
+    """detector returns 1.0 for a Node/JS coding repo marker."""
     (tmp_path / "package.json").write_text('{"name": "test"}\n')
-    assert CODING_PROFILE.detector(tmp_path) == 0.0
+    assert CODING_PROFILE.detector(tmp_path) == 1.0
+
+
+@pytest.mark.parametrize("marker", ["go.mod", "Cargo.toml", "pom.xml", "Gemfile"])
+def test_detector_returns_one_for_other_coding_markers(tmp_path: Path, marker: str) -> None:
+    """detector recognizes common non-Python coding repo markers."""
+    (tmp_path / marker).write_text("module example\n")
+    assert CODING_PROFILE.detector(tmp_path) == 1.0
 
 
 def test_detector_returns_zero_for_empty_dir(tmp_path: Path) -> None:
