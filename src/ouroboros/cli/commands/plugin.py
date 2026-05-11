@@ -2667,7 +2667,7 @@ def disable_command(
     # a recovery hint instead of a raw traceback in the very command
     # operators run to repair that state.
     try:
-        removed_trust = (trust.root / name / "trust.json").is_file()
+        removed_trust = trust.has_trust_record(name)
         if not removed_trust:
             # Disabling an already-untrusted plugin is valid: the disable
             # record is an independent revocation signal. However, when
@@ -2682,7 +2682,7 @@ def disable_command(
                 candidate_root = candidate_root.expanduser()
                 if candidate_root == trust.root.expanduser():
                     continue
-                if (candidate_root / name / "trust.json").is_file():
+                if TrustStore(root=candidate_root).has_trust_record(name):
                     print_error(
                         f"no trust grant for {name!r} exists under {trust.root}, "
                         f"but a grant exists under {candidate_root}; pass the "

@@ -217,6 +217,8 @@ def test_invalid_plugin_name_rejected(tmp_path: Path, bad_name: str) -> None:
     with pytest.raises(ValueError, match="invalid plugin name"):
         store.reset_for_version_bump(bad_name, new_version="0.2.0")
     with pytest.raises(ValueError, match="invalid plugin name"):
+        store.has_trust_record(bad_name)
+    with pytest.raises(ValueError, match="invalid plugin name"):
         store.remove(bad_name)
 
 

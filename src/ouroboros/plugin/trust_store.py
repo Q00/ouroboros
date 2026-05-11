@@ -494,6 +494,16 @@ class TrustStore:
     def reset_for_version_bump(self, plugin: str, new_version: str) -> None:
         self.reset_for_subject_change(plugin, new_version=new_version)
 
+    def has_trust_record(self, plugin: str) -> bool:
+        """True if a trust record file exists for `plugin`.
+
+        This intentionally validates before deriving the path so CLI
+        preflight checks do not bypass the TrustStore path-boundary
+        guard when inspecting whether a grant exists.
+        """
+        _validate_plugin_name(plugin)
+        return self._path(plugin).is_file()
+
     def remove(self, plugin: str) -> bool:
         """Remove the trust file for `plugin`. Returns True if removed.
 
