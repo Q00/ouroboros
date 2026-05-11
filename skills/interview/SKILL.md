@@ -309,6 +309,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
          {"label": "Send as-is", "description": "The structure captures my answer faithfully"},
          {"label": "Add to Constraints", "description": "I want to add a constraint I forgot"},
          {"label": "Add to Out of scope", "description": "I want to mark something explicitly out of scope"},
+         {"label": "Add context", "description": "I want to add reasoning, code context, or research context"},
          {"label": "Rewrite", "description": "Let me re-state the answer"}
        ],
        "multiSelect": false
@@ -327,8 +328,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Refine-passed answers count as direct user judgment — they reset the
    Dialectic Rhythm Guard counter to 0 (see below).
 
-   If the user picks "Add to Constraints", "Add to Out of scope", or
-   "Rewrite", do not infer the missing text from the option label. Immediately
+   If the user picks "Add to Constraints", "Add to Out of scope", "Add context",
+   or "Rewrite", do not infer the missing text from the option label. Immediately
    ask one follow-up AskUserQuestion to collect the exact text:
    ```json
    {
@@ -429,10 +430,16 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    or `open_questions` populated from the user's correction where applicable.
    Send that structured restate correction back to MCP with
    `[from-user][refined]`, preserving the corrected goal line and the user's
-   stated wording or missing scope. Then return to Step 7 so MCP can update its
-   interview state and the Seed-ready Acceptance Guard can run again against the
-   updated state. Do not proceed directly to `ooo seed` from the stale pre-
-   correction MCP state.
+   stated wording or missing scope. Because this is a post-seed-ready follow-up
+   that MCP did not generate, call `ouroboros_interview` with both the
+   structured `answer` and `last_question` set to the exact local Restate
+   follow-up prompt you asked (for example, the "How should the one-sentence
+   goal be worded instead?" or "What scope, condition, or boundary is missing?"
+   question). Without `last_question`, the handler must reject the reopen rather
+   than attach the correction to a stale MCP question. Then return to Step 7 so
+   MCP can update its interview state and the Seed-ready Acceptance Guard can
+   run again against the updated state. Do not proceed directly to `ooo seed`
+   from the stale pre-correction MCP state.
 
    After MCP returns seed-ready again and the Acceptance Guard still passes, ask
    the Restate gate once more with the corrected goal line. Do not loop more
