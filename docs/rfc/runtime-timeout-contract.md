@@ -6,12 +6,13 @@
 
 ## Summary
 
-Three independent timeout surfaces exist today. Each raises its own exception
-and signals cancellation through its own mechanism. None of them emit a
-`control.directive.emitted` event, so the control plane has no unified
-visibility into why a run was interrupted. This RFC proposes a contract that
-maps every timeout surface onto the `Directive` vocabulary and requires each
-site to emit `control.directive.emitted` as the canonical control-plane signal.
+Three independent timeout surfaces exist today. Each raises or returns its own
+timeout representation and signals cancellation through its own mechanism.
+They do not provide a consistent, source-specific `control.directive.emitted`
+signal, so the control plane has no unified visibility into why a run was
+interrupted. This RFC proposes a contract that maps every timeout surface onto
+the `Directive` vocabulary and requires each site to emit
+`control.directive.emitted` as the canonical control-plane signal.
 
 ## Context
 
@@ -21,9 +22,9 @@ site to emit `control.directive.emitted` as the canonical control-plane signal.
 `src/ouroboros/orchestrator/mcp_tools.py`, `src/ouroboros/config/models.py`
 
 `MCPTimeoutError` (defined in `src/ouroboros/mcp/errors.py:170`) is a subclass
-of `MCPClientError` and is raised by the MCP client manager
-(`src/ouroboros/mcp/client/manager.py:460–463`) when an MCP tool call exceeds
-its wall-clock budget. The timeout budget is controlled by
+of `MCPClientError` and is returned as `Result.err(...)` by the MCP client
+manager (`src/ouroboros/mcp/client/manager.py:460–463`) when an MCP tool call
+exceeds its wall-clock budget. The timeout budget is controlled by
 `RuntimeControlsConfig.mcp_tool_timeout_seconds` (default `0`, which disables
 the adapter-level guard):
 
@@ -33,17 +34,20 @@ mcp_tool_timeout_seconds: float = Field(default=0, ge=0)
 ```
 
 `MCPTimeoutError` is marked `is_retriable=True` at construction. The retry
-logic in `src/ouroboros/orchestrator/mcp_tools.py:2156` catches
-`(MCPConnectionError, asyncio.TimeoutError)` and re-attempts up to `MAX_RETRIES`
-times before emitting the structured log event
-`orchestrator.mcp_tools.timeout_after_retries` and raising a non-retriable
-`MCPClientError`. No `control.directive.emitted` event is produced.
+logic in `src/ouroboros/orchestrator/mcp_tools.py:2156` catches raised
+`(MCPConnectionError, asyncio.TimeoutError)` exceptions and re-attempts up to
+`MAX_RETRIES` times before emitting the structured log event
+`orchestrator.mcp_tools.timeout_after_retries` and returning a non-retriable
+tool error. Manager-originated `MCPTimeoutError` values currently bypass that
+exception retry path because they are returned as `Result.err(...)`; the
+orchestrator converts them through its generic `call_failed` path. No
+`control.directive.emitted` event is produced.
 
 ### Surface 2 — Generation watchdog timeout
 
 **Files:** `src/ouroboros/evolution/watchdog.py`, `src/ouroboros/config/models.py`
 
-`GenerationWatchdogTimeout` (defined in `src/ouroboros/evolution/watchdog.py:24`)
+`GenerationWatchdogTimeout` (defined in `src/ouroboros/evolution/watchdog.py:65`)
 is raised by `GenerationProgressWatchdog._raise_if_threshold_exceeded` when one
 of three thresholds is breached:
 
@@ -56,7 +60,10 @@ of three thresholds is breached:
 When raised, the watchdog calls `emit_decision(action="timeout", ...)` which
 persists a `lineage.generation.watchdog_decision` event via the `EventStore`.
 This is a lineage-scoped event, not a `control.directive.emitted` event, so it
-does not appear in the control-plane directive stream.
+does not appear in the control-plane directive stream. One caller path,
+`evolve_step`, can later convert the failed step into a generic
+`control.directive.emitted` event with `emitted_by="evolver"`; that does not
+identify the watchdog timeout as the source surface.
 
 ### Surface 3 — Auto-run handoff timeout
 
@@ -66,8 +73,9 @@ The auto pipeline coordinates interview, seed generation, repair, review, and
 run handoff phases. Each phase runs under a `TimeoutError`-bounded `asyncio`
 call. The run-start phase is the most nuanced: a first `TimeoutError` sets
 `run_handoff_status = "unknown_timeout"` and schedules one retry; a second
-`TimeoutError` on the retry marks `run_handoff_status = "unknown_retry_failed"`
-and blocks further attempts:
+`TimeoutError` on the retry leaves the status as `"unknown_timeout"` and blocks
+further attempts. The `"unknown_retry_failed"` status is used by the non-timeout
+exception path on the retry:
 
 ```python
 # src/ouroboros/auto/pipeline.py:801–814
@@ -98,10 +106,10 @@ The three surfaces described above share no control-plane representation:
    raises; the watchdog cancels the async task then persists a lineage event;
    the auto pipeline writes to a mutable `state` object and returns early.
 
-3. **No shared signal** — none of the three surfaces emit
-   `control.directive.emitted`. A lineage projector, TUI renderer, or external
-   monitor cannot reconstruct *why* a run stopped from the directive journal
-   alone.
+3. **No shared source-specific signal** — these timeout surfaces do not emit a
+   consistent `control.directive.emitted` event at the timeout decision point. A
+   lineage projector, TUI renderer, or external monitor cannot reconstruct
+   *why* a run stopped from the directive journal alone.
 
 This gap is item 5 of Q00/ouroboros#578, which asks for a unified
 control-plane representation across all timeout surfaces so that consumers can
@@ -124,15 +132,18 @@ is determined per-surface as follows.
 | MCP tool timeout | `"mcp.tool_timeout"` | `Directive.CANCEL` | retry budget exhausted |
 | Watchdog timeout | `"watchdog"` | mapped by `watchdog_timeout_to_directive` (proposed in #836) | budget-dependent |
 | Auto handoff timeout — first occurrence | `"auto.run_handoff"` | `Directive.RETRY` | `run_handoff_status == "unknown_timeout"` and not yet retried |
-| Auto handoff timeout — terminal | `"auto.run_handoff"` | `Directive.CANCEL` | retry exhausted (`unknown_retry_failed`) or deadline enforced |
+| Auto handoff timeout — terminal | `"auto.run_handoff"` | `Directive.CANCEL` | retry exhausted while still `unknown_timeout`, retry failed with `unknown_retry_failed`, or deadline enforced |
 
 ### MCP tool timeout mapping
 
 `MCPTimeoutError` sets `is_retriable=True`. The adapter in
-`src/ouroboros/orchestrator/mcp_tools.py` already tracks retry iterations.
-After each failed attempt the site emits `Directive.RETRY`; after the final
-exhausted attempt it emits `Directive.CANCEL`. The event target is
-`target_type="execution"` with `execution_id` from the surrounding context.
+`src/ouroboros/orchestrator/mcp_tools.py` already tracks retry iterations for
+raised retryable exceptions, but manager-originated timeouts are currently
+returned as `Result.err(MCPTimeoutError)` and must either be lifted into the
+retry path or handled explicitly at the `Result.err` decision point. A
+caller-visible retry decision emits `Directive.RETRY`; an exhausted retry budget
+emits `Directive.CANCEL`. The event target is `target_type="execution"` with
+`execution_id` from the surrounding context.
 
 ### Watchdog timeout mapping
 
@@ -151,10 +162,11 @@ Phase timeouts in `src/ouroboros/auto/pipeline.py` catch `asyncio.TimeoutError`
 and update mutable `AutoPipelineState`. The proposal requires each
 `except TimeoutError` branch to additionally call
 `create_control_directive_emitted_event` before returning or blocking. The
-`run_handoff_status` value at the catch site determines the directive:
-`"unknown_timeout"` → `Directive.RETRY`; `"unknown_retry_failed"` or a deadline
-enforcement path → `Directive.CANCEL`. Target: `target_type="session"`,
-`target_id=state.session_id`.
+`run_handoff_status` value and retry context at the catch site determine the
+directive: first `"unknown_timeout"` → `Directive.RETRY`; retried
+`"unknown_timeout"`, `"unknown_retry_failed"`, or a deadline enforcement path →
+`Directive.CANCEL`. Target: `target_type="session"`,
+`target_id=state.auto_session_id`.
 
 ## Invariants
 
@@ -183,9 +195,10 @@ must not restart work; a `RETRY` directive should re-enter the appropriate
 phase.
 
 **I5 — No duplicate emission on retry success.** If a timed-out operation
-succeeds on a subsequent attempt, no `control.directive.emitted` event is
-emitted for that timeout — only for the retry-triggering failure. This keeps
-the directive journal as a decision log, not a full-trace log.
+succeeds on a subsequent attempt, no additional
+`control.directive.emitted` event is emitted for the success — only the
+retry-triggering timeout decision is recorded. This keeps the directive journal
+as a decision log, not a full-trace log.
 
 ## Migration plan
 
@@ -194,19 +207,20 @@ independently deployable. No flag day required.
 
 ### Phase 1 — MCP tool timeout (smallest blast radius)
 
-`MCPTimeoutError` is raised and caught within the orchestrator layer. No
-lineage state is touched on this path. Emit `control.directive.emitted` from
-the catch site in `src/ouroboros/orchestrator/mcp_tools.py` (the
-`timeout_after_retries` log event already signals this is the final decision
-point). Requires passing `execution_id` into the emission context; this context
-is already available via the surrounding tool-invocation frame.
+`MCPTimeoutError` is produced by the manager and consumed within the
+orchestrator layer. No lineage state is touched on this path. First decide
+whether manager timeouts should be raised into `retry_async` or handled from the
+returned `Result.err(MCPTimeoutError)` value; emit `control.directive.emitted`
+from that caller-visible decision site. Requires passing `execution_id` into
+the emission context; this context is already available via the surrounding
+tool-invocation frame.
 
 ### Phase 2 — Auto handoff timeout
 
 Each `except TimeoutError` branch in `src/ouroboros/auto/pipeline.py`
 already calls `state.mark_blocked()` or returns early — a well-defined decision
 point. Add the `control.directive.emitted` emission immediately before the
-existing state mutation. `state.session_id` is available throughout the
+existing state mutation. `state.auto_session_id` is available throughout the
 pipeline.
 
 ### Phase 3 — Watchdog timeout (deferred to #836)
@@ -240,19 +254,24 @@ the `timeout_kind → Directive` mapping.
 
 ## Open questions
 
-**Q1 — Should phase-internal timeouts (interview, repair) also emit directives?**
+**Q1 — Should phase-internal timeouts also emit directives?**
 The mapping table covers the run-handoff `TimeoutError` branches explicitly.
-The interview phase (`src/ouroboros/auto/pipeline.py:368`) and repair phase
-(`src/ouroboros/auto/pipeline.py:603`) also catch `TimeoutError` and call
-`state.mark_blocked()`. Should those sites also emit `Directive.CANCEL`, or is
-the run-handoff path sufficient for #578 item 5? The maintainer's answer will
-determine whether Phase 2 covers all `except TimeoutError` branches or only
-the run-handoff branch.
+The interview phase (`src/ouroboros/auto/pipeline.py:368`), seed-generation
+phase (`src/ouroboros/auto/pipeline.py:455`), repair phase
+(`src/ouroboros/auto/pipeline.py:603`), review phase
+(`src/ouroboros/auto/pipeline.py:700`), and later Ralph/evaluate/unstuck/poll
+helpers also catch `TimeoutError` and call `state.mark_blocked()` or return
+early. Should those sites also emit `Directive.CANCEL`, or is the run-handoff
+path sufficient for #578 item 5? The maintainer's answer will determine
+whether Phase 2 covers all `except TimeoutError` branches or only the
+run-handoff branch.
 
 **Q2 — What is the authoritative retry budget for the MCP surface?**
 `MCPTimeoutError.is_retriable=True` signals the error is retriable, but the
 adapter in `src/ouroboros/orchestrator/mcp_tools.py` caps retries at
-`MAX_RETRIES` internally via a `tenacity`-style retry decorator. The
-`Directive.RETRY` emission proposed here should fire once per caller-visible
-retry opportunity. Is `MAX_RETRIES` the right boundary, or should the directive
-budget be configurable independently of the transport-level retry count?
+`MAX_RETRIES` internally via the local `retry_async` helper for raised
+exceptions. Manager-originated `Result.err(MCPTimeoutError)` values do not
+currently consume that retry budget. The `Directive.RETRY` emission proposed
+here should fire once per caller-visible retry opportunity. Is `MAX_RETRIES`
+the right boundary, or should the directive budget be configurable
+independently of the transport-level retry count?
