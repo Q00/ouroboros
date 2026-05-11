@@ -792,6 +792,35 @@ async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(tm
     assert call_count == 2  # evaluator was re-invoked with the persisted artifact
 
 
+@pytest.mark.asyncio
+async def test_pipeline_run_resumes_evaluate_with_persisted_artifact(tmp_path) -> None:
+    state = _state_at_run_phase(tmp_path)
+    state.phase = AutoPhase.EVALUATE
+    state.evaluate_artifact = "persisted Ralph artifact"
+    eval_calls: list[str] = []
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        eval_calls.append(artifact)
+        return EvaluateResult(passed=True, score=0.91, verdict="pass")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="should not be used"),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert eval_calls == ["persisted Ralph artifact"]
+    assert state.last_qa_verdict == "pass"
+
+
 def test_state_round_trips_evaluate_artifact(tmp_path) -> None:
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.evaluate_artifact = "persisted artifact"

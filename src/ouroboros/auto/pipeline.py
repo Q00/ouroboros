@@ -369,6 +369,7 @@ class AutoPipeline:
             AutoPhase.REVIEW,
             AutoPhase.RUN,
             AutoPhase.RALPH_HANDOFF,
+            AutoPhase.EVALUATE,
         }:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
