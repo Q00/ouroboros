@@ -156,7 +156,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      ```
    - Prefix answer with `[from-code]` when sending to MCP
    - If the user picks "Yes, correct", send the concise factual answer with
-     `[from-code]` and do not apply the Refine gate
+     `[from-code]` and do not apply the Refine gate. Increment the
+     auto-confirm counter (see Dialectic Rhythm Guard below).
    - If the user picks "No, let me correct", immediately ask a second
      AskUserQuestion to collect the corrected answer as free text:
      ```json
@@ -173,7 +174,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - If the user supplies a correction directly without using the option, treat
      that free text the same way: Refine first, then send with
      `[from-user][refined]`.
-   - Increment the auto-confirm counter (see Dialectic Rhythm Guard below)
+   - Reset the Dialectic Rhythm Guard counter to 0 because the corrected
+     answer is direct user judgment, even though it was initiated from a code
+     or research confirmation path.
 
    **PATH 2 — Human Judgment** (decisions only humans can make):
    When the question asks about goals, vision, acceptance criteria, business logic,
@@ -211,7 +214,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      ```
    - Prefix answer with `[from-research]` when sending to MCP
    - If the user picks "Yes, correct", send the concise factual answer with
-     `[from-research]` and do not apply the Refine gate
+     `[from-research]` and do not apply the Refine gate. Increment the
+     auto-confirm counter (see Dialectic Rhythm Guard below).
    - If the user picks "No, let me correct", immediately ask a second
      AskUserQuestion to collect the corrected answer as free text:
      ```json
@@ -228,7 +232,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - If the user supplies a correction directly without using the option, treat
      that free text the same way: Refine first, then send with
      `[from-user][refined]`.
-   - Increment the auto-confirm counter (see Dialectic Rhythm Guard below)
+   - Reset the Dialectic Rhythm Guard counter to 0 because the corrected
+     answer is direct user judgment, even though it was initiated from a code
+     or research confirmation path.
    - **Facts, not decisions**: "Stripe rate limit is 100 req/s" is research.
      "We should use Stripe" is a DECISION — route to PATH 2.
 
@@ -333,9 +339,14 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    }
    ```
    Apply the follow-up text to the structured payload, then ask the Refine gate
-   once more. This retry is bounded: after the second Refine response, send the
-   updated payload to MCP with a valid source prefix plus `[refined]` (for
-   example, `[from-user][refined]`), unless the user explicitly cancels.
+   once more. Do not send the payload to MCP while the user is still telling
+   you that required text is missing or the answer should be rewritten. If the
+   second Refine response again says "Add to Constraints", "Add to Out of
+   scope", or "Rewrite", ask a targeted PATH 2 follow-up for the exact missing
+   text and withhold the MCP answer until the user either supplies that text or
+   explicitly accepts the structured payload. Never infer omitted content from
+   the option label, and prefer stopping over forwarding a payload the user has
+   identified as incomplete.
 
 5. **Mark the answer as Refine-passed**:
    Append `[refined]` to the prefix when sending the structured payload to
