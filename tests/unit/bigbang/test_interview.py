@@ -318,13 +318,15 @@ class TestInterviewEngineAskNextQuestion:
         assert AGENT_SDK_CLI_FIXED_FRAMING_CHARS > 0
         assert AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS > 0
         assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS > 4_800
+        assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS < EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        assert (
+            EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS - AGENT_SDK_CLI_SAFE_PROMPT_CHARS >= 2_000
+        )
         assert (
             AGENT_SDK_CLI_FIXED_FRAMING_CHARS + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
             < EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
-        assert (
-            InterviewEngine._MAX_TOTAL_PROMPT_CHARS == EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
-        )
+        assert InterviewEngine._MAX_TOTAL_PROMPT_CHARS == AGENT_SDK_CLI_SAFE_PROMPT_CHARS
 
     @pytest.mark.asyncio
     async def test_ask_first_question(self) -> None:

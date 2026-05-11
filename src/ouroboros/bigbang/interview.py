@@ -63,7 +63,10 @@ AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS = 16_000
 # observed CLI empty-response cliff after serialization.
 AGENT_SDK_CLI_FIXED_FRAMING_CHARS = 1_500
 AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS = 128
-AGENT_SDK_CLI_SAFE_PROMPT_CHARS = AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS
+# Keep estimated serialized prompts below the observed empty-response boundary;
+# the remaining 2k margin absorbs adapter/provider prompt text that is harder to
+# model locally while still tripling the original 4.8k interview budget.
+AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 14_000
 
 
 class InterviewPerspective(StrEnum):
