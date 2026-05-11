@@ -51,10 +51,18 @@ INITIAL_CONTEXT_SUMMARY_REQUIRED = (
 )
 PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE = "\n\n[Context truncated for prompt safety.]"
 # Empirically, the local Agent SDK CLI path can return empty completions when
-# interview question prompts grow beyond roughly this combined character count
-# (system prompt plus conversation history). Keep richer answers, but bound the
-# request envelope independently of any model context-window size.
-AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 16_000
+# interview question prompts grow beyond roughly this combined character count.
+# This is the observed failure ceiling, not the production raw-message budget:
+# CLI adapters add their own framing around ``message.content`` before sending
+# the real prompt.
+AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS = 16_000
+# Reserve explicit space for adapter-added framing below the observed ceiling.
+# The remaining safe cap still preserves much richer interview answers than
+# the original 4,800-character limit while avoiding an edge-of-cliff budget.
+AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS = 1_000
+AGENT_SDK_CLI_SAFE_PROMPT_CHARS = (
+    AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS - AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+)
 
 
 class InterviewPerspective(StrEnum):

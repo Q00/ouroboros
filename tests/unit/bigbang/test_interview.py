@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import (
+    AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS,
+    AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS,
     AGENT_SDK_CLI_SAFE_PROMPT_CHARS,
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
@@ -24,7 +26,7 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 
-EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 16_000
+EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS = 16_000
 
 
 def create_mock_completion_response(
@@ -300,9 +302,24 @@ class TestInterviewEngineAskNextQuestion:
     """Test InterviewEngine.ask_next_question method."""
 
     def test_total_prompt_cap_stays_within_empirical_cli_ceiling(self) -> None:
-        """Production prompt cap must not exceed the independently recorded CLI ceiling."""
-        assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
-        assert InterviewEngine._MAX_TOTAL_PROMPT_CHARS <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+        """Raw prompt cap plus adapter headroom must stay below the observed ceiling."""
+        assert (
+            AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS
+            == EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
+        assert AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS > 0
+        assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS > 4_800
+        assert (
+            AGENT_SDK_CLI_SAFE_PROMPT_CHARS + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
+        assert (
+            InterviewEngine._MAX_TOTAL_PROMPT_CHARS + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
+        assert (
+            InterviewEngine._MAX_TOTAL_PROMPT_CHARS < EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
 
     @pytest.mark.asyncio
     async def test_ask_first_question(self) -> None:
@@ -359,7 +376,7 @@ class TestInterviewEngineAskNextQuestion:
 
         async def _complete(messages, _config):
             total_prompt_chars = sum(len(message.content) for message in messages)
-            if total_prompt_chars > EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS:
+            if total_prompt_chars > EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS:
                 return Result.err(
                     ProviderError(
                         "Command failed with exit code 1. Check stderr output for details"
@@ -380,7 +397,8 @@ class TestInterviewEngineAskNextQuestion:
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
         assert (
             sum(len(message.content) for message in messages)
-            <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+            + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
         assert "Initial context continues in the first user message" in messages[0].content
         assert messages[1].role == MessageRole.USER
@@ -412,7 +430,8 @@ class TestInterviewEngineAskNextQuestion:
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
         assert (
             sum(len(message.content) for message in messages)
-            <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+            + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
         assert messages[1].role == MessageRole.USER
         assert "Additional initial context omitted" in messages[1].content
@@ -529,7 +548,8 @@ class TestInterviewEngineAskNextQuestion:
         prompt_content = "\n".join(message.content for message in messages)
         assert (
             sum(len(message.content) for message in messages)
-            <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+            + AGENT_SDK_CLI_ADAPTER_FRAMING_HEADROOM_CHARS
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
         )
         assert "Additional initial context omitted" in prompt_content
         assert "TAIL_MARKER" in prompt_content
