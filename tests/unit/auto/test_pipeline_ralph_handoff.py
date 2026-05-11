@@ -245,7 +245,9 @@ async def test_resume_ralph_blocker_retries_fresh_handoff_without_terminal_reatt
     assert state.phase is AutoPhase.COMPLETE
     assert state.ralph_job_id == "job_ralph_retry_new"
     assert state.ralph_lineage_id != "ralph-seed_test_001-auto_old"
+    assert "-retry-" in state.ralph_lineage_id
     assert captured["kwargs"]["reattach_terminal"] is False
+    assert captured["kwargs"]["reuse_existing"] is False
 
 
 @pytest.mark.asyncio

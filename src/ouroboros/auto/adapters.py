@@ -190,6 +190,7 @@ class HandlerRalphStarter:
         on_dispatched: Callable[[dict[str, Any]], None] | None = None,
         on_started: Callable[[dict[str, Any]], None] | None = None,
         reattach_terminal: bool = True,
+        reuse_existing: bool = True,
     ) -> dict[str, Any]:
         """Dispatch the Ralph loop and wait for terminal completion.
 
@@ -205,7 +206,7 @@ class HandlerRalphStarter:
         """
         dispatch_callback = on_dispatched or on_started
         job_manager = self.handler._job_manager  # noqa: SLF001
-        if not existing_job_id and lineage_id:
+        if reuse_existing and not existing_job_id and lineage_id:
             recovered = await job_manager.find_active_job_by_lineage(
                 lineage_id, job_type="ralph", include_terminal=reattach_terminal
             )

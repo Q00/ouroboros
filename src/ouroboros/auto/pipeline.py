@@ -492,6 +492,7 @@ class AutoPipeline:
                     review,
                     run_subagent=None,
                     reattach_terminal=False,
+                    reuse_existing=False,
                 )
             return await self._resume_ralph_handoff(state, ledger, review=review)
 
@@ -878,6 +879,7 @@ class AutoPipeline:
         run_subagent: dict[str, Any] | None,
         *,
         reattach_terminal: bool = True,
+        reuse_existing: bool = True,
     ) -> AutoPipelineResult:
         """Run the RUN → RALPH_HANDOFF → terminal-phase chain.
 
@@ -890,7 +892,19 @@ class AutoPipeline:
         widget guidance to the operator.
         """
         assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
-        lineage_id = state.ralph_lineage_id or f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+        if state.ralph_lineage_id:
+            lineage_id = state.ralph_lineage_id
+        else:
+            lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+            if state.run_handoff_status == "ralph_retry_after_blocker":
+                # A resumable Ralph blocker (for example iteration_timeout)
+                # means the previous Ralph attempt has already produced a
+                # blocker for this auto session. Retrying must enqueue fresh
+                # Ralph work, not reattach to a still-running or terminal job
+                # with the original deterministic lineage. Persist the new
+                # retry lineage before dispatch so a crash after this point
+                # resumes the same retry attempt instead of minting another.
+                lineage_id = f"{lineage_id}-retry-{int(time.time() * 1000)}"
         state.ralph_lineage_id = lineage_id
         if state.phase is AutoPhase.RALPH_HANDOFF:
             state.mark_progress(
@@ -976,6 +990,8 @@ class AutoPipeline:
             starter_kwargs["on_dispatched"] = _checkpoint_dispatch
         if _accepts_keyword(self.ralph_starter, "reattach_terminal"):
             starter_kwargs["reattach_terminal"] = reattach_terminal
+        if _accepts_keyword(self.ralph_starter, "reuse_existing"):
+            starter_kwargs["reuse_existing"] = reuse_existing
         try:
             ralph_call = self.ralph_starter(seed, **starter_kwargs)
             if state.deadline_at is None:
