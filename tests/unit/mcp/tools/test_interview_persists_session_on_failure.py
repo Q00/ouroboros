@@ -161,7 +161,7 @@ async def test_question_failure_event_uses_compact_provider_error(
 async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_path: Path) -> None:
     """Provider compact diagnostics are not automatically safe for lifecycle events."""
     provider_error = ProviderError(
-        "Claude Agent SDK request failed in /Users/alice/workspace/project",
+        "Claude Agent SDK request failed in /Users/alice/workspace/project and /tmp",
         provider="claude_code",
         details={
             "error_type": "RuntimeError",
@@ -170,7 +170,7 @@ async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_pat
             "claudecode_present": True,
             "claude_code_entrypoint": "/Users/alice/bin/claude",
             "configured_cli_path": "/opt/homebrew/bin/claude",
-            "cwd": "/Users/alice/workspace/project",
+            "cwd": "/tmp",
             "env_override_keys": ["ANTHROPIC_API_KEY"],
         },
     )
@@ -201,6 +201,7 @@ async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_pat
     assert "session_id: claude-session-1" in event_error
     assert "/Users/alice" not in event_error
     assert "/opt/homebrew" not in event_error
+    assert "/tmp" not in event_error
     assert "configured_cli_path" not in event_error
     assert "cwd:" not in event_error
     assert "stderr" not in event_error
