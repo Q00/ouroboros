@@ -453,6 +453,9 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
                 "accessToken": "opaque-camel-access-token-value",
                 "clientSecret": "opaque-camel-client-secret-value",
                 "privateKey": "opaque-camel-private-key-value",
+                "aws_secret_access_key": "opaque-aws-secret-access-key-value",
+                "secret_access_key": "opaque-secret-access-key-value",
+                "request_authorization": "opaque-request-authorization-value",
                 "google_preview": "key=AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                 "idempotency_key": "event-correlation-key-123",
                 "safe_count": 3,
@@ -477,6 +480,9 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert "opaque-camel-access-token-value" not in text
     assert "opaque-camel-client-secret-value" not in text
     assert "opaque-camel-private-key-value" not in text
+    assert "opaque-aws-secret-access-key-value" not in text
+    assert "opaque-secret-access-key-value" not in text
+    assert "opaque-request-authorization-value" not in text
     assert "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" not in text
 
     payload = json.loads(text)
@@ -494,6 +500,9 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert data["accessToken"] == "[redacted]"
     assert data["clientSecret"] == "[redacted]"
     assert data["privateKey"] == "[redacted]"
+    assert data["aws_secret_access_key"] == "[redacted]"
+    assert data["secret_access_key"] == "[redacted]"
+    assert data["request_authorization"] == "[redacted]"
     assert data["google_preview"] == "key=[redacted]"
     assert data["idempotency_key"] == "event-correlation-key-123"
     assert data["safe_count"] == 3

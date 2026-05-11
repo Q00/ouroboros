@@ -534,16 +534,19 @@ def _is_secret_field_name(key: str | None) -> bool:
     normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.strip()).lower().replace("-", "_")
     field_parts = tuple(filter(None, normalized.split("_")))
     secret_terminal_parts = {
+        "authorization",
         "credential",
         "credentials",
         "password",
         "secret",
         "token",
     }
+    secret_key_context_parts = {"access", "api", "private", "secret"}
     return (
         normalized in _SECRET_FIELD_NAMES
         or normalized.endswith(("_api_key", "_private_key"))
         or (bool(field_parts) and field_parts[-1] in secret_terminal_parts)
+        or (bool(field_parts) and field_parts[-1] == "key" and bool(set(field_parts) & secret_key_context_parts))
     )
 
 
