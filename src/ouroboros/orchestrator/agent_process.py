@@ -425,14 +425,15 @@ class AgentProcessHandle:
         """
         if self.should_pause() and self._status is AgentProcessStatus.RUNNING:
             await self._set_status(AgentProcessStatus.PAUSED, reason="pause acknowledged")
-            self._save_lifecycle_checkpoint(
-                phase="agent_process_paused",
-                status="paused",
-                event_key="paused_at",
-                log_key="pause",
-                reason=self._pause_checkpoint_reason,
-                store=self._pause_checkpoint_store,
-            )
+            if self.should_pause() and self._status is AgentProcessStatus.PAUSED:
+                self._save_lifecycle_checkpoint(
+                    phase="agent_process_paused",
+                    status="paused",
+                    event_key="paused_at",
+                    log_key="pause",
+                    reason=self._pause_checkpoint_reason,
+                    store=self._pause_checkpoint_store,
+                )
         await self._paused_event.wait()
         if self._status is AgentProcessStatus.PAUSED and not self.should_cancel():
             await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")

@@ -34,6 +34,21 @@ class _FakeEventStore:
         self.appended.append(event)
 
 
+class _BlockingWaitEventStore(_FakeEventStore):
+    """Event store that holds the WAIT append open to expose resume races."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_append_started = asyncio.Event()
+        self.release_wait_append = asyncio.Event()
+
+    async def append(self, event: BaseEvent) -> None:
+        self.appended.append(event)
+        if event.data.get("directive") == "wait":
+            self.wait_append_started.set()
+            await self.release_wait_append.wait()
+
+
 def _types(events: list[BaseEvent]) -> list[str]:
     return [e.type for e in events]
 
@@ -630,6 +645,42 @@ async def test_pause_request_does_not_persist_until_acknowledged(tmp_path: Path)
     await handle.cancel(reason="end test")
     release.set()
     await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_fast_resume_during_pause_ack_does_not_rewrite_stale_pause(
+    tmp_path: Path,
+) -> None:
+    """A resume that wins while WAIT is being emitted must remain durable truth."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    event_store = _BlockingWaitEventStore()
+    process = AgentProcess(event_store=event_store)
+    started = asyncio.Event()
+    checkpoint = asyncio.Event()
+    wait_returned = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        await checkpoint.wait()
+        await handle.wait_unpaused()
+        wait_returned.set()
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=ck_store)
+    checkpoint.set()
+    await asyncio.wait_for(event_store.wait_append_started.wait(), timeout=1.0)
+    assert handle.status() is AgentProcessStatus.PAUSED
+
+    await handle.resume(store=ck_store)
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
+
+    event_store.release_wait_append.set()
+    await asyncio.wait_for(wait_returned.wait(), timeout=1.0)
+    await handle.wait_until_complete(timeout=1.0)
+
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
 
 
 @pytest.mark.asyncio
