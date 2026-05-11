@@ -155,7 +155,11 @@ async def test_ralph_handler_returns_job_id_and_completes_loop() -> None:
         assert job_id.startswith("job_")
 
         snapshot = await job_manager.get_snapshot(job_id)
-        deadline = asyncio.get_running_loop().time() + 30.0
+        # 60s rather than 30s: GitHub Actions runners under load have been
+        # observed to take >30s to drain a 2-iteration FakeEvolveHandler.
+        # The job itself is cheap; the slack absorbs runner cold-start +
+        # neighbor-job contention without masking real regressions.
+        deadline = asyncio.get_running_loop().time() + 60.0
         while not snapshot.is_terminal and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.05)
             snapshot = await job_manager.get_snapshot(job_id)
