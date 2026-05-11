@@ -1034,6 +1034,7 @@ def list_command(
                     "granted_scopes": [],
                     "missing_required_scopes": [],
                     "trust_version_stale": False,
+                    "trust_read_error": None,
                 }
             )
             continue
@@ -1064,6 +1065,7 @@ def list_command(
                     "granted_scopes": [],
                     "missing_required_scopes": [],
                     "trust_version_stale": False,
+                    "trust_read_error": None,
                 }
             )
             continue
@@ -1072,6 +1074,7 @@ def list_command(
         # is the right command for surfacing exactly which file is
         # corrupt; ``list`` must keep working so the operator can see
         # what else is installed.
+        trust_read_error: str | None = None
         try:
             record = trust.read(entry.name)
             trust_state = _describe_trust_state(
@@ -1082,10 +1085,18 @@ def list_command(
             )
             applies = _record_applies_to_subject(record, manifest=manifest, entry=entry)
             scopes = [g.scope for g in record.granted_scopes] if applies and record else []
-        except (ValueError, OSError):
+        except (ValueError, OSError) as exc:
+            # Operators using ``--json`` need to distinguish "no trust
+            # grant yet" from "trust file is malformed". Capture the
+            # raised reason so the row carries a deterministic
+            # diagnostic signal rather than collapsing onto the
+            # untrusted state. The ``trust_state == "trust_unreadable"``
+            # label already exists; ``trust_read_error`` complements it
+            # with the underlying message.
             record = None
             trust_state = "trust_unreadable"
             scopes = []
+            trust_read_error = str(exc)
         # ``trust_version_stale`` mirrors the firewall's "the recorded
         # grant is bound to a different installed version" predicate.
         # ``_record_applies_to_subject`` already collapses this into
@@ -1111,6 +1122,7 @@ def list_command(
                 "granted_scopes": scopes,
                 "missing_required_scopes": missing,
                 "trust_version_stale": stale_version,
+                "trust_read_error": trust_read_error,
             }
         )
 

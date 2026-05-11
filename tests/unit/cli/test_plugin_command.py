@@ -1010,13 +1010,24 @@ def test_list_survives_corrupt_trust_with_readable_manifest(
     data = json.loads(result.output.strip())
     assert isinstance(data, list) and len(data) == 2
     by_name = {row["name"]: row for row in data}
-    # The clean plugin's row is fully populated.
+    # The clean plugin's row is fully populated and carries the new
+    # ``trust_read_error`` key with a None default — ``--json``
+    # consumers can therefore rely on the field always being present.
     assert "clean-plugin" in by_name
+    assert by_name["clean-plugin"]["trust_read_error"] is None
     # The corrupt-trust plugin's row is degraded but PRESENT — that is
     # the contract being restored.
     assert "bad-plugin" in by_name
     bad_row = by_name["bad-plugin"]
     assert bad_row["granted_scopes"] == []
+    # The row must surface the trust read failure deterministically:
+    # ``trust_state`` flips to ``trust_unreadable`` and the new
+    # ``trust_read_error`` field carries a non-empty diagnostic message
+    # so ``--json`` consumers can distinguish "no trust grant yet" from
+    # "trust file is malformed".
+    assert bad_row["trust_state"] == "trust_unreadable"
+    assert isinstance(bad_row["trust_read_error"], str)
+    assert bad_row["trust_read_error"]
 
 
 FIRST_PARTY_REQUIRED_MANIFEST: dict = {
