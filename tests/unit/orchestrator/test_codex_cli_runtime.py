@@ -475,7 +475,11 @@ class TestCodexCliRuntime:
         """Default runtime_profile=None preserves existing command shape (regression)."""
         runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
 
-        command = runtime._build_command(output_last_message_path="/tmp/out.txt")
+        with patch(
+            "ouroboros.providers.profiles.load_config",
+            return_value=OuroborosConfig(),
+        ):
+            command = runtime._build_command(output_last_message_path="/tmp/out.txt")
 
         assert "--profile" not in command
 
@@ -505,7 +509,11 @@ class TestCodexCliRuntime:
                 runtime_profile="future-tier",
             )
 
-        command = runtime._build_command(output_last_message_path="/tmp/out.txt")
+        with patch(
+            "ouroboros.providers.profiles.load_config",
+            return_value=OuroborosConfig(),
+        ):
+            command = runtime._build_command(output_last_message_path="/tmp/out.txt")
 
         assert "--profile" not in command
         mock_warning.assert_called_once()
