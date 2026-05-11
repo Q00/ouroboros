@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import (
+    AGENT_SDK_CLI_SAFE_PROMPT_CHARS,
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     InterviewEngine,
@@ -22,6 +23,8 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+
+EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 16_000
 
 
 def create_mock_completion_response(
@@ -296,6 +299,11 @@ class TestInterviewEngineStartInterview:
 class TestInterviewEngineAskNextQuestion:
     """Test InterviewEngine.ask_next_question method."""
 
+    def test_total_prompt_cap_stays_within_empirical_cli_ceiling(self) -> None:
+        """Production prompt cap must not exceed the independently recorded CLI ceiling."""
+        assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+        assert InterviewEngine._MAX_TOTAL_PROMPT_CHARS <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+
     @pytest.mark.asyncio
     async def test_ask_first_question(self) -> None:
         """ask_next_question generates first question."""
@@ -345,13 +353,13 @@ class TestInterviewEngineAskNextQuestion:
     async def test_long_initial_context_stays_below_cli_failure_cap(
         self, context_length: int
     ) -> None:
-        """Long initial_context is split so the system prompt stays below 3500 chars."""
+        """Long initial_context stays below the empirical Agent SDK CLI ceiling."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
         async def _complete(messages, _config):
             total_prompt_chars = sum(len(message.content) for message in messages)
-            if total_prompt_chars > engine._MAX_TOTAL_PROMPT_CHARS:
+            if total_prompt_chars > EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS:
                 return Result.err(
                     ProviderError(
                         "Command failed with exit code 1. Check stderr output for details"
@@ -370,7 +378,10 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
-        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert (
+            sum(len(message.content) for message in messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+        )
         assert "Initial context continues in the first user message" in messages[0].content
         assert messages[1].role == MessageRole.USER
         assert "Additional initial context omitted" in messages[1].content
@@ -399,7 +410,10 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
-        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert (
+            sum(len(message.content) for message in messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+        )
         assert messages[1].role == MessageRole.USER
         assert "Additional initial context omitted" in messages[1].content
 
@@ -513,7 +527,10 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         prompt_content = "\n".join(message.content for message in messages)
-        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert (
+            sum(len(message.content) for message in messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+        )
         assert "Additional initial context omitted" in prompt_content
         assert "TAIL_MARKER" in prompt_content
 

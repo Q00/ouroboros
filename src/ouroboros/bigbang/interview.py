@@ -50,6 +50,11 @@ INITIAL_CONTEXT_SUMMARY_REQUIRED = (
     "generating a seed.]"
 )
 PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE = "\n\n[Context truncated for prompt safety.]"
+# Empirically, the local Agent SDK CLI path can return empty completions when
+# interview question prompts grow beyond roughly this combined character count
+# (system prompt plus conversation history). Keep richer answers, but bound the
+# request envelope independently of any model context-window size.
+AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 16_000
 
 
 class InterviewPerspective(StrEnum):
@@ -282,7 +287,7 @@ class InterviewEngine:
     model_is_explicit: bool = field(default=False, init=False)
     temperature: float = 0.7
     max_tokens: int = 2048
-    _MAX_TOTAL_PROMPT_CHARS = 16000
+    _MAX_TOTAL_PROMPT_CHARS = AGENT_SDK_CLI_SAFE_PROMPT_CHARS
     _MAX_SYSTEM_PROMPT_CHARS = 3500
     _MIN_SYSTEM_PROMPT_CHARS = 1200
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
