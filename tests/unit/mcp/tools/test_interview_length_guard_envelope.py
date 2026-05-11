@@ -28,6 +28,7 @@ import pytest
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    InterviewRound,
     InterviewState,
     InterviewStatus,
 )
@@ -42,6 +43,7 @@ class _LengthGuardEngine:
 
     state_dir: Path
     saved_states: list[InterviewState] = field(default_factory=list)
+    states_by_id: dict[str, InterviewState] = field(default_factory=dict)
 
     async def start_interview(
         self,
@@ -62,6 +64,24 @@ class _LengthGuardEngine:
         # Mirror the in-process engine's length-guard branch.
         return Result.ok(INITIAL_CONTEXT_SUMMARY_QUESTION)
 
+    async def record_response(
+        self,
+        state: InterviewState,
+        answer: str,
+        pending_question: str,
+    ) -> Result[InterviewState, MCPServerError]:
+        if state.rounds and state.rounds[-1].user_response is None:
+            state.rounds[-1].user_response = answer
+        else:
+            state.rounds.append(
+                InterviewRound(
+                    round_number=state.current_round_number,
+                    question=pending_question,
+                    user_response=answer,
+                )
+            )
+        return Result.ok(state)
+
     async def save_state(self, state: InterviewState) -> Result[Path, MCPServerError]:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self.state_dir / f"interview_{state.interview_id}.json"
@@ -70,12 +90,11 @@ class _LengthGuardEngine:
             encoding="utf-8",
         )
         self.saved_states.append(state)
+        self.states_by_id[state.interview_id] = state
         return Result.ok(path)
 
-    async def load_state(
-        self, session_id: str
-    ) -> Result[InterviewState, MCPServerError]:  # pragma: no cover - unused
-        raise NotImplementedError
+    async def load_state(self, session_id: str) -> Result[InterviewState, MCPServerError]:
+        return Result.ok(self.states_by_id[session_id])
 
 
 @pytest.mark.asyncio
@@ -120,6 +139,86 @@ async def test_start_with_oversized_context_returns_structured_length_guard_enve
     text_body = mcp_result.content[0].text
     assert INITIAL_CONTEXT_SUMMARY_QUESTION in text_body
     assert "Interview started" in text_body
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_length_guard_keeps_structured_envelope(
+    tmp_path: Path,
+) -> None:
+    """Resume path: a pending length-guard round must not become a hard error."""
+    engine = _LengthGuardEngine(state_dir=tmp_path)
+    session_id = "interview_resume_lengthguard"
+    state = InterviewState(
+        interview_id=session_id,
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 100),
+        status=InterviewStatus.IN_PROGRESS,
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=None,
+            )
+        ],
+    )
+    await engine.save_state(state)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle({"session_id": session_id})
+
+    assert outcome.is_ok
+    mcp_result = outcome.value
+    assert mcp_result.is_error is False
+    meta = mcp_result.meta or {}
+    assert meta.get("recoverable") is True
+    assert meta.get("reason") == "initial_context_too_large"
+    assert meta.get("expected_action") == "resend_with_summary"
+    assert meta.get("max_chars") == MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+    assert INITIAL_CONTEXT_SUMMARY_QUESTION in mcp_result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_answer_path_length_guard_keeps_structured_envelope(
+    tmp_path: Path,
+) -> None:
+    """Answer path: a generated length-guard follow-up must not raise/return error."""
+    engine = _LengthGuardEngine(state_dir=tmp_path)
+    session_id = "interview_answer_lengthguard"
+    state = InterviewState(
+        interview_id=session_id,
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 100),
+        status=InterviewStatus.IN_PROGRESS,
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="What are the main requirements?",
+                user_response=None,
+            )
+        ],
+    )
+    await engine.save_state(state)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle({"session_id": session_id, "answer": "Build a robust CLI."})
+
+    assert outcome.is_ok
+    mcp_result = outcome.value
+    assert mcp_result.is_error is False
+    meta = mcp_result.meta or {}
+    assert meta.get("recoverable") is True
+    assert meta.get("reason") == "initial_context_too_large"
+    assert meta.get("expected_action") == "resend_with_summary"
+    assert meta.get("max_chars") == MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+    assert INITIAL_CONTEXT_SUMMARY_QUESTION in mcp_result.content[0].text
 
 
 @pytest.mark.asyncio
