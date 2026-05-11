@@ -291,7 +291,7 @@ _INTERVIEW_EVENT_ABSOLUTE_PATH_RE = re.compile(
     r"(?:"
     r"~[/\\][^\s,;:'\")\]}]+"
     r"|/(?:[A-Za-z0-9._ -]+)(?:/[A-Za-z0-9._ -]+)*"
-    r"|[A-Za-z]:\\[^\s,;:'\")\]}]+"
+    r"|[A-Za-z]:\\[^\r\n,;:'\")\]}]+"
     r")"
 )
 
