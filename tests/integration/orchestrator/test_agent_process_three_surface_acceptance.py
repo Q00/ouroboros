@@ -120,15 +120,19 @@ class _InlineJobManager:
 
 
 class _FakeEvolveHandler:
+    def __init__(self, *, is_error: bool = False, action: str = "converged") -> None:
+        self.is_error = is_error
+        self.action = action
+
     async def handle(self, arguments: dict[str, Any]):
         return Result.ok(
             MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text="evolve ok"),),
-                is_error=False,
+                content=(MCPContentItem(type=ContentType.TEXT, text="evolve result"),),
+                is_error=self.is_error,
                 meta={
                     "lineage_id": arguments["lineage_id"],
                     "generation": 1,
-                    "action": "converged",
+                    "action": self.action,
                 },
             )
         )
@@ -153,6 +157,9 @@ class _FakeExecuteHandler:
     agent_runtime_backend: str | None = None
     llm_backend: str | None = None
 
+    def __init__(self, *, is_error: bool = False) -> None:
+        self.is_error = is_error
+
     async def handle(
         self,
         arguments: dict[str, Any],
@@ -165,8 +172,9 @@ class _FakeExecuteHandler:
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="execute ok"),),
-                is_error=False,
+                is_error=self.is_error,
                 meta={
+                    "action": "failed" if self.is_error else "completed",
                     "seed_content": arguments["seed_content"],
                     "execution_id": execution_id,
                     "session_id": session_id_override,
@@ -339,3 +347,58 @@ async def test_run_with_agent_process_preserves_original_failure_message() -> No
     directives = _directives(store)
     assert directives[0] == "continue"
     assert directives[-1] == "cancel"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "expected_intent"),
+    [
+        ("evolve_step", "evolve_step"),
+        ("ralph", "ralph"),
+        ("execute_seed", "execute_seed"),
+    ],
+)
+async def test_production_start_surfaces_do_not_converge_error_tool_results(
+    surface: str, expected_intent: str
+) -> None:
+    """MCPToolResult(is_error=True) is a lifecycle failure, not convergence."""
+    store = _FakeEventStore()
+    job_manager = _InlineJobManager()
+
+    if surface == "evolve_step":
+        handler = StartEvolveStepHandler(
+            evolve_handler=_FakeEvolveHandler(is_error=True, action="failed"),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle({"lineage_id": "lin_error", "seed_content": "goal: test"})
+    elif surface == "ralph":
+        handler = RalphHandler(
+            evolve_handler=_FakeEvolveHandler(is_error=True, action="failed"),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_error",
+                "seed_content": "goal: test",
+                "max_generations": 1,
+                "per_iteration_timeout_seconds": 30,
+                "max_total_seconds": 30,
+            }
+        )
+    else:
+        handler = StartExecuteSeedHandler(
+            execute_handler=_FakeExecuteHandler(is_error=True),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle({"seed_content": "goal: test"})
+
+    assert result.is_ok, surface
+    assert job_manager.runner_results[0].is_error is True
+    directives = _directives(store)
+    assert directives[0] == "continue", surface
+    assert directives[-1] == "cancel", surface
+    assert "converge" not in directives, surface
+    assert _directive_intents(store)[-1] == expected_intent
