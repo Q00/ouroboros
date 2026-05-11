@@ -1479,9 +1479,13 @@ class InterviewHandler:
                 }
                 if is_length_guard:
                     # Q00/ouroboros#831: surface the length-guard meta-directive
-                    # as a structured envelope so clients do not mis-route it
-                    # to a human via AskUserQuestion.  Text body is preserved
-                    # verbatim so the CLI interview UX is unchanged.
+                    # via structured meta keys so clients can branch on
+                    # ``meta.reason`` instead of mis-routing the text body to a
+                    # human via AskUserQuestion.  ``is_error`` is intentionally
+                    # left ``False`` -- the wire success/failure axis must not
+                    # flip or ``HandlerInterviewBackend.start`` (auto driver)
+                    # would raise on every oversized ``initial_context`` where
+                    # it previously delivered the summarize question.
                     start_meta.update(_length_guard_meta_fields())
                 return Result.ok(
                     MCPToolResult(
@@ -1494,7 +1498,7 @@ class InterviewHandler:
                                 ),
                             ),
                         ),
-                        is_error=is_length_guard,
+                        is_error=False,
                         meta=start_meta,
                     )
                 )
@@ -1538,7 +1542,9 @@ class InterviewHandler:
                     if resume_is_length_guard:
                         # Q00/ouroboros#831: structured signal when resuming
                         # an interview whose pending round is the length-guard
-                        # meta-directive.
+                        # meta-directive.  ``is_error`` stays ``False`` so
+                        # callers like the auto driver do not treat the
+                        # summarize prompt as a hard failure.
                         resume_meta.update(_length_guard_meta_fields())
                     return Result.ok(
                         MCPToolResult(
@@ -1548,7 +1554,7 @@ class InterviewHandler:
                                     text=f"Session {session_id}\n\n{display_question}",
                                 ),
                             ),
-                            is_error=resume_is_length_guard,
+                            is_error=False,
                             meta=resume_meta,
                         )
                     )
@@ -1909,6 +1915,8 @@ class InterviewHandler:
                     # question after an answer is again the length-guard
                     # meta-directive (the post-answer scoring path may still
                     # require the user to summarize before continuing).
+                    # ``is_error`` stays ``False`` so the auto driver's
+                    # ``answer()`` path is not raised on.
                     answer_meta.update(_length_guard_meta_fields())
                 return Result.ok(
                     MCPToolResult(
@@ -1918,7 +1926,7 @@ class InterviewHandler:
                                 text=f"Session {session_id}\n\n{display_question}",
                             ),
                         ),
-                        is_error=answer_is_length_guard,
+                        is_error=False,
                         meta=answer_meta,
                     )
                 )

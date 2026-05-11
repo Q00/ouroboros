@@ -481,9 +481,11 @@ If MCP returns `is_error=true` with `meta.recoverable=true`:
    Then switch to Path B and continue from where you left off.
 
 **Special case — `meta.reason == "initial_context_too_large"`**: When the
-response carries this reason (also `is_error=true`, `recoverable=true`), the
-text body is a meta-directive asking *you* to re-send a shorter context — it
-is **NOT** an interview question. Do not route it via AskUserQuestion.
+response carries this `meta.reason` (with `meta.recoverable=true` and
+`is_error=false` — the wire success/failure axis is intentionally **not**
+flipped, to keep existing callers like the auto driver working), the text
+body is a meta-directive asking *you* to re-send a shorter context — it is
+**NOT** an interview question. Do not route it via AskUserQuestion.
 Instead, produce a concise summary of the original `initial_context`
 (≤ `meta.max_chars` characters; covers goal, constraints, success criteria)
 and re-call `ouroboros_interview` with `session_id=<from meta>` and the
