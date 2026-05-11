@@ -205,7 +205,9 @@ class HandlerRalphStarter:
         dispatch_callback = on_dispatched or on_started
         job_manager = self.handler._job_manager  # noqa: SLF001
         if not existing_job_id and lineage_id:
-            recovered = await job_manager.find_active_job_by_lineage(lineage_id, job_type="ralph")
+            recovered = await job_manager.find_active_job_by_lineage(
+                lineage_id, job_type="ralph", include_terminal=True
+            )
             if recovered is not None:
                 existing_job_id = recovered.job_id
         if existing_job_id:

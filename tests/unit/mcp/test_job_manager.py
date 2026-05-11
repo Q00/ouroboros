@@ -1603,6 +1603,12 @@ class TestJobManager:
             await asyncio.sleep(0.05)
 
             assert (await manager.find_active_job_by_lineage("lin_recovery")) is None
+            terminal_recovered = await manager.find_active_job_by_lineage(
+                "lin_recovery", job_type="ralph", include_terminal=True
+            )
+            assert terminal_recovered is not None
+            assert terminal_recovered.job_id == started.job_id
+            assert terminal_recovered.status == JobStatus.COMPLETED
         finally:
             gate.set()
             await _cancel_manager_tasks(manager)

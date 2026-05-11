@@ -554,17 +554,19 @@ class JobManager:
         lineage_id: str,
         *,
         job_type: str | None = None,
+        include_terminal: bool = False,
     ) -> JobSnapshot | None:
-        """Return the most recently updated non-terminal job for ``lineage_id``.
+        """Return the most recently updated job for ``lineage_id``.
 
         Used by the auto pipeline RALPH_HANDOFF resume path to rediscover an
         already-running Ralph job when the auto state recorded a lineage_id
         but crashed (or returned to caller) before the job_id was persisted.
         Without this lookup, resuming an in-flight handoff would dispatch a
-        second Ralph loop for the same lineage. Returns ``None`` when no
-        active match exists; terminal jobs are deliberately ignored because
-        their async runner has already completed and re-attaching offers no
-        value.
+        second Ralph loop for the same lineage. By default, returns ``None``
+        when no active match exists; terminal jobs are deliberately ignored for
+        legacy callers. Set ``include_terminal=True`` for crash-gap recovery
+        paths that must consume the already-finished job result instead of
+        starting duplicate lineage work.
         """
         await self._ensure_initialized()
         candidates: list[JobSnapshot] = []
@@ -594,7 +596,7 @@ class JobManager:
                 snapshot = await self.get_snapshot(job_id)
             except ValueError:
                 continue
-            if snapshot.is_terminal:
+            if snapshot.is_terminal and not include_terminal:
                 continue
             if snapshot.links.lineage_id != lineage_id:
                 continue

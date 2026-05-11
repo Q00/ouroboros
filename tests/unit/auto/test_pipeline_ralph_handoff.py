@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.adapters import HandlerRalphPoller
+from ouroboros.auto.adapters import HandlerRalphPoller, HandlerRalphStarter
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
@@ -791,6 +791,79 @@ async def test_ralph_handoff_resume_polls_cancelled_job_to_blocked(tmp_path) -> 
     assert state.phase is AutoPhase.BLOCKED
     assert state.last_error == RALPH_CANCEL_BLOCKER_REASON
     assert state.last_tool_name == "ralph_starter"
+
+
+@pytest.mark.asyncio
+async def test_handler_ralph_starter_reattaches_terminal_gap_window_job() -> None:
+    """Gap-window recovery must consume a terminal lineage job instead of
+    dispatching duplicate Ralph work when the job finished before resume.
+    """
+
+    now = datetime.now(UTC)
+
+    class _TerminalJobManager:
+        async def find_active_job_by_lineage(
+            self,
+            lineage_id: str,
+            *,
+            job_type: str | None = None,
+            include_terminal: bool = False,
+        ) -> JobSnapshot | None:
+            assert lineage_id == "ralph-seed_test_001-auto_abc"
+            assert job_type == "ralph"
+            assert include_terminal is True
+            return JobSnapshot(
+                job_id="job_ralph_finished_gap",
+                job_type="ralph",
+                status=JobStatus.COMPLETED,
+                message="Job completed",
+                created_at=now,
+                updated_at=now,
+                links=JobLinks(lineage_id=lineage_id),
+                result_meta={"status": "completed", "stop_reason": "qa passed"},
+            )
+
+        async def get_snapshot(self, job_id: str) -> JobSnapshot:
+            assert job_id == "job_ralph_finished_gap"
+            return JobSnapshot(
+                job_id=job_id,
+                job_type="ralph",
+                status=JobStatus.COMPLETED,
+                message="Job completed",
+                created_at=now,
+                updated_at=now,
+                links=JobLinks(lineage_id="ralph-seed_test_001-auto_abc"),
+                result_meta={"status": "completed", "stop_reason": "qa passed"},
+            )
+
+    class _Handler:
+        _job_manager = _TerminalJobManager()
+
+        async def handle(self, _arguments: dict[str, Any]) -> Any:  # pragma: no cover
+            raise AssertionError("terminal gap recovery must not dispatch a new Ralph job")
+
+    starter = HandlerRalphStarter(_Handler())  # type: ignore[arg-type]
+    dispatched: dict[str, Any] = {}
+
+    result = await starter(
+        _build_seed(),
+        lineage_id="ralph-seed_test_001-auto_abc",
+        on_dispatched=dispatched.update,
+    )
+
+    assert dispatched == {
+        "job_id": "job_ralph_finished_gap",
+        "lineage_id": "ralph-seed_test_001-auto_abc",
+        "dispatch_mode": "job",
+        "status": "reattaching",
+    }
+    assert result == {
+        "job_id": "job_ralph_finished_gap",
+        "lineage_id": "ralph-seed_test_001-auto_abc",
+        "dispatch_mode": "job",
+        "terminal_status": "completed",
+        "stop_reason": "qa passed",
+    }
 
 
 @pytest.mark.asyncio
