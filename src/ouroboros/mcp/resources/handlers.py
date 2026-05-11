@@ -523,7 +523,7 @@ def _redact_event_resource_value(value: Any, *, key: str | None = None) -> Any:
 def _is_secret_field_name(key: str | None) -> bool:
     if key is None:
         return False
-    normalized = key.strip().lower().replace("-", "_")
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.strip()).lower().replace("-", "_")
     field_parts = tuple(filter(None, normalized.split("_")))
     secret_terminal_parts = {
         "credential",

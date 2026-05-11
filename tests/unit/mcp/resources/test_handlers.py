@@ -449,6 +449,9 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
                 "refresh_token": "opaque-refresh-token-value",
                 "github_token": "opaque-github-token-value",
                 "db_password": "opaque-db-password-value",
+                "accessToken": "opaque-camel-access-token-value",
+                "clientSecret": "opaque-camel-client-secret-value",
+                "privateKey": "opaque-camel-private-key-value",
                 "google_preview": "key=AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                 "idempotency_key": "event-correlation-key-123",
                 "safe_count": 3,
@@ -469,6 +472,9 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert "opaque-refresh-token-value" not in text
     assert "opaque-github-token-value" not in text
     assert "opaque-db-password-value" not in text
+    assert "opaque-camel-access-token-value" not in text
+    assert "opaque-camel-client-secret-value" not in text
+    assert "opaque-camel-private-key-value" not in text
     assert "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" not in text
 
     payload = json.loads(text)
@@ -482,6 +488,9 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert data["refresh_token"] == "[redacted]"
     assert data["github_token"] == "[redacted]"
     assert data["db_password"] == "[redacted]"
+    assert data["accessToken"] == "[redacted]"
+    assert data["clientSecret"] == "[redacted]"
+    assert data["privateKey"] == "[redacted]"
     assert data["google_preview"] == "key=[redacted]"
     assert data["idempotency_key"] == "event-correlation-key-123"
     assert data["safe_count"] == 3
