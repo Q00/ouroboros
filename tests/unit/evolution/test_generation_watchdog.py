@@ -318,8 +318,12 @@ async def test_parent_execution_child_events_reset_idle_timeout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_scoped_decomposition_events_reset_material_progress_timeout() -> None:
+async def test_session_scoped_decomposition_events_reset_material_progress_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Decomposition level progress is stored as execution events keyed by session ID."""
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     session_id = "session-levels"
     execution_id = "exec-levels"
@@ -333,6 +337,7 @@ async def test_session_scoped_decomposition_events_reset_material_progress_timeo
     async def decomposition_work() -> str:
         await event_store.append(_session_started(session_id, execution_id))
         await asyncio.sleep(0.04)
+        clock.advance(0.04)
         await event_store.append(
             _decomposition_level_event(
                 session_id,
@@ -341,6 +346,7 @@ async def test_session_scoped_decomposition_events_reset_material_progress_timeo
             )
         )
         await asyncio.sleep(0.04)
+        clock.advance(0.04)
         await event_store.append(
             _decomposition_level_event(
                 session_id,
@@ -349,6 +355,7 @@ async def test_session_scoped_decomposition_events_reset_material_progress_timeo
             )
         )
         await asyncio.sleep(0.04)
+        clock.advance(0.04)
         return "done"
 
     assert await watchdog.watch(decomposition_work()) == "done"
