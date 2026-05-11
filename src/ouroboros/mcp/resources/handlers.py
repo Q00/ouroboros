@@ -54,6 +54,20 @@ _SECRET_FLAG_PATTERN = re.compile(
     r")(?:=|\s+))"
     r"(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;]+)"
 )
+_SECRET_LABEL_PATTERN = re.compile(
+    r"(?i)(\b(?:"
+    r"api[-_]?key"
+    r"|(?:access|auth|bearer|github|gh|refresh)[-_]?token"
+    r"|token"
+    r"|password"
+    r"|(?:client[-_]?)?secret"
+    r"|credentials?"
+    r"|private[-_]?key"
+    r"|(?:aws[-_])?secret[-_]access[-_]key"
+    r"|authorization"
+    r")\b\s*[:=]\s*)"
+    r"(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\n]+)"
+)
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
     r"\b(?:"
@@ -546,12 +560,17 @@ def _is_secret_field_name(key: str | None) -> bool:
         normalized in _SECRET_FIELD_NAMES
         or normalized.endswith(("_api_key", "_private_key"))
         or (bool(field_parts) and field_parts[-1] in secret_terminal_parts)
-        or (bool(field_parts) and field_parts[-1] == "key" and bool(set(field_parts) & secret_key_context_parts))
+        or (
+            bool(field_parts)
+            and field_parts[-1] == "key"
+            and bool(set(field_parts) & secret_key_context_parts)
+        )
     )
 
 
 def _redact_secret_shaped_text(value: str) -> str:
     redacted = _SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{_REDACTED}", value)
+    redacted = _SECRET_LABEL_PATTERN.sub(lambda match: f"{match.group(1)}{_REDACTED}", redacted)
     redacted = _BEARER_PATTERN.sub(f"Bearer {_REDACTED}", redacted)
     return _HIGH_CONFIDENCE_SECRET_PATTERN.sub(_REDACTED, redacted)
 

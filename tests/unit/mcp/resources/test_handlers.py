@@ -446,6 +446,7 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
                 "quoted_password_preview": 'command: login --password "correct horse battery staple"',
                 "quoted_secret_preview": "command: run --secret 'multi word value'",
                 "client_secret_preview": "command: deploy --client-secret supersecret-value",
+                "label_preview": "api_key: my-test-secret, password: hunter2, authorization: Token abc123",
                 "access_token": "opaque-access-token-value",
                 "refresh_token": "opaque-refresh-token-value",
                 "github_token": "opaque-github-token-value",
@@ -473,6 +474,9 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert "sk-live-SECRET123" not in text
     assert "multi word value" not in text
     assert "supersecret-value" not in text
+    assert "my-test-secret" not in text
+    assert "hunter2" not in text
+    assert "Token abc123" not in text
     assert "opaque-access-token-value" not in text
     assert "opaque-refresh-token-value" not in text
     assert "opaque-github-token-value" not in text
@@ -493,6 +497,10 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert data["quoted_password_preview"] == "command: login --password [redacted]"
     assert data["quoted_secret_preview"] == "command: run --secret [redacted]"
     assert data["client_secret_preview"] == "command: deploy --client-secret [redacted]"
+    assert (
+        data["label_preview"]
+        == "api_key: [redacted], password: [redacted], authorization: [redacted]"
+    )
     assert data["access_token"] == "[redacted]"
     assert data["refresh_token"] == "[redacted]"
     assert data["github_token"] == "[redacted]"
