@@ -298,6 +298,37 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_plugin_dispatch_failure_returns_persisted_auto_session_id(
+        self, tmp_path, fake_inner_auto
+    ) -> None:
+        event_store = MagicMock()
+        event_store.initialize = AsyncMock(side_effect=RuntimeError("event store down"))
+        job_manager = MagicMock()
+        job_manager.start_job = AsyncMock()
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_err
+        persisted = list(tmp_path.glob("auto_*.json"))
+        assert len(persisted) == 1
+        auto_session_id = persisted[0].stem
+        assert auto_session_id in result.error.message
+        assert result.error.details["auto_session_id"] == auto_session_id
+        assert "resume" in result.error.message
+        assert not persisted[0].with_suffix(".start_auto_lease.json").exists()
+        job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_active_background_job_for_session_errors_before_enqueue(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
@@ -788,6 +819,45 @@ class TestAutoHandlerLeaseRelease:
                 lease = json.loads(lease_path.read_text(encoding="utf-8"))
                 assert lease["mode"] == "direct_auto"
                 assert lease["owner_pid"] == os.getpid()
+                return AutoPipelineResult(
+                    status="running",
+                    auto_session_id=state.auto_session_id,
+                    phase="interview",
+                    pending_question="Which runtime?",
+                )
+
+        h = StubAutoHandler(store=store)
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert not lease_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_direct_auto_resume_recovers_dead_owner_lease(self, tmp_path) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        state.pipeline_timeout_seconds = 900
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "dead_direct",
+                    "mode": "direct_auto",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                lease = json.loads(lease_path.read_text(encoding="utf-8"))
+                assert lease["mode"] == "direct_auto"
+                assert lease["token"] != "dead_direct"
                 return AutoPipelineResult(
                     status="running",
                     auto_session_id=state.auto_session_id,

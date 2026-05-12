@@ -622,9 +622,19 @@ class StartAutoHandler:
                     mode="plugin_dispatched",
                     ttl_seconds=max(1.0, state.pipeline_timeout_seconds),
                 )
-            except Exception:
+            except Exception as exc:
                 _release_start_lease(self._store, auto_session_id, token=lease_token)
-                raise
+                return Result.err(
+                    MCPToolError(
+                        "Failed to dispatch plugin auto session "
+                        f"{auto_session_id}: {exc}. The auto session was persisted; "
+                        f"resume with ouroboros_start_auto resume={auto_session_id} "
+                        f"or ouroboros_auto resume={auto_session_id}.",
+                        tool_name="ouroboros_start_auto",
+                        is_retriable=True,
+                        details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+                    )
+                )
             return build_subagent_result(
                 payload,
                 response_shape={
@@ -933,7 +943,8 @@ def _reserve_start_lease(
     with file_lock(path):
         existing = _read_start_lease_locked(path)
         if existing is not None and not _lease_is_expired(existing):
-            return "", _lease_conflict_error(auto_session_id, existing)
+            if _lease_owner_is_alive(existing):
+                return "", _lease_conflict_error(auto_session_id, existing)
         _write_start_lease_locked(
             path,
             {
