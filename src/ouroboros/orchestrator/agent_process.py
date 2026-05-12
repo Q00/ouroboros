@@ -258,6 +258,7 @@ class AgentProcessHandle:
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     _cancel_reason: str = "cancel requested"
     _emit_directive: Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None = None
+    _work_task: asyncio.Task[None] | None = None
 
     def __post_init__(self) -> None:
         # The paused-event is "set" when the loop is *not* paused so a
@@ -482,7 +483,7 @@ class AgentProcess:
 
         # Spawn but do not await — the caller drives lifecycle through
         # the handle.
-        asyncio.create_task(_runner(), name=f"agent_process:{pid}")
+        handle._work_task = asyncio.create_task(_runner(), name=f"agent_process:{pid}")
         return handle
 
     def _make_emitter(
@@ -522,3 +523,75 @@ class AgentProcess:
 def _new_process_id() -> str:
     """Return a fresh process_id."""
     return uuid4().hex
+
+
+async def run_with_agent_process[T](
+    *,
+    event_store: _AppendableEventStore | None,
+    intent: str,
+    work_fn: Callable[[AgentProcessHandle], Awaitable[T]],
+    timeout: float | None = None,
+) -> T:
+    """Run one production surface through :class:`AgentProcess.spawn`.
+
+    This helper is the shared acceptance boundary for long-running MCP
+    surfaces.  It lets each surface keep its existing JobManager contract
+    while ensuring the actual background runner emits the uniform
+    AgentProcess lifecycle directives (RUNNING/CONVERGE/CANCEL/FAILED).
+    """
+    result_box: list[T] = []
+    error_box: list[BaseException] = []
+
+    async def _work(handle: AgentProcessHandle) -> None:
+        try:
+            result = await work_fn(handle)
+            result_box.append(result)
+            if getattr(result, "is_error", False):
+                reason = getattr(result, "text_content", None) or f"{intent} returned is_error=True"
+                meta = getattr(result, "meta", {})
+                terminal_kind = None
+                if isinstance(meta, dict):
+                    terminal_kind = meta.get("action") or meta.get("status")
+                if terminal_kind in {"cancel", "cancelled", "interrupted"}:
+                    await handle.cancel(reason=str(reason)[:500])
+                    await handle._mark_cancelled()
+                else:
+                    await handle._mark_failed(reason=str(reason)[:500])
+        except BaseException as exc:  # noqa: BLE001 - preserve the original runner failure
+            error_box.append(exc)
+            raise
+
+    process = AgentProcess(event_store=event_store)
+    handle = await process.spawn(intent=intent, work_fn=_work)
+    try:
+        final_status = await handle.wait_until_complete(timeout=timeout)
+    except (asyncio.CancelledError, TimeoutError):
+        await handle.cancel(reason="cancelled by job runner")
+        work_task = handle._work_task
+        if work_task is not None and not work_task.done():
+            work_task.cancel()
+            done, _pending = await asyncio.wait({work_task}, timeout=1.0)
+            for completed in done:
+                try:
+                    await completed
+                except asyncio.CancelledError:
+                    pass
+        await handle._mark_cancelled()
+        raise
+
+    if final_status is AgentProcessStatus.CANCELLED:
+        if result_box:
+            return result_box[0]
+        raise asyncio.CancelledError(f"{intent} cancelled")
+    if final_status is AgentProcessStatus.FAILED:
+        if result_box:
+            return result_box[0]
+        if error_box:
+            exc = error_box[0]
+            if isinstance(exc, Exception):
+                raise exc
+            raise RuntimeError(f"{intent} failed") from exc
+        raise RuntimeError(f"{intent} failed")
+    if not result_box:
+        raise RuntimeError(f"{intent} completed without a result")
+    return result_box[0]

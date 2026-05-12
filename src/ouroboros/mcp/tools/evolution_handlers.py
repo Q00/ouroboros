@@ -45,6 +45,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
@@ -899,7 +900,11 @@ class StartEvolveStepHandler:
         snapshot = await self._job_manager.start_job(
             job_type="evolve_step",
             initial_message=f"Queued evolve_step for {lineage_id}",
-            runner=_runner(),
+            runner=run_with_agent_process(
+                event_store=self._event_store,
+                intent="evolve_step",
+                work_fn=lambda _handle: _runner(),
+            ),
             links=JobLinks(lineage_id=lineage_id),
         )
 

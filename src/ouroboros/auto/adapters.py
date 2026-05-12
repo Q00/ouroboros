@@ -22,6 +22,15 @@ from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import MCPToolResult
 from ouroboros.resilience.lateral import ThinkingPersona
 
+_SAFE_SEED_ID_FILENAME_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+)
+_WINDOWS_RESERVED_FILENAME_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
+
 
 class HandlerError(RuntimeError):
     """Raised when an MCP handler returns an error result."""
@@ -596,12 +605,46 @@ def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
     """Persist an auto-generated Seed in the standard seed directory."""
     directory = seeds_dir or (Path.home() / ".ouroboros" / "seeds")
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{seed.metadata.seed_id}.yaml"
+    seed_id = _safe_seed_id_for_filename(seed.metadata.seed_id)
+    path = directory / f"{seed_id}.yaml"
+    _require_path_inside_directory(path, directory)
     path.write_text(
         yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
     return str(path)
+
+
+def _safe_seed_id_for_filename(seed_id: str) -> str:
+    """Return a filesystem-safe filename stem for a Seed id.
+
+    Seed ids are semantic identifiers, not a filesystem trust boundary.  Keep
+    common generated ids readable, but percent-encode every other UTF-8 byte so
+    traversal separators, whitespace, dots, and path-sensitive characters cannot
+    become path syntax while the persisted Seed metadata remains intact.
+    """
+    if seed_id == "":
+        return "%EMPTY%"
+    parts: list[str] = []
+    for char in seed_id:
+        if char in _SAFE_SEED_ID_FILENAME_CHARS:
+            parts.append(char)
+        else:
+            parts.extend(f"%{byte:02X}" for byte in char.encode("utf-8"))
+    stem = "".join(parts)
+    if stem.upper() in _WINDOWS_RESERVED_FILENAME_STEMS:
+        first_byte = stem[0].encode("utf-8")[0]
+        stem = f"%{first_byte:02X}{stem[1:]}"
+    return stem
+
+
+def _require_path_inside_directory(path: Path, directory: Path) -> None:
+    """Fail closed if a computed seed path escapes the seed directory."""
+    resolved_directory = directory.resolve()
+    resolved_path = path.resolve()
+    if resolved_path.parent != resolved_directory:
+        msg = f"Seed path escapes seed directory: {resolved_path}"
+        raise HandlerError(msg)
 
 
 def _turn_from_result(

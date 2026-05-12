@@ -11,7 +11,6 @@ from ouroboros.evolution.directive_mapping import (
     WATCHDOG_TIMEOUT_KINDS,
     is_terminal_directive,
     step_action_to_directive,
-    watchdog_timeout_to_directive,
 )
 from ouroboros.evolution.loop import StepAction
 
@@ -74,56 +73,21 @@ class TestTerminalClassification:
         assert is_terminal_directive(Directive.UNSTUCK) is False
 
 
-class TestWatchdogTimeoutMapping:
-    """Pin the watchdog-timeout → directive matrix for #578.
+class TestWatchdogTimeoutAlphabet:
+    """Watchdog timeout_kind is metadata, not directive policy."""
 
-    Conservative-by-design mapping documented in
-    ``ouroboros.evolution.directive_mapping``: safety/idle ⇒ CANCEL,
-    no-material-progress ⇒ UNSTUCK. WAIT and RETRY are intentionally
-    not produced — the watchdog has already waited past its budget,
-    and retry budgeting lives at the step layer below.
-    """
+    def test_timeout_kind_alphabet_is_classification_only(self) -> None:
+        assert (
+            frozenset(
+                {
+                    "safety_timeout",
+                    "idle_timeout",
+                    "no_material_progress_timeout",
+                }
+            )
+            == WATCHDOG_TIMEOUT_KINDS
+        )
 
-    def test_safety_timeout_maps_to_cancel(self) -> None:
-        directive = watchdog_timeout_to_directive("safety_timeout")
-        assert directive == Directive.CANCEL
-        assert directive is not None and directive.is_terminal is True
-
-    def test_idle_timeout_maps_to_cancel(self) -> None:
-        directive = watchdog_timeout_to_directive("idle_timeout")
-        assert directive == Directive.CANCEL
-        assert directive is not None and directive.is_terminal is True
-
-    def test_no_material_progress_timeout_maps_to_unstuck(self) -> None:
-        """No-progress is the canonical lateral-thinking trigger; the
-        directive must be non-terminal so the runtime can route the
-        lineage through an UNSTUCK persona rather than aborting."""
-        directive = watchdog_timeout_to_directive("no_material_progress_timeout")
-        assert directive == Directive.UNSTUCK
-        assert directive is not None and directive.is_terminal is False
-
-    def test_unknown_timeout_kind_returns_none(self) -> None:
-        """Forward-compatible: an unrecognized timeout name silently
-        maps to None so a future watchdog threshold lands without
-        breaking older callers."""
-        assert watchdog_timeout_to_directive("future_threshold_we_have_not_named") is None
-        assert watchdog_timeout_to_directive("") is None
-
-    def test_no_watchdog_timeout_produces_wait_or_retry(self) -> None:
-        """Pin the intentional absence of WAIT/RETRY in the watchdog
-        mapping — see module docstring rationale. WAIT would ask the
-        runtime to wait longer (the very thing the watchdog exists to
-        cut short); RETRY belongs at the step layer below."""
-        produced = {watchdog_timeout_to_directive(kind) for kind in WATCHDOG_TIMEOUT_KINDS}
-        assert Directive.WAIT not in produced
-        assert Directive.RETRY not in produced
-
-    def test_every_kind_in_the_alphabet_has_a_mapping(self) -> None:
-        """``WATCHDOG_TIMEOUT_KINDS`` is the public alphabet of timeout
-        names the watchdog can raise. Adding a name without an entry
-        in the lookup table would silently fall back to ``None`` and
-        skip directive emission, which masks the watchdog decision on
-        the control plane. The mapping table must therefore cover
-        every kind in the constant."""
-        for kind in WATCHDOG_TIMEOUT_KINDS:
-            assert watchdog_timeout_to_directive(kind) is not None, kind
+    def test_watchdog_failures_follow_failed_step_mapping(self) -> None:
+        assert step_action_to_directive("failed", retry_budget_remaining=1) == Directive.RETRY
+        assert step_action_to_directive("failed", retry_budget_remaining=0) == Directive.CANCEL

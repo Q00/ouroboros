@@ -520,6 +520,59 @@ def test_public_router_parses_raw_ooo_input_and_extracts_argument(
     }
 
 
+def test_packaged_auto_resolves_documented_chat_dispatch_flags(tmp_path: Path) -> None:
+    runtime_cwd = tmp_path / "workspace"
+    runtime_cwd.mkdir()
+    prompt = (
+        'ooo auto "Build a hello CLI" --complete-product '
+        "--pipeline-timeout-seconds 600.5 --max-interview-rounds 3 --skip-run"
+    )
+
+    result = resolve_skill_dispatch(ResolveRequest(prompt=prompt, cwd=runtime_cwd))
+
+    assert isinstance(result, Resolved)
+    assert result.skill_name == "auto"
+    assert result.mcp_tool == "ouroboros_auto"
+    assert result.mcp_args["goal"] == "Build a hello CLI"
+    assert result.mcp_args["cwd"] == str(runtime_cwd)
+    assert result.mcp_args["complete_product"] is True
+    assert result.mcp_args["pipeline_timeout_seconds"] == 600.5
+    assert isinstance(result.mcp_args["pipeline_timeout_seconds"], float)
+    assert result.mcp_args["max_interview_rounds"] == 3
+    assert result.mcp_args["skip_run"] is True
+
+
+def test_packaged_auto_absent_new_flags_default_false_compatible(tmp_path: Path) -> None:
+    result = resolve_skill_dispatch(
+        ResolveRequest(prompt="ooo auto Build a hello CLI", cwd=tmp_path)
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args["goal"] == "Build a hello CLI"
+    assert result.mcp_args["complete_product"] == ""
+    assert result.mcp_args["pipeline_timeout_seconds"] == ""
+    assert result.mcp_args["skip_run"] == ""
+
+
+def test_packaged_auto_preserves_unknown_flags_and_literal_control_text(
+    tmp_path: Path,
+) -> None:
+    prompt = (
+        "ooo auto Build docs mentioning --complete-product and "
+        "--pipeline-timeout-seconds 600.5 --unknown flag"
+    )
+
+    result = resolve_skill_dispatch(ResolveRequest(prompt=prompt, cwd=tmp_path))
+
+    assert isinstance(result, Resolved)
+    assert result.mcp_args["goal"] == (
+        "Build docs mentioning --complete-product and "
+        "--pipeline-timeout-seconds 600.5 --unknown flag"
+    )
+    assert result.mcp_args["complete_product"] == ""
+    assert result.mcp_args["pipeline_timeout_seconds"] == ""
+
+
 def test_router_exports_runtime_request_and_result_types(tmp_path: Path) -> None:
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "run"

@@ -428,6 +428,75 @@ def test_trust_partial_grant_records_installed_in_audit_event(
     )
 
 
+def test_trust_multi_scope_audit_events_reflect_incremental_grant_state(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Multi-scope trust persists atomically, but the audit stream is still
+    one event per requested scope. Each event's trust_state must describe
+    the conceptual grant step for that event, not the final batched result.
+    """
+    manifest_with_two_required = {
+        **REFERENCE_MANIFEST,
+        "permissions": [
+            {"scope": "github:read", "risk": "read_only", "required": True},
+            {
+                "scope": "github:pull_request:write",
+                "risk": "destructive",
+                "required": True,
+            },
+        ],
+    }
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(manifest_with_two_required))
+    paths = _common_paths(tmp_path)
+    install = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert install.exit_code == 0, install.output
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--scope",
+            "github:pull_request:write",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(paths["audit_log"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    payloads = [json.loads(line)["payload"] for line in paths["audit_log"].read_text().splitlines()]
+    assert [payload["provenance"]["granted_scope"] for payload in payloads] == [
+        "github:read",
+        "github:pull_request:write",
+    ]
+    assert [payload["trust_state"] for payload in payloads] == ["installed", "trusted"]
+
+    record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert record is not None
+    assert {g.scope for g in record.granted_scopes} == {
+        "github:read",
+        "github:pull_request:write",
+    }
+
+
 def test_trust_full_required_grant_records_trusted_in_audit_event(
     runner: CliRunner, tmp_path: Path
 ) -> None:
@@ -1595,6 +1664,100 @@ def test_trust_clears_disable_record(runner: CliRunner, tmp_path: Path) -> None:
     )
     rec = trust.read("github-pr-ops")
     assert rec is not None and rec.has_scope("github:read")
+
+
+def test_trust_command_uses_atomic_multi_scope_grant_and_clear_disable(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ooo plugin trust` must not split grant and re-enable into
+    separate TrustStore critical sections.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    TrustStore(root=paths["trust_root"]).write_disable(
+        "github-pr-ops",
+        source_type="local_path",
+        source_identity=str(src),
+        disabled_by="user:test",
+    )
+
+    calls: list[dict[str, object]] = []
+    original = TrustStore.grant_many_and_clear_disable
+
+    def _spy(self: TrustStore, **kwargs):  # noqa: ANN001
+        calls.append(dict(kwargs))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(TrustStore, "grant_many_and_clear_disable", _spy)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["scopes"] == ["github:read"]
+    trust = TrustStore(root=paths["trust_root"])
+    assert trust.read("github-pr-ops") is not None
+    assert not trust.is_disabled("github-pr-ops")
+
+
+def test_disable_command_uses_atomic_apply_disable(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ooo plugin disable` must write disabled.json and revoke trust
+    through the TrustStore atomic disable primitive.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    TrustStore(root=paths["trust_root"]).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    original = TrustStore.apply_disable
+
+    def _spy(self: TrustStore, plugin: str, **kwargs):  # noqa: ANN001
+        calls.append((plugin, dict(kwargs)))
+        return original(self, plugin, **kwargs)
+
+    monkeypatch.setattr(TrustStore, "apply_disable", _spy)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0][0] == "github-pr-ops"
+    trust = TrustStore(root=paths["trust_root"])
+    assert trust.read("github-pr-ops") is None
+    assert trust.is_disabled("github-pr-ops")
 
 
 def test_list_reflects_disabled_state(runner: CliRunner, tmp_path: Path) -> None:
@@ -3278,7 +3441,27 @@ def test_trust_friendly_error_on_clear_disable_failure(
     """
     paths = _common_paths(tmp_path)
     src = tmp_path / "src"
-    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    optional_manifest = {
+        **REFERENCE_MANIFEST,
+        "permissions": [
+            {"scope": "github:read", "risk": "read_only", "required": False},
+        ],
+    }
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "ouroboros.plugin.json").write_text(json.dumps(optional_manifest))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
 
     runner.invoke(
         plugin_app,
@@ -3302,8 +3485,6 @@ def test_trust_friendly_error_on_clear_disable_failure(
         [
             "trust",
             "github-pr-ops",
-            "--scope",
-            "github:read",
             "--lockfile",
             str(paths["lockfile"]),
             "--trust-root",
@@ -3520,14 +3701,14 @@ def test_trust_failure_after_disable_check_keeps_disable_record(
     trust = TrustStore(root=paths["trust_root"])
     assert trust.is_disabled("github-pr-ops")
 
-    # Make the grant write fail. With the new ordering, the failure
-    # must NOT clear the disable record.
-    original_grant = TrustStore.grant
+    # Make the atomic grant/re-enable write fail. The failure must NOT
+    # clear the disable record.
+    original_grant_many = TrustStore.grant_many_and_clear_disable
 
-    def _failing_grant(self, **kwargs):  # noqa: ANN001 — pytest patch shape
+    def _failing_grant_many(self, **kwargs):  # noqa: ANN001 — pytest patch shape
         raise OSError("disk full simulating mid-grant failure")
 
-    monkeypatch.setattr(TrustStore, "grant", _failing_grant)
+    monkeypatch.setattr(TrustStore, "grant_many_and_clear_disable", _failing_grant_many)
 
     result = runner.invoke(
         plugin_app,
@@ -3546,7 +3727,7 @@ def test_trust_failure_after_disable_check_keeps_disable_record(
     )
     assert result.exit_code != 0, result.output
     # Re-read trust state with the original grant restored.
-    monkeypatch.setattr(TrustStore, "grant", original_grant)
+    monkeypatch.setattr(TrustStore, "grant_many_and_clear_disable", original_grant_many)
     assert trust.is_disabled("github-pr-ops"), (
         "trust command failed mid-grant; the disable record MUST remain "
         "in place so the plugin stays gated until the user re-runs"

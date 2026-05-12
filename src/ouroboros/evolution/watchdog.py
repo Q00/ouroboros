@@ -7,7 +7,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 import logging
 import time
-from typing import Any
+from typing import Any, Final
 
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.directive import Directive
@@ -17,58 +17,22 @@ from ouroboros.events.control import create_control_directive_emitted_event
 from ouroboros.events.lineage import lineage_generation_watchdog_decision
 from ouroboros.evolution.directive_mapping import (
     is_terminal_directive,
-    watchdog_timeout_to_directive,
+    step_action_to_directive,
+)
+from ouroboros.evolution.material_progress import (
+    EXECUTION_MATERIAL_EVENTS,
+    LINEAGE_MATERIAL_EVENTS,
+    SESSION_MATERIAL_EVENTS,
+    TERMINAL_AC_STATUSES,
 )
 from ouroboros.persistence.event_store import EventStore
 
-logger = logging.getLogger(__name__)
+#: v0 cancellation contract (see docs/contributing/watchdog-cancellation.md).
+#: Kept as a named constant so projectors and tests can assert the mode without
+#: hardcoding the string.
+WATCHDOG_CANCELLATION_MODE: Final[str] = "cooperative_direct_one_stage"
 
-_LINEAGE_MATERIAL_EVENTS = frozenset(
-    {
-        "lineage.generation.started",
-        "lineage.generation.phase_changed",
-        "lineage.generation.completed",
-        "lineage.generation.interrupted",
-        "lineage.generation.failed",
-        "lineage.ontology.evolved",
-        "lineage.converged",
-        "lineage.stagnated",
-        "lineage.exhausted",
-    }
-)
-_EXECUTION_MATERIAL_EVENTS = frozenset(
-    {
-        "execution.ac.stall_detected",
-        "execution.coordinator.completed",
-        "execution.coordinator.failed",
-        "execution.decomposition.level_started",
-        "execution.decomposition.level_completed",
-        "execution.session.completed",
-        "execution.session.failed",
-        "execution.session.started",
-        "execution.terminal",
-    }
-)
-_SESSION_MATERIAL_EVENTS = frozenset(
-    {
-        "orchestrator.session.cancelled",
-        "orchestrator.session.completed",
-        "orchestrator.session.failed",
-        "orchestrator.session.started",
-        "orchestrator.task.completed",
-        "orchestrator.task.started",
-    }
-)
-_TERMINAL_AC_STATUSES = frozenset(
-    {
-        "completed",
-        "failed",
-        "skipped",
-        "blocked",
-        "invalid",
-        "satisfied",
-    }
-)
+logger = logging.getLogger(__name__)
 
 
 class GenerationWatchdogTimeout(OuroborosError):
@@ -87,7 +51,24 @@ class GenerationWatchdogTimeout(OuroborosError):
 
 @dataclass(slots=True)
 class GenerationProgressWatchdog:
-    """Watch EventStore activity and material progress for one generation."""
+    """Watch EventStore activity and material progress for one generation.
+
+    Resume contract
+    ---------------
+    The EventStore is the recovery substrate. When ``watch()`` raises
+    ``GenerationWatchdogTimeout``, the cancelled task is gone but every event
+    from that attempt — including the trailing ``lineage.generation.watchdog_decision``
+    and the ``control.directive.emitted`` written by the watchdog — remains
+    durably persisted.  The production loop treats
+    ``GenerationWatchdogTimeout`` as ``StepAction.FAILED``; replay consumers
+    read the trailing directive via ``event_store.replay("lineage", lineage_id)``.
+    Because the watchdog timeout path does not currently pass a real
+    ``retry_budget_remaining`` value, that directive follows the default
+    ``StepAction.FAILED`` mapping to ``Directive.RETRY``.
+    The watchdog itself is stateless across attempts: each new instance starts
+    fresh ``initialize_baseline()`` cursors, so stale events from the previous
+    attempt are not double-counted as activity or material progress.
+    """
 
     event_store: EventStore
     lineage_id: str
@@ -113,7 +94,34 @@ class GenerationProgressWatchdog:
     _baseline_initialized: bool = False
 
     async def watch[T](self, awaitable: Awaitable[T]) -> T:
-        """Run *awaitable* until it finishes or watchdog policy cancels it."""
+        """Run *awaitable* until it finishes or watchdog policy cancels it.
+
+        Cancellation contract (v0 — ``cooperative_direct_one_stage``):
+
+        When a threshold is exceeded the watchdog:
+
+        (a) Calls ``task.cancel()`` directly — one stage, no escalation.
+            There is no SIGTERM-then-SIGKILL style two-stage sequence; a
+            single ``CancelledError`` injection is the entire escalation path.
+        (b) Awaits the cancelled task and swallows ``CancelledError`` so the
+            inner coroutine has a chance to run its ``except CancelledError``
+            cleanup block before control returns here.
+        (c) Emits a ``lineage.generation.watchdog_decision`` event whose
+            details carry
+            ``cancellation_mode = WATCHDOG_CANCELLATION_MODE``.
+
+        *Cooperative* because the inner task observes the ``CancelledError``
+        and can react (e.g. flush state).  *Direct* because no
+        ``AgentProcess`` intermediary is involved — the watchdog holds the
+        asyncio task handle and cancels it inline.  *One-stage* because there
+        is no escalation from a soft signal to a hard kill.
+
+        To introduce two-stage escalation in the future, add a
+        ``SIGTERM``-equivalent soft-cancel step, give the inner task a
+        configurable grace period, then hard-cancel if still running.  Update
+        ``WATCHDOG_CANCELLATION_MODE`` and the doc in
+        ``docs/contributing/watchdog-cancellation.md`` accordingly.
+        """
         await self.initialize_baseline()
         task: asyncio.Task[T] = asyncio.create_task(awaitable)
         try:
@@ -133,21 +141,19 @@ class GenerationProgressWatchdog:
                 await task
             except asyncio.CancelledError:
                 pass
-            # Issue #578 — directive mapping. Resolve the timeout kind
-            # onto the shared ``Directive`` vocabulary so the watchdog's
-            # decision joins the same control-plane lane as
-            # ``StepAction``-level directives emitted by the evolution
-            # loop. ``None`` (forward-compat for unknown timeout kinds)
-            # keeps the legacy ``watchdog_decision`` event flowing
-            # untouched.
-            directive = watchdog_timeout_to_directive(exc.timeout_kind)
+            # Watchdog timeouts surface to the runtime as a failed
+            # generation. The directive follows the same retry/resilience
+            # budget mapping as the evolution loop instead of deriving policy
+            # directly from timeout_kind.
+            directive = step_action_to_directive("failed")
             try:
-                await self.emit_decision(
+                decision_metadata = await self.emit_decision(
                     action="timeout",
                     reason=exc.message,
                     details=exc.details,
                     directive=directive,
                 )
+                exc.details.update(decision_metadata)
             except Exception:
                 logger.warning(
                     "Failed to persist watchdog decision for lineage %s generation %s",
@@ -203,7 +209,7 @@ class GenerationProgressWatchdog:
         reason: str,
         details: dict[str, Any] | None = None,
         directive: Directive | None = None,
-    ) -> None:
+    ) -> dict[str, str]:
         """Persist a watchdog control decision for status/debug surfaces.
 
         When *directive* is provided (issue #578), two events are
@@ -219,29 +225,31 @@ class GenerationProgressWatchdog:
            record, aggregated by ``(target_type="lineage",
            target_id=self.lineage_id)`` so it interleaves with
            ``StepAction``-level directives the evolution loop emits on
-           the same lineage. ``emitted_by="watchdog"`` lets projectors
-           distinguish watchdog-sourced directives from evolver-sourced
-           ones at a glance.
+           the same lineage. ``emitted_by="generation.watchdog"`` lets
+           projectors distinguish watchdog-sourced directives from
+           evolver-sourced ones at a glance.
 
         ``directive=None`` preserves the pre-#578 behaviour: only the
         watchdog_decision event is persisted. This keeps callers that
         emit non-timeout decisions (or that don't yet have a directive
         mapping for their timeout kind) working unchanged.
+
+        The stored event always includes ``cancellation_mode`` in its
+        ``details`` dict so downstream projectors and tests can assert which
+        cancellation contract was in effect without inspecting the source.
         """
-        decision_details: dict[str, Any] | None
-        if directive is not None and details is not None:
-            decision_details = {
-                **details,
-                "directive": directive.value,
-                "directive_is_terminal": is_terminal_directive(directive),
-            }
-        elif directive is not None:
-            decision_details = {
-                "directive": directive.value,
-                "directive_is_terminal": is_terminal_directive(directive),
-            }
-        else:
-            decision_details = details
+        merged: dict[str, Any] = {"cancellation_mode": WATCHDOG_CANCELLATION_MODE}
+        if details:
+            merged.update(details)
+        if directive is not None:
+            merged.update(
+                {
+                    "directive": directive.value,
+                    "directive_is_terminal": is_terminal_directive(directive),
+                    "step_action": "failed",
+                    "retry_budget_remaining": 1,
+                }
+            )
 
         decision_event = lineage_generation_watchdog_decision(
             self.lineage_id,
@@ -249,29 +257,50 @@ class GenerationProgressWatchdog:
             action,
             reason,
             execution_id=self.execution_id,
-            details=decision_details,
+            details=merged,
         )
 
         if directive is None:
             await self.event_store.append(decision_event)
-            return
+            return {"watchdog_decision_event_id": decision_event.id}
+
+        timeout_kind = merged.get("timeout_kind")
+        phase = merged.get("phase") if isinstance(merged.get("phase"), str) else "executing"
+        idempotency_key = (
+            f"generation.watchdog:{self.lineage_id}:"
+            f"{self.generation_number}:{timeout_kind}:{decision_event.id}"
+        )
+        is_terminal = is_terminal_directive(directive)
+        merged["watchdog_decision_event_id"] = decision_event.id
+        merged["watchdog_directive_idempotency_key"] = idempotency_key
 
         directive_event = create_control_directive_emitted_event(
             target_type="lineage",
             target_id=self.lineage_id,
-            emitted_by="watchdog",
+            emitted_by="generation.watchdog",
             directive=directive,
             reason=reason,
             lineage_id=self.lineage_id,
             generation_number=self.generation_number,
+            phase=phase,
             execution_id=self.execution_id,
+            idempotency_key=idempotency_key,
             extra={
                 "watchdog_action": action,
-                "timeout_kind": (details or {}).get("timeout_kind"),
-                "is_terminal": is_terminal_directive(directive),
+                "timeout_kind": timeout_kind,
+                "cancellation_mode": WATCHDOG_CANCELLATION_MODE,
+                "is_terminal": is_terminal,
+                "step_action": "failed",
+                "retry_budget_remaining": 1,
+                "watchdog_decision_event_id": decision_event.id,
             },
         )
         await self.event_store.append_batch([decision_event, directive_event])
+        return {
+            "watchdog_decision_event_id": decision_event.id,
+            "watchdog_directive_event_id": directive_event.id,
+            "watchdog_directive_idempotency_key": idempotency_key,
+        }
 
     def _record_event(self, event: BaseEvent) -> None:
         if event.id in self._seen_event_ids:
@@ -290,13 +319,13 @@ class GenerationProgressWatchdog:
             self._last_material_event_type = event.type
 
     def _is_material_progress(self, event: BaseEvent) -> bool:
-        if event.type in _LINEAGE_MATERIAL_EVENTS:
+        if event.type in LINEAGE_MATERIAL_EVENTS:
             return self._event_matches_generation(event)
 
-        if event.type in _EXECUTION_MATERIAL_EVENTS:
+        if event.type in EXECUTION_MATERIAL_EVENTS:
             return True
 
-        if event.type in _SESSION_MATERIAL_EVENTS:
+        if event.type in SESSION_MATERIAL_EVENTS:
             return True
 
         if event.type == "workflow.progress.updated":
@@ -453,7 +482,7 @@ class GenerationProgressWatchdog:
             if not isinstance(status, str):
                 continue
             normalized = status.strip().lower()
-            if normalized in _TERMINAL_AC_STATUSES:
+            if normalized in TERMINAL_AC_STATUSES:
                 terminal_count += 1
             statuses.append((criterion.get("index"), normalized))
 
@@ -558,4 +587,5 @@ class GenerationProgressWatchdog:
 __all__ = [
     "GenerationProgressWatchdog",
     "GenerationWatchdogTimeout",
+    "WATCHDOG_CANCELLATION_MODE",
 ]

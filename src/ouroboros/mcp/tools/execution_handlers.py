@@ -57,6 +57,7 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -1172,7 +1173,11 @@ class StartExecuteSeedHandler:
         snapshot = await self._job_manager.start_job(
             job_type="execute_seed",
             initial_message="Queued seed execution",
-            runner=_runner(),
+            runner=run_with_agent_process(
+                event_store=self._event_store,
+                intent="execute_seed",
+                work_fn=lambda _handle: _runner(),
+            ),
             links=JobLinks(
                 session_id=session_id or new_session_id,
                 execution_id=execution_id,
