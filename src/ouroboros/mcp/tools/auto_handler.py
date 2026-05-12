@@ -202,8 +202,21 @@ class AutoHandler:
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
         auto_session_id = _auto_session_id_from_arguments(arguments)
         start_lease_token = _start_auto_lease_token_from_arguments(arguments)
+        release_start_lease = False
         store = self.store or AutoStore()
-        if auto_session_id is not None and start_lease_token is None:
+        if auto_session_id is None and start_lease_token is not None:
+            return Result.err(
+                MCPToolError(
+                    "_start_auto_lease_token is reserved for internal start_auto dispatches",
+                    tool_name="ouroboros_auto",
+                )
+            )
+        if auto_session_id is not None and start_lease_token is not None:
+            token_error = _validate_start_lease_token(store, auto_session_id, start_lease_token)
+            if token_error is not None:
+                return Result.err(token_error)
+            release_start_lease = True
+        elif auto_session_id is not None:
             try:
                 state = store.load(auto_session_id)
             except ValueError as exc:
@@ -216,16 +229,17 @@ class AutoHandler:
             )
             if lease_error is not None:
                 return Result.err(lease_error)
+            release_start_lease = True
         try:
             result = await self._run(arguments)
         except Exception as exc:
-            if auto_session_id is not None and start_lease_token is not None:
+            if auto_session_id is not None and release_start_lease:
                 _release_start_lease(store, auto_session_id, token=start_lease_token)
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
         release_session_id = result.auto_session_id or auto_session_id
-        if release_session_id and start_lease_token is not None:
+        if release_session_id and release_start_lease:
             _release_start_lease(store, release_session_id, token=start_lease_token)
         meta = _result_meta(result)
         text = _format_result(result)
@@ -971,6 +985,45 @@ def _release_start_lease(
             if lease is not None and lease.get("token") != token:
                 return
         path.unlink(missing_ok=True)
+
+
+def _validate_start_lease_token(
+    store: AutoStore, auto_session_id: str, token: str
+) -> MCPToolError | None:
+    lease = _read_start_lease(store, auto_session_id)
+    if lease is None:
+        return MCPToolError(
+            "Invalid start_auto lease token: no active lease exists for "
+            f"auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_auto",
+            is_retriable=True,
+            details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+        )
+    if _lease_is_expired(lease):
+        return MCPToolError(
+            "Invalid start_auto lease token: lease has expired for "
+            f"auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_auto",
+            is_retriable=True,
+            details={
+                "auto_session_id": auto_session_id,
+                "session_id": auto_session_id,
+                "lease_mode": lease.get("mode"),
+                "lease_expires_at": lease.get("expires_at"),
+            },
+        )
+    if lease.get("token") != token:
+        return MCPToolError(
+            f"Invalid start_auto lease token for auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_auto",
+            is_retriable=True,
+            details={
+                "auto_session_id": auto_session_id,
+                "session_id": auto_session_id,
+                "lease_mode": lease.get("mode"),
+            },
+        )
+    return None
 
 
 def _write_start_lease_locked(path: Path, payload: dict[str, Any]) -> None:

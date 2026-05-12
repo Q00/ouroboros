@@ -733,6 +733,49 @@ class TestAutoHandlerLeaseRelease:
         assert lease_path.exists()
 
     @pytest.mark.asyncio
+    async def test_direct_auto_resume_rejects_forged_start_auto_token(self, tmp_path) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "real_token",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                raise AssertionError("_run must not run with a forged lease token")
+
+        h = StubAutoHandler(store=store)
+        result = await h.handle(
+            {"resume": state.auto_session_id, "_start_auto_lease_token": "forged_token"}
+        )
+
+        assert result.is_err
+        assert "Invalid start_auto lease token" in result.error.message
+        assert json.loads(lease_path.read_text(encoding="utf-8"))["token"] == "real_token"
+
+    @pytest.mark.asyncio
+    async def test_start_auto_token_without_resume_is_rejected(self, tmp_path) -> None:
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                raise AssertionError("_run must not run with a stray lease token")
+
+        h = StubAutoHandler(store=AutoStore(tmp_path))
+        result = await h.handle({"goal": "build a CLI", "_start_auto_lease_token": "forged"})
+
+        assert result.is_err
+        assert "_start_auto_lease_token is reserved" in result.error.message
+
+    @pytest.mark.asyncio
     async def test_direct_auto_resume_acquires_and_releases_own_lease(self, tmp_path) -> None:
         store = AutoStore(tmp_path)
         state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
