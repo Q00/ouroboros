@@ -110,26 +110,54 @@ def classify_qa_failure_to_pattern(
     return StagnationPattern.SPINNING
 
 
+_FALLBACK_CHAIN: tuple[ThinkingPersona, ...] = (
+    ThinkingPersona.CONTRARIAN,
+    ThinkingPersona.HACKER,
+    ThinkingPersona.ARCHITECT,
+    ThinkingPersona.RESEARCHER,
+    ThinkingPersona.SIMPLIFIER,
+)
+
+
 def select_persona_for_qa_failure(
     differences: Sequence[str],
     suggestions: Sequence[str],
     *,
-    already_tried_personas: tuple[ThinkingPersona, ...] = (),
-) -> ThinkingPersona:
+    already_tried_personas: Sequence[ThinkingPersona] = (),
+) -> ThinkingPersona | None:
     """Pick a persona for a QA failure, excluding already-tried personas.
 
-    Falls back to ``ThinkingPersona.CONTRARIAN`` as the universal fallback
-    when the pattern's primary persona is already in
-    ``already_tried_personas``. CONTRARIAN itself can't be filtered out
-    here because Phase 2.2 only invokes a single persona per session;
-    P2.2b's multi-round retry will track the full exclusion set across
-    iterations.
+    RFC #809 Phase 2.2b — the closed-loop recovery dispatcher invokes a
+    different persona on each EVALUATE → UNSTUCK_LATERAL round (the
+    "each persona may be invoked at most once per evaluate session"
+    guard). The pipeline persists every routed persona in
+    ``AutoPipelineState.personas_invoked`` and forwards the deduplicated
+    set here as ``already_tried_personas``.
+
+    Selection order:
+
+    1. The pattern-based primary persona (HACKER/ARCHITECT/RESEARCHER/
+       SIMPLIFIER) chosen by :func:`classify_qa_failure_to_pattern`.
+    2. CONTRARIAN as the universal fallback.
+    3. Any remaining persona from the deterministic fallback chain
+       (HACKER → ARCHITECT → RESEARCHER → SIMPLIFIER), so the loop can
+       keep exploring distinct angles after the obvious two have been
+       tried.
+
+    Returns ``None`` when every persona in steps 1–3 is already in
+    ``already_tried_personas``. The caller (``pipeline._run_lateral`` in
+    P2.2b) transitions to ``BLOCKED`` with a "personas exhausted"
+    reason rather than picking a stale persona.
     """
+    tried = tuple(already_tried_personas)
     pattern = classify_qa_failure_to_pattern(differences, suggestions)
     primary = _PATTERN_PERSONA[pattern]
-    if primary in already_tried_personas:
-        return ThinkingPersona.CONTRARIAN
-    return primary
+    if primary not in tried:
+        return primary
+    for fallback in _FALLBACK_CHAIN:
+        if fallback not in tried:
+            return fallback
+    return None
 
 
 __all__ = [

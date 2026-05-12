@@ -24,6 +24,20 @@ class AutoPhase(StrEnum):
     RALPH_HANDOFF = "ralph_handoff"
     EVALUATE = "evaluate"
     UNSTUCK_LATERAL = "unstuck_lateral"
+    # RFC #809 Phase 2.2 originally specified a third recovery phase
+    # ``SEED_REGENERATE`` that would re-enter SEED_GENERATION with a
+    # ``[lateral_repair]`` ledger entry, automatically rewriting the Seed's
+    # acceptance criteria when persona lateral also failed. P2.2b
+    # deliberately does NOT wire this phase: an automatic AC rewrite when
+    # the run cannot satisfy the user's stated bar is a reward-hacking
+    # surface (the system silently downgrades the spec the user explicitly
+    # agreed to in the interview, then declares success against the
+    # downgraded spec). Ouroboros's spec-first invariant — "define what
+    # should be built before telling AI what to build" — keeps the spec
+    # owned by the human. P2.2b instead exhausts the deterministic
+    # recovery budget (rounds + fingerprint + persona-once + wall-clock)
+    # and surfaces a BLOCKED with the three explicit operator choices
+    # (relax AC, re-interview, or abandon) rather than mutating the Seed.
     COMPLETE = "complete"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -64,6 +78,15 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.EVALUATE.value: 90,
     AutoPhase.UNSTUCK_LATERAL.value: 60,
 }
+
+# RFC #809 Phase 2.2b — closed-loop recovery cap. Three EVALUATE rounds is
+# the SeedRepairer convention re-applied to the EVALUATE ⇄ UNSTUCK_LATERAL
+# retry cycle. Past three rounds the failure mode is structural rather
+# than a transient grading miss; the pipeline blocks for human review
+# (with the three operator choices: relax AC, re-interview, or abandon)
+# instead of burning more LLM budget or — worse — silently rewriting the
+# Seed (see the SEED_REGENERATE deferral comment on ``AutoPhase``).
+MAX_EVALUATE_ROUNDS: int = 3
 
 # Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
 # a typical product-bootstrap chain — interview ≤ 120s × 12 rounds + seed gen
@@ -215,7 +238,16 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
     },
+    # RFC #809 Phase 2.2b — UNSTUCK_LATERAL is no longer a terminal advisory
+    # phase. It now dispatches one of two outcomes inside the bounded
+    # retry budget: back to EVALUATE for another round under a different
+    # persona, or BLOCKED when a recovery guard trips
+    # (``MAX_EVALUATE_ROUNDS``, duplicate failure fingerprint, persona
+    # exhaustion, or wall-clock budget). SEED_REGENERATE is deliberately
+    # not part of this set — see the ``AutoPhase`` comment block above for
+    # the spec-first rationale behind that omission.
     AutoPhase.UNSTUCK_LATERAL: {
+        AutoPhase.EVALUATE,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
@@ -395,6 +427,26 @@ class AutoPipelineState:
     last_lateral_approach_summary: str | None = None
     last_lateral_text: str | None = None
     lateral_input_hash: str | None = None
+    # RFC #809 Phase 2.2b — closed-loop recovery counters. Persisted so a
+    # resumed session does not re-roll the budget after a process restart.
+    #
+    # ``evaluate_round`` counts entries into the EVALUATE phase (post-Ralph
+    # or post-SEED_REGENERATE). ``MAX_EVALUATE_ROUNDS`` (3) caps the loop.
+    #
+    # ``failure_fingerprints`` accumulates a deterministic fingerprint of
+    # each EVALUATE failure (sha256 over differences + suggestions). Two
+    # consecutive identical fingerprints means the recovery loop is not
+    # making material progress on the failure surface, so the pipeline
+    # transitions to BLOCKED rather than spending another LLM budget cycle.
+    #
+    # ``personas_invoked`` lists ``ThinkingPersona.value`` strings of every
+    # persona already routed in this session. The lateral router skips
+    # personas already in this list and finally returns ``None`` (no
+    # persona left to try) when all five are exhausted, which the pipeline
+    # treats as BLOCKED.
+    evaluate_round: int = 0
+    failure_fingerprints: list[str] = field(default_factory=list)
+    personas_invoked: list[str] = field(default_factory=list)
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -721,6 +773,14 @@ class AutoPipelineState:
         payload.setdefault("last_lateral_text", None)
         payload.setdefault("lateral_input_hash", None)
         payload.setdefault("active_domain_profile_name", None)
+        # RFC #809 Phase 2.2b — closed-loop recovery counters. Default the
+        # three new fields so a pre-P2.2b state file loads as a fresh
+        # recovery budget (round 0, no fingerprints, no personas tried).
+        # Without these setdefaults a legacy resume would raise the
+        # "state is missing required fields" guard below.
+        payload.setdefault("evaluate_round", 0)
+        payload.setdefault("failure_fingerprints", [])
+        payload.setdefault("personas_invoked", [])
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset

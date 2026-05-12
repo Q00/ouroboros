@@ -161,12 +161,21 @@ class _StubLedger:
 
 def test_unstuck_lateral_phase_in_allowed_transitions() -> None:
     assert AutoPhase.UNSTUCK_LATERAL in _ALLOWED_TRANSITIONS[AutoPhase.EVALUATE]
+    # RFC #809 Phase 2.2b — UNSTUCK_LATERAL became a retry dispatcher:
+    # back to EVALUATE for another round under a different persona, or
+    # BLOCKED when a recovery guard trips. SEED_REGENERATE is intentionally
+    # absent (see the AutoPhase deferral comment): an automatic Seed
+    # rewrite is a reward-hacking surface that mutates the spec the user
+    # explicitly agreed to. The pipeline instead surfaces the three
+    # operator choices (relax AC, re-interview, abandon) in the final
+    # BLOCKED message and leaves the spec under human control.
     assert _ALLOWED_TRANSITIONS[AutoPhase.UNSTUCK_LATERAL] == {
+        AutoPhase.EVALUATE,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
     }
-    # Recovery from terminal phases must allow re-entering UNSTUCK_LATERAL
+    # Recovery from terminal phases must allow re-entering UNSTUCK_LATERAL.
     assert AutoPhase.UNSTUCK_LATERAL in _ALLOWED_TRANSITIONS[AutoPhase.BLOCKED]
     assert AutoPhase.UNSTUCK_LATERAL in _ALLOWED_TRANSITIONS[AutoPhase.FAILED]
 
