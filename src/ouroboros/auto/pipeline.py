@@ -336,14 +336,6 @@ class AutoPipeline:
         if self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
-            _answerer = getattr(self.interview_driver, "answerer", None)
-            if _answerer is not None:
-                try:
-                    _apply_active_profile(state, _answerer)
-                except ValueError as exc:
-                    state.mark_blocked(str(exc), tool_name="domain_profile_registry")
-                    self._save(state)
-                    return self._result(state, ledger, blocker=state.last_error)
             # Arm the top-level pipeline deadline (#779) on the first
             # CREATED → INTERVIEW transition so every later phase entry can
             # compare ``time.monotonic()`` against a stable absolute target.
@@ -378,6 +370,14 @@ class AutoPipeline:
                 )
                 self._save(state)
             else:
+                _answerer = getattr(self.interview_driver, "answerer", None)
+                if _answerer is not None:
+                    try:
+                        _apply_active_profile(state, _answerer)
+                    except ValueError as exc:
+                        state.mark_blocked(str(exc), tool_name="domain_profile_registry")
+                        self._save(state)
+                        return self._result(state, ledger, blocker=state.last_error)
                 interview_phase_timeout = state.phase_timeout_seconds(AutoPhase.INTERVIEW)
                 interview_timeout = self._deadline_capped_timeout(state, interview_phase_timeout)
                 try:
