@@ -299,14 +299,11 @@ class AutoPipeline:
         # BLOCKED state via ``_enforce_deadline``. Same exception applies
         # to the second ``_enforce_deadline`` gate after the BLOCKED/FAILED
         # recovery branch below.
-        ralph_resume_pending = state.phase is AutoPhase.RALPH_HANDOFF and (
-            state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
-        )
         if (
             state.deadline_at is not None
             and not state.is_terminal()
             and state.is_deadline_expired()
-            and not ralph_resume_pending
+            and not _has_reconciliable_ralph_resume_checkpoint(state)
         ):
             state.last_tool_name = PIPELINE_DEADLINE_TOOL_NAME
             state.mark_blocked(
@@ -362,7 +359,7 @@ class AutoPipeline:
         # subsequent ``_enforce_deadline`` call inside ``_poll_ralph_job``)
         # still fires ``pipeline_timeout`` if the job is genuinely still
         # running after the persisted budget has expired.
-        if not ralph_resume_pending and self._enforce_deadline(state):
+        if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
             # Arm the top-level pipeline deadline (#779) on the first
@@ -448,7 +445,7 @@ class AutoPipeline:
         # Q00/ouroboros#782 review-12 BLOCKING #1: same exception — let
         # ``RALPH_HANDOFF`` resume reach ``_resume_ralph_handoff`` so the
         # poller can reconcile an already-terminal Ralph job.
-        if not ralph_resume_pending and self._enforce_deadline(state):
+        if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.SEED_GENERATION:
             if state.seed_artifact:
@@ -2418,6 +2415,18 @@ def _arm_legacy_missing_deadline(state: AutoPipelineState) -> bool:
         return False
     state.arm_deadline()
     return True
+
+
+def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool:
+    """Return True when deadline gating should allow Ralph reconciliation.
+
+    Only persisted job handles and confirmed plugin dispatches qualify. An
+    unconfirmed ``plugin_pending`` checkpoint must still obey normal deadline
+    enforcement because resume has to retry the side-effecting plugin dispatch.
+    """
+    if state.phase is not AutoPhase.RALPH_HANDOFF:
+        return False
+    return state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
 
 
 def _first_nonempty(*values: str | None) -> str | None:

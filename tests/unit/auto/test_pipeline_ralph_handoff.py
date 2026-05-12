@@ -1571,3 +1571,106 @@ async def test_ralph_handoff_resume_confirmed_plugin_does_not_replay_subagent(
     # And the persisted state must be cleared so a future re-resume also
     # doesn't replay it.
     assert state.run_subagent == {}
+
+
+@pytest.mark.asyncio
+async def test_expired_deadline_after_recovery_allows_persisted_ralph_job_poll(
+    tmp_path,
+) -> None:
+    """A recoverable BLOCKED state with a persisted Ralph job must poll first.
+
+    The deadline exception has to be recomputed after BLOCKED -> RALPH_HANDOFF
+    recovery; otherwise an expired deadline masks an already-finished Ralph job
+    as ``pipeline_timeout``.
+    """
+    state = _state_in_ralph_handoff(tmp_path)
+    state.deadline_at = time.monotonic() - 5.0
+    state.deadline_at_epoch = time.time() - 5.0
+    state.mark_blocked("ralph handoff timed out before terminal status", tool_name="ralph_starter")
+
+    polled: list[str] = []
+
+    async def ralph_resumer(*, job_id: str) -> dict[str, Any]:
+        polled.append(job_id)
+        return {
+            "job_id": job_id,
+            "lineage_id": state.ralph_lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_resumer=ralph_resumer,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert polled == ["job_ralph_existing"]
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.last_tool_name != PIPELINE_DEADLINE_TOOL_NAME
+
+
+@pytest.mark.asyncio
+async def test_expired_deadline_after_recovery_allows_confirmed_plugin_checkpoint(
+    tmp_path,
+) -> None:
+    """Confirmed plugin dispatches are also reconciled after recovery."""
+    state = _state_in_ralph_handoff(tmp_path)
+    state.ralph_job_id = None
+    state.ralph_dispatch_mode = "plugin"
+    state.deadline_at = time.monotonic() - 5.0
+    state.deadline_at_epoch = time.time() - 5.0
+    state.mark_blocked("ralph handoff timed out before terminal status", tool_name="ralph_starter")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.last_tool_name != PIPELINE_DEADLINE_TOOL_NAME
+
+
+@pytest.mark.asyncio
+async def test_expired_deadline_after_recovery_blocks_unconfirmed_plugin_pending(
+    tmp_path,
+) -> None:
+    """Unconfirmed plugin_pending checkpoints still obey normal deadlines."""
+    state = _state_in_ralph_handoff(tmp_path)
+    state.ralph_job_id = None
+    state.ralph_dispatch_mode = "plugin_pending"
+    state.deadline_at = time.monotonic() - 5.0
+    state.deadline_at_epoch = time.time() - 5.0
+    state.mark_blocked("ralph handoff timed out before terminal status", tool_name="ralph_starter")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("plugin_pending must not retry after deadline expiry")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")

@@ -354,6 +354,47 @@ def test_gap_window_reports_pending_starting_ralph(tmp_path) -> None:
     assert "Pending: starting ralph" in text
 
 
+def test_plugin_pending_reports_interrupted_dispatch_not_starting_gap(tmp_path) -> None:
+    """Unconfirmed plugin dispatch is distinct from the normal startup gap."""
+    state = _state_at_ralph_handoff(tmp_path, with_job_id=False)
+    state.ralph_dispatch_mode = "plugin_pending"
+    AutoStore(tmp_path).save(state)
+
+    handler = SessionStatusHandler(auto_store=AutoStore(tmp_path))
+    result = asyncio.run(handler.handle({"session_id": state.auto_session_id}))
+    assert result.is_ok
+    meta = result.value.meta
+    assert meta["phase"] == "ralph_handoff"
+    assert "pending" not in meta
+    assert meta["ralph"] == {
+        "dispatch_mode": "plugin_pending",
+        "lineage_id": state.ralph_lineage_id,
+        "status": "interrupted_plugin_dispatch",
+        "guidance": "plugin dispatch unconfirmed; resume will retry or block",
+    }
+    text = result.value.content[0].text
+    assert "Pending: starting ralph" not in text
+    assert "dispatch_mode: plugin_pending" in text
+    assert "status: interrupted_plugin_dispatch" in text
+
+
+def test_cli_plugin_pending_reports_interrupted_dispatch_not_starting_gap(tmp_path) -> None:
+    """CLI mirrors the MCP distinction for plugin_pending checkpoints."""
+    from ouroboros.cli.commands.status import _format_auto_status
+
+    state = _state_at_ralph_handoff(tmp_path, with_job_id=False)
+    state.ralph_dispatch_mode = "plugin_pending"
+
+    rendered = _format_auto_status(state)
+
+    assert "Ralph (plugin pending):" in rendered
+    assert "dispatch_mode: plugin_pending" in rendered
+    assert "status: interrupted plugin dispatch" in rendered
+    assert "guidance: plugin dispatch unconfirmed; resume will retry or block" in rendered
+    assert "Ralph (pending):" not in rendered
+    assert "pending: starting ralph" not in rendered
+
+
 @pytest.mark.parametrize("phase", (AutoPhase.BLOCKED, AutoPhase.FAILED))
 def test_terminal_lineage_without_job_id_is_not_gap_window(tmp_path, phase: AutoPhase) -> None:
     """Terminal auto state must not be masked as a pending Ralph handoff."""

@@ -46,13 +46,23 @@ def _format_auto_status(state) -> str:
         state.phase is AutoPhase.RALPH_HANDOFF
         and state.ralph_lineage_id is not None
         and state.ralph_job_id is None
-        and state.ralph_dispatch_mode != "plugin"
+        and state.ralph_dispatch_mode not in {"plugin", "plugin_pending"}
+    )
+    is_plugin_pending = (
+        state.phase is AutoPhase.RALPH_HANDOFF
+        and state.ralph_dispatch_mode == "plugin_pending"
     )
 
     if state.ralph_dispatch_mode == "plugin":
         lines.append("Ralph (plugin):")
         lines.append("  dispatch_mode: plugin")
         lines.append("  guidance: ralph delegated to OpenCode Task widget; follow that lifecycle")
+    elif is_plugin_pending:
+        lines.append("Ralph (plugin pending):")
+        lines.append("  dispatch_mode: plugin_pending")
+        lines.append(f"  lineage_id: {state.ralph_lineage_id}")
+        lines.append("  status: interrupted plugin dispatch")
+        lines.append("  guidance: plugin dispatch unconfirmed; resume will retry or block")
     elif state.ralph_job_id is not None:
         lines.append("Ralph (job):")
         lines.append(f"  job_id: {state.ralph_job_id}")

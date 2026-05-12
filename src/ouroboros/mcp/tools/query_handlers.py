@@ -105,6 +105,16 @@ class SessionStatusHandler:
                 "dispatch_mode": "plugin",
                 "guidance": ("ralph delegated to OpenCode Task widget; follow that lifecycle"),
             }
+        if (
+            state.phase is AutoPhase.RALPH_HANDOFF
+            and state.ralph_dispatch_mode == "plugin_pending"
+        ):
+            return {
+                "dispatch_mode": "plugin_pending",
+                "lineage_id": state.ralph_lineage_id,
+                "status": "interrupted_plugin_dispatch",
+                "guidance": "plugin dispatch unconfirmed; resume will retry or block",
+            }
         if state.ralph_job_id is not None:
             return {
                 "job_id": state.ralph_job_id,
@@ -146,7 +156,7 @@ class SessionStatusHandler:
             state.phase is AutoPhase.RALPH_HANDOFF
             and state.ralph_lineage_id is not None
             and state.ralph_job_id is None
-            and state.ralph_dispatch_mode != "plugin"
+            and state.ralph_dispatch_mode not in {"plugin", "plugin_pending"}
         )
         phase_value = "ralph_handoff" if is_gap_window else state.phase.value
         is_terminal = state.phase in {
