@@ -126,6 +126,7 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
+    "integration: integration tests that exercise cross-component behavior",
     "slow: integration tests that build artifacts or call subprocesses",
 ]
 
