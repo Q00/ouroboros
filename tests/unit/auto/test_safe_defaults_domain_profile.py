@@ -10,21 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-from ouroboros.auto.domain_profile import DEFAULT_REGISTRY, DomainProfile
-from ouroboros.auto.interview_driver import (
-    AutoInterviewDriver,
-    FunctionInterviewBackend,
-    InterviewTurn,
-)
+from ouroboros.auto.domain_profile import DomainProfile
 from ouroboros.auto.ledger import LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.safe_defaults import (
     _DefaultSpec,
     build_safe_default_synthesis,
     finalize_safe_defaultable_gaps,
 )
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoPipelineState
 
 # ---------------------------------------------------------------------------
 # Minimal stubs
@@ -268,87 +261,3 @@ def test_active_profile_legacy_state_defaults_to_none() -> None:
     restored = AutoPipelineState.from_dict(payload)
 
     assert restored.active_domain_profile_name is None
-
-
-@pytest.mark.asyncio
-async def test_interview_driver_persists_profile_resolved_synthesis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Driver transcript persistence should use the profile-resolved spec."""
-    profile = _make_profile(
-        name="story-profile",
-        safe_defaults={
-            "actors": _DefaultSpec(
-                value="Assume the protagonist and narrator are the only story actors.",
-                rationale="Narrative domain actor policy",
-            )
-        },
-    )
-    monkeypatch.setattr(DEFAULT_REGISTRY, "_profiles", [profile])
-    answer_calls: list[str] = []
-
-    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn("What should we verify?", "interview_1")
-
-    async def answer(session_id: str, text: str) -> InterviewTurn:
-        answer_calls.append(text)
-        if "mark the interview complete" in text.lower():
-            return InterviewTurn("", session_id, seed_ready=True, completed=True)
-        return InterviewTurn("What else?", session_id, seed_ready=False)
-
-    state = AutoPipelineState(goal="Draft a local short story outline", cwd=str(tmp_path))
-    state.active_domain_profile_name = "story-profile"
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
-        store=AutoStore(tmp_path),
-        max_rounds=1,
-        timeout_seconds=1,
-    )
-
-    result = await driver.run(state, ledger)
-
-    assert result.status == "seed_ready"
-    synthesis = next(text for text in answer_calls if "safe-default synthesis" in text.lower())
-    assert "Assume the protagonist and narrator are the only story actors." in synthesis
-    assert "Assume the primary actor is the user or automation agent" not in synthesis
-    assert any(
-        "protagonist and narrator" in item.get("answer", "") for item in ledger.question_history
-    )
-
-
-@pytest.mark.asyncio
-async def test_interview_driver_missing_requested_profile_blocks_safe_defaulting(
-    tmp_path: Path,
-) -> None:
-    """A requested but unregistered profile must not fall back to coding defaults."""
-    answer_calls: list[str] = []
-
-    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn("What should we verify?", "interview_1")
-
-    async def answer(session_id: str, text: str) -> InterviewTurn:
-        answer_calls.append(text)
-        return InterviewTurn("What else?", session_id, seed_ready=False)
-
-    state = AutoPipelineState(goal="Draft a local short story outline", cwd=str(tmp_path))
-    state.active_domain_profile_name = "missing-story-profile"
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
-        store=AutoStore(tmp_path),
-        max_rounds=1,
-        timeout_seconds=1,
-    )
-
-    result = await driver.run(state, ledger)
-
-    assert result.status == "blocked"
-    assert "missing-story-profile" in (result.blocker or "")
-    assert ledger.open_gaps()
-    assert not any(
-        entry.key.endswith(".safe_default_finalization")
-        for section in ledger.sections.values()
-        for entry in section.entries
-    )
-    assert not any("safe-default synthesis" in text.lower() for text in answer_calls)

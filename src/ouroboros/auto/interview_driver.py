@@ -20,18 +20,10 @@ from ouroboros.auto.answerer import (
     AutoBlocker,
 )
 from ouroboros.auto.blocker_attribution import record_authoring_backend
-from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
-from ouroboros.auto.safe_defaults import (
-    AUTO_ANSWER_PREFIX,
-    SAFE_DEFAULT_SYNTHESIS_TAG,
-    SafeDefaultFinalization,
-    build_safe_default_synthesis,
-    finalize_safe_defaultable_gaps,
-)
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 log = structlog.get_logger(__name__)
@@ -45,6 +37,11 @@ class InterviewTurn:
     session_id: str
     seed_ready: bool = False
     completed: bool = False
+    # Optional diagnostic surface — backend's own ambiguity reading for the
+    # current turn. The driver never gates on this; it is only used to build
+    # informative blocker messages when the mutual-agreement closure gate
+    # exhausts its budget without both parties converging.
+    ambiguity_score: float | None = None
 
 
 class InterviewBackend(Protocol):
@@ -191,16 +188,49 @@ class AutoInterviewDriver:
                 "blocked", state.interview_session_id, ledger, state.current_round, blocker
             )
 
-        if turn.seed_ready or turn.completed:
-            return self._handle_completed_turn(state, ledger, turn, state.current_round)
-
+        # Closure gate: an interview closes only when the backend (semantic
+        # ambiguity model) AND the driver-side ledger (structural completeness)
+        # agree on the same turn. Disagreement in either direction is reframed
+        # as the next answer instead of being treated as a terminal block:
+        #
+        # * backend signals completion but the ledger has open gaps → answer
+        #   the first open gap so the backend re-scores against substantive
+        #   new content and either accepts or asks a follow-up.
+        # * backend keeps asking but the ledger is structurally full → keep
+        #   answering normally; let the backend drive the dialogue.
+        #
+        # ``max_rounds`` is the sole budget. If the loop exits without mutual
+        # agreement, the blocker reports both readiness states so callers can
+        # decide whether to raise ``max_rounds`` or sharpen the goal.
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
+            backend_done = turn.seed_ready or turn.completed
+            ledger_done = ledger.is_seed_ready()
+            if backend_done and ledger_done:
+                state.pending_question = None
+                state.interview_completed = True
+                self._save(state)
+                return AutoInterviewResult(
+                    "seed_ready", state.interview_session_id, ledger, state.current_round
+                )
+
             state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
             self._save(state)
 
-            answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
+            if backend_done and not ledger_done:
+                # Backend said done but ledger isn't — pick the first open gap
+                # and answer it. This drives the backend to reopen with
+                # substantive new content; we never accept closure unilaterally.
+                first_gap = ledger.open_gaps()[0]
+                answer = self.answerer.answer_gap(first_gap, ledger, answer_context)
+                question_for_record = (
+                    f"[driver gap-reopen '{first_gap}': backend_completed=True ledger_done=False]"
+                )
+            else:
+                answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
+                question_for_record = turn.question
+
             if answer.blocker is not None:
-                self.answerer.apply(answer, ledger, question=turn.question)
+                self.answerer.apply(answer, ledger, question=question_for_record)
                 state.ledger = ledger.to_dict()
                 blocker_text = answer.blocker.reason
                 state.mark_blocked(blocker_text, tool_name="auto_answerer")
@@ -214,14 +244,14 @@ class AutoInterviewDriver:
                     blocker_text,
                 )
             state.current_round = round_number
-            self.answerer.apply(answer, ledger, question=turn.question)
+            self.answerer.apply(answer, ledger, question=question_for_record)
             state.ledger = ledger.to_dict()
             state.pending_question = None
             _record_auto_answer(
                 state,
                 round_number=round_number,
                 source=answer.source.value,
-                question=turn.question,
+                question=question_for_record,
                 answer=answer.text,
             )
             state.mark_progress(
@@ -256,73 +286,31 @@ class AutoInterviewDriver:
                 )
 
             state.interview_session_id = turn.session_id
-            if turn.seed_ready or turn.completed:
-                return self._handle_completed_turn(state, ledger, turn, round_number)
             state.pending_question = turn.question
             self._save(state)
 
-        if not ledger.is_seed_ready():
-            if state.active_domain_profile_name:
-                _active_profile = DEFAULT_REGISTRY.get(state.active_domain_profile_name)
-                if _active_profile is None:
-                    finalization = SafeDefaultFinalization(
-                        (),
-                        tuple(
-                            f"{section}: active domain profile "
-                            f"{state.active_domain_profile_name!r} is not registered"
-                            for section in ledger.open_gaps()
-                        ),
-                    )
-                else:
-                    finalization = finalize_safe_defaultable_gaps(
-                        ledger,
-                        goal=state.goal,
-                        provenance=f"auto interview max rounds {self.max_rounds}",
-                        pending_question=state.pending_question,
-                        active_profile=_active_profile,
-                    )
-            else:
-                finalization = finalize_safe_defaultable_gaps(
-                    ledger,
-                    goal=state.goal,
-                    provenance=f"auto interview max rounds {self.max_rounds}",
-                    pending_question=state.pending_question,
-                    active_profile=None,
-                )
-            state.ledger = ledger.to_dict()
-            if finalization.completed and ledger.is_seed_ready():
-                synthesis_blocker = await self._record_safe_default_synthesis(
-                    state, ledger, finalization
-                )
-                if synthesis_blocker is None:
-                    state.pending_question = None
-                    state.interview_completed = True
-                    state.mark_progress(
-                        "auto interview finalized safe-defaultable gaps at max rounds",
-                        tool_name="interview_driver",
-                    )
-                    self._save(state)
-                    return AutoInterviewResult(
-                        "seed_ready", state.interview_session_id, ledger, self.max_rounds
-                    )
-                # Synthesis could not be persisted to the interview transcript —
-                # roll back the safe-default entries so ledger.open_gaps() and
-                # the blocker message reflect the genuinely unresolved state.
-                # Without this, downstream consumers of the convergence
-                # contract (interview stalled → name the unresolved sections)
-                # would see an apparently complete ledger paired with a block.
-                _revert_safe_default_entries(ledger, finalization.defaulted_sections)
-                state.ledger = ledger.to_dict()
-            gaps_list = finalization.unsafe_gaps or tuple(ledger.open_gaps())
-            gaps = ", ".join(gaps_list)
-            blocker = f"auto interview reached max rounds with unresolved gaps: {gaps}"
-            state.mark_blocked(blocker, tool_name="interview_driver")
-            record_authoring_backend(state)
+        # max_rounds exhausted — one final closure check, then diagnostic blocker.
+        backend_done = turn.seed_ready or turn.completed
+        ledger_done = ledger.is_seed_ready()
+        if backend_done and ledger_done:
+            state.pending_question = None
+            state.interview_completed = True
             self._save(state)
             return AutoInterviewResult(
-                "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
+                "seed_ready", state.interview_session_id, ledger, self.max_rounds
             )
-        blocker = "auto interview reached max rounds before backend marked the Seed ready"
+
+        if turn.ambiguity_score is not None:
+            ambiguity_part = f"ambiguity_score={turn.ambiguity_score:.2f}"
+        else:
+            ambiguity_part = "ambiguity_score=unknown"
+        open_gaps = ledger.open_gaps()
+        gaps_part = f"open_gaps={open_gaps}" if open_gaps else "open_gaps=[]"
+        blocker = (
+            f"auto interview reached max_rounds={self.max_rounds} without closure: "
+            f"backend_done={backend_done} ({ambiguity_part}), "
+            f"ledger_done={ledger_done} ({gaps_part})"
+        )
         state.mark_blocked(blocker, tool_name="interview_driver")
         record_authoring_backend(state)
         self._save(state)
@@ -431,113 +419,6 @@ class AutoInterviewDriver:
         return any(
             _normalize_answer_text(item.get("answer", "")) == proposed
             for item in ledger.question_history
-        )
-
-    def _handle_completed_turn(
-        self, state: AutoPipelineState, ledger: SeedDraftLedger, turn: InterviewTurn, rounds: int
-    ) -> AutoInterviewResult:
-        state.interview_session_id = turn.session_id
-        state.pending_question = None
-        if ledger.is_seed_ready():
-            state.interview_completed = True
-            self._save(state)
-            return AutoInterviewResult("seed_ready", turn.session_id, ledger, rounds)
-        gaps = ", ".join(ledger.open_gaps())
-        blocker = f"interview backend completed before auto ledger was ready: {gaps}"
-        state.mark_blocked(blocker, tool_name="interview_driver")
-        record_authoring_backend(state)
-        self._save(state)
-        return AutoInterviewResult("blocked", state.interview_session_id, ledger, rounds, blocker)
-
-    # Maximum number of completion-signal turns the driver will send when
-    # closing the interview after safe-default finalization. The production
-    # InterviewHandler requires a stability streak of
-    # ``AUTO_COMPLETE_STREAK_REQUIRED`` (=2) qualifying completion signals
-    # before it actually closes the transcript, so a single synthesis turn
-    # does not always suffice — we send the full synthesis once and then
-    # short follow-up confirmations until the backend confirms or we hit
-    # this cap.
-    _SYNTHESIS_COMPLETION_MAX_ATTEMPTS = 3
-
-    async def _record_safe_default_synthesis(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        finalization: SafeDefaultFinalization,
-    ) -> str | None:
-        """Persist the safe-default synthesis through the interview backend.
-
-        The downstream seed generator reads from the interview transcript on
-        disk, not from the auto ledger, so a ledger that becomes Seed-ready
-        only via :func:`finalize_safe_defaultable_gaps` would otherwise leave
-        the transcript missing those assumptions (Q00/ouroboros#763 review on
-        ``c072ed94``). Push the synthesis answer through ``backend.answer``
-        so the transcript and ledger stay in sync, then send up to
-        :pyattr:`_SYNTHESIS_COMPLETION_MAX_ATTEMPTS - 1` short confirmation
-        turns until the backend signals ``seed_ready``/``completed``. The
-        production interview handler requires a streak of two qualifying
-        completion signals before it closes the transcript (review of
-        ``64875869``), so a single synthesis turn does not reliably end the
-        session. Returns ``None`` on success or when there is nothing to
-        synthesize, and a blocker string if the synthesis cannot be
-        persisted within the attempt budget.
-        """
-        synthesis = build_safe_default_synthesis(finalization)
-        if not synthesis or not state.interview_session_id:
-            return None
-        follow_up = (
-            f"{AUTO_ANSWER_PREFIX}{SAFE_DEFAULT_SYNTHESIS_TAG} "
-            "Mark the interview complete and hand off for seed generation. "
-            "No remaining ambiguity for safe-defaultable sections."
-        )
-        # Capture the question that was pending before synthesis started so
-        # the ledger can record the correct Q/A pairing for round 1.
-        prior_pending_question = state.pending_question or "auto safe-default finalization"
-        for attempt in range(self._SYNTHESIS_COMPLETION_MAX_ATTEMPTS):
-            text = synthesis if attempt == 0 else follow_up
-            try:
-                turn = _validate_turn(
-                    await self._with_timeout(
-                        self.backend.answer(state.interview_session_id, text),
-                        state,
-                        tool_name="interview.answer",
-                    )
-                )
-            except TimeoutError as exc:
-                # The backend may or may not have processed the call —
-                # invalidate our cached pending_question so a later
-                # ``--resume`` queries live state via ``backend.resume`` and
-                # cannot replay an already-answered prompt.
-                state.pending_question = None
-                self._save(state)
-                return (
-                    "safe-default synthesis could not be persisted to the "
-                    f"interview transcript: {exc}"
-                )
-            except Exception as exc:
-                state.pending_question = None
-                self._save(state)
-                return f"safe-default synthesis answer failed: {exc}"
-            state.interview_session_id = turn.session_id
-            # Sync pending_question with the backend's latest turn so that a
-            # later ``--resume`` after synthesis failure re-enters the
-            # interview at the correct prompt instead of replaying the
-            # pre-synthesis question (review of ``cc128420``).
-            state.pending_question = turn.question or None
-            if attempt == 0:
-                ledger.record_qa(prior_pending_question, synthesis)
-                state.ledger = ledger.to_dict()
-            self._save(state)
-            if turn.seed_ready or turn.completed:
-                return None
-        # The backend still has not honoured the completion signal. Caller
-        # rolls back the safe-default entries and emits the canonical
-        # "unresolved gaps" blocker; we just signal the failure here. The
-        # final ``state.pending_question`` reflects the live backend prompt.
-        return (
-            "interview backend did not honour the safe-default completion "
-            f"signal within {self._SYNTHESIS_COMPLETION_MAX_ATTEMPTS} attempts; "
-            "transcript would still contain an unanswered question."
         )
 
     async def _with_timeout(
@@ -754,5 +635,8 @@ def _validate_turn(value: object) -> InterviewTurn:
         raise TypeError(msg)
     if type(value.seed_ready) is not bool or type(value.completed) is not bool:
         msg = "interview backend returned non-boolean completion flags"
+        raise TypeError(msg)
+    if value.ambiguity_score is not None and not isinstance(value.ambiguity_score, (int, float)):
+        msg = "interview backend returned non-numeric ambiguity_score"
         raise TypeError(msg)
     return value

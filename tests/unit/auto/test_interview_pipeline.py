@@ -215,102 +215,6 @@ def test_seed_draft_ledger_uses_later_repeated_non_goal_as_correction() -> None:
     ]
 
 
-@pytest.mark.asyncio
-async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_path) -> None:
-    answer_calls: list[tuple[str, str]] = []
-
-    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn("What should we verify?", "interview_1")
-
-    async def answer(session_id: str, text: str) -> InterviewTurn:
-        answer_calls.append((session_id, text))
-        # Mirror the production interview handler: a synthesis answer that
-        # carries the "mark the interview complete" completion signal
-        # closes the transcript on the same turn.
-        if "mark the interview complete" in text.lower():
-            return InterviewTurn("", session_id, seed_ready=True, completed=True)
-        return InterviewTurn("What else?", session_id, seed_ready=False)
-
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
-        store=AutoStore(tmp_path),
-        max_rounds=1,
-        timeout_seconds=1,
-    )
-
-    result = await driver.run(state, ledger)
-
-    assert result.status == "seed_ready"
-    assert state.phase == AutoPhase.INTERVIEW
-    assert state.interview_completed is True
-    assert ledger.is_seed_ready()
-    assert ledger.summary()["open_gaps"] == []
-    final_actor = ledger.sections["actors"].entries[-1]
-    assert final_actor.status == LedgerStatus.DEFAULTED
-    assert final_actor.source == LedgerSource.ASSUMPTION
-    assert any("safe-default policy" in item for item in final_actor.evidence)
-    # Synthesis must be persisted to the interview transcript so the seed
-    # generator (which reads the transcript) sees the same assumptions the
-    # ledger now records — guards against the ledger/transcript split-brain.
-    synthesis_text = next(
-        text for _sid, text in answer_calls if "safe-default synthesis" in text.lower()
-    )
-    assert "mark the interview complete" in synthesis_text.lower()
-    assert "actors" in synthesis_text
-    assert any("safe-default" in item.get("answer", "").lower() for item in ledger.question_history)
-
-
-@pytest.mark.asyncio
-async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_path) -> None:
-    call_count = 0
-
-    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn("What should we verify?", "interview_1")
-
-    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return InterviewTurn("What else?", session_id, seed_ready=False)
-        msg = "interview backend refuses post-bound synthesis"
-        raise RuntimeError(msg)
-
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
-        store=AutoStore(tmp_path),
-        max_rounds=1,
-        timeout_seconds=1,
-    )
-
-    result = await driver.run(state, ledger)
-
-    assert result.status == "blocked"
-    assert state.phase == AutoPhase.BLOCKED
-    # Synthesis failure rolls back the safe-default entries so the canonical
-    # "unresolved gaps" blocker is reported and the ledger reflects the
-    # genuinely unresolved sections — preserving the convergence contract.
-    assert "unresolved gaps" in (result.blocker or "")
-    assert state.interview_completed is False
-    assert ledger.open_gaps(), (
-        "rolled-back ledger must expose at least one unresolved gap so the "
-        "convergence contract still names actionable sections"
-    )
-    assert not any(
-        entry.key.endswith(".safe_default_finalization")
-        for section in ledger.sections.values()
-        for entry in section.entries
-    ), "safe-default policy entries must be reverted on synthesis failure"
-    # Backend.answer raised after the first synthesis turn — the driver
-    # cannot trust the cached pending_question because the backend may have
-    # processed (or partially processed) the call. Force ``--resume`` to
-    # query live state via ``backend.resume()`` instead of replaying.
-    assert state.pending_question is None
-
-
 def test_revert_safe_default_entries_preserves_user_keys_with_matching_suffix() -> None:
     """Regression: rollback must NOT remove a non-policy entry whose key
     coincidentally ends with ``.safe_default_finalization``.
@@ -378,98 +282,6 @@ def test_revert_safe_default_entries_preserves_user_keys_with_matching_suffix() 
         "a user-authored entry whose key shares the suffix MUST survive rollback"
     )
     assert "constraints.other" in remaining_keys
-
-
-@pytest.mark.asyncio
-async def test_interview_driver_finalizes_when_backend_requires_two_completion_signals(
-    tmp_path,
-) -> None:
-    # The production interview handler closes the transcript only after a
-    # streak of two qualifying completion signals. The driver must follow up
-    # with additional confirmation turns until the backend confirms.
-    completion_streak = 0
-    answer_calls: list[tuple[str, str]] = []
-
-    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn("What should we verify?", "interview_1")
-
-    async def answer(session_id: str, text: str) -> InterviewTurn:
-        nonlocal completion_streak
-        answer_calls.append((session_id, text))
-        if "mark the interview complete" in text.lower():
-            completion_streak += 1
-            if completion_streak >= 2:
-                return InterviewTurn("", session_id, seed_ready=True, completed=True)
-            # Streak shortfall — backend asks the user to confirm again.
-            return InterviewTurn("Type done once more", session_id, seed_ready=False)
-        return InterviewTurn("What else?", session_id, seed_ready=False)
-
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
-        store=AutoStore(tmp_path),
-        max_rounds=1,
-        timeout_seconds=1,
-    )
-
-    result = await driver.run(state, ledger)
-
-    assert result.status == "seed_ready"
-    assert state.interview_completed is True
-    assert ledger.is_seed_ready()
-    # Round-1 user answer + synthesis (turn 1) + confirmation (turn 2) = 3.
-    completion_signal_calls = [
-        text for _sid, text in answer_calls if "mark the interview complete" in text.lower()
-    ]
-    assert len(completion_signal_calls) >= 2, (
-        "expected the driver to send at least two completion signals to satisfy "
-        f"the streak contract; got {completion_signal_calls!r}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_interview_driver_blocks_when_backend_ignores_synthesis_completion_signal(
-    tmp_path,
-) -> None:
-    # The synthesis text carries a "mark the interview complete" signal; if
-    # a backend ignores it and keeps asking questions, the persisted
-    # transcript would diverge from auto state. The driver must block
-    # rather than declaring seed_ready against a still-open transcript.
-    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn("What should we verify?", "interview_1")
-
-    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
-        # Always return another question with seed_ready=False, regardless
-        # of the answer text — simulating a backend that does not honour
-        # the completion signal.
-        return InterviewTurn("Anything else?", session_id, seed_ready=False)
-
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
-        store=AutoStore(tmp_path),
-        max_rounds=1,
-        timeout_seconds=1,
-    )
-
-    result = await driver.run(state, ledger)
-
-    assert result.status == "blocked"
-    assert state.phase == AutoPhase.BLOCKED
-    # Backend ignored the completion signal → synthesis failed → ledger is
-    # rolled back and the canonical "unresolved gaps" blocker is emitted.
-    assert "unresolved gaps" in (result.blocker or "")
-    assert state.interview_completed is False
-    assert ledger.open_gaps()
-    # After synthesis failure the driver must leave pending_question pointing
-    # at the backend's latest live prompt (or cleared) — never the stale
-    # pre-synthesis question. A later ``--resume`` would otherwise replay an
-    # already-answered prompt against an advanced session. The fake backend
-    # always returns "Anything else?" after the synthesis turns, so that's
-    # what the auto state should now hold.
-    assert state.pending_question == "Anything else?"
 
 
 def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -> None:
@@ -916,8 +728,15 @@ async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(tmp_
 
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
-    assert "unresolved gaps" in (result.blocker or "")
-    assert "unsafe default context" in (result.blocker or "")
+    blocker = result.blocker or ""
+    # New mutual-agreement closure gate emits a structured diagnostic naming
+    # both readiness states and the unresolved sections. The auto path no
+    # longer attempts safe-default finalization, so the goal's unsafe-context
+    # words ("production"/"credentials") cannot sneak a closure through —
+    # the diagnostic blocker is the only terminal outcome here.
+    assert "without closure" in blocker
+    assert "ledger_done=False" in blocker
+    assert "open_gaps=" in blocker
     assert not ledger.is_seed_ready()
 
 
@@ -1503,7 +1322,13 @@ async def test_interview_driver_blocks_when_backend_never_marks_ready(tmp_path) 
     result = await driver.run(state, ledger)
 
     assert result.status == "blocked"
-    assert "before backend marked" in (result.blocker or "")
+    blocker = result.blocker or ""
+    # Ledger is pre-filled (`_fill_ready`) so ledger_done is True, but the
+    # mock backend never sends a completion flag — the mutual-agreement gate
+    # refuses closure and emits the structured diagnostic naming both states.
+    assert "without closure" in blocker
+    assert "backend_done=False" in blocker
+    assert "ledger_done=True" in blocker
 
 
 @pytest.mark.asyncio
@@ -1748,11 +1573,20 @@ async def test_pipeline_resumes_repair_phase_through_review(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_blocks_when_backend_completes_before_ledger_ready(tmp_path) -> None:
+async def test_interview_driver_emits_diagnostic_when_readiness_models_disagree(tmp_path) -> None:
+    """Backend insists 'done' but ledger stays incomplete (and vice versa): under
+    the mutual-agreement closure gate the driver never accepts unilateral
+    closure — it keeps answering open gaps until both parties agree or
+    max_rounds exhausts. When the budget runs out, the blocker must surface
+    both readiness states so callers can decide how to recover.
+    """
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_1")
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        # Backend permanently claims completion regardless of content — driver
+        # must NOT accept this while ledger still has open gaps.
         return InterviewTurn("done", session_id, seed_ready=True, completed=True)
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -1764,7 +1598,11 @@ async def test_interview_driver_blocks_when_backend_completes_before_ledger_read
     result = await driver.run(state, ledger)
 
     assert result.status == "blocked"
-    assert "completed before auto ledger was ready" in (result.blocker or "")
+    blocker = result.blocker or ""
+    assert "without closure" in blocker
+    assert "backend_done=True" in blocker
+    assert "ledger_done=False" in blocker
+    assert "open_gaps=" in blocker
     assert state.phase == AutoPhase.BLOCKED
 
 
@@ -3724,9 +3562,12 @@ async def test_convergence_contract_stalled_generic_followups_report_actionable_
     blocker = result.blocker or ""
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
-    assert "unresolved gaps" in blocker
+    # New diagnostic format names both readiness states and lists the open
+    # gap sections so callers can decide whether to raise max_rounds or
+    # sharpen the goal — preserving the convergence contract that stalls
+    # must surface actionable section names, not just "reached max_rounds".
+    assert "without closure" in blocker
+    assert "open_gaps=" in blocker
     open_gaps = ledger.open_gaps()
     assert open_gaps, "stalled generic loop must leave at least one open required gap"
-    # The blocker must name at least one specific unresolved section, not just
-    # report that max_rounds was reached.
     assert any(section in blocker for section in open_gaps)

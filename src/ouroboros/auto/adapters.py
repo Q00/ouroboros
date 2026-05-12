@@ -811,11 +811,18 @@ def _turn_from_result(
     if not session_id:
         raise HandlerError("ouroboros_interview did not return a session_id")
     text = result.content[0].text if result.content else ""
+    raw_ambiguity = meta.get("ambiguity_score")
+    ambiguity_score: float | None
+    if isinstance(raw_ambiguity, (int, float)):
+        ambiguity_score = float(raw_ambiguity)
+    else:
+        ambiguity_score = None
     return InterviewTurn(
         question=_extract_interview_question(text, session_id=session_id),
         session_id=session_id,
         seed_ready=bool(meta.get("seed_ready")),
         completed=bool(meta.get("completed")),
+        ambiguity_score=ambiguity_score,
     )
 
 
