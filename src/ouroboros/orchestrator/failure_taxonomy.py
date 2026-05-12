@@ -142,6 +142,9 @@ def classify(attempt: Attempt) -> FailureClass | None:
     if attempt.evidence_error is not None:
         return FailureClass.EVIDENCE_MISSING
 
+    if attempt.validation is not None and attempt.validation.blocker is not None:
+        return FailureClass.BLOCKED
+
     if attempt.validation is not None and not attempt.validation.ok:
         return FailureClass.EVIDENCE_MISSING
 

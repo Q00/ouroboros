@@ -185,6 +185,10 @@ class Attempt:
     def accepted(self) -> bool:
         return self.verdict is not None and self.verdict.passed
 
+    @property
+    def blocked(self) -> bool:
+        return self.validation is not None and self.validation.blocker is not None
+
 
 @dataclass(frozen=True)
 class LoopResult:
@@ -317,6 +321,8 @@ def run_with_verifier(
 
         if attempt.accepted:
             return LoopResult(accepted=True, attempts=tuple(attempts))
+        if attempt.blocked:
+            return LoopResult(accepted=False, attempts=tuple(attempts))
 
         feedback = _failure_reasons(attempt)
 

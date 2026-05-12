@@ -422,6 +422,34 @@ class TestEvidenceShortCircuit:
         # Feedback to the retry should mention the parse failure.
         assert any("evidence parse failed" in line for line in executor.feedbacks[1])
 
+    def test_blocked_evidence_stops_without_retry_or_verifier(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        blocked = json.dumps({
+            "status": "blocked",
+            "blocker": {
+                "code": "MISSING_CONFIGURATION",
+                "reason": "DATABASE_URL is required to verify this AC",
+            },
+        })
+        executor = ScriptedExecutor(outputs=[blocked, _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[VerifierVerdict(passed=True)])
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=verifier,
+            profile=code_profile,
+            ac="x",
+        )
+
+        assert result.accepted is False
+        assert len(result.attempts) == 1
+        assert result.final.blocked is True
+        assert result.final.validation is not None
+        assert result.final.validation.blocker is not None
+        assert verifier.calls == 0
+        assert len(executor.feedbacks) == 1
+
     def test_evidence_validation_fail_skips_verifier(self, code_profile: ExecutionProfile) -> None:
         empty_tests = _code_evidence(tests_passed=[])
         executor = ScriptedExecutor(outputs=[empty_tests, _code_evidence()])

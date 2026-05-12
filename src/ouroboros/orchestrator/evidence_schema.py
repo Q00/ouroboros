@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from enum import StrEnum
 import json
 import re
 from typing import Any
@@ -51,6 +52,31 @@ class EvidenceError(ValueError):
     """Raised when evidence cannot be parsed or a profile expression is invalid."""
 
 
+class BlockerCode(StrEnum):
+    """Machine-readable terminal blocker classes surfaced by leaf evidence."""
+
+    MISSING_AUTHORITY = "MISSING_AUTHORITY"
+    MISSING_ACCESS = "MISSING_ACCESS"
+    MISSING_TOOL = "MISSING_TOOL"
+    MISSING_CONFIGURATION = "MISSING_CONFIGURATION"
+    UNSAFE_SCOPE_CHANGE = "UNSAFE_SCOPE_CHANGE"
+    EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
+
+
+@dataclass(frozen=True)
+class EvidenceBlocker:
+    """Typed precondition that prevents the leaf from completing an AC."""
+
+    code: BlockerCode
+    reason: str
+    required_by: str = ""
+
+    def summary(self) -> str:
+        detail = f": {self.reason}" if self.reason else ""
+        suffix = f" (required_by: {self.required_by})" if self.required_by else ""
+        return f"blocked[{self.code.value}]{detail}{suffix}"
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     """Outcome of validating an evidence record against a profile.
@@ -60,15 +86,20 @@ class ValidationResult:
         missing_fields: Required fields the record did not provide.
         rejected_by: rejected_if expressions that evaluated True against
             the record (verbatim, in profile order).
+        blocker: typed terminal blocker if the leaf could not satisfy a
+            legitimate precondition. Blockers are not missing evidence.
     """
 
     ok: bool
     missing_fields: tuple[str, ...] = ()
     rejected_by: tuple[str, ...] = ()
+    blocker: EvidenceBlocker | None = None
 
     def reasons(self) -> tuple[str, ...]:
         """Human-readable, harness-friendly summary of all failure reasons."""
         out: list[str] = []
+        if self.blocker is not None:
+            out.append(self.blocker.summary())
         if self.missing_fields:
             out.append("missing required fields: " + ", ".join(self.missing_fields))
         out.extend(f"rejected by {expr!r}" for expr in self.rejected_by)
@@ -172,6 +203,52 @@ def _parse_literal(raw: str) -> Any:
         raise EvidenceError(msg) from exc
 
 
+def _parse_blocker(data: dict[str, Any]) -> EvidenceBlocker | None:
+    """Return a typed blocker from a blocked evidence record, if present."""
+    status = data.get("status")
+    if status not in {"blocked", "BLOCKED"}:
+        return None
+
+    raw_blocker = data.get("blocker")
+    if raw_blocker is None:
+        # Preserve compatibility with ordinary evidence schemas that use
+        # status == "blocked" as a domain field or rejected_if literal.
+        # A terminal blocker is typed only when the blocker object is present.
+        return None
+    if not isinstance(raw_blocker, dict):
+        msg = "Blocked evidence blocker must be an object."
+        raise EvidenceError(msg)
+
+    raw_code = raw_blocker.get("code")
+    if not isinstance(raw_code, str):
+        msg = "Blocked evidence blocker.code must be a string."
+        raise EvidenceError(msg)
+    try:
+        code = BlockerCode(raw_code)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in BlockerCode)
+        msg = f"Unknown blocker.code {raw_code!r}; expected one of: {valid}"
+        raise EvidenceError(msg) from exc
+
+    raw_reason = raw_blocker.get("reason")
+    if not isinstance(raw_reason, str) or not raw_reason.strip():
+        msg = "Blocked evidence blocker.reason must be a non-empty string."
+        raise EvidenceError(msg)
+
+    raw_required_by = raw_blocker.get("required_by", "")
+    if raw_required_by is None:
+        raw_required_by = ""
+    if not isinstance(raw_required_by, str):
+        msg = "Blocked evidence blocker.required_by must be a string when present."
+        raise EvidenceError(msg)
+
+    return EvidenceBlocker(
+        code=code,
+        reason=raw_reason.strip(),
+        required_by=raw_required_by.strip(),
+    )
+
+
 def _evaluate_rejection(expr: str, data: dict[str, Any]) -> bool:
     """Evaluate a single rejected_if expression.
 
@@ -210,6 +287,10 @@ def validate_evidence(profile: ExecutionProfile, record: EvidenceRecord) -> Vali
     """
     schema = profile.evidence_schema
 
+    blocker = _parse_blocker(record.data)
+    if blocker is not None:
+        return ValidationResult(ok=False, blocker=blocker)
+
     missing = tuple(name for name in schema.required if name not in record.data)
     rejected = tuple(expr for expr in schema.rejected_if if _evaluate_rejection(expr, record.data))
 
@@ -221,6 +302,8 @@ def validate_evidence(profile: ExecutionProfile, record: EvidenceRecord) -> Vali
 
 
 __all__ = [
+    "BlockerCode",
+    "EvidenceBlocker",
     "EvidenceError",
     "EvidenceRecord",
     "ValidationResult",

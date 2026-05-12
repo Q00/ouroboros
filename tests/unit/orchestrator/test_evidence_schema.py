@@ -301,3 +301,48 @@ class TestJsonYamlLiteralSpellings:
         profile = self._profile_with_rule('status == "blocked"')
         record = EvidenceRecord(data={"status": "blocked"})
         assert validate_evidence(profile, record).ok is False
+
+
+class TestBlockedEvidence:
+    def test_blocked_record_is_typed_not_missing_evidence(self, code_profile) -> None:
+        record = EvidenceRecord(
+            data={
+                "status": "blocked",
+                "blocker": {
+                    "code": "MISSING_TOOL",
+                    "reason": "pytest is not installed in the execution image",
+                    "required_by": "AC-1 test verification",
+                },
+            }
+        )
+        result = validate_evidence(code_profile, record)
+        assert result.ok is False
+        assert result.missing_fields == ()
+        assert result.rejected_by == ()
+        assert result.blocker is not None
+        assert result.blocker.code.value == "MISSING_TOOL"
+        assert result.reasons() == (
+            "blocked[MISSING_TOOL]: pytest is not installed in the execution image "
+            "(required_by: AC-1 test verification)",
+        )
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ({"status": "blocked", "blocker": "nope"}, "blocker must be an object"),
+            ({"status": "blocked", "blocker": {"reason": "x"}}, "blocker.code"),
+            (
+                {"status": "blocked", "blocker": {"code": "MYSTERY", "reason": "x"}},
+                "Unknown blocker.code",
+            ),
+            (
+                {"status": "blocked", "blocker": {"code": "MISSING_TOOL", "reason": ""}},
+                "blocker.reason",
+            ),
+        ],
+    )
+    def test_malformed_blocked_record_is_schema_error(
+        self, code_profile, payload, message: str
+    ) -> None:
+        with pytest.raises(EvidenceError, match=message):
+            validate_evidence(code_profile, EvidenceRecord(data=payload))
