@@ -287,7 +287,7 @@ _INTERVIEW_EVENT_ERROR_DETAIL_KEYS = (
 )
 
 _INTERVIEW_EVENT_POSIX_PATH_RE = re.compile(
-    r"(^|[\s:=])"
+    r"(^|[\s:='\"])"
     r"("
     r"~[/\\][^\s,;'\"\]}]+"
     r"|/(?:Applications|Users|Volumes|etc|home|mnt|opt|private|repo|tmp|usr|var|workspace)(?:/[^\s,;'\"\]}]+)*"
