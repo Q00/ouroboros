@@ -180,26 +180,31 @@ class ProfileBackedStrategy:
         # H2's extract_evidence() consumes exactly ONE fenced JSON
         # object per dispatch. Earlier rounds asked the executor for
         # "one record per AC"; the parser would silently drop every
-        # record after the first, so the multi-AC transcript could
-        # not be validated. Instead, instruct the executor to emit a
-        # single consolidated evidence record at the very end of the
-        # dispatch, with per-AC entries inside it. Blocked ACs are
-        # also represented inside that record (e.g. by populating the
-        # rejected_if-bearing fields with a blocked-marker), so the
-        # downstream H7 classifier sees structured evidence rather
-        # than a parse failure that degrades to EVIDENCE_MISSING
-        # (bot finding on #891 r6 round 2).
+        # record after the first. Now we ask for ONE consolidated
+        # record at the end of the dispatch, with cumulative per-AC
+        # evidence populating the required fields.
+        #
+        # NOTE on blocked ACs: the current harness does not have a
+        # structured BLOCKED channel. extract_evidence() / rejected_if
+        # / classify() collectively map any missing-or-empty required
+        # field to EVIDENCE_MISSING regardless of intent. Encoding a
+        # blocker marker in the record (e.g. an empty list) would
+        # trigger rejected_if and still surface as EVIDENCE_MISSING,
+        # not BLOCKED (bot finding on #891 r7). Routing genuinely
+        # BLOCKED ACs through H7 therefore requires a follow-up that
+        # adds a `blocked` field (or similar) to EvidenceRecord /
+        # ExecutionProfile.evidence_schema and teaches `classify()` to
+        # honor it. Until that lands, this prompt does NOT instruct
+        # the executor to fabricate blocker markers — it just asks for
+        # accurate evidence; H7 will currently degrade legitimate
+        # blockers to RETRY, which is suboptimal but safe.
         contract = (
             "[POST — harness-injected; consolidated evidence contract]\n"
-            "When you have worked through every acceptance criterion "
-            "above (or surfaced a blocker for one), emit exactly ONE "
-            "fenced JSON evidence record at the end of your response. "
-            "The record must cover every AC you addressed — populate "
-            f"its required fields ({required}) with the cumulative "
-            "evidence across all ACs. If an AC is blocked, populate the "
-            "record's fields with a marker that describes the blocker "
-            "(e.g. an empty list or a `BLOCKED:` string) so the verifier "
-            "can route the failure through the H7 taxonomy.\n"
+            "When you have completed every acceptance criterion above, "
+            "emit exactly ONE fenced JSON evidence record at the end "
+            "of your response. The record must cover every AC you "
+            f"addressed — populate its required fields ({required}) "
+            "with the cumulative evidence across all ACs.\n"
             f"Automatic rejection rules: {rejected}.\n"
             "Do not declare DONE in prose — the harness adjudicates via "
             "an external verifier pass. Emit the single evidence record, "
@@ -217,17 +222,25 @@ class ProfileBackedStrategy:
         runs the restatement + precondition pass against the AC list it
         just received.
         """
+        # See the system-prompt POST block in get_system_prompt_fragment
+        # for why blocked-AC routing through a record marker is not
+        # encoded here: the current harness has no structured BLOCKED
+        # channel, so any marker would still surface as EVIDENCE_MISSING
+        # via classify(). Document the restatement+precondition gate
+        # only; blocker handling is a follow-up that lands with the H2
+        # schema extension.
         return (
             "[PRE — harness-injected; restate before any action]\n"
             "For each acceptance criterion above, restate it in one "
             "sentence and list every precondition you are assuming "
-            "(paths, commands, external services, access tokens).\n\n"
-            "When the work for all reachable ACs is complete (or a "
-            "precondition cannot be verified for one of them), emit the "
+            "(paths, commands, external services, access tokens). "
+            "Verify the preconditions before invoking any tool; if one "
+            "cannot be verified, halt that AC and capture the blocker "
+            "as part of the evidence record's prose fields so the "
+            "operator can act on it.\n\n"
+            "When work on all reachable ACs is complete, emit the "
             "single consolidated evidence record described in the "
-            "system prompt. Encode any blocker inside that record — do "
-            "not surface the blocker as prose only, or the H7 classifier "
-            "will degrade it to EVIDENCE_MISSING instead of BLOCKED."
+            "system prompt."
         )
 
     def get_activity_map(self) -> dict[str, ActivityType]:

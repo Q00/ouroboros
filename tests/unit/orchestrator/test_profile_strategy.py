@@ -97,22 +97,27 @@ class TestSystemPromptFragment:
         # "exactly ONE" or "single ... record" — accept either wording.
         assert "exactly one" in fragment.lower() or "single" in fragment.lower()
 
-    def test_fragment_routes_blocker_through_record(self, profile: ExecutionProfile) -> None:
-        # Bot finding on #891 r6 round 2: a blocker surfaced as prose
-        # without JSON gets classified as EVIDENCE_MISSING, not BLOCKED.
-        # The system prompt must direct the executor to encode blockers
-        # inside the evidence record so H7 can route them correctly.
+    def test_fragment_omits_blocker_marker_until_schema_extension(
+        self, profile: ExecutionProfile
+    ) -> None:
+        # Bot finding on #891 r7: encoding a blocker marker (empty list
+        # / BLOCKED string) in the evidence record would trigger
+        # rejected_if and surface as EVIDENCE_MISSING anyway. Until
+        # H2/H7 gain a structured BLOCKED channel, the prompt must NOT
+        # instruct the executor to fabricate blocker markers — that
+        # would actively misroute. The contract is documented as a
+        # follow-up dependency instead.
         fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
-        assert "blocker" in fragment.lower() or "blocked" in fragment.lower()
+        # The system prompt should not instruct the executor to encode
+        # blockers using markers that conflict with rejected_if.
+        assert "empty list" not in fragment.lower()
+        assert "BLOCKED:" not in fragment
 
     def test_suffix_demands_restatement_and_preconditions(self, profile: ExecutionProfile) -> None:
         suffix = ProfileBackedStrategy(profile).get_task_prompt_suffix()
         assert "[PRE" in suffix
         assert "restate" in suffix.lower()
         assert "precondition" in suffix.lower()
-        # Blocker handling is encoded in the suffix so H7 routes BLOCKED
-        # vs EVIDENCE_MISSING correctly.
-        assert "blocker" in suffix.lower() or "BLOCKED" in suffix
 
 
 class TestTaskPromptSuffix:
@@ -130,14 +135,16 @@ class TestTaskPromptSuffix:
         r = ProfileBackedStrategy(load_profile("research")).get_task_prompt_suffix()
         assert c == r
 
-    def test_suffix_blocker_routes_through_record(self) -> None:
-        # Bot finding on #891 r6 round 2: a blocker surfaced as prose
-        # without JSON gets classified as EVIDENCE_MISSING, not BLOCKED.
-        # The PRE gate must route the blocker through the evidence
-        # record, not via prose-only output.
+    def test_suffix_mentions_blocker_capture_in_prose_fields(self) -> None:
+        # Bot finding on #891 r7: the harness has no structured BLOCKED
+        # channel today, so we cannot route blockers via markers in the
+        # record. The PRE gate instead asks the executor to capture the
+        # blocker in prose fields of the evidence record so the
+        # operator can act on it; routing the failure class to BLOCKED
+        # is a documented follow-up.
         suffix = ProfileBackedStrategy(load_profile("code")).get_task_prompt_suffix()
-        assert "do not surface" in suffix.lower() or "encode" in suffix.lower()
-        assert "EVIDENCE_MISSING" in suffix or "evidence record" in suffix.lower()
+        assert "blocker" in suffix.lower()
+        assert "evidence record" in suffix.lower()
 
 
 class TestActivityMap:
