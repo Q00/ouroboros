@@ -12,6 +12,7 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
 from ouroboros.orchestrator.verifier import (
     DEFAULT_MAX_RETRIES,
     LoopResult,
+    VerifierContractError,
     VerifierVerdict,
     run_with_verifier,
 )
@@ -163,6 +164,39 @@ class TestVerifierExceptionWrapping:
         assert any("TimeoutError" in r for r in first.verdict.reasons)
         # Retry executor must have seen the wrapped reason as feedback.
         assert any("TimeoutError" in line for line in executor.feedbacks[1])
+
+    def test_contract_error_propagates_not_masked_as_stall(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        # A verifier impl that constructs an invalid verdict is a
+        # deterministic programming bug — masking it as STALL would
+        # burn retry budget and ship a broken verifier. The loop must
+        # let VerifierContractError propagate (bot finding on #884 r3).
+        def buggy_verifier(
+            *,
+            profile: ExecutionProfile,
+            ac: str,
+            leaf_output: str,
+            record: EvidenceRecord,
+        ) -> VerifierVerdict:
+            # passed=True with reasons → __post_init__ raises
+            # VerifierContractError.
+            return VerifierVerdict(passed=True, reasons=("oops",))
+
+        executor = ScriptedExecutor(outputs=[_code_evidence()])
+        with pytest.raises(VerifierContractError):
+            run_with_verifier(
+                executor=executor,
+                verifier=buggy_verifier,
+                profile=code_profile,
+                ac="x",
+            )
+
+    def test_contract_error_is_value_error_subclass(self) -> None:
+        # Subclassing ValueError preserves backward compatibility for
+        # callers that already check `except ValueError`.
+        with pytest.raises(ValueError):
+            VerifierVerdict(passed=False)
 
     def test_verifier_exhausts_budget_when_always_raises(
         self, code_profile: ExecutionProfile

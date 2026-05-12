@@ -44,6 +44,18 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
 DEFAULT_MAX_RETRIES: int = 2
 
+
+class VerifierContractError(ValueError):
+    """Raised when a VerifierVerdict is constructed in an invalid shape.
+
+    Subclasses ValueError for backward compatibility with callers that
+    check `ValueError`, but acts as a distinct exception type so the
+    bounded-retry loop can distinguish a verifier *implementation bug*
+    (this class — must propagate) from an *operational failure* (any
+    other Exception — converted to a STALL verdict and retried).
+    """
+
+
 # Canonical failure classes the H7 router knows how to route. Verifier
 # implementations may set VerifierVerdict.failure_class to any of these
 # (or leave it None); any other string is rejected up front so a typo
@@ -83,10 +95,10 @@ class VerifierVerdict:
     def __post_init__(self) -> None:
         if self.passed and self.reasons:
             msg = "VerifierVerdict(passed=True) must not carry reasons"
-            raise ValueError(msg)
+            raise VerifierContractError(msg)
         if self.passed and self.failure_class is not None:
             msg = "VerifierVerdict(passed=True) must not carry a failure_class"
-            raise ValueError(msg)
+            raise VerifierContractError(msg)
         if not self.passed and not self.reasons:
             # A bare FAIL with no reasons produces no feedback for the
             # retry executor and no surfaceable explanation on budget
@@ -97,7 +109,7 @@ class VerifierVerdict:
                 "reason; the retry loop feeds reasons back to the "
                 "executor and surfaces them on exhaustion."
             )
-            raise ValueError(msg)
+            raise VerifierContractError(msg)
         if self.failure_class is not None and self.failure_class not in _VALID_FAILURE_CLASSES:
             # Verifier impls that emit an unknown failure_class would
             # silently degrade to STALL in the H7 classifier — a typo
@@ -108,7 +120,7 @@ class VerifierVerdict:
                 f"VerifierVerdict.failure_class={self.failure_class!r} is "
                 f"not a recognized taxonomy value. Valid: {valid}, or None."
             )
-            raise ValueError(msg)
+            raise VerifierContractError(msg)
 
 
 class Verifier(Protocol):
@@ -236,6 +248,13 @@ def run_with_verifier(
                         leaf_output=leaf_output,
                         record=record,
                     )
+                except VerifierContractError:
+                    # A verifier impl that constructs an invalid verdict
+                    # is a deterministic programming bug, not a transient
+                    # operational failure. Surface it — masking it as
+                    # STALL would burn the retry budget and ship a
+                    # broken verifier to production.
+                    raise
                 except Exception as exc:
                     # Verifier impls run tests / query LLMs, so transient
                     # operational failures (timeout, network, crashed
@@ -272,6 +291,7 @@ __all__ = [
     "LeafExecutor",
     "LoopResult",
     "Verifier",
+    "VerifierContractError",
     "VerifierVerdict",
     "run_with_verifier",
 ]
