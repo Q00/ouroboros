@@ -37,17 +37,14 @@ from typing import Any
 
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
-# Fence delimiters for ```json ... ``` evidence blocks. Leaf prompts in
-# later PRs instruct executors to emit evidence inside one of these.
-# We deliberately do NOT use a single regex to extract the JSON body:
-# a non-greedy `{.*?}` stops at the first `}` even inside a quoted
-# string, so any valid evidence payload that contains "}" in a string
-# value would be truncated and rejected (bot finding on PR #883).
-# Instead we slice between fences and let json.loads handle string
-# escaping correctly.
+# Fence openers signal where the JSON evidence body starts. Once we've
+# located the opener, parsing the body is delegated to JSON itself via
+# json.JSONDecoder.raw_decode — that's how we avoid every sentinel-
+# scanning class of bug (the closing ``` or any `}` may appear inside a
+# JSON string value, and only a real JSON parser knows string boundaries).
 _FENCE_OPENERS: tuple[str, ...] = ("```json", "```JSON", "```")
-_FENCE_CLOSER: str = "```"
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
+_DECODER = json.JSONDecoder()
 
 
 class EvidenceError(ValueError):
@@ -94,12 +91,12 @@ class EvidenceRecord:
         return self.data.get(name, default)
 
 
-def _extract_fenced_payload(text: str) -> str | None:
-    """Return the body of the first ```json ... ``` (or bare ```) fence.
+def _find_body_start(text: str) -> int:
+    """Locate where the JSON body begins.
 
-    The slice respects fence markers — not braces inside JSON strings —
-    so a payload like `{"note": "hello } more"}` survives extraction.
-    Returns None when no fence is found.
+    Scans for the earliest fence opener (```json / ```JSON / ```). If
+    none is found we treat the whole input as a bare JSON body — the
+    JSON decoder will skip leading whitespace itself.
     """
     best_open = -1
     best_open_len = 0
@@ -111,32 +108,38 @@ def _extract_fenced_payload(text: str) -> str | None:
             best_open = idx
             best_open_len = len(opener)
     if best_open == -1:
-        return None
-
+        return 0
     body_start = best_open + best_open_len
-    close_idx = text.find(_FENCE_CLOSER, body_start)
-    if close_idx == -1:
-        return None
-    return text[body_start:close_idx].strip()
+    # JSONDecoder tolerates leading whitespace but `raw_decode` requires
+    # the *first* non-whitespace character to start the value, so skip
+    # whitespace explicitly to give clean offsets in error messages.
+    while body_start < len(text) and text[body_start] in " \t\r\n":
+        body_start += 1
+    return body_start
 
 
 def extract_evidence(text: str) -> EvidenceRecord:
     """Pull a JSON evidence record out of a leaf executor's raw output.
 
     Accepts either a bare JSON object or a single ```json``` fenced block.
-    Raises EvidenceError on missing / malformed payloads so the harness can
-    surface a clear failure instead of silently accepting empty results.
+    Body extraction is delegated to ``json.JSONDecoder.raw_decode`` so
+    the parser — not sentinel scanning — decides where the JSON value
+    ends. That keeps `}` and ``` inside string values from truncating
+    valid payloads.
+
+    Raises EvidenceError on missing / malformed payloads so the harness
+    can surface a clear failure instead of silently accepting empty
+    results.
     """
     if not text or not text.strip():
         msg = "Leaf output is empty; no evidence record to validate."
         raise EvidenceError(msg)
 
-    payload = _extract_fenced_payload(text)
-    if payload is None:
-        payload = text.strip()
+    start = _find_body_start(text)
+    body = text[start:]
 
     try:
-        parsed = json.loads(payload)
+        parsed, _ = _DECODER.raw_decode(body)
     except json.JSONDecodeError as exc:
         msg = f"Evidence is not valid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})"
         raise EvidenceError(msg) from exc
