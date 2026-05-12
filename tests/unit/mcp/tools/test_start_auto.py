@@ -64,6 +64,12 @@ class TestDefinition:
             p.name for p in inner.definition.parameters
         }
 
+    def test_user_preferences_schema_mentions_list_values(self) -> None:
+        param = next(
+            p for p in StartAutoHandler().definition.parameters if p.name == "user_preferences"
+        )
+        assert "non-empty lists of strings/numbers" in param.description
+
 
 class TestRequiredArguments:
     @pytest.mark.asyncio
@@ -160,11 +166,14 @@ class TestBackgroundJobPath:
 
         result = await h.handle({"goal": "build a CLI"})
         assert result.is_ok
-        assert "job_auto_001" in result.value.content[0].text
         auto_session_id = result.value.meta["auto_session_id"]
         assert isinstance(auto_session_id, str)
         assert auto_session_id.startswith("auto_")
-        assert f"Auto session ID: {auto_session_id}" in result.value.content[0].text
+        assert result.value.content[0].text == (
+            "Started background auto session. job_id=job_auto_001\n\n"
+            f"Auto session ID: {auto_session_id}\n\n"
+            "Poll with ouroboros_job_status / ouroboros_job_wait."
+        )
         assert result.value.meta["job_id"] == "job_auto_001"
         assert result.value.meta["session_id"] == auto_session_id
         assert result.value.meta["dispatch_mode"] == "job"

@@ -1105,7 +1105,8 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
             normalised = raw_val.strip()
             if not normalised:
                 raise ValueError(
-                    f"user_preferences['{raw_key}'] must be a non-empty string or list of strings"
+                    f"user_preferences['{raw_key}'] must be a non-empty string or "
+                    "list of strings/numbers"
                 )
             cleaned[raw_key] = normalised
             continue
@@ -1115,19 +1116,20 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
                 if isinstance(item, bool) or not isinstance(item, str | int | float):
                     raise ValueError(
                         f"user_preferences['{raw_key}'] must be a non-empty string or "
-                        "list of strings"
+                        "list of strings/numbers"
                     )
                 text = str(item).strip()
                 if text:
                     parts.append(text)
             if not parts:
                 raise ValueError(
-                    f"user_preferences['{raw_key}'] must be a non-empty string or list of strings"
+                    f"user_preferences['{raw_key}'] must be a non-empty string or "
+                    "list of strings/numbers"
                 )
             cleaned[raw_key] = "\n".join(parts)
             continue
         raise ValueError(
-            f"user_preferences['{raw_key}'] must be a non-empty string or list of strings"
+            f"user_preferences['{raw_key}'] must be a non-empty string or list of strings/numbers"
         )
     return cleaned
 
