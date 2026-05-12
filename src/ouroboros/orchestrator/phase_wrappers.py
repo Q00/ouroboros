@@ -54,6 +54,19 @@ def _format_rejected(schema: EvidenceSchema) -> str:
     return "; ".join(schema.rejected_if)
 
 
+def _indent_ac(ac: str, indent: str = "  ") -> str:
+    """Apply a constant indent to every line of an AC.
+
+    Seed ACs are free-form text and may contain embedded newlines.
+    Indenting only the first line lets subsequent lines run flush-left
+    and visually escape the "Acceptance criterion to satisfy" section,
+    merging with the harness instructions that follow (bot finding on
+    #886 r2). Apply the indent to every non-empty line so the AC's
+    section boundary is preserved.
+    """
+    return "\n".join(indent + line if line else line for line in ac.splitlines())
+
+
 def build_pre_block(profile: ExecutionProfile, ac: str) -> str:
     """Compose the PRE wrapper for a single leaf dispatch.
 
@@ -65,7 +78,7 @@ def build_pre_block(profile: ExecutionProfile, ac: str) -> str:
     return (
         f"{_DEFAULT_PRE_HEADER}\n"
         f"Active profile: {profile.profile!r} (axis: {profile.axis}).\n"
-        f"Acceptance criterion to satisfy:\n  {ac.strip()}\n\n"
+        f"Acceptance criterion to satisfy:\n{_indent_ac(ac.strip())}\n\n"
         "Before touching any tool, restate this AC in one sentence and "
         "list every precondition you are assuming (paths, commands, "
         "external services). Do not begin execution if any precondition "
@@ -96,14 +109,15 @@ def build_post_block(profile: ExecutionProfile) -> str:
 def wrap_prompt(profile: ExecutionProfile, ac: str, body: str) -> WrappedPrompt:
     """Compose a profile-aware [PRE] + body + [POST] leaf prompt.
 
-    The `body` is the skill-/strategy-specific task instructions that
-    the existing dispatch path already supplies; this function does not
-    rewrite that content, it only frames it with the harness-owned
-    wrappers.
+    The `body` is the skill-/strategy-specific task instructions the
+    existing dispatch path supplies. It is passed through verbatim —
+    no stripping, no normalization — so formatting-sensitive content
+    (indented code blocks, JSON examples, deliberately blank-prefixed
+    markdown) survives intact (bot finding on #886 r2).
     """
     return WrappedPrompt(
         pre=build_pre_block(profile, ac),
-        body=body.strip(),
+        body=body,
         post=build_post_block(profile),
     )
 

@@ -46,6 +46,28 @@ class TestPreBlock:
         assert "   spaced AC" not in block
         assert "  spaced AC\n\nBefore" in block
 
+    def test_multiline_ac_every_line_indented(self, code_profile: ExecutionProfile) -> None:
+        # Bot finding on #886 r2: subsequent lines of a multiline AC
+        # used to run flush-left and visually escape the AC section,
+        # merging with the harness instructions below. Every non-empty
+        # line must carry the two-space indent.
+        multiline = "first line\nsecond line\nthird line"
+        block = build_pre_block(code_profile, multiline)
+        assert "  first line" in block
+        assert "  second line" in block
+        assert "  third line" in block
+        # Flush-left lines (which would escape the section) must not
+        # appear adjacent to the AC body.
+        assert "\nsecond line" not in block
+        assert "\nthird line" not in block
+
+    def test_blank_lines_in_ac_preserved(self, code_profile: ExecutionProfile) -> None:
+        # Blank lines stay blank (not "  ") so the AC's paragraph
+        # structure survives untouched.
+        ac = "paragraph one\n\nparagraph two"
+        block = build_pre_block(code_profile, ac)
+        assert "  paragraph one\n\n  paragraph two" in block
+
 
 class TestPostBlock:
     def test_lists_required_fields(self, code_profile: ExecutionProfile) -> None:
@@ -95,9 +117,13 @@ class TestWrapPrompt:
         # PRE / body / POST are double-newline separated.
         assert rendered.count("\n\n") >= 2
 
-    def test_body_is_trimmed(self, code_profile: ExecutionProfile) -> None:
-        wrapped = wrap_prompt(code_profile, "AC", "\n\n  body\n\n")
-        assert wrapped.body == "body"
+    def test_body_passes_through_verbatim(self, code_profile: ExecutionProfile) -> None:
+        # Bot finding on #886 r2: body must NOT be normalized. Indented
+        # code blocks, JSON examples, deliberately blank-prefixed
+        # markdown must survive the wrapper unchanged.
+        body = "\n\n  indented body\n  with blank-prefixed lines\n\n"
+        wrapped = wrap_prompt(code_profile, "AC", body)
+        assert wrapped.body == body
 
     def test_profile_distinction_reflected(self) -> None:
         c = wrap_prompt(load_profile("code"), "AC", "body").render()
