@@ -45,9 +45,27 @@ def test_manual_plan_is_not_auto_dispatchable() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"action": "ralph_redispatch", "safe_to_redispatch": False, "reason": "x", "qa_score": 0.1, "qa_verdict": "fail"},
-        {"action": "manual_intervention", "safe_to_redispatch": True, "reason": "x", "qa_score": 0.1, "qa_verdict": "fail"},
-        {"action": "mystery", "safe_to_redispatch": False, "reason": "x", "qa_score": 0.1, "qa_verdict": "fail"},
+        {
+            "action": "ralph_redispatch",
+            "safe_to_redispatch": False,
+            "reason": "x",
+            "qa_score": 0.1,
+            "qa_verdict": "fail",
+        },
+        {
+            "action": "manual_intervention",
+            "safe_to_redispatch": True,
+            "reason": "x",
+            "qa_score": 0.1,
+            "qa_verdict": "fail",
+        },
+        {
+            "action": "mystery",
+            "safe_to_redispatch": False,
+            "reason": "x",
+            "qa_score": 0.1,
+            "qa_verdict": "fail",
+        },
     ],
 )
 def test_invalid_plan_payloads_raise(payload) -> None:

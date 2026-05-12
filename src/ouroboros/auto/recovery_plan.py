@@ -95,7 +95,9 @@ class AutoRecoveryPlan:
             msg = "recovery plan is missing action"
             raise ValueError(msg) from exc
         except ValueError as exc:
-            msg = f"recovery plan action must be one of {[item.value for item in RecoveryPlanAction]}"
+            msg = (
+                f"recovery plan action must be one of {[item.value for item in RecoveryPlanAction]}"
+            )
             raise ValueError(msg) from exc
         return cls(
             action=action,
