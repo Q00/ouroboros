@@ -233,7 +233,7 @@ def test_lazy_registry_register_loads_defaults_before_custom_profile() -> None:
     assert [profile.name for profile in registry.all()] == ["built-in", "custom"]
 
 
-def test_lazy_registry_respects_replaced_profile_storage() -> None:
+def test_lazy_registry_respects_replaced_profile_storage_temporarily() -> None:
     calls: list[str] = []
 
     def _loader(registry: DomainProfileRegistry) -> None:
@@ -241,10 +241,15 @@ def test_lazy_registry_respects_replaced_profile_storage() -> None:
         registry.register(_make_profile(name="built-in"))
 
     registry = DomainProfileRegistry(loader=_loader)
+    original_profiles = registry._profiles  # type: ignore[attr-defined]
     registry._profiles = []  # type: ignore[attr-defined]  # test-only singleton isolation hook
 
     assert registry.all() == ()
     assert calls == []
+
+    registry._profiles = original_profiles  # type: ignore[attr-defined]
+    assert [profile.name for profile in registry.all()] == ["built-in"]
+    assert calls == ["loaded"]
 
 
 def test_registry_rejects_duplicate_name() -> None:

@@ -201,8 +201,8 @@ class DomainProfileRegistry:
         if self._profiles is not self._profile_storage:
             # Tests and callers may intentionally replace the private backing
             # list to isolate the singleton registry.  Treat that replacement
-            # as an explicit opt-out from default lazy loading for this object.
-            self._loaded = True
+            # as a temporary opt-out; do not mark the loader complete because
+            # monkeypatch-style replacement may later restore the original list.
             return
         self._loaded = True
         if self._loader is not None:
