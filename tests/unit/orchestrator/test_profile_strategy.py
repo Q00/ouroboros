@@ -92,6 +92,16 @@ class TestTaskPromptSuffix:
         r = ProfileBackedStrategy(load_profile("research")).get_task_prompt_suffix()
         assert c == r
 
+    def test_suffix_does_not_terminate_after_first_ac(self) -> None:
+        # Bot finding on #891 r2: the runner non-parallel path renders
+        # ALL acceptance criteria into one prompt. A "stop after first
+        # evidence record" instruction would abort the run before the
+        # remaining criteria executed. Suffix must direct the executor
+        # to continue through every AC.
+        suffix = ProfileBackedStrategy(load_profile("code")).get_task_prompt_suffix()
+        assert "next AC" in suffix or "move on" in suffix
+        assert "every acceptance criterion" in suffix.lower()
+
 
 class TestActivityMap:
     def test_known_tools_get_canonical_activity(self) -> None:

@@ -121,9 +121,10 @@ class ProfileBackedStrategy:
             "not begin execution if any precondition is unverified — "
             "surface the blocker instead.\n\n"
             "When you finish the work for an AC, emit a single fenced "
-            "JSON evidence record per the active profile and stop. Do "
-            "not declare DONE in prose — the harness adjudicates via "
-            "the verifier loop."
+            "JSON evidence record per the active profile, then move on "
+            "to the next AC. Continue until every acceptance criterion "
+            "above has its own evidence record. Do not declare DONE in "
+            "prose — the harness adjudicates via the verifier loop."
         )
 
     def get_activity_map(self) -> dict[str, ActivityType]:
