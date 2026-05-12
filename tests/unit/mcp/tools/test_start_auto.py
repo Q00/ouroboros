@@ -560,6 +560,45 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_dead_owner_plugin_lease_allows_redispatch(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").write_text(
+            json.dumps(
+                {
+                    "token": "lease_stale",
+                    "mode": "plugin_dispatched",
+                    "created_at": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        job_manager.start_job = AsyncMock()
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "delegated_to_plugin"
+        job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_plugin_dispatch_lease_uses_pipeline_timeout(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:

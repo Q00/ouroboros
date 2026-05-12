@@ -771,6 +771,9 @@ class StartAutoHandler:
                 False,
             )
         if mode.startswith("plugin"):
+            if not _lease_owner_is_alive(lease):
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None, True
             try:
                 state = self._store.load(auto_session_id)
             except ValueError:
