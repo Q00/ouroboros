@@ -69,8 +69,9 @@ class TestVerifierRoute:
     def test_code_profile_gets_test_runner_tools(self, code_profile: ExecutionProfile) -> None:
         route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
         assert route.tier == ModelTier.OPUS
-        assert route.tools == ("Read", "Glob", "Grep", "Bash")
-        assert "subprocess test runner" in route.rationale
+        assert route.tools == ("Read", "Glob", "Grep")
+        assert route.requires_external_test_runner is True
+        assert "raw Bash is not granted" in route.rationale
 
     @pytest.mark.parametrize("profile_name", ["research", "analysis"])
     def test_read_only_profiles_exclude_bash(self, profile_name: str) -> None:
@@ -78,6 +79,7 @@ class TestVerifierRoute:
         route = decide_route(role=DispatchRole.VERIFIER, profile=profile)
         assert route.tier == ModelTier.OPUS
         assert route.tools == ("Read", "Glob", "Grep")
+        assert route.requires_external_test_runner is False
         assert "read-only" in route.rationale
 
     def test_fabrication_retry_caps_verifier_at_opus(self, code_profile: ExecutionProfile) -> None:

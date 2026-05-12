@@ -93,11 +93,12 @@ class ExecutionProfile(BaseModel):
         description="Instruction passed to the external verifier subagent (H1).",
     )
     verifier_capability: VerifierCapability = Field(
-        VerifierCapability.READ_ONLY_DISCOVERY,
+        ...,
         description=(
             "Structured verifier execution envelope. READ_ONLY_DISCOVERY "
-            "may inspect files only; SUBPROCESS_TEST_RUNNER may also run "
-            "bounded test/check commands without mutating the workspace."
+            "may inspect files only; SUBPROCESS_TEST_RUNNER requires a "
+            "harness-owned read-only test runner and must not be modeled as "
+            "unrestricted shell access."
         ),
     )
     suggested_tools: tuple[str, ...] = Field(

@@ -25,8 +25,10 @@ Implementation status at this PR:
   VERIFIER (implemented)
     Routing verifier dispatches is based on the structured
     `ExecutionProfile.verifier_capability` field. Read-only discovery
-    verifiers receive file-discovery tools only; subprocess-test-runner
-    verifiers additionally receive Bash so they can run bounded tests.
+    verifiers receive file-discovery tools only. Subprocess-test-runner
+    verifiers still receive read-only discovery tools at the agent-tool
+    layer and set `requires_external_test_runner=True`, so callers know
+    to provide a harness-owned bounded runner instead of raw Bash.
 
 This module is wiring-only. `parallel_executor` still uses its current
 hardcoded adapter call. `decide_route()` takes role + profile + retry
@@ -61,7 +63,7 @@ _TIER_ORDER: tuple[ModelTier, ...] = (ModelTier.HAIKU, ModelTier.SONNET, ModelTi
 
 # Tools available to verifier envelopes at the routing layer.
 _VERIFIER_READ_ONLY_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
-_VERIFIER_TEST_RUNNER_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep", "Bash")
+_VERIFIER_TEST_RUNNER_TOOLS: tuple[str, ...] = _VERIFIER_READ_ONLY_TOOLS
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,7 @@ class RouteDecision:
     tier: ModelTier
     tools: tuple[str, ...]
     rationale: str
+    requires_external_test_runner: bool = False
 
 
 def _bump_tier(tier: ModelTier, *, steps: int = 1) -> ModelTier:
@@ -168,9 +171,11 @@ def decide_route(
                 tier=tier,
                 tools=_VERIFIER_TEST_RUNNER_TOOLS,
                 rationale=(
-                    "Verifier: one tier above executor with subprocess test "
-                    "runner capability from verifier_capability."
+                    "Verifier: one tier above executor; profile requires a "
+                    "harness-owned read-only subprocess test runner, so raw "
+                    "Bash is not granted as an agent tool."
                 ),
+                requires_external_test_runner=True,
             )
         msg = f"Unhandled verifier_capability: {profile.verifier_capability!r}"
         raise NotImplementedError(msg)

@@ -69,11 +69,22 @@ class TestSchemaValidation:
         with pytest.raises(ProfileError, match="schema validation"):
             load_profile("broken", profiles_dir=tmp_path)
 
+    def test_verifier_capability_is_required(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "missing_capability",
+            "profile: missing_capability\naxis: x\nmin_unit: y\nverifier_focus: z\n",
+        )
+        with pytest.raises(ProfileError, match="verifier_capability"):
+            load_profile("missing_capability", profiles_dir=tmp_path)
+
     def test_extra_field_rejected(self, tmp_path: Path) -> None:
         self._write(
             tmp_path,
             "extra",
-            ("profile: extra\naxis: x\nmin_unit: y\nverifier_focus: z\nunknown_field: oops\n"),
+            (
+                "profile: extra\naxis: x\nmin_unit: y\nverifier_capability: read_only_discovery\nverifier_focus: z\nunknown_field: oops\n"
+            ),
         )
         with pytest.raises(ProfileError, match="schema validation"):
             load_profile("extra", profiles_dir=tmp_path)
@@ -82,7 +93,7 @@ class TestSchemaValidation:
         self._write(
             tmp_path,
             "alpha",
-            "profile: beta\naxis: x\nmin_unit: y\nverifier_focus: z\n",
+            "profile: beta\naxis: x\nmin_unit: y\nverifier_capability: read_only_discovery\nverifier_focus: z\n",
         )
         with pytest.raises(ProfileError, match="name mismatch"):
             load_profile("alpha", profiles_dir=tmp_path)
@@ -134,7 +145,7 @@ class TestIoErrorNormalization:
 
         path = tmp_path / "locked.yaml"
         path.write_text(
-            "profile: locked\naxis: x\nmin_unit: y\nverifier_focus: z\n",
+            "profile: locked\naxis: x\nmin_unit: y\nverifier_capability: read_only_discovery\nverifier_focus: z\n",
             encoding="utf-8",
         )
         path.chmod(0)
