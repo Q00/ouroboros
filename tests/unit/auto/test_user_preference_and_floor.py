@@ -551,6 +551,22 @@ def test_mcp_handler_validates_user_preferences_keys() -> None:
     with pytest.raises(ValueError, match="must be an object"):
         _parse_user_preferences("not-a-dict")
 
+    # list[str] value accepted, joined with newlines
+    cleaned = _parse_user_preferences({"constraints": ["one", "  two  ", ""]})
+    assert cleaned == {"constraints": "one\ntwo"}
+
+    # list with only empties rejected
+    with pytest.raises(ValueError, match="non-empty string or list of strings"):
+        _parse_user_preferences({"constraints": ["", "  "]})
+
+    # list with bool rejected (bool is int subclass, but disallowed)
+    with pytest.raises(ValueError, match="non-empty string or list of strings"):
+        _parse_user_preferences({"constraints": [True]})
+
+    # Unknown key suggests closest match
+    with pytest.raises(ValueError, match=r"did you mean: 'constraints'"):
+        _parse_user_preferences({"constraint": "x"})
+
 
 def test_mcp_handler_context_provider_injects_user_preferences(tmp_path) -> None:
     from ouroboros.mcp.tools.auto_handler import _build_context_provider

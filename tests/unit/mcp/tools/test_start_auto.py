@@ -1,0 +1,102 @@
+"""Tests for StartAutoHandler — fire-and-forget ``ooo auto`` wrapper.
+
+Mirrors :mod:`test_start_evaluate`. The synchronous ``ouroboros_auto`` tool
+routinely exceeds an MCP client's tool-call timeout because the Socratic
+interview + repair loops + (optional) Ralph chain run end-to-end. The fire-
+and-forget handler must return a ``job_id`` immediately and run the pipeline
+under a :class:`JobManager`-backed background task.
+"""
+
+from __future__ import annotations
+
+import inspect
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from ouroboros.core.types import Result
+from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.persistence.event_store import EventStore
+
+
+@pytest.fixture
+async def event_store():
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    yield store
+    await store.close()
+
+
+@pytest.fixture
+def fake_inner_auto():
+    """An AutoHandler stub whose ``handle`` returns a canned ok result."""
+    inner = MagicMock(spec=AutoHandler)
+    inner.handle = AsyncMock(
+        return_value=Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="ran"),),
+                is_error=False,
+                meta={"auto_session_id": "auto_xyz"},
+            )
+        )
+    )
+    return inner
+
+
+class TestDefinition:
+    def test_tool_name(self) -> None:
+        assert StartAutoHandler().definition.name == "ouroboros_start_auto"
+
+    def test_description_mentions_background(self) -> None:
+        assert "background" in StartAutoHandler().definition.description.lower()
+
+    def test_parameters_mirror_auto(self) -> None:
+        h = StartAutoHandler()
+        inner = AutoHandler()
+        assert {p.name for p in h.definition.parameters} == {
+            p.name for p in inner.definition.parameters
+        }
+
+
+class TestRequiredArguments:
+    @pytest.mark.asyncio
+    async def test_missing_goal_and_resume_errors(self, event_store) -> None:
+        h = StartAutoHandler(event_store=event_store)
+        result = await h.handle({})
+        assert result.is_err
+        assert "goal" in result.error.message
+
+    @pytest.mark.asyncio
+    async def test_blank_goal_and_blank_resume_errors(self, event_store) -> None:
+        h = StartAutoHandler(event_store=event_store)
+        result = await h.handle({"goal": "   ", "resume": "   "})
+        assert result.is_err
+
+
+class TestBackgroundJobPath:
+    @pytest.mark.asyncio
+    async def test_returns_job_id_immediately(self, event_store, fake_inner_auto) -> None:
+        job_manager = MagicMock()
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_001"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager)
+        # Inject the fake inner so we don't accidentally fire a real pipeline.
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI"})
+        assert result.is_ok
+        assert "job_auto_001" in result.value.content[0].text
+        assert result.value.meta["job_id"] == "job_auto_001"
+        assert result.value.meta["dispatch_mode"] == "job"
+        # The inner AutoHandler must NOT have run synchronously — the runner is
+        # enqueued on the JobManager only.
+        fake_inner_auto.handle.assert_not_called()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import difflib
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,7 @@ from ouroboros.auto.state import (
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
@@ -52,6 +54,8 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.orchestrator.agent_process import run_with_agent_process
+from ouroboros.persistence.event_store import EventStore
 
 
 @dataclass(slots=True)
@@ -399,6 +403,126 @@ class AutoHandler:
         return await pipeline.run(state)
 
 
+@dataclass
+class StartAutoHandler:
+    """Start an ``ooo auto`` pipeline in the background and return a job ID.
+
+    The full auto pipeline (Socratic interview + repair loops + seed
+    generation + optional run/Ralph handoff) routinely runs longer than
+    an MCP client's default tool-call timeout. This handler wraps
+    :class:`AutoHandler` in a :class:`JobManager`-backed background job so
+    the caller gets a ``job_id`` immediately and polls for the verdict
+    via ``ouroboros_job_status`` / ``ouroboros_job_wait`` /
+    ``ouroboros_job_result``.
+
+    Design choice (JobLinks): the ``auto_session_id`` is only minted
+    inside :meth:`AutoPipeline.run`, so it is not pre-known at
+    ``start_job`` time. We enqueue with ``JobLinks(session_id=None)`` and
+    surface the eventual ``auto_session_id`` via the underlying
+    ``AutoHandler`` MCP result (readable through ``ouroboros_job_result``).
+    This keeps the diff minimal and avoids leaking AutoPipeline internals
+    into the start path. Plugin-mode is not short-circuited here — the
+    inner ``AutoHandler._run`` already routes plugin dispatch correctly
+    for its sub-handlers (Ralph etc.), so the background job inherits
+    that behavior transparently.
+    """
+
+    interview_handler: InterviewHandler | None = field(default=None, repr=False)
+    generate_seed_handler: GenerateSeedHandler | None = field(default=None, repr=False)
+    start_execute_seed_handler: StartExecuteSeedHandler | None = field(default=None, repr=False)
+    store: AutoStore | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
+    mcp_manager: object | None = field(default=None, repr=False)
+    mcp_tool_prefix: str = ""
+    event_store: EventStore | None = field(default=None, repr=False)
+    job_manager: JobManager | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._event_store = self.event_store or EventStore()
+        self._job_manager = self.job_manager or JobManager(self._event_store)
+        self._inner_auto = AutoHandler(
+            interview_handler=self.interview_handler,
+            generate_seed_handler=self.generate_seed_handler,
+            start_execute_seed_handler=self.start_execute_seed_handler,
+            store=self.store,
+            llm_backend=self.llm_backend,
+            agent_runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            mcp_manager=self.mcp_manager,
+            mcp_tool_prefix=self.mcp_tool_prefix,
+        )
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        inner_def = self._inner_auto.definition
+        return MCPToolDefinition(
+            name="ouroboros_start_auto",
+            description=(
+                "Start ooo auto in the background and return auto_session_id + "
+                "job_id immediately. Poll with ouroboros_job_status / "
+                "ouroboros_job_wait and read final state via "
+                "ouroboros_job_result."
+            ),
+            parameters=inner_def.parameters,
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        # Mirror AutoHandler._run's pre-flight: either ``goal`` (new session)
+        # or ``resume`` (existing session) must be supplied. We validate
+        # eagerly so the caller sees a synchronous contract error instead of
+        # a background job that fails immediately.
+        resume = arguments.get("resume")
+        goal = arguments.get("goal")
+        has_resume = isinstance(resume, str) and bool(resume.strip())
+        has_goal = isinstance(goal, str) and bool(goal.strip())
+        if not has_resume and not has_goal:
+            return Result.err(
+                MCPToolError(
+                    "goal is required when not resuming",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+
+        async def _runner() -> MCPToolResult:
+            result = await self._inner_auto.handle(arguments)
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            return result.value
+
+        initial_label = resume.strip() if has_resume else goal.strip()[:80]  # type: ignore[union-attr]
+        snapshot = await self._job_manager.start_job(
+            job_type="auto",
+            initial_message=f"Queued ooo auto for {initial_label}",
+            runner=run_with_agent_process(
+                event_store=self._event_store,
+                intent="auto",
+                work_fn=lambda _handle: _runner(),
+            ),
+            links=JobLinks(session_id=None),
+        )
+
+        text = (
+            f"Started background auto session. job_id={snapshot.job_id}\n\n"
+            "Poll with ouroboros_job_status / ouroboros_job_wait."
+        )
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                is_error=False,
+                meta={
+                    "job_id": snapshot.job_id,
+                    "status": "queued",
+                    "dispatch_mode": "job",
+                },
+            )
+        )
+
+
 def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     """Build MCP metadata for clients that render auto progress outside CLI text."""
     meta: dict[str, Any] = {
@@ -527,9 +651,18 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
     """Validate and normalise the optional ``user_preferences`` MCP arg.
 
     Returns a dict keyed by ledger section names. Empty input yields an empty
-    dict. Any unknown section name or empty/non-string value is rejected with
-    ``ValueError`` so callers see a clear contract failure rather than a
-    silently-ignored preference.
+    dict. Any unknown section name or empty/non-stringifiable value is
+    rejected with ``ValueError`` so callers see a clear contract failure
+    rather than a silently-ignored preference.
+
+    Accepted value shapes per key:
+
+    * ``str``  — stripped; must be non-empty.
+    * ``list[str | int | float]`` — each item stringified+stripped, empties
+      dropped, joined with ``"\\n"``; final result must be non-empty.
+
+    The downstream ``answerer.py`` still consumes the value as a single
+    string (via ``raw_value.strip()``); only the input contract widens.
     """
     if value is None or value == "":
         return {}
@@ -543,13 +676,40 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
         if not isinstance(raw_key, str):
             raise ValueError("user_preferences keys must be strings")
         if raw_key not in valid_sections:
+            suggestion = difflib.get_close_matches(raw_key, sorted(valid_sections), n=1, cutoff=0.6)
+            hint = f" (did you mean: '{suggestion[0]}'?)" if suggestion else ""
             raise ValueError(
                 f"user_preferences key '{raw_key}' is not a valid ledger section "
-                f"(allowed: {', '.join(sorted(valid_sections))})"
+                f"(allowed: {', '.join(sorted(valid_sections))}){hint}"
             )
-        if not isinstance(raw_val, str) or not raw_val.strip():
-            raise ValueError(f"user_preferences['{raw_key}'] must be a non-empty string")
-        cleaned[raw_key] = raw_val.strip()
+        if isinstance(raw_val, str):
+            normalised = raw_val.strip()
+            if not normalised:
+                raise ValueError(
+                    f"user_preferences['{raw_key}'] must be a non-empty string or list of strings"
+                )
+            cleaned[raw_key] = normalised
+            continue
+        if isinstance(raw_val, list):
+            parts: list[str] = []
+            for item in raw_val:
+                if isinstance(item, bool) or not isinstance(item, str | int | float):
+                    raise ValueError(
+                        f"user_preferences['{raw_key}'] must be a non-empty string or "
+                        "list of strings"
+                    )
+                text = str(item).strip()
+                if text:
+                    parts.append(text)
+            if not parts:
+                raise ValueError(
+                    f"user_preferences['{raw_key}'] must be a non-empty string or list of strings"
+                )
+            cleaned[raw_key] = "\n".join(parts)
+            continue
+        raise ValueError(
+            f"user_preferences['{raw_key}'] must be a non-empty string or list of strings"
+        )
     return cleaned
 
 
