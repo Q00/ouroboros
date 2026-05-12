@@ -204,6 +204,11 @@ def compose_context(
     # not a hard pre-allocation. Subtract from the sibling ceiling only
     # what the parent will actually occupy:
     #   - no parent: subtract 0 (bot finding on r2)
+    #   - reserve == 0 with a parent: subtract 0. The parent is then
+    #     best-effort and consumes only leftover budget; siblings have
+    #     priority. Subtracting parent_overhead would let an optional
+    #     parent section drop sibling lines, violating the
+    #     "best-effort parent" contract (bot finding on r8).
     #   - parent shorter than reserve: subtract len(parent) + overhead
     #     so the unused reserve goes to siblings (bot finding on r3 round 2)
     #   - parent at-or-above reserve: subtract reserve + overhead
@@ -211,7 +216,7 @@ def compose_context(
     # The parent can still grow beyond its reserve later if siblings
     # under-consume the remaining budget.
     sibling_ceiling = budget.total_chars
-    if parent_stripped:
+    if parent_stripped and budget.parent_summary_reserve > 0:
         parent_floor = min(len(parent_stripped), budget.parent_summary_reserve)
         sibling_ceiling -= parent_floor + parent_overhead
     for sib in siblings:

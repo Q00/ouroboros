@@ -221,6 +221,23 @@ class TestRenderedSizeContract:
         assert len(result.parent_summary) > 0
         assert len(result.render()) <= 200
 
+    def test_zero_reserve_does_not_steal_overhead_from_siblings(self) -> None:
+        # Bot finding on #890 r6: with parent_summary present but
+        # reserve=0, the previous code still subtracted parent_overhead
+        # (20 chars) from the sibling ceiling. That let an optional
+        # parent section drop sibling status, violating the
+        # "best-effort parent" contract for reserve=0.
+        siblings = [SiblingStatus(str(i), accepted=True, headline="xxxxx") for i in range(10)]
+        budget = ContextBudget(total_chars=200, parent_summary_reserve=0)
+        with_parent = compose_context(ac="ac", parent_summary="p", siblings=siblings, budget=budget)
+        without_parent = compose_context(
+            ac="ac", parent_summary="", siblings=siblings, budget=budget
+        )
+        # Siblings placed in the with_parent case must match (or exceed)
+        # the without_parent case — adding a best-effort parent must
+        # not push siblings out.
+        assert len(with_parent.sibling_lines) >= len(without_parent.sibling_lines)
+
     def test_short_parent_does_not_starve_siblings(self) -> None:
         # Bot finding on #890 r4: when parent_summary is non-empty but
         # SHORTER than parent_summary_reserve, the previous code still
