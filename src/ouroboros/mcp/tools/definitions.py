@@ -585,6 +585,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.mcp.tools.auto_handler import AutoHandler
 
         return AutoHandler
+    if name == "StartAutoHandler":
+        from ouroboros.mcp.tools.auto_handler import StartAutoHandler
+
+        return StartAutoHandler
     raise AttributeError(name)
 
 
