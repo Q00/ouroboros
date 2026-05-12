@@ -228,6 +228,12 @@ def test_detector_returns_one_for_directory_markers(tmp_path: Path, marker: str)
     assert CODING_PROFILE.detector(tmp_path) == 1.0
 
 
+def test_detector_returns_one_for_git_file_marker(tmp_path: Path) -> None:
+    """linked worktree roots expose .git as a file, not a directory."""
+    (tmp_path / ".git").write_text("gitdir: ../.git/worktrees/example\n")
+    assert CODING_PROFILE.detector(tmp_path) == 1.0
+
+
 def test_detector_returns_zero_for_empty_dir(tmp_path: Path) -> None:
     """detector returns 0.0 when neither marker file nor marker directory is present."""
     assert CODING_PROFILE.detector(tmp_path) == 0.0
