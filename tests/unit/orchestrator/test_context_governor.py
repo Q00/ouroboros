@@ -246,6 +246,32 @@ class TestRenderedSizeContract:
         assert result.parent_summary == "p"
         assert len(result.render()) <= 120
 
+    def test_impossible_reserve_raises(self) -> None:
+        # Bot finding on #890 r4 round 2: when the AC alone leaves less
+        # than parent_overhead + parent_summary_reserve, the function
+        # used to silently return parent_summary="" with truncated=True,
+        # violating the API's "guaranteed minimum" contract. Now it
+        # must fail fast so the caller can shrink the AC or raise the
+        # total.
+        with pytest.raises(ValueError, match="Budget cannot honor parent_summary_reserve"):
+            compose_context(
+                ac="x" * 35,
+                parent_summary="parent summary here",  # 19 chars
+                budget=ContextBudget(total_chars=50, parent_summary_reserve=30),
+            )
+
+    def test_impossible_reserve_with_zero_reserve_does_not_raise(self) -> None:
+        # When the caller explicitly opts out of the guarantee
+        # (reserve=0), the parent is best-effort; silent truncation is
+        # the right behavior, not fail-fast.
+        result = compose_context(
+            ac="x" * 35,
+            parent_summary="parent",
+            budget=ContextBudget(total_chars=50, parent_summary_reserve=0),
+        )
+        assert result.parent_summary == ""
+        assert result.truncated is True
+
     def test_parent_actual_content_meets_reserve_floor(self) -> None:
         # Bot finding on #890 r3: the reserve was applied to the
         # sibling ceiling without accounting for the parent section

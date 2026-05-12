@@ -165,12 +165,41 @@ def compose_context(
         raise ValueError(msg)
     used = ac_section_cost
 
+    # Reserve honoring is a documented guarantee, not best-effort. If
+    # the AC alone leaves less than parent_overhead + the parent's
+    # actual content floor, the budget is structurally impossible —
+    # fail fast so the caller knows to either shrink the AC or raise
+    # the total. Silently returning an empty parent_summary with
+    # truncated=True would violate the API's "guaranteed minimum"
+    # contract (bot finding on #890 r4 round 2).
+    parent_overhead = len(_PARENT_HEADER) + len(_SECTION_JOINER)
+    parent_stripped_len = len(parent_stripped)
+    # Reserve honoring is a documented guarantee, not best-effort —
+    # only when the caller explicitly asked for one (reserve > 0). If
+    # the AC alone leaves less than parent_overhead + the parent's
+    # actual content floor, the budget is structurally impossible —
+    # fail fast so the caller knows to either shrink the AC or raise
+    # the total. With reserve=0 the parent is best-effort, so silent
+    # truncation is the right behavior (bot finding on #890 r4 round 2).
+    if parent_stripped and budget.parent_summary_reserve > 0:
+        parent_floor = min(parent_stripped_len, budget.parent_summary_reserve)
+        required_for_parent = parent_overhead + parent_floor
+        if ac_section_cost + required_for_parent > budget.total_chars:
+            msg = (
+                f"Budget cannot honor parent_summary_reserve="
+                f"{budget.parent_summary_reserve}: ac_section="
+                f"{ac_section_cost} + parent_overhead={parent_overhead} + "
+                f"parent_floor={parent_floor} > total="
+                f"{budget.total_chars}. Either shrink the AC or raise "
+                "total_chars / lower parent_summary_reserve."
+            )
+            raise ValueError(msg)
+
     # Sibling section bookkeeping: include the header + section-joiner
     # cost only if at least one sibling line lands in the output.
     sibling_lines: list[str] = []
     sibling_overhead = len(_SIBLING_HEADER) + len(_SECTION_JOINER)
     sibling_inner = 0  # bytes inside the section (lines + newline joins).
-    parent_overhead = len(_PARENT_HEADER) + len(_SECTION_JOINER)
     # The parent_summary_reserve is a *floor* for the parent's content,
     # not a hard pre-allocation. Subtract from the sibling ceiling only
     # what the parent will actually occupy:
