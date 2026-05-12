@@ -200,17 +200,20 @@ class AutoHandler:
 
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
         auto_session_id = _auto_session_id_from_arguments(arguments)
+        start_lease_token = _start_auto_lease_token_from_arguments(arguments)
         try:
             result = await self._run(arguments)
         except Exception as exc:
-            if auto_session_id is not None:
-                _release_start_lease(self.store or AutoStore(), auto_session_id)
+            if auto_session_id is not None and start_lease_token is not None:
+                _release_start_lease(
+                    self.store or AutoStore(), auto_session_id, token=start_lease_token
+                )
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
         store = self.store or AutoStore()
-        if result.auto_session_id:
-            _release_start_lease(store, result.auto_session_id)
+        if result.auto_session_id and start_lease_token is not None:
+            _release_start_lease(store, result.auto_session_id, token=start_lease_token)
         meta = _result_meta(result)
         text = _format_result(result)
         if result.run_subagent is not None:
@@ -570,6 +573,7 @@ class StartAutoHandler:
         )
         if lease_error is not None:
             return Result.err(lease_error)
+        runner_arguments["_start_auto_lease_token"] = lease_token
 
         if plugin_dispatch:
             payload = _build_auto_subagent(runner_arguments, auto_session_id=auto_session_id)
@@ -830,6 +834,13 @@ def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
     resume = arguments.get("resume")
     if isinstance(resume, str) and resume.strip():
         return resume.strip()
+    return None
+
+
+def _start_auto_lease_token_from_arguments(arguments: dict[str, Any]) -> str | None:
+    token = arguments.get("_start_auto_lease_token")
+    if isinstance(token, str) and token:
+        return token
     return None
 
 

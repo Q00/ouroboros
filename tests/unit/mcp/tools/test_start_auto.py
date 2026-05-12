@@ -211,6 +211,7 @@ class TestBackgroundJobPath:
         assert store.path_for(meta["auto_session_id"]).exists()
         assert meta["_subagent"]["tool_name"] == "ouroboros_start_auto"
         assert meta["_subagent"]["context"]["arguments"]["resume"] == meta["auto_session_id"]
+        assert isinstance(meta["_subagent"]["context"]["arguments"]["_start_auto_lease_token"], str)
         body = json.loads(result.value.content[0].text)
         assert body["auto_session_id"] == meta["auto_session_id"]
         job_manager.start_job.assert_not_called()
@@ -253,7 +254,9 @@ class TestBackgroundJobPath:
         h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
         h._inner_auto = fake_inner_auto
 
-        result = await h.handle({"resume": state.auto_session_id})
+        result = await h.handle(
+            {"resume": state.auto_session_id, "_start_auto_lease_token": "lease_active"}
+        )
 
         assert result.is_err
         assert state.auto_session_id in result.error.message
@@ -495,7 +498,9 @@ class TestAutoHandlerLeaseRelease:
                 )
 
         h = StubAutoHandler(store=store)
-        result = await h.handle({"resume": state.auto_session_id})
+        result = await h.handle(
+            {"resume": state.auto_session_id, "_start_auto_lease_token": "lease_active"}
+        )
 
         assert result.is_ok
         assert (
@@ -524,9 +529,46 @@ class TestAutoHandlerLeaseRelease:
                 raise RuntimeError("child failed")
 
         h = StubAutoHandler(store=store)
-        result = await h.handle({"resume": state.auto_session_id})
+        result = await h.handle(
+            {"resume": state.auto_session_id, "_start_auto_lease_token": "lease_active"}
+        )
 
         assert result.is_err
         assert (
             not store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").exists()
         )
+
+    @pytest.mark.asyncio
+    async def test_direct_auto_resume_without_token_does_not_clear_start_auto_lease(
+        self, tmp_path
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "lease_active",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                return AutoPipelineResult(
+                    status="running",
+                    auto_session_id=state.auto_session_id,
+                    phase="interview",
+                    pending_question="Which runtime?",
+                )
+
+        h = StubAutoHandler(store=store)
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert lease_path.exists()
