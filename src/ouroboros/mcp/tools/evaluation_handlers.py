@@ -1730,12 +1730,42 @@ class StartEvaluateHandler:
         # StartEvolveStepHandler. Polling a fake job_id would break the
         # ouroboros_job_status contract.
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Mirror EvaluateHandler.handle's AC normalization so plugin
+            # dispatch does not silently drop multi-AC checklist input
+            # (PR #882 review feedback): the parameter surface advertises
+            # both `acceptance_criterion` (singular) and
+            # `acceptance_criteria` (plural list), so both must be honoured
+            # here exactly as the non-plugin path honours them via the inner
+            # handler. ``build_evaluate_subagent`` only accepts the singular
+            # field, so a multi-item list is rendered as a numbered checklist
+            # before being forwarded.
+            acceptance_criteria_raw = arguments.get("acceptance_criteria")
+            acceptance_criteria: tuple[str, ...] = ()
+            if isinstance(acceptance_criteria_raw, list):
+                acceptance_criteria = tuple(
+                    str(item).strip()
+                    for item in acceptance_criteria_raw
+                    if isinstance(item, (str, int, float)) and str(item).strip()
+                )
+            ac_singular_raw = arguments.get("acceptance_criterion")
+            if not acceptance_criteria and ac_singular_raw and str(ac_singular_raw).strip():
+                acceptance_criteria = (str(ac_singular_raw).strip(),)
+
+            if len(acceptance_criteria) > 1:
+                ac_for_payload: str | None = "\n".join(
+                    f"{i + 1}. {ac}" for i, ac in enumerate(acceptance_criteria)
+                )
+            elif acceptance_criteria:
+                ac_for_payload = acceptance_criteria[0]
+            else:
+                ac_for_payload = None
+
             payload = build_evaluate_subagent(
                 session_id=session_id,
                 artifact=artifact,
                 artifact_type=arguments.get("artifact_type", "code"),
                 seed_content=arguments.get("seed_content"),
-                acceptance_criterion=arguments.get("acceptance_criterion"),
+                acceptance_criterion=ac_for_payload,
                 working_dir=arguments.get("working_dir"),
                 trigger_consensus=arguments.get("trigger_consensus", False),
             )

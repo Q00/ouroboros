@@ -170,6 +170,56 @@ class TestPluginModeDispatch:
         assert "_subagent" in result.value.meta
         assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_evaluate"
 
+    @pytest.mark.asyncio
+    async def test_multi_acceptance_criteria_preserved_in_plugin_payload(self, handler) -> None:
+        """Plugin dispatch must not silently drop the multi-AC checklist input.
+
+        Regression guard for PR #882 review feedback: ``acceptance_criteria``
+        (plural list) was being dropped on the plugin path because only the
+        singular ``acceptance_criterion`` field was forwarded. The non-plugin
+        path normalises both inputs inside ``EvaluateHandler.handle``, so the
+        plugin path must do the equivalent before building the subagent
+        payload.
+        """
+        result = await handler.handle(
+            {
+                "session_id": "orch_xyz",
+                "artifact": "code",
+                "acceptance_criteria": ["First AC", "Second AC", "Third AC"],
+            }
+        )
+        assert result.is_ok
+        payload_context = result.value.meta["_subagent"]["context"]
+        forwarded = payload_context["acceptance_criterion"] or ""
+        assert "First AC" in forwarded
+        assert "Second AC" in forwarded
+        assert "Third AC" in forwarded
+
+    @pytest.mark.asyncio
+    async def test_singular_acceptance_criterion_still_forwarded(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "orch_xyz",
+                "artifact": "code",
+                "acceptance_criterion": "Only one",
+            }
+        )
+        payload_context = result.value.meta["_subagent"]["context"]
+        assert payload_context["acceptance_criterion"] == "Only one"
+
+    @pytest.mark.asyncio
+    async def test_plural_takes_precedence_over_singular(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "orch_xyz",
+                "artifact": "code",
+                "acceptance_criterion": "Should be ignored",
+                "acceptance_criteria": ["Wins"],
+            }
+        )
+        payload_context = result.value.meta["_subagent"]["context"]
+        assert payload_context["acceptance_criterion"] == "Wins"
+
 
 class TestFactoryWiring:
     def test_get_ouroboros_tools_includes_start_evaluate(self) -> None:
