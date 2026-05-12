@@ -55,9 +55,19 @@ class TestClassify:
         assert classify(attempt) == FailureClass.FABRICATION_SUSPECTED
 
     def test_unknown_verifier_class_degrades_to_stall(self) -> None:
+        # PR3 round 2 (#884) now rejects unknown failure_class at
+        # VerifierVerdict construction time, so the public API can no
+        # longer reach this path. We still keep `classify` defensive
+        # against bypassed construction (e.g. deserialization or future
+        # impls that hand-build the Attempt) — bypass __post_init__ via
+        # object.__setattr__ on the frozen dataclass to prove the
+        # defensive degradation still works.
+        verdict = VerifierVerdict(passed=False, reasons=("?",), failure_class="STALL")
+        # Bypass the frozen guard to inject an out-of-taxonomy tag.
+        object.__setattr__(verdict, "failure_class", "UNREGISTERED")
         attempt = _attempt(
             validation=ValidationResult(ok=True),
-            verdict=VerifierVerdict(passed=False, reasons=("?",), failure_class="UNREGISTERED"),
+            verdict=verdict,
         )
         assert classify(attempt) == FailureClass.STALL
 
