@@ -1159,7 +1159,18 @@ class StartExecuteSeedHandler:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
 
-        async def _runner() -> MCPToolResult:
+        async def _runner(handle) -> MCPToolResult:
+            if handle.should_cancel():
+                return MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="Seed execution cancelled before restart work began.",
+                        ),
+                    ),
+                    is_error=True,
+                    meta={"status": "cancelled"},
+                )
             result = await self._execute_handler.handle(
                 arguments,
                 execution_id=execution_id,
@@ -1170,18 +1181,23 @@ class StartExecuteSeedHandler:
                 raise RuntimeError(str(result.error))
             return result.value
 
+        job_id = await self._job_manager.allocate_job_id()
+
         snapshot = await self._job_manager.start_job(
             job_type="execute_seed",
             initial_message="Queued seed execution",
             runner=run_with_agent_process(
                 event_store=self._event_store,
                 intent="execute_seed",
-                work_fn=lambda _handle: _runner(),
+                work_fn=_runner,
+                process_id=f"execute_seed:{execution_id}:{job_id}",
+                cancel_key=f"mcp_job:{job_id}",
             ),
             links=JobLinks(
                 session_id=session_id or new_session_id,
                 execution_id=execution_id,
             ),
+            job_id=job_id,
         )
 
         from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend

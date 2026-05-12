@@ -53,6 +53,7 @@ from uuid import uuid4
 
 from ouroboros.core.control_contract import ControlContract
 from ouroboros.core.directive import Directive
+from ouroboros.core.errors import PersistenceError
 from ouroboros.events.control import create_control_directive_emitted_event
 from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 
@@ -62,6 +63,9 @@ logger = logging.getLogger(__name__)
 _TARGET_TYPE: Final[str] = "agent_process"
 _EMITTED_BY: Final[str] = "agent_process"
 _DIRECTIVE_EMIT_TIMEOUT_SECONDS: Final[float] = 1.0
+_CANCELLED_PHASE: Final[str] = "agent_process_cancelled"
+_CANCEL_CONSUMED_PHASE: Final[str] = "agent_process_cancel_consumed"
+_CANCEL_CONTROL_SEED_PREFIX: Final[str] = "__ouroboros_agent_process_cancel__:"
 
 
 class AgentProcessStatus(StrEnum):
@@ -267,6 +271,8 @@ class AgentProcessHandle:
     _expected_directive_count: int = 0
     _emit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _work_task: asyncio.Task[None] | None = None
+    _checkpoint_store: CheckpointStore | None = field(default=None, repr=False)
+    _cancel_key: str | None = field(default=None, repr=False)
     _pause_checkpoint_store: CheckpointStore | None = field(default=None, repr=False)
     _pause_checkpoint_reason: str | None = field(default=None, repr=False)
     _pause_checkpoint_requested: bool = field(default=False, repr=False)
@@ -351,16 +357,40 @@ class AgentProcessHandle:
         if self._status is AgentProcessStatus.PAUSED:
             await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
 
-    async def cancel(self, reason: str = "cancel requested") -> None:
+    async def cancel(
+        self,
+        reason: str = "cancel requested",
+        *,
+        checkpoint_store: CheckpointStore | None = None,
+    ) -> None:
         """Request a cooperative cancel.
 
         The work loop sees the cancel flag at the next checkpoint and
         exits cleanly. In-flight LLM/tool calls finish naturally; the
-        loop exits before starting the next iteration.
+        loop exits before starting the next iteration. If a checkpoint store
+        is wired, the cancel signal is also persisted as a best-effort hint
+        for restart recovery.
         """
         if self._status in _TERMINAL_STATUSES:
             return
         self._request_cancel(reason)
+
+        store = checkpoint_store or self._checkpoint_store
+        if store is not None:
+            try:
+                cancel_key = self._cancel_key or self.process_id
+                self.persist_cancel_signal(
+                    cancel_key,
+                    store=store,
+                    reason=reason,
+                    source_process_id=self.process_id,
+                )
+            except Exception:  # noqa: BLE001 — live cancellation remains authoritative
+                logger.warning(
+                    "agent_process.cancel_checkpoint_save_failed",
+                    extra={"process_id": self.process_id},
+                    exc_info=True,
+                )
 
     async def abort(self, reason: str = "abort requested") -> None:
         """Cancel the underlying work task for caller-abort propagation."""
@@ -459,6 +489,125 @@ class AgentProcessHandle:
                 extra={"process_id": process_id},
             )
             return False
+
+    @classmethod
+    def persist_cancel_signal(
+        cls,
+        process_id: str,
+        *,
+        store: CheckpointStore,
+        reason: str,
+        source_process_id: str | None = None,
+    ) -> None:
+        """Persist a durable cancel marker for a restart-stable cancel identity."""
+        checkpoint = CheckpointData.create(
+            seed_id=cls._cancel_checkpoint_seed(process_id),
+            phase=_CANCELLED_PHASE,
+            state={
+                "status": "cancelled",
+                "process_id": source_process_id or process_id,
+                "cancel_key": process_id,
+                "reason": reason,
+                "cancelled_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        result = store.save(checkpoint)
+        if result.is_err:
+            raise result.error
+
+    @classmethod
+    def load_persisted_cancel(
+        cls,
+        process_id: str,
+        *,
+        store: CheckpointStore | None = None,
+    ) -> tuple[bool, str | None]:
+        """Return ``(True, reason)`` iff durable state records cancellation.
+
+        Cancel checkpoints live under a dedicated control-plane key so ordinary
+        workflow checkpoints for the same process cannot rotate them out.
+        If any cancel checkpoint artifact exists but cannot be read, this fails
+        closed by raising instead of treating cancellation as absent.
+        """
+        if store is None:
+            return False, None
+        seed_id = cls._cancel_checkpoint_seed(process_id)
+        for level in range(store.MAX_ROLLBACK_DEPTH + 1):
+            if not cls._checkpoint_artifact_exists(store, seed_id, level=level):
+                continue
+            result = store._load_checkpoint_level(seed_id, level)  # noqa: SLF001
+            if result.is_err:
+                raise result.error
+            checkpoint = result.value
+            if checkpoint.phase == _CANCEL_CONSUMED_PHASE:
+                if level > 0:
+                    raise PersistenceError(
+                        "Ambiguous durable cancel state: found a rotated consumed marker "
+                        "without a current checkpoint level",
+                        operation="read",
+                        details={"seed_id": seed_id, "level": level},
+                    )
+                return False, None
+            if checkpoint.phase == _CANCELLED_PHASE:
+                reason = checkpoint.state.get("reason")
+                return True, reason if isinstance(reason, str) else None
+        return False, None
+
+    @staticmethod
+    def _cancel_checkpoint_seed(process_id: str) -> str:
+        """Return the reserved durable checkpoint seed for cancel control state."""
+        AgentProcessHandle._validate_process_id_namespace(process_id)
+        return f"{_CANCEL_CONTROL_SEED_PREFIX}{process_id}"
+
+    @staticmethod
+    def _validate_process_id_namespace(process_id: str) -> None:
+        """Reject caller process IDs that collide with control-plane seeds."""
+        sanitized_process_id = CheckpointStore._sanitize_seed_id(process_id)  # noqa: SLF001
+        sanitized_prefix = CheckpointStore._sanitize_seed_id(  # noqa: SLF001
+            _CANCEL_CONTROL_SEED_PREFIX
+        )
+        if process_id.startswith(_CANCEL_CONTROL_SEED_PREFIX) or sanitized_process_id.startswith(
+            sanitized_prefix
+        ):
+            raise ValueError(
+                "process_id uses the reserved agent-process cancel checkpoint namespace"
+            )
+
+    @classmethod
+    def _consume_persisted_cancel(
+        cls, process_id: str, *, store: CheckpointStore, reason: str | None
+    ) -> None:
+        """Mark a durable cancel as consumed after restart teardown observes it."""
+        consumed = CheckpointData.create(
+            seed_id=cls._cancel_checkpoint_seed(process_id),
+            phase=_CANCEL_CONSUMED_PHASE,
+            state={
+                "status": "cancel_consumed",
+                "process_id": process_id,
+                "reason": reason,
+                "consumed_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        result = store.save(consumed)
+        if result.is_err:
+            raise result.error
+
+    @staticmethod
+    def _checkpoint_artifact_exists(store: CheckpointStore, process_id: str, level: int) -> bool:
+        """Return True when a specific rollback-level checkpoint file exists."""
+        try:
+            path = store._get_checkpoint_path(process_id, level)  # noqa: SLF001
+            try:
+                path.stat()
+            except FileNotFoundError:
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001
+            raise PersistenceError(
+                f"Failed to inspect checkpoint artifact: {exc}",
+                operation="read",
+                details={"seed_id": process_id, "level": level},
+            ) from exc
 
     def failure(self) -> BaseException | None:
         """Return the exception captured from the work task, if it failed."""
@@ -716,6 +865,8 @@ class AgentProcess:
     """
 
     event_store: _AppendableEventStore | None = None
+    checkpoint_store: CheckpointStore | None = None
+    cancel_key: str | None = None
 
     async def spawn(
         self,
@@ -744,6 +895,9 @@ class AgentProcess:
             The :class:`AgentProcessHandle` wired to the work loop.
         """
         pid = process_id or _new_process_id()
+        cancel_key = self.cancel_key or pid
+        AgentProcessHandle._validate_process_id_namespace(pid)
+        AgentProcessHandle._validate_process_id_namespace(cancel_key)
         emit = self._make_emitter(intent=intent, process_id=pid)
         replay_store: _ReplayableEventStore | None = (
             self.event_store  # type: ignore[assignment]
@@ -755,7 +909,21 @@ class AgentProcess:
             _emit_directive=emit,
             _replay_store=replay_store,
             _validate_replay_against_live_status=True,
+            _checkpoint_store=self.checkpoint_store,
+            _cancel_key=cancel_key,
         )
+        persisted_cancel_found = False
+        persisted_cancel_reason: str | None = None
+        if self.checkpoint_store is not None:
+            cancelled, reason = AgentProcessHandle.load_persisted_cancel(
+                cancel_key, store=self.checkpoint_store
+            )
+            if cancelled:
+                persisted_cancel_found = True
+                persisted_cancel_reason = reason
+                handle._cancel_reason = reason or "cancel requested"
+                handle._cancel_event.set()
+                handle._paused_event.set()
         # Emit the initial RUNNING transition so projections have a
         # spawn marker even if the loop fails before the first
         # cooperative checkpoint.
@@ -794,6 +962,19 @@ class AgentProcess:
                 try:
                     if handle.should_cancel() and not handle._complete_on_return_after_cancel:
                         await handle._mark_cancelled()
+                        if self.checkpoint_store is not None and persisted_cancel_found:
+                            try:
+                                AgentProcessHandle._consume_persisted_cancel(
+                                    cancel_key,
+                                    store=self.checkpoint_store,
+                                    reason=persisted_cancel_reason,
+                                )
+                            except Exception:  # noqa: BLE001 — cleanup must not hide cancellation
+                                logger.warning(
+                                    "agent_process.spawn_cancel_consume_failed",
+                                    extra={"process_id": pid, "cancel_key": cancel_key},
+                                    exc_info=True,
+                                )
                     else:
                         await handle._mark_completed(reason="work returned")
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
@@ -877,6 +1058,9 @@ async def run_with_agent_process[T](
     intent: str,
     work_fn: Callable[[AgentProcessHandle], Awaitable[T]],
     timeout: float | None = None,
+    checkpoint_store: CheckpointStore | None = None,
+    process_id: str | None = None,
+    cancel_key: str | None = None,
 ) -> T:
     """Run one production surface through :class:`AgentProcess.spawn`.
 
@@ -907,6 +1091,29 @@ async def run_with_agent_process[T](
             error_box.append(exc)
             raise
 
+    durable_store = checkpoint_store
+    durable_cancel_key = cancel_key or process_id
+    if durable_cancel_key is not None and durable_store is None:
+        try:
+            durable_store = CheckpointStore()
+            durable_store.initialize()
+        except Exception:  # noqa: BLE001 — durable cancel is best-effort at this boundary
+            logger.warning(
+                "agent_process.run_with_agent_process_checkpoint_unavailable",
+                extra={
+                    "process_id": process_id,
+                    "cancel_key": durable_cancel_key,
+                    "intent": intent,
+                },
+                exc_info=True,
+            )
+            durable_store = None
+
+    process = AgentProcess(
+        event_store=event_store, checkpoint_store=durable_store, cancel_key=durable_cancel_key
+    )
+    handle = await process.spawn(intent=intent, work_fn=_work, process_id=process_id)
+
     async def _request_work_cancellation() -> asyncio.Task[None] | None:
         await handle.cancel(reason="cancelled by job runner")
         work_task = handle._work_task
@@ -914,8 +1121,6 @@ async def run_with_agent_process[T](
             work_task.cancel()
         return work_task
 
-    process = AgentProcess(event_store=event_store)
-    handle = await process.spawn(intent=intent, work_fn=_work)
     try:
         final_status = await handle.wait_until_complete(timeout=timeout)
     except asyncio.CancelledError:

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import logging
 import math
 from typing import Any
+from uuid import uuid4
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -408,9 +409,24 @@ class RalphHandler:
 
         runner = RalphLoopRunner(self._evolve_handler)
 
-        async def _run_loop() -> MCPToolResult:
+        async def _run_loop(handle) -> MCPToolResult:
+            if handle.should_cancel():
+                return MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="Ralph loop cancelled before restart work began.",
+                        ),
+                    ),
+                    is_error=True,
+                    meta={"status": "cancelled"},
+                )
             result = await runner.run(config)
             return result.to_tool_result()
+
+        job_id = await self._job_manager.allocate_job_id()
+        agent_process_id = f"ralph:{config.lineage_id}:{uuid4().hex[:12]}"
+        agent_cancel_key = f"mcp_job:{job_id}"
 
         snapshot = await self._job_manager.start_job(
             job_type="ralph",
@@ -418,9 +434,12 @@ class RalphHandler:
             runner=run_with_agent_process(
                 event_store=self._event_store,
                 intent="ralph",
-                work_fn=lambda _handle: _run_loop(),
+                work_fn=_run_loop,
+                process_id=agent_process_id,
+                cancel_key=agent_cancel_key,
             ),
             links=JobLinks(lineage_id=config.lineage_id),
+            job_id=job_id,
         )
 
         text = (

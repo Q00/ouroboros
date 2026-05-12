@@ -18,6 +18,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -81,6 +82,11 @@ class _CancellableJobManager:
     def __init__(self) -> None:
         self.runner_task: asyncio.Task[Any] | None = None
         self.job_types: list[str] = []
+        self._counter = 0
+
+    async def allocate_job_id(self) -> str:
+        self._counter += 1
+        return f"job_{uuid4().hex[:12]}"
 
     async def start_job(
         self,
@@ -89,11 +95,13 @@ class _CancellableJobManager:
         initial_message: str,  # noqa: ARG002 - mirrors JobManager API
         runner: Any,
         links: JobLinks | None = None,
+        job_id: str | None = None,
     ) -> _CompletedJobSnapshot:
+        job_id = job_id or await self.allocate_job_id()
         self.job_types.append(job_type)
         self.runner_task = asyncio.create_task(runner)
         return _CompletedJobSnapshot(
-            job_id=f"job_{job_type}",
+            job_id=job_id,
             links=links or JobLinks(),
             status=JobStatus.RUNNING,
         )
@@ -111,6 +119,11 @@ class _InlineJobManager:
     def __init__(self) -> None:
         self.runner_results: list[MCPToolResult] = []
         self.job_types: list[str] = []
+        self._counter = 0
+
+    async def allocate_job_id(self) -> str:
+        self._counter += 1
+        return f"job_{uuid4().hex[:12]}"
 
     async def start_job(
         self,
@@ -119,11 +132,13 @@ class _InlineJobManager:
         initial_message: str,  # noqa: ARG002 - mirrors JobManager API
         runner: Any,
         links: JobLinks | None = None,
+        job_id: str | None = None,
     ) -> _CompletedJobSnapshot:
+        job_id = job_id or await self.allocate_job_id()
         self.job_types.append(job_type)
         self.runner_results.append(await runner)
         return _CompletedJobSnapshot(
-            job_id=f"job_{job_type}",
+            job_id=job_id,
             links=links or JobLinks(),
         )
 

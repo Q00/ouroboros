@@ -18,11 +18,13 @@ from ouroboros.mcp.tools.job_handlers import (
     _render_job_snapshot_inner,
 )
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
 from ouroboros.orchestrator.heartbeat import lock_path
 from ouroboros.orchestrator.heartbeat import release as release_session_lock
 from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.orchestrator.session import SessionRepository
+from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore, PersistenceError
 
 
@@ -42,6 +44,25 @@ async def _cancel_manager_tasks(manager: JobManager) -> None:
             task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _wait_for_job_status(
+    manager: JobManager,
+    job_id: str,
+    status: JobStatus,
+    *,
+    timeout: float = 1.0,
+) -> JobSnapshot:
+    deadline = asyncio.get_running_loop().time() + timeout
+    last_snapshot: JobSnapshot | None = None
+    while asyncio.get_running_loop().time() < deadline:
+        last_snapshot = await manager.get_snapshot(job_id)
+        if last_snapshot.status is status:
+            return last_snapshot
+        await asyncio.sleep(0.01)
+    if last_snapshot is None:
+        last_snapshot = await manager.get_snapshot(job_id)
+    raise AssertionError(f"job {job_id} did not become {status}; last={last_snapshot.status}")
 
 
 class TestJobManager:
@@ -132,13 +153,93 @@ class TestJobManager:
                 links=JobLinks(),
             )
 
-            await asyncio.sleep(0.15)
-            snapshot = await manager.get_snapshot(started.job_id)
+            snapshot = await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
 
             assert snapshot.status == JobStatus.COMPLETED
             assert snapshot.result_text == "done"
             assert snapshot.result_meta["kind"] == "test"
         finally:
+            await store.close()
+
+    async def test_start_job_default_allocates_job_id(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
+            )
+
+            assert started.job_id.startswith("job_")
+            assert len(started.job_id) == len("job_") + 12
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_start_job_accepts_preallocated_job_id_once(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult()
+
+            job_id = await manager.allocate_job_id()
+            started = await manager.start_job(
+                job_id=job_id,
+                job_type="test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
+            )
+
+            assert started.job_id == job_id
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_start_job_rejects_existing_job_id(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult()
+
+            job_id = await manager.allocate_job_id()
+            await manager.start_job(
+                job_id=job_id,
+                job_type="test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
+            )
+
+            try:
+                runner = asyncio.get_running_loop().create_future()
+                runner.set_result(MCPToolResult())
+                await manager.start_job(
+                    job_id=job_id,
+                    job_type="test",
+                    initial_message="queued again",
+                    runner=runner,
+                    links=JobLinks(),
+                )
+            except ValueError as exc:
+                assert str(exc) == f"Job already exists: {job_id}"
+            else:
+                raise AssertionError("expected duplicate job_id to be rejected")
+        finally:
+            await _cancel_manager_tasks(manager)
             await store.close()
 
     async def test_start_job_tracks_externally_created_task(self, tmp_path) -> None:
@@ -165,8 +266,7 @@ class TestJobManager:
 
             assert manager._runner_tasks.get(started.job_id) is external_task
 
-            await asyncio.sleep(0.1)
-            snapshot = await manager.get_snapshot(started.job_id)
+            snapshot = await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
             assert snapshot.status == JobStatus.COMPLETED
             assert started.job_id not in manager._runner_tasks
         finally:
@@ -197,8 +297,7 @@ class TestJobManager:
                     meta={"kind": "future"},
                 )
             )
-            await asyncio.sleep(0.05)
-            snapshot = await manager.get_snapshot(started.job_id)
+            snapshot = await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
 
             assert snapshot.status == JobStatus.COMPLETED
             assert snapshot.result_text == "future"
@@ -275,6 +374,68 @@ class TestJobManager:
             assert changed is True
             assert snapshot.cursor >= started.cursor
         finally:
+            await store.close()
+
+    async def test_cancel_job_persists_job_scoped_agent_process_cancel(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        checkpoint_store = CheckpointStore(tmp_path / "checkpoints")
+        manager = JobManager(store, checkpoint_store=checkpoint_store)
+
+        try:
+            never_done = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                await never_done.wait()
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="durable_cancel",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
+            )
+
+            await manager.cancel_job(started.job_id)
+
+            found, reason = AgentProcessHandle.load_persisted_cancel(
+                f"mcp_job:{started.job_id}", store=checkpoint_store
+            )
+            assert found is True
+            assert reason == "Background job cancelled"
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_persist_failure_does_not_block_cancellation(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        def _raise_persist(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            raise RuntimeError("checkpoint unavailable")
+
+        monkeypatch.setattr(manager, "_persist_durable_cancel", _raise_persist)
+
+        try:
+            never_done = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                await never_done.wait()
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="durable_cancel_best_effort",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
+            )
+
+            snapshot = await manager.cancel_job(started.job_id)
+
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+        finally:
+            await _cancel_manager_tasks(manager)
             await store.close()
 
     async def test_cancel_job_cancels_non_session_task(self, tmp_path) -> None:
