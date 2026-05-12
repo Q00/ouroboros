@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.auto.state import AutoStore
+from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -94,6 +94,43 @@ class TestRequiredArguments:
         assert result.is_err
         assert "Auto session not found" in result.error.message
         job_manager.start_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_argument_is_trimmed_for_enqueued_runner(
+        self, event_store, tmp_path
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        job_manager = MagicMock()
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_resume"
+        captured: dict[str, object] = {}
+
+        async def _start_job(*, runner, **_):
+            captured["runner"] = runner
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        inner = MagicMock(spec=AutoHandler)
+        inner.handle = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="ran"),),
+                    is_error=False,
+                    meta={"auto_session_id": state.auto_session_id},
+                )
+            )
+        )
+        h._inner_auto = inner
+
+        result = await h.handle({"resume": f" {state.auto_session_id} "})
+
+        assert result.is_ok
+        await captured["runner"]
+        inner.handle.assert_awaited_once()
+        assert inner.handle.await_args.args[0]["resume"] == state.auto_session_id
 
 
 class TestBackgroundJobPath:
