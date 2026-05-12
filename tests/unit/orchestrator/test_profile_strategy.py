@@ -118,6 +118,33 @@ class TestActivityMap:
         activity_map = ProfileBackedStrategy(custom).get_activity_map()
         assert activity_map["MysteryTool"] == ActivityType.EXPLORING
 
+    def test_bash_semantics_match_legacy_per_profile(self) -> None:
+        # Bot finding on #891 r2: hardcoding Bash → TESTING for every
+        # profile regressed research dashboard semantics (legacy
+        # ResearchStrategy mapped Bash → EXPLORING because Bash there
+        # backs grep/curl, not test runs).
+        from ouroboros.orchestrator.profile_loader import EvidenceSchema
+
+        # Force Bash into each profile so the activity_map can be asserted
+        # uniformly (research.yaml does not declare Bash by default).
+        for name, expected in (
+            ("code", ActivityType.TESTING),
+            ("analysis", ActivityType.TESTING),
+            ("research", ActivityType.EXPLORING),
+        ):
+            base = load_profile(name)
+            forced = base.model_copy(
+                update={
+                    "suggested_tools": tuple({*base.suggested_tools, "Bash"}),
+                    "evidence_schema": EvidenceSchema(),
+                }
+            )
+            activity_map = ProfileBackedStrategy(forced).get_activity_map()
+            assert activity_map["Bash"] == expected, (
+                f"{name} profile mapped Bash → {activity_map['Bash']}, "
+                f"expected {expected} (matches legacy execution_strategy)"
+            )
+
 
 class TestRunnerPromptIntegration:
     """Strategy must wire H3 wrappers through runner.build_*_prompt.

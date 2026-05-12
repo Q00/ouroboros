@@ -8,9 +8,11 @@ a YAML edit, not a Python + markdown edit.
 
 This module ships a `ProfileBackedStrategy` that satisfies the existing
 `ExecutionStrategy` Protocol but reads tools and system-prompt fragment
-from a loaded `ExecutionProfile`. The system prompt is composed via
-`phase_wrappers.build_pre_block` so the H1/H2/H3 guardrails are baked
-into the prompt the leaf executor sees.
+from a loaded `ExecutionProfile`. The system prompt fragment carries
+the H3 `[POST]` block (`build_post_block`) so the evidence_schema
+flows through `runner.build_system_prompt`; the `[PRE]` restate-and-
+preconditions gate lives in `get_task_prompt_suffix` so it grounds in
+the AC list `runner.build_task_prompt` renders immediately above it.
 
 Opt-in by design — the default strategy registry in
 `execution_strategy._STRATEGY_REGISTRY` is **not** modified by this PR.
@@ -37,13 +39,29 @@ from ouroboros.orchestrator.phase_wrappers import build_post_block
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.workflow_state import ActivityType
 
-_DEFAULT_ACTIVITY_MAP: dict[str, ActivityType] = {
+# Shared activity classification for tools that mean the same thing in
+# every profile. Bash is intentionally absent — its semantics differ
+# per profile (TESTING for code/analysis where Bash invokes test
+# commands, EXPLORING for research where Bash backs grep/curl/etc.).
+_SHARED_ACTIVITY_MAP: dict[str, ActivityType] = {
     "Read": ActivityType.EXPLORING,
     "Glob": ActivityType.EXPLORING,
     "Grep": ActivityType.EXPLORING,
     "Edit": ActivityType.BUILDING,
     "Write": ActivityType.BUILDING,
-    "Bash": ActivityType.TESTING,
+    "NotebookEdit": ActivityType.BUILDING,
+    "MultiEdit": ActivityType.BUILDING,
+}
+
+# Per-profile overrides preserve the legacy execution_strategy behavior
+# (Bash → TESTING for code/analysis, EXPLORING for research). Without
+# this, opting into ProfileBackedStrategy for the research profile
+# would flip Bash live phase reporting from EXPLORING to TESTING,
+# regressing dashboard semantics (bot finding on #891 r2).
+_PROFILE_ACTIVITY_OVERRIDES: dict[str, dict[str, ActivityType]] = {
+    "code": {"Bash": ActivityType.TESTING},
+    "analysis": {"Bash": ActivityType.TESTING},
+    "research": {"Bash": ActivityType.EXPLORING},
 }
 
 
@@ -109,12 +127,14 @@ class ProfileBackedStrategy:
         )
 
     def get_activity_map(self) -> dict[str, ActivityType]:
-        # Resolve activity types from the profile's suggested tools.
-        # Unknown tools default to EXPLORING — they get logged but
-        # don't break the dashboard.
+        # Compose the shared map with per-profile overrides so Bash
+        # semantics match the legacy execution_strategy (TESTING for
+        # code/analysis, EXPLORING for research). Unknown tools default
+        # to EXPLORING — they get logged but don't break the dashboard.
+        overrides = _PROFILE_ACTIVITY_OVERRIDES.get(self.profile.profile, {})
+        merged: dict[str, ActivityType] = {**_SHARED_ACTIVITY_MAP, **overrides}
         return {
-            tool: _DEFAULT_ACTIVITY_MAP.get(tool, ActivityType.EXPLORING)
-            for tool in self.profile.suggested_tools
+            tool: merged.get(tool, ActivityType.EXPLORING) for tool in self.profile.suggested_tools
         }
 
 
