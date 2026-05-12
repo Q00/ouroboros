@@ -499,6 +499,7 @@ class AgentProcessHandle:
                     "agent_process.failed_checkpoint_cleanup_failed",
                     extra={"process_id": self.process_id},
                 )
+                self._delete_lifecycle_checkpoint(store=self._pause_checkpoint_store)
         self._status = AgentProcessStatus.FAILED
         if self._emit_directive is not None:
             await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
@@ -575,8 +576,22 @@ class AgentProcessHandle:
             )
             if strict:
                 raise
-            if strict:
-                raise
+
+    def _delete_lifecycle_checkpoint(self, *, store: CheckpointStore | None = None) -> None:
+        """Best-effort fail-closed deletion of a stale pause checkpoint."""
+        checkpoint_store = store if store is not None else CheckpointStore()
+        try:
+            checkpoint_store.initialize()
+            checkpoint_path = checkpoint_store._get_checkpoint_path(  # noqa: SLF001
+                _pause_checkpoint_seed_id(self.process_id), 0
+            )
+            if checkpoint_path.exists():
+                checkpoint_path.unlink()
+        except Exception:  # noqa: BLE001 — no safer recovery remains
+            logger.warning(
+                "agent_process.lifecycle_checkpoint_delete_failed",
+                extra={"process_id": self.process_id},
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -642,7 +657,16 @@ class AgentProcess:
                 await work_fn(handle)
             except asyncio.CancelledError:
                 await handle.cancel(reason="cancelled by event loop")
-                await handle._mark_cancelled()
+                try:
+                    await handle._mark_cancelled()
+                except BaseException as exc:  # noqa: BLE001 — terminal durability failure
+                    await handle._mark_failed(
+                        reason=f"cancel finalization failed {type(exc).__name__}: {exc!s}"
+                    )
+                    logger.exception(
+                        "agent_process.cancel_finalization_failed",
+                        extra={"process_id": pid},
+                    )
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
                 if handle.status() in _TERMINAL_STATUSES:

@@ -963,6 +963,53 @@ async def test_resume_surfaces_checkpoint_save_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_finalization_deletes_stale_pause_when_failed_checkpoint_save_fails(
+    tmp_path: Path,
+) -> None:
+    """If failed cleanup cannot write a tombstone, stale paused truth is deleted."""
+    ck_store = _FailingSecondSaveCheckpointStore(base_path=tmp_path)
+    handle = AgentProcessHandle(process_id="failed-delete")
+
+    await handle.pause(store=ck_store)
+    waiter = asyncio.create_task(handle.wait_unpaused())
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    await handle._mark_failed(reason="simulated failure")
+
+    assert handle.status() is AgentProcessStatus.FAILED
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+
+@pytest.mark.asyncio
+async def test_spawned_cancel_finalization_failure_completes_failed(tmp_path: Path) -> None:
+    """Event-loop cancellation cleanup must not strand completion waiters on save failure."""
+    ck_store = _FailingSecondSaveCheckpointStore(base_path=tmp_path)
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+
+    async def work(handle):
+        await handle.pause(store=ck_store)
+        started.set()
+        await handle.wait_unpaused()
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    work_task = handle._work_task
+    assert work_task is not None
+
+    work_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await work_task
+
+    assert handle.status() is AgentProcessStatus.FAILED
+    assert handle._completed_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_spawned_process_fails_closed_when_terminal_checkpoint_save_fails() -> None:
     """A terminal durability failure in the runner must not leave waiters hanging."""
     process = AgentProcess(event_store=None)
