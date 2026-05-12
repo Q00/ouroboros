@@ -246,9 +246,9 @@ class HandlerRalphStarter:
         # ``"plugin"`` for the post-call confirmation envelope below;
         # :meth:`AutoPipeline._resume_ralph_handoff` retries dispatch when it
         # observes the unconfirmed marker.
-        plugin_dispatch = should_dispatch_via_plugin(
-            self.handler.agent_runtime_backend, self.handler.opencode_mode
-        )
+        runtime_backend = _optional_runtime_attr(self.handler, "agent_runtime_backend")
+        opencode_mode = _optional_runtime_attr(self.handler, "opencode_mode")
+        plugin_dispatch = should_dispatch_via_plugin(runtime_backend, opencode_mode)
         if plugin_dispatch and on_dispatched is not None:
             on_dispatched(
                 {
@@ -737,6 +737,11 @@ def _extract_seed_yaml(text: str) -> str:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _optional_runtime_attr(handler: object, name: str) -> str | None:
+    value = getattr(handler, name, None)
+    return value if isinstance(value, str) else None
 
 
 def _optional_int(value: object) -> int | None:
