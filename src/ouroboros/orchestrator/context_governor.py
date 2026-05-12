@@ -170,7 +170,13 @@ def compose_context(
     sibling_lines: list[str] = []
     sibling_overhead = len(_SIBLING_HEADER) + len(_SECTION_JOINER)
     sibling_inner = 0  # bytes inside the section (lines + newline joins).
-    sibling_ceiling = budget.total_chars - budget.parent_summary_reserve
+    # The parent-summary reserve is a floor only when there's a parent
+    # summary to place. With no parent, withholding the reserve from
+    # siblings would silently discard sibling status that fits in the
+    # total budget (bot finding on #890 r2).
+    sibling_ceiling = budget.total_chars
+    if parent_stripped:
+        sibling_ceiling -= budget.parent_summary_reserve
     for sib in siblings:
         line = sib.to_line()
         # `\n` joiner between sibling lines, only after the first.

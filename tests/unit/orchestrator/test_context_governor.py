@@ -186,6 +186,41 @@ class TestRenderedSizeContract:
         assert result.truncated is True
         assert len(result.render()) <= 30
 
+    def test_unused_parent_reserve_redistributes_to_siblings(self) -> None:
+        # Bot finding on #890 r2: with no parent summary present, the
+        # reserve must not gate siblings out of space they could
+        # otherwise occupy. Setup: total=120, parent_reserve=60, AC=2
+        # chars, no parent_summary. Previously only one sibling line
+        # fit because the ceiling subtracted the reserve unconditionally.
+        siblings = [SiblingStatus(f"AC{i}", accepted=True, headline="x" * 5) for i in range(5)]
+        result = compose_context(
+            ac="ac",
+            parent_summary="",
+            siblings=siblings,
+            budget=ContextBudget(total_chars=120, parent_summary_reserve=60),
+        )
+        # Without the fix this dropped to 1 line and rendered ~45 chars
+        # of 120 budget. With redistribution, multiple lines fit.
+        assert len(result.sibling_lines) >= 3, (
+            f"only {len(result.sibling_lines)} siblings placed; the "
+            f"reserve must not block them when parent_summary is empty"
+        )
+        assert len(result.render()) <= 120
+
+    def test_reserve_still_applies_when_parent_present(self) -> None:
+        # Symmetric guarantee: when a parent summary IS present, the
+        # reserve still acts as a floor — siblings cannot eat into it.
+        siblings = [SiblingStatus(f"AC{i}", accepted=True, headline="x" * 100) for i in range(20)]
+        result = compose_context(
+            ac="ac",
+            parent_summary="parent content here",
+            siblings=siblings,
+            budget=ContextBudget(total_chars=200, parent_summary_reserve=50),
+        )
+        # Parent summary got at least its reserve.
+        assert len(result.parent_summary) > 0
+        assert len(result.render()) <= 200
+
     def test_sibling_section_overhead_charged(self) -> None:
         # Budget large enough for AC + one sibling line but NOT enough
         # for the sibling header — the line must be dropped.
