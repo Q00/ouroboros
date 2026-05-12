@@ -224,6 +224,7 @@ def test_interview_failure_redactor_preserves_non_path_diagnostics() -> None:
         "path:'/Users/alice/.codex/config.json'; wrapped=(/tmp/wrapped); "
         "list=[/tmp/listed]; root=/root/.codex/auth.json; "
         "markdown=`/tmp/markdown`; angle=</tmp/angle>; "
+        "/srv/app/config.yml /run/user/1000/codex.sock /bin/bash /nix/store/hash; "
         "endpoint https://api.openai.com/v1/responses"
     )
 
@@ -240,6 +241,10 @@ def test_interview_failure_redactor_preserves_non_path_diagnostics() -> None:
     assert "/root/.codex/auth.json" not in redacted
     assert "/tmp/markdown" not in redacted
     assert "/tmp/angle" not in redacted
+    assert "/srv/app/config.yml" not in redacted
+    assert "/run/user/1000/codex.sock" not in redacted
+    assert "/bin/bash" not in redacted
+    assert "/nix/store/hash" not in redacted
     assert "C:" not in redacted
 
 

@@ -290,7 +290,7 @@ _INTERVIEW_EVENT_POSIX_PATH_RE = re.compile(
     r"(^|[\s,;:='\"`(<{\[])"
     r"("
     r"~[/\\][^\s,;'\"\]}]+"
-    r"|/(?:Applications|Users|Volumes|etc|home|mnt|opt|private|repo|root|tmp|usr|var|workspace)(?:/[^\s,;'\"\]}]+)*"
+    r"|/(?!api(?:/|$))[^\s,;'\"\]}]+"
     r")"
 )
 _INTERVIEW_EVENT_URL_RE = re.compile(r"https?://[^\s,;:'\")\]}]+")
