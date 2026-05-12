@@ -66,39 +66,49 @@ class TestExecutorRoute:
 
 
 class TestVerifierRoute:
-    def test_default_one_tier_above_executor(self, code_profile: ExecutionProfile) -> None:
-        route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
+    def test_default_one_tier_above_executor(self, research_profile: ExecutionProfile) -> None:
+        # Use research (no subprocess verifier_focus marker) so the
+        # route is supported and we can assert the tier choice.
         # Default executor = SONNET → verifier = OPUS.
+        route = decide_route(role=DispatchRole.VERIFIER, profile=research_profile)
         assert route.tier == ModelTier.OPUS
 
-    def test_fabrication_caps_at_opus(self, code_profile: ExecutionProfile) -> None:
+    def test_fabrication_caps_at_opus(self, research_profile: ExecutionProfile) -> None:
         # Executor escalates to OPUS; verifier "one above" should cap there.
         route = decide_route(
             role=DispatchRole.VERIFIER,
-            profile=code_profile,
+            profile=research_profile,
             fabrication_retry=True,
         )
         assert route.tier == ModelTier.OPUS
 
-    def test_read_only_tool_set_enforced_structurally(self, code_profile: ExecutionProfile) -> None:
-        # Bot finding on #889 r3: H1 read-only contract is enforced at
-        # the routing layer, not delegated to prompt obedience. The
-        # verifier tool set is HARD-FIXED to read-only discovery tools
-        # regardless of what the profile lists. Bash is excluded
-        # structurally because the router cannot inspect Bash command
-        # text to verify a command is read-only.
-        route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
+    def test_read_only_tool_set_enforced_structurally(
+        self, research_profile: ExecutionProfile
+    ) -> None:
+        # H1 read-only contract is enforced at the routing layer, not
+        # delegated to prompt obedience. The verifier tool set is
+        # HARD-FIXED to read-only discovery tools regardless of what
+        # the profile lists. Bash is excluded structurally because the
+        # router cannot inspect Bash command text to verify a command
+        # is read-only.
+        route = decide_route(role=DispatchRole.VERIFIER, profile=research_profile)
         assert set(route.tools) == {"Read", "Glob", "Grep"}
         assert "Bash" not in route.tools
         assert "Edit" not in route.tools
         assert "Write" not in route.tools
 
+    def test_subprocess_verifier_focus_raises(self, code_profile: ExecutionProfile) -> None:
+        # Bot finding on #889 r4: code profile's verifier_focus says
+        # "Run the project's test command", which cannot be satisfied
+        # by the read-only verifier envelope. The router must surface
+        # that gap explicitly, not silently return an impossible route.
+        with pytest.raises(NotImplementedError, match="test command"):
+            decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
+
     def test_verifier_tools_ignore_profile_extensions(self) -> None:
-        # Even if a profile lists extra tools, the verifier seam does
-        # not grant them. Subprocess-based verifier needs (e.g. code
-        # profile's "Run the project's test command") route through a
-        # separate read-only test runner (follow-up PR), not via the
-        # verifier-tool envelope.
+        # Even if a profile lists extra tools (Bash/Edit), the verifier
+        # seam does not grant them. Use a profile whose verifier_focus
+        # does NOT mention subprocess so the route is supported.
         from ouroboros.orchestrator.profile_loader import EvidenceSchema
 
         custom = load_profile("research").model_copy(
@@ -112,9 +122,11 @@ class TestVerifierRoute:
 
 
 class TestRationaleStrings:
-    def test_each_route_has_rationale(self, code_profile: ExecutionProfile) -> None:
+    def test_each_route_has_rationale(self, research_profile: ExecutionProfile) -> None:
+        # Use research profile so VERIFIER route is supported (no
+        # subprocess marker in verifier_focus).
         for role in DispatchRole:
-            route = decide_route(role=role, profile=code_profile)
+            route = decide_route(role=role, profile=research_profile)
             assert route.rationale, f"{role} returned empty rationale"
 
 

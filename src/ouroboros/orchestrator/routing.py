@@ -69,6 +69,36 @@ _TIER_ORDER: tuple[ModelTier, ...] = (ModelTier.HAIKU, ModelTier.SONNET, ModelTi
 # route through a dedicated read-only test runner — see module docstring.
 _VERIFIER_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
 
+# Phrases in profile.verifier_focus that signal the verifier needs to
+# execute subprocesses (typically test commands). When detected, the
+# router raises NotImplementedError so the caller knows to plumb a
+# dedicated read-only test runner instead of silently routing a
+# profile whose verifier contract this seam cannot satisfy
+# (bot finding on #889 r4).
+_VERIFIER_SUBPROCESS_MARKERS: tuple[str, ...] = (
+    "test command",
+    "subprocess",
+    "shell command",
+    "pytest",
+)
+
+
+def _check_verifier_supported(profile: ExecutionProfile) -> None:
+    """Raise NotImplementedError if the profile needs subprocess verifier."""
+    focus_lower = profile.verifier_focus.lower()
+    for marker in _VERIFIER_SUBPROCESS_MARKERS:
+        if marker in focus_lower:
+            msg = (
+                f"Profile {profile.profile!r} declares verifier_focus that "
+                f"requires {marker!r} (subprocess execution). The current "
+                f"verifier route is hard-fixed to {list(_VERIFIER_TOOLS)} "
+                "to enforce H1 read-only-ness structurally, so it cannot "
+                "complete this profile's verifier contract. Wire a "
+                "dedicated read-only test runner before routing "
+                "DispatchRole.VERIFIER for this profile."
+            )
+            raise NotImplementedError(msg)
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -109,8 +139,12 @@ def decide_route(
         profile: Active ExecutionProfile (suggested_tools is the source
             of truth for the executor's tool set).
         fabrication_retry: True when retrying after H7 classified the
-            previous attempt as FABRICATION_SUSPECTED. Bumps the
-            executor and the verifier one tier up.
+            previous attempt as FABRICATION_SUSPECTED. Escalates the
+            executor one tier up (SONNET → OPUS). The verifier always
+            runs one tier above the executor and is capped at OPUS, so
+            in practice the verifier tier is unchanged on retry once
+            the executor reaches OPUS — the cap, not the bump, defines
+            the verifier on retry.
 
     Returns:
         RouteDecision with the chosen tier, the resolved tool tuple,
@@ -121,6 +155,14 @@ def decide_route(
             routing seam fails fast on unknown inputs (e.g. a raw
             string from config/JSON) rather than silently falling
             through to the verifier branch with the wrong tools.
+        NotImplementedError: For DispatchRole.VERIFIER when the
+            profile's verifier_focus requires subprocess invocation
+            (e.g. code profile's "Run the project's test command").
+            The current verifier-tool envelope is hard-fixed read-only
+            (Read/Glob/Grep) for H1 contract enforcement and cannot
+            satisfy such profiles — the caller must wire a dedicated
+            read-only test runner before using VERIFIER routing for
+            them.
     """
     if not isinstance(role, DispatchRole):
         msg = (
@@ -154,6 +196,12 @@ def decide_route(
         )
 
     if role is DispatchRole.VERIFIER:
+        # Profiles whose verifier_focus needs subprocess execution
+        # cannot be satisfied by the read-only (Read/Glob/Grep) envelope
+        # this router enforces. Surface that explicitly instead of
+        # silently returning a route the verifier cannot complete (bot
+        # finding on #889 r4).
+        _check_verifier_supported(profile)
         executor_tier = _executor_tier(profile, fabrication_retry=fabrication_retry)
         verifier_tier = _bump_tier(executor_tier)
         return RouteDecision(
