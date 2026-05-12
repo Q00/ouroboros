@@ -12,7 +12,7 @@ from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline, _apply_active_profile
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
-from ouroboros.auto.state import AutoPhase, AutoPipelineState
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability
 from ouroboros.core.seed import (
     EvaluationPrinciple,
     ExitCondition,
@@ -146,6 +146,7 @@ async def test_pipeline_blocks_cleanly_when_durable_profile_is_missing() -> None
     assert state.last_tool_name == "domain_profile_registry"
     assert state.last_error == "active domain profile is not registered: missing-profile"
     assert result.blocker == state.last_error
+    assert state.resume_capability() is AutoResumeCapability.RETRY
     assert driver.invocations == 0
 
 

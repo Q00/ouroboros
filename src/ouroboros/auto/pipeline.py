@@ -2088,6 +2088,7 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         "interview.resume",
         "interview.answer",
         "auto_answerer",
+        "domain_profile_registry",
         "interview_driver",
     }:
         return AutoPhase.INTERVIEW

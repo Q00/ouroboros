@@ -41,6 +41,16 @@ class _UnknownClassifier:
         return frozenset({"future_label"})
 
 
+class _CrashingClassifier:
+    """Raises to prove profile callback failures stay in-band."""
+
+    def classify(self, question: str) -> str | None:  # noqa: ARG002
+        raise RuntimeError("classifier unavailable")
+
+    def supported_intents(self) -> frozenset[str]:
+        return frozenset({"verification"})
+
+
 class _NeverClassifier:
     """Always returns None — no intent recognised."""
 
@@ -73,6 +83,26 @@ class _ExitCodePredicate:
 
     def repair_template(self, criterion: str) -> str:
         return f"Command must exit 0 for: {criterion}"
+
+
+class _CrashingMatchPredicate:
+    code = "crashing_match"
+
+    def matches(self, criterion: str) -> bool:  # noqa: ARG002
+        raise RuntimeError("predicate unavailable")
+
+    def repair_template(self, criterion: str) -> str:
+        return criterion
+
+
+class _CrashingRepairPredicate:
+    code = "crashing_repair"
+
+    def matches(self, criterion: str) -> bool:  # noqa: ARG002
+        return True
+
+    def repair_template(self, criterion: str) -> str:  # noqa: ARG002
+        raise RuntimeError("repair unavailable")
 
 
 class _NoopExtractor:
@@ -164,6 +194,18 @@ class TestClassifyRoutesThroughProfileWhenActive:
             section == "constraints" and entry.key.startswith("constraints.behavior.")
             for section, entry in answer.ledger_updates
         )
+
+    def test_profile_classifier_exception_returns_blocker(self):
+        profile = _make_profile(classifier=_CrashingClassifier())
+        answerer = AutoAnswerer(active_profile=profile)
+        ledger = _ledger()
+
+        answer = answerer.answer("How should we verify the tests pass?", ledger)
+
+        assert answer.blocker is not None
+        assert answer.source.value == "blocker"
+        assert "intent_classifier.classify" in answer.blocker.reason
+        assert "classifier unavailable" in answer.blocker.reason
 
 
 class TestVagueTermLookupUsesProfile:
@@ -269,3 +311,31 @@ class TestVerifiablePredicateIterationPicksFirstMatch:
         assert ac_entries
         # Falls back to hardcoded "exit code 0" text
         assert "exit code 0" in ac_entries[0].value
+
+    def test_predicate_match_exception_returns_blocker(self):
+        profile = _make_profile(
+            classifier=_AlwaysVerificationClassifier(),
+            predicates=[_CrashingMatchPredicate()],
+        )
+        answerer = AutoAnswerer(active_profile=profile)
+        ledger = _ledger()
+
+        answer = answerer.answer("How should we verify this?", ledger)
+
+        assert answer.blocker is not None
+        assert "find_verifiable_predicate" in answer.blocker.reason
+        assert "predicate unavailable" in answer.blocker.reason
+
+    def test_predicate_repair_exception_returns_blocker(self):
+        profile = _make_profile(
+            classifier=_AlwaysVerificationClassifier(),
+            predicates=[_CrashingRepairPredicate()],
+        )
+        answerer = AutoAnswerer(active_profile=profile)
+        ledger = _ledger()
+
+        answer = answerer.answer("How should we verify this?", ledger)
+
+        assert answer.blocker is not None
+        assert "crashing_repair.repair_template" in answer.blocker.reason
+        assert "repair unavailable" in answer.blocker.reason

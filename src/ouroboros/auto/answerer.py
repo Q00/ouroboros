@@ -162,7 +162,10 @@ class AutoAnswerer:
         # generic default answer.
         if self.active_profile is not None:
             intents = _classify_question_intents(question)
-            profile_label = self.active_profile.intent_classifier.classify(question)
+            try:
+                profile_label = self.active_profile.intent_classifier.classify(question)
+            except Exception as exc:
+                return self._profile_callback_blocker(question, "intent_classifier.classify", exc)
             if profile_label is not None:
                 intents = frozenset(intents | _intents_from_profile_label(profile_label))
             # -- DUAL-PATH HOOK 2: vague-term detection -----------------------
@@ -415,9 +418,17 @@ class AutoAnswerer:
         fallback_ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
         fallback_value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
         if self.active_profile is not None:
-            matched = self.active_profile.find_verifiable_predicate(question)
+            try:
+                matched = self.active_profile.find_verifiable_predicate(question)
+            except Exception as exc:
+                return self._profile_callback_blocker(question, "find_verifiable_predicate", exc)
             if matched is not None:
-                ac_value = matched.repair_template(question)
+                try:
+                    ac_value = matched.repair_template(question)
+                except Exception as exc:
+                    return self._profile_callback_blocker(
+                        question, f"{matched.code}.repair_template", exc
+                    )
                 value = ac_value
             else:
                 ac_value = fallback_ac_value
@@ -452,6 +463,16 @@ class AutoAnswerer:
             ),
         ]
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.84, updates)
+
+    @staticmethod
+    def _profile_callback_blocker(question: str, callback: str, exc: Exception) -> AutoAnswer:
+        reason = f"domain profile callback {callback} failed: {type(exc).__name__}: {exc}"
+        return AutoAnswer(
+            text=f"Cannot safely decide automatically: {reason}",
+            source=AutoAnswerSource.BLOCKER,
+            confidence=1.0,
+            blocker=AutoBlocker(reason=reason, question=question),
+        )
 
     def _feature_acceptance_answer(self, question: str) -> AutoAnswer:
         subject = _acceptance_subject(question)
