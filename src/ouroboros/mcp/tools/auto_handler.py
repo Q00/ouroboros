@@ -697,6 +697,8 @@ class StartAutoHandler:
             return lease_error
         active_job = await self._find_active_job(auto_session_id)
         if active_job is not None:
+            if not self._job_snapshot_has_live_worker(active_job):
+                return None
             return MCPToolError(
                 "Auto session already has an active background job: "
                 f"auto_session_id={auto_session_id}, job_id={active_job.job_id}. "
@@ -734,6 +736,9 @@ class StartAutoHandler:
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
                 return None
             if snapshot.is_terminal:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None
+            if not self._job_snapshot_has_live_worker(snapshot):
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
                 return None
             return MCPToolError(
@@ -785,6 +790,12 @@ class StartAutoHandler:
                 "lease_mode": mode,
             },
         )
+
+    def _job_snapshot_has_live_worker(self, snapshot) -> bool:
+        checker = getattr(type(self._job_manager), "has_live_job_task", None)
+        if checker is None:
+            return True
+        return self._job_manager.has_live_job_task(snapshot.job_id) is True
 
 
 def _build_auto_subagent(

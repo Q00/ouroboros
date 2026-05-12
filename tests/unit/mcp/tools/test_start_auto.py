@@ -262,6 +262,69 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_stale_job_lease_allows_resume_after_restart_gap(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").write_text(
+            json.dumps(
+                {
+                    "token": "lease_job",
+                    "mode": "job",
+                    "job_id": "job_stale",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        stale_snapshot = MagicMock()
+        stale_snapshot.job_id = "job_stale"
+        stale_snapshot.is_terminal = False
+        stale_snapshot.status.value = "queued"
+        new_snapshot = MagicMock()
+        new_snapshot.job_id = "job_new"
+
+        class RestartedJobManager:
+            def __init__(self) -> None:
+                self.start_job = AsyncMock(side_effect=self._start_job)
+
+            async def get_snapshot(self, job_id):
+                assert job_id == "job_stale"
+                return stale_snapshot
+
+            def has_live_job_task(self, job_id):
+                assert job_id == "job_stale"
+                return False
+
+            async def find_active_job_by_session(self, session_id, *, job_type=None):
+                assert session_id == state.auto_session_id
+                assert job_type == "auto"
+                return stale_snapshot
+
+            async def _start_job(self, *, runner, **_):
+                if inspect.iscoroutine(runner):
+                    runner.close()
+                return new_snapshot
+
+        job_manager = RestartedJobManager()
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,  # type: ignore[arg-type]
+            store=store,
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert result.value.meta["job_id"] == "job_new"
+        job_manager.start_job.assert_awaited_once()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_pending_lease_blocks_concurrent_resume_before_job_row_exists(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:

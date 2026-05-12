@@ -482,6 +482,17 @@ class JobManager:
 
             await asyncio.sleep(0.5)
 
+    def has_live_job_task(self, job_id: str) -> bool:
+        """Return true when this process still owns live tasks for ``job_id``."""
+        return any(
+            task is not None and not task.done()
+            for task in (
+                self._tasks.get(job_id),
+                self._runner_tasks.get(job_id),
+                self._monitors.get(job_id),
+            )
+        )
+
     async def cancel_job(self, job_id: str) -> JobSnapshot:
         """Request cancellation for a running job."""
         snapshot = await self.get_snapshot(job_id)
