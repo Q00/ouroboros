@@ -77,6 +77,8 @@ def test_source_count_predicate_ignores_non_count_numbers() -> None:
     assert not pred.matches("cite sources published after 2020")
     assert not pred.matches("include DOI 10.1234 references")
     assert not pred.matches("source map v3 must work")
+    assert not pred.matches("update 3 source files")
+    assert not pred.matches("compare 2 reference implementations")
 
 
 def test_citation_format_predicate_matches_citation_keyword() -> None:
@@ -85,6 +87,8 @@ def test_citation_format_predicate_matches_citation_keyword() -> None:
     assert pred.matches("bibliography entries are required")
     assert pred.matches("include references section")
     assert not pred.matches("run all unit tests")
+    assert not pred.matches("use a reference implementation")
+    assert not pred.matches("compare 2 reference implementations")
 
 
 def test_vague_terms_contain_research_specific_words() -> None:

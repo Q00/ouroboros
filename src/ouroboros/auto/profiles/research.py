@@ -24,9 +24,10 @@ class _SourceCountPredicate:
     _SOURCE_COUNT_RE = re.compile(
         r"""
         (?:\b(?:at\s+least|minimum(?:\s+of)?|no\s+fewer\s+than)\s+\d+(?![\w.])\s+
-            (?:sources?|citations?|references?)\b)
+            (?:sources?|citations?|references?)\b(?!\s+(?:files?|implementations?|modules?|maps?)))
         |
-        (?:(?<![\w.])\d+(?![\w.])\s+(?:sources?|citations?|references?)\b)
+        (?:(?<![\w.])\d+(?![\w.])\s+
+            (?:sources?|citations?|references?)\b(?!\s+(?:files?|implementations?|modules?|maps?)))
         """,
         re.I | re.X,
     )
@@ -40,9 +41,17 @@ class _SourceCountPredicate:
 
 class _CitationFormatPredicate:
     code = "citation_format"
+    _CITATION_FORMAT_RE = re.compile(
+        r"""
+        \b(?:citation|reference)\s+(?:style|format|section|list)\b
+        |\b(?:citations|references)\s+section\b
+        |\bbibliograph(?:y|ic|ies)\b
+        """,
+        re.I | re.X,
+    )
 
     def matches(self, criterion: str) -> bool:
-        return any(t in criterion.lower() for t in ("citation", "reference", "bibliography"))
+        return bool(self._CITATION_FORMAT_RE.search(criterion))
 
     def repair_template(self, criterion: str) -> str:
         return "Specify the citation style (APA / MLA / Chicago / IEEE) explicitly."
