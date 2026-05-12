@@ -384,7 +384,7 @@ class CopilotCliLLMAdapter:
     @staticmethod
     def _looks_like_future_event_envelope(event: dict[str, Any]) -> bool:
         event_type = event.get("type")
-        if not isinstance(event_type, str):
+        if not isinstance(event_type, str) or event_type in _COPILOT_EVENT_TYPES:
             return False
         prefix, separator, suffix = event_type.partition(".")
         return separator == "." and bool(suffix) and prefix in _COPILOT_FUTURE_EVENT_PREFIXES
@@ -394,6 +394,42 @@ class CopilotCliLLMAdapter:
         if not response_format:
             return False
         return response_format.get("type") in {"json_object", "json_schema"}
+
+    @staticmethod
+    def _is_structured_json_payload(content: str) -> bool:
+        if not content.strip():
+            return False
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(parsed, dict | list)
+
+    def _should_preserve_structured_event_line(self, event: dict[str, Any]) -> bool:
+        event_type = event.get("type")
+        if event_type in {"agent.message", "message"}:
+            return True
+        if event_type == "tool_use" and not any(key in event for key in _COPILOT_TOOL_EVENT_KEYS):
+            return True
+        return not self._is_copilot_event_envelope(event)
+
+    def _select_success_content(
+        self,
+        *,
+        stdout_lines: list[str],
+        last_content: str,
+        fallback_content: str,
+        preserve_structured_json: bool,
+    ) -> str:
+        if not preserve_structured_json:
+            return last_content or fallback_content
+        if not self._has_copilot_stream_context(stdout_lines):
+            return fallback_content or last_content
+        fallback_is_structured = self._is_structured_json_payload(fallback_content)
+        last_is_structured = self._is_structured_json_payload(last_content)
+        if fallback_is_structured and not last_is_structured:
+            return fallback_content
+        return last_content or fallback_content
 
     def _extract_text(self, value: object) -> str:
         if isinstance(value, str):
@@ -514,13 +550,16 @@ class CopilotCliLLMAdapter:
             if preserve_structured_json and event is not None and not has_stream_context:
                 content_lines.append(line)
                 continue
-            if event is not None and (
-                self._is_copilot_event_envelope(event)
-                or (has_stream_context and self._looks_like_future_event_envelope(event))
-            ):
-                continue
-            if event is not None and not preserve_structured_json:
-                continue
+            if event is not None:
+                if has_stream_context and self._looks_like_future_event_envelope(event):
+                    continue
+                if preserve_structured_json and self._should_preserve_structured_event_line(event):
+                    content_lines.append(line)
+                    continue
+                if self._is_copilot_event_envelope(event):
+                    continue
+                if not preserve_structured_json:
+                    continue
             content_lines.append(line)
         return "\n".join(content_lines)
 
@@ -712,10 +751,11 @@ class CopilotCliLLMAdapter:
             stdout_lines,
             preserve_structured_json=preserve_structured_json,
         )
-        content = (
-            fallback_content or last_content
-            if preserve_structured_json and not self._has_copilot_stream_context(stdout_lines)
-            else last_content or fallback_content
+        content = self._select_success_content(
+            stdout_lines=stdout_lines,
+            last_content=last_content,
+            fallback_content=fallback_content,
+            preserve_structured_json=preserve_structured_json,
         )
 
         if process.returncode != 0:
@@ -840,10 +880,11 @@ class CopilotCliLLMAdapter:
             stdout_lines,
             preserve_structured_json=preserve_structured_json,
         )
-        content = (
-            fallback_content or last_content
-            if preserve_structured_json and not self._has_copilot_stream_context(stdout_lines)
-            else last_content or fallback_content
+        content = self._select_success_content(
+            stdout_lines=stdout_lines,
+            last_content=last_content,
+            fallback_content=fallback_content,
+            preserve_structured_json=preserve_structured_json,
         )
 
         if process.returncode != 0:
