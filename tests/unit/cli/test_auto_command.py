@@ -210,7 +210,7 @@ def test_run_auto_passes_state_interview_timeout_to_driver(tmp_path) -> None:
 
 
 def test_run_auto_uses_default_state_interview_timeout_for_new_sessions() -> None:
-    """New sessions must inherit the 120s default from AutoPipelineState."""
+    """New sessions must inherit the 600s default from AutoPipelineState."""
     import asyncio
 
     from ouroboros.cli.commands.auto import _run_auto
@@ -239,7 +239,7 @@ def test_run_auto_uses_default_state_interview_timeout_for_new_sessions() -> Non
         )
 
     assert result.status == "complete"
-    assert captured["driver_timeout_seconds"] == 120.0
+    assert captured["driver_timeout_seconds"] == 600.0
 
 
 def test_resume_rejects_lower_bound_override(tmp_path) -> None:

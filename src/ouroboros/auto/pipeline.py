@@ -33,6 +33,7 @@ from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
+    DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
     MAX_EVALUATE_ROUNDS,
     AutoPhase,
     AutoPipelineState,
@@ -235,7 +236,9 @@ class AutoPipeline:
     attach_source: str | None = None
     reconcile_run: bool = False
     reconcile_source: str | None = None
-    seed_timeout_seconds: float = 120.0
+    seed_timeout_seconds: float = float(
+        DEFAULT_TIMEOUT_SECONDS_BY_PHASE[AutoPhase.SEED_GENERATION.value]
+    )
     run_start_timeout_seconds: float = 60.0
     progress_callback: AutoProgressCallback | None = None
     # Q00/ouroboros#773: chain RUN → RALPH_HANDOFF when ``complete_product``

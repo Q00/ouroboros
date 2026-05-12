@@ -23,6 +23,7 @@ from ouroboros.auto.pipeline import (
 )
 from ouroboros.auto.state import (
     DEFAULT_PIPELINE_TIMEOUT_SECONDS,
+    DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
     AutoPhase,
     AutoPipelineState,
     AutoStore,
@@ -68,6 +69,16 @@ class _NeverInterviewDriver:
 
 async def _unused_seed_generator(_session_id: str):  # pragma: no cover
     raise AssertionError("seed generator should not be invoked when deadline trips")
+
+
+def test_seed_generation_timeout_uses_state_default_policy() -> None:
+    """AutoPipeline's live seed-generation timeout must track state policy."""
+    pipeline = AutoPipeline(_NeverInterviewDriver(), _unused_seed_generator)
+
+    assert pipeline.seed_timeout_seconds == float(
+        DEFAULT_TIMEOUT_SECONDS_BY_PHASE[AutoPhase.SEED_GENERATION.value]
+    )
+    assert pipeline.seed_timeout_seconds == 300.0
 
 
 @pytest.mark.asyncio

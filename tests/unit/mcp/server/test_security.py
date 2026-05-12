@@ -244,7 +244,7 @@ class TestInputValidator:
                 "goal": "g",
                 "user_preferences": {
                     "constraints": "no shell here; just a semicolon",
-                    "non_goals": ["item one", "item; two"],
+                    "non_goals": "item one; item two",
                 },
             },
         )
