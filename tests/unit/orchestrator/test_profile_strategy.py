@@ -71,6 +71,22 @@ class TestSystemPromptFragment:
         for required in profile.evidence_schema.required:
             assert required in fragment, f"{required!r} missing from system prompt"
 
+    def test_fragment_preserves_legacy_domain_guidance(self) -> None:
+        # Bot finding on #891 r4: dropping the legacy markdown agent
+        # guidance regressed behavior callers relied on. ProfileBacked-
+        # Strategy must preserve the domain-specific instructions for
+        # each built-in profile.
+        c = ProfileBackedStrategy(load_profile("code")).get_system_prompt_fragment()
+        assert "clean, well-tested code" in c
+
+        r = ProfileBackedStrategy(load_profile("research")).get_system_prompt_fragment()
+        assert "Cite sources" in r
+        assert "markdown" in r.lower()
+
+        a = ProfileBackedStrategy(load_profile("analysis")).get_system_prompt_fragment()
+        assert "tradeoffs" in a.lower() or "trade-offs" in a.lower()
+        assert "structured analytical" in a.lower()
+
     def test_fragment_does_not_tell_executor_to_stop(self, profile: ExecutionProfile) -> None:
         # Bot finding on #891 r3: reusing build_post_block (which says
         # "emit one JSON block, then stop") in the system prompt

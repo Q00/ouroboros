@@ -63,6 +63,45 @@ _PROFILE_ACTIVITY_OVERRIDES: dict[str, dict[str, ActivityType]] = {
     "research": {"Bash": ActivityType.EXPLORING},
 }
 
+# Per-profile executor guidance preserves the domain-specific behavior
+# the legacy strategies carried in `src/ouroboros/agents/{name}.md`.
+# Without this, opting into ProfileBackedStrategy would lose the
+# instructions research callers rely on (cite sources, save outputs as
+# markdown), analysis callers rely on (structured tradeoff analysis),
+# and code callers rely on ("clean, well-tested code"). The legacy
+# markdown files are kept for the deprecated `CodeStrategy` etc.; this
+# table is the canonical source for the profile-backed path
+# (bot finding on #891 r4).
+_PROFILE_GUIDANCE: dict[str, str] = {
+    "code": (
+        "## Domain guidelines (code profile)\n"
+        "- Use the available tools (Read, Edit, Bash, Glob, Grep) to "
+        "accomplish each AC.\n"
+        "- Write clean, well-tested code that follows project conventions.\n"
+        "- Surface blockers clearly instead of working around unverified "
+        "preconditions."
+    ),
+    "research": (
+        "## Domain guidelines (research profile)\n"
+        "- Gather information from available sources thoroughly and "
+        "cross-reference multiple sources for accuracy.\n"
+        "- Synthesize findings into clear, structured markdown documents "
+        "saved under docs/ or output/.\n"
+        "- Cite sources and provide references where applicable.\n"
+        "- Surface blockers clearly instead of fabricating coverage."
+    ),
+    "analysis": (
+        "## Domain guidelines (analysis profile)\n"
+        "- Read and understand the subject matter thoroughly before "
+        "concluding.\n"
+        "- Apply structured analytical frameworks; consider multiple "
+        "perspectives and explicit tradeoffs.\n"
+        "- Document the analytical process and present findings with "
+        "supporting evidence in markdown.\n"
+        "- Save analysis outputs as .md files."
+    ),
+}
+
 
 @dataclass(frozen=True)
 class ProfileBackedStrategy:
@@ -108,12 +147,23 @@ class ProfileBackedStrategy:
             if schema.rejected_if
             else "(profile declares no automatic rejection rules)"
         )
-        return (
+        anchor = (
             f"You are executing acceptance criteria under the "
             f"{self.profile.profile!r} profile.\n"
             f"Decomposition axis: {self.profile.axis}.\n"
             f"Smallest acceptable unit: {self.profile.min_unit}.\n"
-            f"The verifier will focus on: {self.profile.verifier_focus.strip()}\n\n"
+            f"The verifier will focus on: {self.profile.verifier_focus.strip()}"
+        )
+        # Domain guidance preserves the behavior the legacy strategies
+        # carried — e.g. research's "cite sources, save as markdown",
+        # analysis's "structured tradeoff", code's "clean, well-tested".
+        # Profiles without a registered guidance block fall back to a
+        # minimal generic line so the prompt still reads coherently.
+        guidance = _PROFILE_GUIDANCE.get(
+            self.profile.profile,
+            "## Domain guidelines\n- Execute each AC thoroughly and surface blockers explicitly.",
+        )
+        contract = (
             "[POST — harness-injected; per-AC evidence contract]\n"
             "For each acceptance criterion you complete, emit a single "
             "fenced JSON evidence record on its own line and continue "
@@ -124,6 +174,7 @@ class ProfileBackedStrategy:
             "an external verifier pass. The run finishes when every "
             "criterion above has its own evidence record."
         )
+        return f"{anchor}\n\n{guidance}\n\n{contract}"
 
     def get_task_prompt_suffix(self) -> str:
         """Compose the [PRE]-style restate / precondition gate.
