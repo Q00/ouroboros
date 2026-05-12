@@ -32,6 +32,7 @@ from ouroboros.auto.state import (
     DEFAULT_PIPELINE_TIMEOUT_SECONDS,
     MAX_PIPELINE_TIMEOUT_SECONDS,
     MIN_PIPELINE_TIMEOUT_SECONDS,
+    TERMINAL_PHASES,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
@@ -545,6 +546,10 @@ class StartAutoHandler:
             runner_arguments["resume"] = auto_session_id
             runner_arguments.pop("pipeline_timeout_seconds", None)
 
+        already_running = await self._active_session_error(auto_session_id)
+        if already_running is not None:
+            return Result.err(already_running)
+
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             payload = _build_auto_subagent(runner_arguments, auto_session_id=auto_session_id)
             await self._event_store.initialize()
@@ -643,6 +648,59 @@ class StartAutoHandler:
             state.ralph_opencode_mode = opencode_mode
         self._store.save(state)
         return state
+
+    async def _active_session_error(self, auto_session_id: str) -> MCPToolError | None:
+        """Return an error when another start_auto already owns this session."""
+        active_job = await self._find_active_job(auto_session_id)
+        if active_job is not None:
+            return MCPToolError(
+                "Auto session already has an active background job: "
+                f"auto_session_id={auto_session_id}, job_id={active_job.job_id}. "
+                "Poll that job or cancel it before starting another resume.",
+                tool_name="ouroboros_start_auto",
+                is_retriable=True,
+                details={
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "job_id": active_job.job_id,
+                    "status": active_job.status.value,
+                },
+            )
+        if await self._has_active_plugin_dispatch(auto_session_id):
+            return MCPToolError(
+                "Auto session already has an active plugin dispatch: "
+                f"auto_session_id={auto_session_id}. Wait for the OpenCode task "
+                "to finish before starting another resume.",
+                tool_name="ouroboros_start_auto",
+                is_retriable=True,
+                details={
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "dispatch_mode": "plugin",
+                },
+            )
+        return None
+
+    async def _find_active_job(self, auto_session_id: str):
+        finder = getattr(self._job_manager, "find_active_job_by_session", None)
+        if finder is None or not inspect.iscoroutinefunction(finder):
+            return None
+        return await finder(auto_session_id, job_type="auto")
+
+    async def _has_active_plugin_dispatch(self, auto_session_id: str) -> bool:
+        try:
+            state = self._store.load(auto_session_id)
+        except ValueError:
+            return False
+        if state.phase in TERMINAL_PHASES:
+            return False
+        await self._event_store.initialize()
+        events = await self._event_store.query_events(
+            aggregate_id=auto_session_id,
+            event_type="subagent.dispatched",
+            limit=10,
+        )
+        return any(event.data.get("tool_name") == "ouroboros_start_auto" for event in events)
 
 
 def _build_auto_subagent(

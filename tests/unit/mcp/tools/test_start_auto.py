@@ -17,6 +17,7 @@ import pytest
 
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.core.types import Result
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
@@ -223,4 +224,63 @@ class TestBackgroundJobPath:
         assert auto_session_id in result.error.message
         assert result.error.details["auto_session_id"] == auto_session_id
         assert "resume" in result.error.message
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_active_background_job_for_session_errors_before_enqueue(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        active_snapshot = MagicMock()
+        active_snapshot.job_id = "job_auto_active"
+        active_snapshot.status.value = "running"
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=active_snapshot)
+        job_manager.start_job = AsyncMock()
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert state.auto_session_id in result.error.message
+        assert result.error.details["job_id"] == "job_auto_active"
+        job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_active_plugin_dispatch_for_session_errors_before_redispatch(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        await event_store.append(
+            BaseEvent(
+                type="subagent.dispatched",
+                aggregate_type="subagent",
+                aggregate_id=state.auto_session_id,
+                data={"tool_name": "ouroboros_start_auto"},
+            )
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        job_manager.start_job = AsyncMock()
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "active plugin dispatch" in result.error.message
+        assert result.error.details["auto_session_id"] == state.auto_session_id
+        job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
