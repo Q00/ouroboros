@@ -503,6 +503,27 @@ class TestComplete:
         assert result.value.raw_response["session_id"] == "sess-plain-json"
 
     @pytest.mark.asyncio
+    async def test_plain_fallback_preserves_single_dotted_type_json_answer(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        answer = {"type": "run.progress", "value": "user payload"}
+        stdout = json.dumps(answer)
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return JSON")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert result.value.content == json.dumps(answer)
+
+    @pytest.mark.asyncio
     async def test_plain_fallback_prefers_plain_text_over_incidental_json(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
         stdout = "\n".join(

@@ -557,7 +557,9 @@ class CopilotCliLLMAdapter:
                     content_lines.append(line)
                 continue
             if event is not None:
-                if self._looks_like_future_event_envelope(event):
+                if self._looks_like_future_event_envelope(event) and (
+                    preserve_structured_json or has_stream_context
+                ):
                     continue
                 if preserve_structured_json and self._should_preserve_structured_event_line(event):
                     content_lines.append(line)
