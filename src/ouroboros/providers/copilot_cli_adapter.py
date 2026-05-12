@@ -109,6 +109,19 @@ _COPILOT_EVENT_TYPES = frozenset(
 )
 
 _COPILOT_ALWAYS_EVENT_TYPES = _COPILOT_EVENT_TYPES - {"agent.message", "message", "tool_use"}
+_COPILOT_FUTURE_EVENT_PREFIXES = frozenset(
+    {
+        "agent",
+        "message",
+        "reasoning",
+        "run",
+        "session",
+        "telemetry",
+        "thinking",
+        "tool",
+        "turn",
+    }
+)
 _COPILOT_MESSAGE_CONTENT_KEYS = frozenset({"content", "message", "text"})
 _COPILOT_TOOL_EVENT_KEYS = frozenset(
     {"args", "arguments", "command", "id", "input", "name", "parameters", "tool"}
@@ -373,7 +386,8 @@ class CopilotCliLLMAdapter:
         event_type = event.get("type")
         if not isinstance(event_type, str):
             return False
-        return "." in event_type
+        prefix, separator, suffix = event_type.partition(".")
+        return separator == "." and bool(suffix) and prefix in _COPILOT_FUTURE_EVENT_PREFIXES
 
     @staticmethod
     def _is_structured_response_format(response_format: dict[str, object] | None) -> bool:

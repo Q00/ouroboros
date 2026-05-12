@@ -313,6 +313,16 @@ class TestEventParsing:
         errors = adapter._extract_stdout_errors(lines)
         assert errors == ["rate limit reached", "auth missing"]
 
+    def test_future_event_envelope_heuristic_is_limited_to_copilot_namespaces(
+        self,
+    ) -> None:
+        assert CopilotCliLLMAdapter._looks_like_future_event_envelope(
+            {"type": "run.progress", "payload": {"phase": "future"}}
+        )
+        assert not CopilotCliLLMAdapter._looks_like_future_event_envelope(
+            {"type": "com.acme.result", "value": 1}
+        )
+
 
 class TestRetryLogic:
     def test_is_retryable_error_matches_known_patterns(self) -> None:
@@ -609,6 +619,38 @@ class TestComplete:
         ):
             result = await adapter.complete(
                 [Message(role=MessageRole.USER, content="Return a result JSON object")],
+                CompletionConfig(
+                    model="default",
+                    response_format={"type": "json_object"},
+                ),
+            )
+
+        assert result.is_ok
+        assert result.value.content == json.dumps(answer)
+
+    @pytest.mark.asyncio
+    async def test_structured_fallback_preserves_dotted_application_type_in_stream_context(
+        self,
+    ) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        answer = {"type": "com.acme.result", "value": 1}
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-json"}),
+                json.dumps(answer),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return application JSON")],
                 CompletionConfig(
                     model="default",
                     response_format={"type": "json_object"},
