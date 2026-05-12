@@ -235,6 +235,31 @@ def auto_handler(
     )
 
 
+def start_auto_handler(
+    *,
+    llm_backend: str | None = None,
+    runtime_backend: str | None = None,
+    mcp_manager: object | None = None,
+    mcp_tool_prefix: str = "",
+    opencode_mode: str | None = None,
+) -> object:
+    """Create a StartAutoHandler instance (fire-and-forget ``ooo auto``).
+
+    Imports lazily to mirror :func:`auto_handler`; the underlying module
+    pulls in the full auto pipeline graph and would otherwise reintroduce
+    the import cycles that ``_LazyAutoHandler`` exists to avoid.
+    """
+    from ouroboros.mcp.tools.auto_handler import StartAutoHandler
+
+    return StartAutoHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+        mcp_manager=mcp_manager,
+        mcp_tool_prefix=mcp_tool_prefix,
+    )
+
+
 def lateral_think_handler(
     *,
     runtime_backend: str | None = None,
@@ -455,6 +480,13 @@ def get_ouroboros_tools(
                 mcp_tool_prefix=resolved_prefix,
                 opencode_mode=opencode_mode,
             ),
+            start_auto_handler(
+                llm_backend=llm_backend,
+                runtime_backend=runtime_backend,
+                mcp_manager=resolved_manager,
+                mcp_tool_prefix=resolved_prefix,
+                opencode_mode=opencode_mode,
+            ),
         )
         if include_auto
         else ()
@@ -532,16 +564,39 @@ class _LazyAutoHandler:
         return await AutoHandler().handle(arguments)
 
 
+class _LazyStartAutoHandler:
+    """Lazy static fire-and-forget auto handler — mirror of _LazyAutoHandler."""
+
+    @property
+    def definition(self):
+        from ouroboros.mcp.tools.auto_handler import StartAutoHandler
+
+        return StartAutoHandler().definition
+
+    async def handle(self, arguments):
+        from ouroboros.mcp.tools.auto_handler import StartAutoHandler
+
+        return await StartAutoHandler().handle(arguments)
+
+
 def __getattr__(name: str) -> object:
     """Lazily re-export handlers that would otherwise create import cycles."""
     if name == "AutoHandler":
         from ouroboros.mcp.tools.auto_handler import AutoHandler
 
         return AutoHandler
+    if name == "StartAutoHandler":
+        from ouroboros.mcp.tools.auto_handler import StartAutoHandler
+
+        return StartAutoHandler
     raise AttributeError(name)
 
 
 # Static legacy registry for definition/name lookups.  Runtime registration that
 # needs dependency injection should call ``get_ouroboros_tools(...)`` instead;
 # the auto entry here is a lazy proxy to avoid import cycles.
-OUROBOROS_TOOLS = (*get_ouroboros_tools(include_auto=False), _LazyAutoHandler())
+OUROBOROS_TOOLS = (
+    *get_ouroboros_tools(include_auto=False),
+    _LazyAutoHandler(),
+    _LazyStartAutoHandler(),
+)

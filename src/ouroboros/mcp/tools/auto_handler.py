@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+import difflib
+import inspect
 import json
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ouroboros.auto.adapters import (
     HandlerEvaluator,
@@ -30,19 +34,28 @@ from ouroboros.auto.state import (
     DEFAULT_PIPELINE_TIMEOUT_SECONDS,
     MAX_PIPELINE_TIMEOUT_SECONDS,
     MIN_PIPELINE_TIMEOUT_SECONDS,
+    TERMINAL_PHASES,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
     AutoStore,
 )
 from ouroboros.config import get_opencode_mode
+from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.subagent import (
+    build_subagent_payload,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -52,6 +65,11 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.orchestrator.agent_process import run_with_agent_process
+from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
+from ouroboros.persistence.event_store import EventStore
+
+_START_AUTO_PENDING_LEASE_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -162,7 +180,7 @@ class AutoHandler:
                         "(e.g. runtime_context, constraints, non_goals). The Driver "
                         "tags matching answers with [from-auto][user_preference] in the "
                         "ledger. Keys must be valid ledger section names; values must "
-                        "be non-empty strings."
+                        "be non-empty strings or non-empty lists of strings/numbers."
                     ),
                     required=False,
                 ),
@@ -182,12 +200,47 @@ class AutoHandler:
         )
 
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
+        auto_session_id = _auto_session_id_from_arguments(arguments)
+        start_lease_token = _start_auto_lease_token_from_arguments(arguments)
+        release_start_lease = False
+        store = self.store or AutoStore()
+        if auto_session_id is None and start_lease_token is not None:
+            return Result.err(
+                MCPToolError(
+                    "_start_auto_lease_token is reserved for internal start_auto dispatches",
+                    tool_name="ouroboros_auto",
+                )
+            )
+        if auto_session_id is not None and start_lease_token is not None:
+            token_error = _validate_start_lease_token(store, auto_session_id, start_lease_token)
+            if token_error is not None:
+                return Result.err(token_error)
+            release_start_lease = True
+        elif auto_session_id is not None:
+            try:
+                state = store.load(auto_session_id)
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_auto"))
+            start_lease_token, lease_error = _reserve_start_lease(
+                store,
+                auto_session_id,
+                mode="direct_auto",
+                ttl_seconds=max(1.0, state.pipeline_timeout_seconds),
+            )
+            if lease_error is not None:
+                return Result.err(lease_error)
+            release_start_lease = True
         try:
             result = await self._run(arguments)
         except Exception as exc:
+            if auto_session_id is not None and release_start_lease:
+                _release_start_lease(store, auto_session_id, token=start_lease_token)
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
+        release_session_id = result.auto_session_id or auto_session_id
+        if release_session_id and release_start_lease:
+            _release_start_lease(store, release_session_id, token=start_lease_token)
         meta = _result_meta(result)
         text = _format_result(result)
         if result.run_subagent is not None:
@@ -399,6 +452,653 @@ class AutoHandler:
         return await pipeline.run(state)
 
 
+@dataclass
+class StartAutoHandler:
+    """Start an ``ooo auto`` pipeline in the background and return a job ID.
+
+    The full auto pipeline (Socratic interview + repair loops + seed
+    generation + optional run/Ralph handoff) routinely runs longer than
+    an MCP client's default tool-call timeout. This handler wraps
+    :class:`AutoHandler` in a :class:`JobManager`-backed background job so
+    the caller gets a ``job_id`` immediately and polls for the verdict
+    via ``ouroboros_job_status`` / ``ouroboros_job_wait`` /
+    ``ouroboros_job_result``.
+
+    For new sessions, this handler pre-allocates and persists an
+    ``AutoPipelineState`` before enqueuing the job, then runs the inner
+    ``AutoHandler`` through the normal resume path. That makes the
+    ``auto_session_id`` immediately available for recovery even if the MCP
+    server exits before the caller fetches ``ouroboros_job_result``.
+    Plugin mode is terminal here: the handler returns an OpenCode subagent
+    envelope directly instead of hiding that envelope inside a background
+    job result that the bridge cannot intercept.
+    """
+
+    interview_handler: InterviewHandler | None = field(default=None, repr=False)
+    generate_seed_handler: GenerateSeedHandler | None = field(default=None, repr=False)
+    start_execute_seed_handler: StartExecuteSeedHandler | None = field(default=None, repr=False)
+    store: AutoStore | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
+    mcp_manager: object | None = field(default=None, repr=False)
+    mcp_tool_prefix: str = ""
+    event_store: EventStore | None = field(default=None, repr=False)
+    job_manager: JobManager | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._event_store = self.event_store or EventStore()
+        self._job_manager = self.job_manager or JobManager(self._event_store)
+        self._store = self.store or AutoStore()
+        self._inner_auto = AutoHandler(
+            interview_handler=self.interview_handler,
+            generate_seed_handler=self.generate_seed_handler,
+            start_execute_seed_handler=self.start_execute_seed_handler,
+            store=self._store,
+            llm_backend=self.llm_backend,
+            agent_runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            mcp_manager=self.mcp_manager,
+            mcp_tool_prefix=self.mcp_tool_prefix,
+        )
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        inner_def = self._inner_auto.definition
+        return MCPToolDefinition(
+            name="ouroboros_start_auto",
+            description=(
+                "Start ooo auto in the background and return auto_session_id + "
+                "job_id immediately. Resume with the returned auto_session_id; "
+                "poll with ouroboros_job_status / ouroboros_job_wait and read "
+                "final state via ouroboros_job_result."
+            ),
+            parameters=inner_def.parameters,
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        # Mirror AutoHandler._run's pre-flight: either ``goal`` (new session)
+        # or ``resume`` (existing session) must be supplied. We validate
+        # eagerly so the caller sees a synchronous contract error instead of
+        # a background job that fails immediately.
+        resume = arguments.get("resume")
+        goal = arguments.get("goal")
+        has_resume = isinstance(resume, str) and bool(resume.strip())
+        has_goal = isinstance(goal, str) and bool(goal.strip())
+        if not has_resume and not has_goal:
+            return Result.err(
+                MCPToolError(
+                    "goal is required when not resuming",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+        try:
+            attach_requested = any(
+                _optional_text_arg(arguments, field_name)
+                for field_name in ("attach_execution", "attach_job", "attach_session")
+            )
+            requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
+        if attach_requested and not has_resume:
+            return Result.err(
+                MCPToolError(
+                    "attach_* arguments require resume",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+        if bool(arguments.get("reconcile_run", False)) and not has_resume:
+            return Result.err(
+                MCPToolError(
+                    "reconcile_run requires resume",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+        if has_resume and requested_pipeline_timeout is not None:
+            return Result.err(
+                MCPToolError(
+                    "pipeline_timeout_seconds cannot be changed on resume; the "
+                    "original deadline is preserved across process restarts",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+
+        runner_arguments = dict(arguments)
+        if has_resume:
+            auto_session_id = resume.strip()
+            try:
+                state = self._store.load(auto_session_id)
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
+            runner_arguments["resume"] = auto_session_id
+        else:
+            try:
+                state = self._preallocate_state(
+                    arguments,
+                    goal.strip(),  # type: ignore[union-attr]
+                    pipeline_timeout_seconds=requested_pipeline_timeout,
+                )
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
+            auto_session_id = state.auto_session_id
+            runner_arguments["resume"] = auto_session_id
+            runner_arguments.pop("pipeline_timeout_seconds", None)
+
+        already_running = await self._active_session_error(auto_session_id)
+        if already_running is not None:
+            return Result.err(already_running)
+
+        plugin_dispatch = _state_dispatches_via_plugin(
+            state,
+            fallback_runtime_backend=self.agent_runtime_backend,
+            fallback_opencode_mode=self.opencode_mode,
+        )
+        lease_token, lease_error = _reserve_start_lease(
+            self._store,
+            auto_session_id,
+            mode="plugin_pending" if plugin_dispatch else "job_pending",
+            ttl_seconds=_START_AUTO_PENDING_LEASE_SECONDS,
+        )
+        if lease_error is not None:
+            return Result.err(lease_error)
+        runner_arguments["_start_auto_lease_token"] = lease_token
+
+        if plugin_dispatch:
+            payload = _build_auto_subagent(runner_arguments, auto_session_id=auto_session_id)
+            try:
+                await self._event_store.initialize()
+                await emit_subagent_dispatched_event(
+                    self._event_store,
+                    session_id=auto_session_id,
+                    payload=payload,
+                )
+                _update_start_lease(
+                    self._store,
+                    auto_session_id,
+                    token=lease_token,
+                    mode="plugin_dispatched",
+                    ttl_seconds=max(1.0, state.pipeline_timeout_seconds),
+                )
+            except Exception as exc:
+                _release_start_lease(self._store, auto_session_id, token=lease_token)
+                return Result.err(
+                    MCPToolError(
+                        "Failed to dispatch plugin auto session "
+                        f"{auto_session_id}: {exc}. The auto session was persisted; "
+                        f"resume with ouroboros_start_auto resume={auto_session_id} "
+                        f"or ouroboros_auto resume={auto_session_id}.",
+                        tool_name="ouroboros_start_auto",
+                        is_retriable=True,
+                        details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+                    )
+                )
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "job_id": None,
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "status": "delegated_to_plugin",
+                    "dispatch_mode": "plugin",
+                },
+            )
+
+        async def _runner() -> MCPToolResult:
+            result = await self._inner_auto.handle(runner_arguments)
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            return result.value
+
+        initial_label = auto_session_id if has_resume else goal.strip()[:80]  # type: ignore[union-attr]
+        runner = run_with_agent_process(
+            event_store=self._event_store,
+            intent="auto",
+            work_fn=lambda _handle: _runner(),
+        )
+        try:
+            snapshot = await self._job_manager.start_job(
+                job_type="auto",
+                initial_message=f"Queued ooo auto for {initial_label}",
+                runner=runner,
+                links=JobLinks(session_id=auto_session_id),
+            )
+            _update_start_lease(
+                self._store,
+                auto_session_id,
+                token=lease_token,
+                mode="job",
+                job_id=snapshot.job_id,
+                ttl_seconds=None,
+            )
+        except Exception as exc:
+            if inspect.iscoroutine(runner):
+                runner.close()
+            _release_start_lease(self._store, auto_session_id, token=lease_token)
+            return Result.err(
+                MCPToolError(
+                    "Failed to enqueue background auto session "
+                    f"{auto_session_id}: {exc}. The auto session was persisted; "
+                    f"resume with ouroboros_start_auto resume={auto_session_id} "
+                    f"or ouroboros_auto resume={auto_session_id}.",
+                    tool_name="ouroboros_start_auto",
+                    is_retriable=True,
+                    details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+                )
+            )
+
+        text = (
+            f"Started background auto session. job_id={snapshot.job_id}\n\n"
+            f"Auto session ID: {auto_session_id}\n\n"
+            "Poll with ouroboros_job_status / ouroboros_job_wait."
+        )
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                is_error=False,
+                meta={
+                    "job_id": snapshot.job_id,
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "status": "queued",
+                    "dispatch_mode": "job",
+                },
+            )
+        )
+
+    def _preallocate_state(
+        self,
+        arguments: dict[str, Any],
+        goal: str,
+        *,
+        pipeline_timeout_seconds: float | None,
+    ) -> AutoPipelineState:
+        """Persist a new auto session before the background job starts."""
+        cwd = str(_resolve_cwd(arguments.get("cwd")))
+        state = AutoPipelineState(goal=goal, cwd=cwd)
+        state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 12)
+        state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
+        state.skip_run = bool(arguments.get("skip_run", False))
+        state.complete_product = bool(arguments.get("complete_product", False))
+        if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
+            state.user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
+        if pipeline_timeout_seconds is not None:
+            state.pipeline_timeout_seconds = pipeline_timeout_seconds
+        runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
+        opencode_mode = _resolved_opencode_mode(runtime_backend, self.opencode_mode)
+        state.runtime_backend = runtime_backend
+        state.opencode_mode = opencode_mode
+        if opencode_mode is not None:
+            state.ralph_opencode_mode = opencode_mode
+        self._store.save(state)
+        return state
+
+    async def _active_session_error(self, auto_session_id: str) -> MCPToolError | None:
+        """Return an error when another start_auto already owns this session."""
+        lease_error, released_stale_lease = await self._active_start_lease_error(auto_session_id)
+        if lease_error is not None:
+            return lease_error
+        if released_stale_lease:
+            return None
+        active_job = await self._find_active_job(auto_session_id)
+        if active_job is not None:
+            return MCPToolError(
+                "Auto session already has an active background job: "
+                f"auto_session_id={auto_session_id}, job_id={active_job.job_id}. "
+                "Poll that job or cancel it before starting another resume.",
+                tool_name="ouroboros_start_auto",
+                is_retriable=True,
+                details={
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "job_id": active_job.job_id,
+                    "status": active_job.status.value,
+                },
+            )
+        return None
+
+    async def _find_active_job(self, auto_session_id: str):
+        finder = getattr(self._job_manager, "find_active_job_by_session", None)
+        if finder is None or not inspect.iscoroutinefunction(finder):
+            return None
+        return await finder(auto_session_id, job_type="auto")
+
+    async def _active_start_lease_error(
+        self, auto_session_id: str
+    ) -> tuple[MCPToolError | None, bool]:
+        lease = _read_start_lease(self._store, auto_session_id)
+        if lease is None:
+            return None, False
+        if _lease_is_expired(lease):
+            _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+            return None, True
+        mode = str(lease.get("mode") or "unknown")
+        job_id = lease.get("job_id")
+        if isinstance(job_id, str) and job_id:
+            try:
+                snapshot = await self._job_manager.get_snapshot(job_id)
+            except ValueError:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None, True
+            if snapshot.is_terminal:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None, True
+            if not _lease_owner_is_alive(lease):
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None, True
+            return (
+                MCPToolError(
+                    "Auto session already has an active background job: "
+                    f"auto_session_id={auto_session_id}, job_id={job_id}. "
+                    "Poll that job or cancel it before starting another resume.",
+                    tool_name="ouroboros_start_auto",
+                    is_retriable=True,
+                    details={
+                        "auto_session_id": auto_session_id,
+                        "session_id": auto_session_id,
+                        "job_id": job_id,
+                        "status": snapshot.status.value,
+                        "lease_mode": mode,
+                        "lease_owner_pid": lease.get("owner_pid"),
+                    },
+                ),
+                False,
+            )
+        if mode.startswith("plugin"):
+            if not _lease_owner_is_alive(lease):
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None, True
+            try:
+                state = self._store.load(auto_session_id)
+            except ValueError:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None, True
+            if state.phase in TERMINAL_PHASES:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None, True
+            return (
+                MCPToolError(
+                    "Auto session already has an active plugin dispatch: "
+                    f"auto_session_id={auto_session_id}. Wait for the OpenCode task "
+                    "to finish or retry after the dispatch lease expires.",
+                    tool_name="ouroboros_start_auto",
+                    is_retriable=True,
+                    details={
+                        "auto_session_id": auto_session_id,
+                        "session_id": auto_session_id,
+                        "dispatch_mode": "plugin",
+                        "lease_expires_at": lease.get("expires_at"),
+                        "lease_mode": mode,
+                    },
+                ),
+                False,
+            )
+        return (
+            MCPToolError(
+                "Auto session already has a pending start lease: "
+                f"auto_session_id={auto_session_id}. Retry after the lease expires.",
+                tool_name="ouroboros_start_auto",
+                is_retriable=True,
+                details={
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "lease_expires_at": lease.get("expires_at"),
+                    "lease_mode": mode,
+                },
+            ),
+            False,
+        )
+
+
+def _build_auto_subagent(
+    arguments: dict[str, Any],
+    *,
+    auto_session_id: str,
+):
+    """Build the immediate OpenCode dispatch envelope for ``start_auto``."""
+    prompt = (
+        "Run the Ouroboros auto pipeline for the preallocated session below.\n\n"
+        "Use the MCP tool `ouroboros_auto` directly with the provided arguments. "
+        "Do not call `ouroboros_start_auto` from this child session; this dispatch "
+        "already owns the async handoff.\n\n"
+        f"Auto session ID: {auto_session_id}\n\n"
+        "Arguments:\n"
+        f"```json\n{json.dumps(arguments, ensure_ascii=False, indent=2)}\n```\n\n"
+        "Return the final auto result, including any resume guidance or downstream "
+        "run/Ralph delegation receipt surfaced by `ouroboros_auto`."
+    )
+    return build_subagent_payload(
+        tool_name="ouroboros_start_auto",
+        title=f"Auto: {auto_session_id}",
+        prompt=prompt,
+        context={
+            "auto_session_id": auto_session_id,
+            "arguments": arguments,
+        },
+    )
+
+
+def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
+    resume = arguments.get("resume")
+    if isinstance(resume, str) and resume.strip():
+        return resume.strip()
+    return None
+
+
+def _state_dispatches_via_plugin(
+    state: AutoPipelineState,
+    *,
+    fallback_runtime_backend: str | None,
+    fallback_opencode_mode: str | None,
+) -> bool:
+    runtime_backend = state.runtime_backend or fallback_runtime_backend
+    if runtime_backend is None and state.opencode_mode is not None:
+        runtime_backend = "opencode"
+    runtime_backend = resolve_agent_runtime_backend(runtime_backend)
+    opencode_mode = _resolved_opencode_mode(
+        runtime_backend,
+        state.opencode_mode or fallback_opencode_mode,
+    )
+    return should_dispatch_via_plugin(runtime_backend, opencode_mode)
+
+
+def _start_auto_lease_token_from_arguments(arguments: dict[str, Any]) -> str | None:
+    token = arguments.get("_start_auto_lease_token")
+    if isinstance(token, str) and token:
+        return token
+    return None
+
+
+def _start_lease_path(store: AutoStore, auto_session_id: str) -> Path:
+    return store.path_for(auto_session_id).with_suffix(".start_auto_lease.json")
+
+
+def _read_start_lease(store: AutoStore, auto_session_id: str) -> dict[str, Any] | None:
+    path = _start_lease_path(store, auto_session_id)
+    with file_lock(path):
+        return _read_start_lease_locked(path)
+
+
+def _read_start_lease_locked(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _reserve_start_lease(
+    store: AutoStore,
+    auto_session_id: str,
+    *,
+    mode: str,
+    ttl_seconds: float,
+) -> tuple[str, MCPToolError | None]:
+    path = _start_lease_path(store, auto_session_id)
+    token = uuid4().hex
+    with file_lock(path):
+        existing = _read_start_lease_locked(path)
+        if existing is not None and not _lease_is_expired(existing):
+            if _lease_owner_is_alive(existing):
+                return "", _lease_conflict_error(auto_session_id, existing)
+        _write_start_lease_locked(
+            path,
+            {
+                "token": token,
+                "mode": mode,
+                "created_at": _utc_iso(),
+                "expires_at": _utc_iso(ttl_seconds=ttl_seconds),
+                **_current_lease_owner(),
+            },
+        )
+    return token, None
+
+
+def _update_start_lease(
+    store: AutoStore,
+    auto_session_id: str,
+    *,
+    token: str,
+    mode: str,
+    ttl_seconds: float | None,
+    job_id: str | None = None,
+) -> None:
+    path = _start_lease_path(store, auto_session_id)
+    with file_lock(path):
+        lease = _read_start_lease_locked(path)
+        if lease is None or lease.get("token") != token:
+            return
+        lease["mode"] = mode
+        lease["updated_at"] = _utc_iso()
+        if job_id is not None:
+            lease["job_id"] = job_id
+        if ttl_seconds is None:
+            lease.pop("expires_at", None)
+        else:
+            lease["expires_at"] = _utc_iso(ttl_seconds=ttl_seconds)
+        _write_start_lease_locked(path, lease)
+
+
+def _release_start_lease(
+    store: AutoStore,
+    auto_session_id: str,
+    *,
+    token: object | None = None,
+) -> None:
+    path = _start_lease_path(store, auto_session_id)
+    with file_lock(path):
+        if token is not None:
+            lease = _read_start_lease_locked(path)
+            if lease is not None and lease.get("token") != token:
+                return
+        path.unlink(missing_ok=True)
+
+
+def _validate_start_lease_token(
+    store: AutoStore, auto_session_id: str, token: str
+) -> MCPToolError | None:
+    lease = _read_start_lease(store, auto_session_id)
+    if lease is None:
+        return MCPToolError(
+            "Invalid start_auto lease token: no active lease exists for "
+            f"auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_auto",
+            is_retriable=True,
+            details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+        )
+    if _lease_is_expired(lease):
+        return MCPToolError(
+            "Invalid start_auto lease token: lease has expired for "
+            f"auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_auto",
+            is_retriable=True,
+            details={
+                "auto_session_id": auto_session_id,
+                "session_id": auto_session_id,
+                "lease_mode": lease.get("mode"),
+                "lease_expires_at": lease.get("expires_at"),
+            },
+        )
+    if lease.get("token") != token:
+        return MCPToolError(
+            f"Invalid start_auto lease token for auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_auto",
+            is_retriable=True,
+            details={
+                "auto_session_id": auto_session_id,
+                "session_id": auto_session_id,
+                "lease_mode": lease.get("mode"),
+            },
+        )
+    return None
+
+
+def _write_start_lease_locked(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def _lease_is_expired(lease: dict[str, Any]) -> bool:
+    expires_at = lease.get("expires_at")
+    if not isinstance(expires_at, str) or not expires_at:
+        return False
+    try:
+        expires = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    return expires <= datetime.now(UTC)
+
+
+def _current_lease_owner() -> dict[str, Any]:
+    pid, start_time = current_process_identity()
+    return {
+        "owner_pid": pid,
+        "owner_start_time": start_time,
+    }
+
+
+def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
+    pid = lease.get("owner_pid")
+    if not isinstance(pid, int):
+        # Legacy non-expiring job leases did not record an owner. Treat them as
+        # active because process-local task state cannot prove cross-process
+        # staleness.
+        return True
+    start_time = lease.get("owner_start_time")
+    if start_time is not None and not isinstance(start_time, int | float):
+        start_time = None
+    return is_process_identity_alive(pid, float(start_time) if start_time is not None else None)
+
+
+def _lease_conflict_error(auto_session_id: str, lease: dict[str, Any]) -> MCPToolError:
+    mode = str(lease.get("mode") or "unknown")
+    return MCPToolError(
+        "Auto session already has a pending start lease: "
+        f"auto_session_id={auto_session_id}. Retry after the lease expires.",
+        tool_name="ouroboros_start_auto",
+        is_retriable=True,
+        details={
+            "auto_session_id": auto_session_id,
+            "session_id": auto_session_id,
+            "lease_mode": mode,
+            "lease_expires_at": lease.get("expires_at"),
+        },
+    )
+
+
+def _utc_iso(*, ttl_seconds: float | None = None) -> str:
+    value = datetime.now(UTC)
+    if ttl_seconds is not None:
+        value += timedelta(seconds=ttl_seconds)
+    return value.isoformat()
+
+
 def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     """Build MCP metadata for clients that render auto progress outside CLI text."""
     meta: dict[str, Any] = {
@@ -527,9 +1227,18 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
     """Validate and normalise the optional ``user_preferences`` MCP arg.
 
     Returns a dict keyed by ledger section names. Empty input yields an empty
-    dict. Any unknown section name or empty/non-string value is rejected with
-    ``ValueError`` so callers see a clear contract failure rather than a
-    silently-ignored preference.
+    dict. Any unknown section name or empty/non-stringifiable value is
+    rejected with ``ValueError`` so callers see a clear contract failure
+    rather than a silently-ignored preference.
+
+    Accepted value shapes per key:
+
+    * ``str``  — stripped; must be non-empty.
+    * ``list[str | int | float]`` — each item stringified+stripped, empties
+      dropped, joined with ``"\\n"``; final result must be non-empty.
+
+    The downstream ``answerer.py`` still consumes the value as a single
+    string (via ``raw_value.strip()``); only the input contract widens.
     """
     if value is None or value == "":
         return {}
@@ -543,13 +1252,42 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
         if not isinstance(raw_key, str):
             raise ValueError("user_preferences keys must be strings")
         if raw_key not in valid_sections:
+            suggestion = difflib.get_close_matches(raw_key, sorted(valid_sections), n=1, cutoff=0.6)
+            hint = f" (did you mean: '{suggestion[0]}'?)" if suggestion else ""
             raise ValueError(
                 f"user_preferences key '{raw_key}' is not a valid ledger section "
-                f"(allowed: {', '.join(sorted(valid_sections))})"
+                f"(allowed: {', '.join(sorted(valid_sections))}){hint}"
             )
-        if not isinstance(raw_val, str) or not raw_val.strip():
-            raise ValueError(f"user_preferences['{raw_key}'] must be a non-empty string")
-        cleaned[raw_key] = raw_val.strip()
+        if isinstance(raw_val, str):
+            normalised = raw_val.strip()
+            if not normalised:
+                raise ValueError(
+                    f"user_preferences['{raw_key}'] must be a non-empty string or "
+                    "list of strings/numbers"
+                )
+            cleaned[raw_key] = normalised
+            continue
+        if isinstance(raw_val, list):
+            parts: list[str] = []
+            for item in raw_val:
+                if isinstance(item, bool) or not isinstance(item, str | int | float):
+                    raise ValueError(
+                        f"user_preferences['{raw_key}'] must be a non-empty string or "
+                        "list of strings/numbers"
+                    )
+                text = str(item).strip()
+                if text:
+                    parts.append(text)
+            if not parts:
+                raise ValueError(
+                    f"user_preferences['{raw_key}'] must be a non-empty string or "
+                    "list of strings/numbers"
+                )
+            cleaned[raw_key] = "\n".join(parts)
+            continue
+        raise ValueError(
+            f"user_preferences['{raw_key}'] must be a non-empty string or list of strings/numbers"
+        )
     return cleaned
 
 

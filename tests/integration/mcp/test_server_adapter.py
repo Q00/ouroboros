@@ -500,6 +500,7 @@ class TestCreateOuroborosServer:
         "ouroboros_query_events",
         "ouroboros_ralph",
         "ouroboros_session_status",
+        "ouroboros_start_auto",
         "ouroboros_start_evaluate",
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
@@ -516,7 +517,7 @@ class TestCreateOuroborosServer:
 
     def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
         """Auto resume rebuilds should retain bridge access from server wiring."""
-        from ouroboros.mcp.tools.auto_handler import AutoHandler
+        from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
 
         class FakeBridge:
             manager = object()
@@ -525,10 +526,28 @@ class TestCreateOuroborosServer:
         bridge = FakeBridge()
         server = create_ouroboros_server(mcp_bridge=bridge)
         auto = server._tool_handlers["ouroboros_auto"]
+        start_auto = server._tool_handlers["ouroboros_start_auto"]
 
         assert isinstance(auto, AutoHandler)
+        assert isinstance(start_auto, StartAutoHandler)
         assert auto.mcp_manager is bridge.manager
         assert auto.mcp_tool_prefix == "bridge__"
+        assert start_auto._inner_auto.mcp_manager is bridge.manager
+        assert start_auto._inner_auto.mcp_tool_prefix == "bridge__"
+
+    def test_create_server_start_auto_reuses_auto_dependency_graph(self) -> None:
+        """Async auto must share the same injected handlers as synchronous auto."""
+        from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
+
+        server = create_ouroboros_server()
+        auto = server._tool_handlers["ouroboros_auto"]
+        start_auto = server._tool_handlers["ouroboros_start_auto"]
+
+        assert isinstance(auto, AutoHandler)
+        assert isinstance(start_auto, StartAutoHandler)
+        assert start_auto._inner_auto.interview_handler is auto.interview_handler
+        assert start_auto._inner_auto.generate_seed_handler is auto.generate_seed_handler
+        assert start_auto._inner_auto.start_execute_seed_handler is auto.start_execute_seed_handler
 
     def test_creates_server_with_custom_config(self) -> None:
         """Factory creates server with custom configuration."""

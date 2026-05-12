@@ -1814,3 +1814,52 @@ class TestJobManager:
             gate.set()
             await _cancel_manager_tasks(manager)
             await store.close()
+
+    async def test_find_active_job_by_session_recovers_in_flight_job(self, tmp_path) -> None:
+        """A non-terminal auto job is rediscoverable by session_id."""
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        gate: asyncio.Event = asyncio.Event()
+
+        try:
+
+            async def _slow_runner() -> MCPToolResult:
+                await gate.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="auto done"),),
+                    is_error=False,
+                )
+
+            assert (await manager.find_active_job_by_session("auto_recovery")) is None
+
+            started = await manager.start_job(
+                job_type="auto",
+                initial_message="queued",
+                runner=_slow_runner(),
+                links=JobLinks(session_id="auto_recovery"),
+            )
+
+            recovered = await manager.find_active_job_by_session("auto_recovery", job_type="auto")
+            assert recovered is not None
+            assert recovered.job_id == started.job_id
+            assert recovered.links.session_id == "auto_recovery"
+
+            assert (
+                await manager.find_active_job_by_session("auto_recovery", job_type="ralph")
+            ) is None
+
+            gate.set()
+            await asyncio.sleep(0.05)
+
+            assert (await manager.find_active_job_by_session("auto_recovery")) is None
+            terminal_recovered = await manager.find_active_job_by_session(
+                "auto_recovery", job_type="auto", include_terminal=True
+            )
+            assert terminal_recovered is not None
+            assert terminal_recovered.job_id == started.job_id
+            assert terminal_recovered.status == JobStatus.COMPLETED
+        finally:
+            gate.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()

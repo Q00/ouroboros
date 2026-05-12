@@ -482,6 +482,17 @@ class JobManager:
 
             await asyncio.sleep(0.5)
 
+    def has_live_job_task(self, job_id: str) -> bool:
+        """Return true when this process still owns live tasks for ``job_id``."""
+        return any(
+            task is not None and not task.done()
+            for task in (
+                self._tasks.get(job_id),
+                self._runner_tasks.get(job_id),
+                self._monitors.get(job_id),
+            )
+        )
+
     async def cancel_job(self, job_id: str) -> JobSnapshot:
         """Request cancellation for a running job."""
         snapshot = await self.get_snapshot(job_id)
@@ -646,6 +657,60 @@ class JobManager:
             if snapshot.is_terminal and not include_terminal:
                 continue
             if snapshot.links.lineage_id != lineage_id:
+                continue
+            if job_type is not None and snapshot.job_type != job_type:
+                continue
+            self._known_job_ids.add(job_id)
+            candidates.append(snapshot)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda s: s.updated_at)
+
+    async def find_active_job_by_session(
+        self,
+        session_id: str,
+        *,
+        job_type: str | None = None,
+        include_terminal: bool = False,
+    ) -> JobSnapshot | None:
+        """Return the most recently updated job for ``session_id``.
+
+        Mirrors :meth:`find_active_job_by_lineage` for tools whose durable
+        checkpoint is keyed by session id. Returning an active match lets
+        accept-boundary handlers reject duplicate starts before two workers
+        race on the same session-scoped state file.
+        """
+        await self._ensure_initialized()
+        candidates: list[JobSnapshot] = []
+        candidate_job_ids = set(self._known_job_ids)
+        offset = 0
+        while True:
+            created_events = await self._event_store.query_events(
+                event_type="mcp.job.created",
+                limit=100,
+                offset=offset,
+            )
+            if not created_events:
+                break
+            for event in created_events:
+                links = event.data.get("links") or {}
+                if links.get("session_id") != session_id:
+                    continue
+                if job_type is not None and event.data.get("job_type") != job_type:
+                    continue
+                candidate_job_ids.add(event.aggregate_id)
+            if len(created_events) < 100:
+                break
+            offset += 100
+
+        for job_id in candidate_job_ids:
+            try:
+                snapshot = await self.get_snapshot(job_id)
+            except ValueError:
+                continue
+            if snapshot.is_terminal and not include_terminal:
+                continue
+            if snapshot.links.session_id != session_id:
                 continue
             if job_type is not None and snapshot.job_type != job_type:
                 continue
