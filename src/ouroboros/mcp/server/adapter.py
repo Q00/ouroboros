@@ -1178,6 +1178,7 @@ def create_ouroboros_server(
         QueryEventsHandler,
         RalphHandler,
         SessionStatusHandler,
+        StartEvaluateHandler,
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
     )
@@ -1746,6 +1747,13 @@ def create_ouroboros_server(
         BrownfieldHandler(_store=brownfield_store),
         EvaluateHandler(
             event_store=event_store,
+            llm_backend=llm_backend,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        StartEvaluateHandler(
+            event_store=event_store,
+            job_manager=job_manager,
             llm_backend=llm_backend,
             agent_runtime_backend=resolved_runtime_backend,
             opencode_mode=opencode_mode,

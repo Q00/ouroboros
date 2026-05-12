@@ -32,6 +32,7 @@ from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     LateralThinkHandler,
     MeasureDriftHandler,
+    StartEvaluateHandler,
 )
 from ouroboros.mcp.tools.evolution_handlers import (
     EvolveRewindHandler,
@@ -260,6 +261,26 @@ def evaluate_handler(
     )
 
 
+def start_evaluate_handler(
+    *,
+    llm_backend: str | None = None,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> StartEvaluateHandler:
+    """Create a StartEvaluateHandler instance."""
+    evaluate = EvaluateHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    return StartEvaluateHandler(
+        evaluate_handler=evaluate,
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+
+
 def checklist_verify_handler(
     *,
     evaluate_handler: EvaluateHandler | None = None,
@@ -346,6 +367,7 @@ OuroborosToolHandlers = tuple[
     | MeasureDriftHandler
     | InterviewHandler
     | EvaluateHandler
+    | StartEvaluateHandler
     | ChecklistVerifyHandler
     | LateralThinkHandler
     | EvolveStepHandler
@@ -418,6 +440,12 @@ def get_ouroboros_tools(
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
     )
+    start_evaluate = StartEvaluateHandler(
+        evaluate_handler=evaluate,
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
     auto = (
         (
             auto_handler(
@@ -446,6 +474,7 @@ def get_ouroboros_tools(
         MeasureDriftHandler(),
         interview,
         evaluate,
+        start_evaluate,
         ChecklistVerifyHandler(evaluate_handler=evaluate, llm_backend=llm_backend),
         LateralThinkHandler(
             agent_runtime_backend=runtime_backend,

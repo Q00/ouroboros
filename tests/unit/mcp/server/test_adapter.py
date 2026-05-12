@@ -1411,6 +1411,9 @@ class TestCreateOuroborosServerCwdFallback:
             "ouroboros.mcp.tools.definitions.StartEvolveStepHandler": _mock_handler(
                 "ouroboros_start_evolve_step"
             ),
+            "ouroboros.mcp.tools.definitions.StartEvaluateHandler": _mock_handler(
+                "ouroboros_start_evaluate"
+            ),
             "ouroboros.mcp.tools.definitions.LineageStatusHandler": _mock_handler(
                 "ouroboros_lineage_status"
             ),
@@ -1677,6 +1680,9 @@ class TestCreateOuroborosServerBrownfieldStore:
             ),
             "ouroboros.mcp.tools.definitions.StartEvolveStepHandler": _simple_mock_handler(
                 "ouroboros_start_evolve_step"
+            ),
+            "ouroboros.mcp.tools.definitions.StartEvaluateHandler": _simple_mock_handler(
+                "ouroboros_start_evaluate"
             ),
             "ouroboros.mcp.tools.definitions.LineageStatusHandler": _simple_mock_handler(
                 "ouroboros_lineage_status"

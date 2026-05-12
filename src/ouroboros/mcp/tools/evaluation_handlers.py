@@ -21,6 +21,7 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
     build_evaluate_subagent,
@@ -40,6 +41,7 @@ from ouroboros.observability.drift import (
     DRIFT_THRESHOLD,
     DriftMeasurement,
 )
+from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyExecutionPhase,
@@ -1647,3 +1649,148 @@ class LateralThinkHandler(BridgeAwareMixin):
                     tool_name="ouroboros_lateral_think",
                 )
             )
+
+
+@dataclass
+class StartEvaluateHandler:
+    """Start an evaluation asynchronously and return a job ID immediately.
+
+    The three-stage evaluation pipeline (mechanical + semantic + optional
+    consensus) routinely runs longer than an MCP client's default tool-call
+    timeout (Claude Code's MCP layer caps tool calls at ~120s). This handler
+    wraps :class:`EvaluateHandler` in a :class:`JobManager`-backed background
+    job so the caller gets a ``job_id`` immediately and polls for the verdict
+    via ``ouroboros_job_status`` / ``ouroboros_job_wait`` /
+    ``ouroboros_job_result``.
+
+    Plugin mode (OpenCode subagent dispatch) is terminal here, mirroring
+    :class:`StartExecuteSeedHandler` and :class:`StartEvolveStepHandler`:
+    the envelope is emitted directly and no background job is enqueued, so
+    polling never targets a non-existent job.
+    """
+
+    evaluate_handler: EvaluateHandler | None = field(default=None, repr=False)
+    event_store: EventStore | None = field(default=None, repr=False)
+    job_manager: JobManager | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._event_store = self.event_store or EventStore()
+        self._job_manager = self.job_manager or JobManager(self._event_store)
+        self._evaluate_handler = self.evaluate_handler or EvaluateHandler(
+            event_store=self._event_store,
+            llm_backend=self.llm_backend,
+            agent_runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+        )
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        return MCPToolDefinition(
+            name="ouroboros_start_evaluate",
+            description=(
+                "Start an evaluation in the background and return a job ID immediately. "
+                "Use this instead of ouroboros_evaluate when the three-stage pipeline "
+                "(mechanical + semantic + optional consensus) is expected to exceed the "
+                "MCP client tool-call timeout. Poll with ouroboros_job_status / "
+                "ouroboros_job_wait and read the verdict via ouroboros_job_result. "
+                "In plugin mode, evaluation is delegated to an OpenCode Task pane and "
+                "job_id is None — results appear in the Task pane instead of being "
+                "pollable via job_status/job_result."
+            ),
+            parameters=EvaluateHandler().definition.parameters,
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        session_id = arguments.get("session_id")
+        if not session_id:
+            return Result.err(
+                MCPToolError(
+                    "session_id is required",
+                    tool_name="ouroboros_start_evaluate",
+                )
+            )
+        artifact = arguments.get("artifact")
+        if not artifact:
+            return Result.err(
+                MCPToolError(
+                    "artifact is required",
+                    tool_name="ouroboros_start_evaluate",
+                )
+            )
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        # Plugin mode is terminal — return the delegation envelope without
+        # enqueuing a background job, matching StartExecuteSeedHandler /
+        # StartEvolveStepHandler. Polling a fake job_id would break the
+        # ouroboros_job_status contract.
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            payload = build_evaluate_subagent(
+                session_id=session_id,
+                artifact=artifact,
+                artifact_type=arguments.get("artifact_type", "code"),
+                seed_content=arguments.get("seed_content"),
+                acceptance_criterion=arguments.get("acceptance_criterion"),
+                working_dir=arguments.get("working_dir"),
+                trigger_consensus=arguments.get("trigger_consensus", False),
+            )
+            await self._event_store.initialize()
+            await emit_subagent_dispatched_event(
+                self._event_store,
+                session_id=session_id,
+                payload=payload,
+            )
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "job_id": None,
+                    "session_id": session_id,
+                    "status": "delegated_to_plugin",
+                    "dispatch_mode": "plugin",
+                    "artifact_type": arguments.get("artifact_type", "code"),
+                    "trigger_consensus": arguments.get("trigger_consensus", False),
+                },
+            )
+
+        # Fall-through: real background job path.
+        async def _runner() -> MCPToolResult:
+            result = await self._evaluate_handler.handle(arguments)
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            return result.value
+
+        snapshot = await self._job_manager.start_job(
+            job_type="evaluate",
+            initial_message=f"Queued evaluation for {session_id}",
+            runner=run_with_agent_process(
+                event_store=self._event_store,
+                intent="evaluate",
+                work_fn=lambda _handle: _runner(),
+            ),
+            links=JobLinks(session_id=session_id),
+        )
+
+        text = (
+            f"Started background evaluation.\n\n"
+            f"Job ID: {snapshot.job_id}\n"
+            f"Session ID: {session_id}\n\n"
+            "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result "
+            "to monitor it."
+        )
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                is_error=False,
+                meta={
+                    "job_id": snapshot.job_id,
+                    "session_id": session_id,
+                    "status": snapshot.status.value,
+                    "cursor": snapshot.cursor,
+                },
+            )
+        )
