@@ -58,6 +58,28 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError, match="must be a JSON object"):
             extract_evidence("[1, 2, 3]")
 
+    def test_quoted_brace_inside_string_value(self) -> None:
+        # Regression: old regex stopped at the first `}` even inside a
+        # JSON string value, truncating the payload (bot finding #1 on
+        # PR #883). The fence-aware extractor must keep the entire body
+        # and let json.loads handle string escaping.
+        payload = '{"note": "hello } still inside string", "ok": true}'
+        record = extract_evidence(payload)
+        assert record.data == {
+            "note": "hello } still inside string",
+            "ok": True,
+        }
+
+    def test_quoted_backticks_inside_string_value(self) -> None:
+        text = '```json\n{"note": "embedded `single backtick` survives", "ok": true}\n```\n'
+        record = extract_evidence(text)
+        assert record.data["ok"] is True
+        assert "single backtick" in record.data["note"]
+
+    def test_uppercase_json_fence_tag(self) -> None:
+        record = extract_evidence('```JSON\n{"x": 1}\n```\n')
+        assert record.data == {"x": 1}
+
 
 class TestValidateCodeProfile:
     def test_accepts_complete_record(self, code_profile) -> None:
@@ -200,3 +222,64 @@ class TestRejectionGrammar:
         result = validate_evidence(profile, record)
         assert result.ok is False
         assert result.rejected_by == ("never_emitted == None",)
+
+
+class TestJsonYamlLiteralSpellings:
+    """rejected_if must accept literals YAML / JSON authors write.
+
+    Profiles are YAML-authored and evidence is JSON, so authors reach
+    for `null`, `true`, `false` — not Python's `None`/`True`/`False`.
+    Both spellings must work (bot finding #2 on PR #883).
+    """
+
+    def _profile_with_rule(self, rule: str):
+        from ouroboros.orchestrator.profile_loader import EvidenceSchema
+
+        return load_profile("code").model_copy(
+            update={
+                "evidence_schema": EvidenceSchema(
+                    required=(),
+                    rejected_if=(rule,),
+                )
+            }
+        )
+
+    def test_json_null_literal(self) -> None:
+        profile = self._profile_with_rule("flag == null")
+        record = EvidenceRecord(data={"flag": None})
+        result = validate_evidence(profile, record)
+        assert result.ok is False
+        assert result.rejected_by == ("flag == null",)
+
+    def test_json_true_literal(self) -> None:
+        profile = self._profile_with_rule("flag == true")
+        record = EvidenceRecord(data={"flag": True})
+        assert validate_evidence(profile, record).ok is False
+
+    def test_json_false_literal(self) -> None:
+        profile = self._profile_with_rule("flag == false")
+        record = EvidenceRecord(data={"flag": False})
+        assert validate_evidence(profile, record).ok is False
+
+    def test_python_spellings_still_work(self) -> None:
+        # Backwards-compat with the legacy Python literal spellings.
+        for rule, value in (
+            ("flag == None", None),
+            ("flag == True", True),
+            ("flag == False", False),
+        ):
+            profile = self._profile_with_rule(rule)
+            record = EvidenceRecord(data={"flag": value})
+            assert validate_evidence(profile, record).ok is False, (
+                f"{rule!r} did not trigger for {value!r}"
+            )
+
+    def test_json_number_literal(self) -> None:
+        profile = self._profile_with_rule("count == 0")
+        record = EvidenceRecord(data={"count": 0})
+        assert validate_evidence(profile, record).ok is False
+
+    def test_json_string_literal(self) -> None:
+        profile = self._profile_with_rule('status == "blocked"')
+        record = EvidenceRecord(data={"status": "blocked"})
+        assert validate_evidence(profile, record).ok is False

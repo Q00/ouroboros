@@ -10,9 +10,11 @@ parallel_executor. The H1 verifier loop (next PR in the stack) consumes
 the ValidationResult to decide between accept / retry / escalate.
 
 The evaluator for `rejected_if` is intentionally narrow. It supports only
-`<field> == <literal>` where literal is parsed via ast.literal_eval. Any
-other expression shape raises EvidenceError so that profile authors get an
-immediate, loud failure instead of silent acceptance.
+`<field> == <literal>` where literal is parsed first as JSON (so YAML/JSON
+authors can write `null`, `true`, `false`, numbers, strings, lists) and
+then as a Python literal as a fallback (so legacy `None`/`True`/`False`
+keep working). Any other expression shape raises EvidenceError so that
+profile authors get an immediate, loud failure instead of silent acceptance.
 
 Usage:
     from ouroboros.orchestrator.evidence_schema import (
@@ -35,12 +37,16 @@ from typing import Any
 
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
-# Match the first ```json ... ``` fenced block. Leaf prompts in later PRs
-# will instruct executors to emit evidence inside one of these.
-_FENCED_JSON_RE = re.compile(
-    r"```(?:json)?\s*(?P<body>\{.*?\})\s*```",
-    re.DOTALL,
-)
+# Fence delimiters for ```json ... ``` evidence blocks. Leaf prompts in
+# later PRs instruct executors to emit evidence inside one of these.
+# We deliberately do NOT use a single regex to extract the JSON body:
+# a non-greedy `{.*?}` stops at the first `}` even inside a quoted
+# string, so any valid evidence payload that contains "}" in a string
+# value would be truncated and rejected (bot finding on PR #883).
+# Instead we slice between fences and let json.loads handle string
+# escaping correctly.
+_FENCE_OPENERS: tuple[str, ...] = ("```json", "```JSON", "```")
+_FENCE_CLOSER: str = "```"
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 
 
@@ -88,6 +94,32 @@ class EvidenceRecord:
         return self.data.get(name, default)
 
 
+def _extract_fenced_payload(text: str) -> str | None:
+    """Return the body of the first ```json ... ``` (or bare ```) fence.
+
+    The slice respects fence markers — not braces inside JSON strings —
+    so a payload like `{"note": "hello } more"}` survives extraction.
+    Returns None when no fence is found.
+    """
+    best_open = -1
+    best_open_len = 0
+    for opener in _FENCE_OPENERS:
+        idx = text.find(opener)
+        if idx == -1:
+            continue
+        if best_open == -1 or idx < best_open:
+            best_open = idx
+            best_open_len = len(opener)
+    if best_open == -1:
+        return None
+
+    body_start = best_open + best_open_len
+    close_idx = text.find(_FENCE_CLOSER, body_start)
+    if close_idx == -1:
+        return None
+    return text[body_start:close_idx].strip()
+
+
 def extract_evidence(text: str) -> EvidenceRecord:
     """Pull a JSON evidence record out of a leaf executor's raw output.
 
@@ -99,8 +131,9 @@ def extract_evidence(text: str) -> EvidenceRecord:
         msg = "Leaf output is empty; no evidence record to validate."
         raise EvidenceError(msg)
 
-    match = _FENCED_JSON_RE.search(text)
-    payload = match.group("body") if match else text.strip()
+    payload = _extract_fenced_payload(text)
+    if payload is None:
+        payload = text.strip()
 
     try:
         parsed = json.loads(payload)
@@ -116,7 +149,19 @@ def extract_evidence(text: str) -> EvidenceRecord:
 
 
 def _parse_literal(raw: str) -> Any:
-    """Safely parse the right-hand side of a `field == literal` expression."""
+    """Safely parse the right-hand side of a `field == literal` expression.
+
+    Profiles are YAML-authored and the evidence is JSON, so the natural
+    literal spellings authors will reach for are `null`, `true`, `false`,
+    plus numbers / strings / lists. We try JSON first so those work
+    out-of-the-box. We fall back to ast.literal_eval so legacy Python
+    spellings (`None`, `True`, `False`) keep working too.
+    """
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
     try:
         return ast.literal_eval(raw)
     except (ValueError, SyntaxError) as exc:
