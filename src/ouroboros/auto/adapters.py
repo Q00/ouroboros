@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,13 @@ _WINDOWS_RESERVED_FILENAME_STEMS = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
+)
+_SEED_FILENAME_SUFFIX = ".yaml"
+_SEED_FILENAME_COMPONENT_MAX_BYTES = 255
+_SEED_FILENAME_DIGEST_HEX_LENGTH = 24
+_SEED_FILENAME_DIGEST_SEPARATOR = "--"
+_SEED_FILENAME_STEM_MAX_BYTES = _SEED_FILENAME_COMPONENT_MAX_BYTES - len(
+    _SEED_FILENAME_SUFFIX.encode("utf-8")
 )
 
 
@@ -736,7 +744,7 @@ def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
     directory = seeds_dir or (Path.home() / ".ouroboros" / "seeds")
     directory.mkdir(parents=True, exist_ok=True)
     seed_id = _safe_seed_id_for_filename(seed.metadata.seed_id)
-    path = directory / f"{seed_id}.yaml"
+    path = directory / f"{seed_id}{_SEED_FILENAME_SUFFIX}"
     _require_path_inside_directory(path, directory)
     path.write_text(
         yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False),
@@ -765,7 +773,25 @@ def _safe_seed_id_for_filename(seed_id: str) -> str:
     if stem.upper() in _WINDOWS_RESERVED_FILENAME_STEMS:
         first_byte = stem[0].encode("utf-8")[0]
         stem = f"%{first_byte:02X}{stem[1:]}"
-    return stem
+    return _bound_seed_filename_stem(stem, seed_id)
+
+
+def _bound_seed_filename_stem(stem: str, seed_id: str) -> str:
+    """Keep the encoded Seed filename stem under common component limits.
+
+    The encoded stem is ASCII-only, so character count equals byte count.  When
+    percent-encoding would inflate a valid semantic Seed id beyond common
+    255-byte filename component limits, preserve a readable prefix and append a
+    digest of the original semantic id.
+    """
+    if len(stem.encode("utf-8")) <= _SEED_FILENAME_STEM_MAX_BYTES:
+        return stem
+
+    digest = hashlib.sha256(seed_id.encode("utf-8")).hexdigest()[:_SEED_FILENAME_DIGEST_HEX_LENGTH]
+    suffix = f"{_SEED_FILENAME_DIGEST_SEPARATOR}{digest}"
+    prefix_budget = _SEED_FILENAME_STEM_MAX_BYTES - len(suffix.encode("utf-8"))
+    prefix = stem[:prefix_budget]
+    return f"{prefix}{suffix}"
 
 
 def _require_path_inside_directory(path: Path, directory: Path) -> None:

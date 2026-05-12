@@ -2043,6 +2043,57 @@ def test_auto_save_seed_encodes_windows_reserved_basename_seed_id(
     assert load_seed(path).metadata.seed_id == "CON"
 
 
+def test_auto_save_seed_bounds_long_unicode_seed_id_filename_without_metadata_drift(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    seed_id = "漢" * 80
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id=seed_id),
+    )
+
+    path = Path(save_seed(seed, seeds_dir=seeds_dir)).resolve()
+
+    assert path.parent == seeds_dir.resolve()
+    assert path.exists()
+    assert len(path.name.encode("utf-8")) <= 255
+    assert path.name.endswith(".yaml")
+    assert "--" in path.stem
+    assert load_seed(path).metadata.seed_id == seed_id
+
+
+def test_auto_save_seed_long_unicode_filename_digest_avoids_prefix_collision(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    ontology = OntologySchema(name="demo", description="demo ontology")
+    first = Seed(
+        goal="Demo goal", ontology_schema=ontology, metadata=SeedMetadata(seed_id="漢" * 80)
+    )
+    second = Seed(
+        goal="Demo goal",
+        ontology_schema=ontology,
+        metadata=SeedMetadata(seed_id=("漢" * 79) + "字"),
+    )
+
+    first_path = Path(save_seed(first, seeds_dir=seeds_dir)).resolve()
+    second_path = Path(save_seed(second, seeds_dir=seeds_dir)).resolve()
+
+    assert first_path != second_path
+    assert first_path.exists()
+    assert second_path.exists()
+    assert len(first_path.name.encode("utf-8")) <= 255
+    assert len(second_path.name.encode("utf-8")) <= 255
+
+
 def test_auto_save_seed_accepts_default_seed_id_inside_seed_dir(tmp_path: Path) -> None:
     from ouroboros.auto.adapters import load_seed, save_seed
     from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
