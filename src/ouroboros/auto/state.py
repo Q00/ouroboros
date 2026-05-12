@@ -22,6 +22,8 @@ class AutoPhase(StrEnum):
     REPAIR = "repair"
     RUN = "run"
     RALPH_HANDOFF = "ralph_handoff"
+    EVALUATE = "evaluate"
+    UNSTUCK_LATERAL = "unstuck_lateral"
     COMPLETE = "complete"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -59,6 +61,8 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.REVIEW.value: 90,
     AutoPhase.REPAIR.value: 90,
     AutoPhase.RUN.value: 60,
+    AutoPhase.EVALUATE.value: 90,
+    AutoPhase.UNSTUCK_LATERAL.value: 60,
 }
 
 # Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
@@ -200,6 +204,18 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.FAILED,
     },
     AutoPhase.RALPH_HANDOFF: {
+        AutoPhase.EVALUATE,
+        AutoPhase.COMPLETE,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    },
+    AutoPhase.EVALUATE: {
+        AutoPhase.UNSTUCK_LATERAL,
+        AutoPhase.COMPLETE,
+        AutoPhase.BLOCKED,
+        AutoPhase.FAILED,
+    },
+    AutoPhase.UNSTUCK_LATERAL: {
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
@@ -211,6 +227,8 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.REVIEW,
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
+        AutoPhase.EVALUATE,
+        AutoPhase.UNSTUCK_LATERAL,
     },
     AutoPhase.FAILED: {
         AutoPhase.INTERVIEW,
@@ -218,6 +236,8 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.REVIEW,
         AutoPhase.RUN,
         AutoPhase.RALPH_HANDOFF,
+        AutoPhase.EVALUATE,
+        AutoPhase.UNSTUCK_LATERAL,
     },
 }
 
@@ -330,6 +350,49 @@ class AutoPipelineState:
     # ``REQUIRED_SECTIONS`` at construction time by the MCP handler — only
     # known section keys with non-empty string values land here.
     user_preferences: dict[str, str] = field(default_factory=dict)
+    # Active domain profile name resolved at session start (PR-3, #809 P3).
+    # The DomainProfile instance itself is not stored here because it contains
+    # callables that are not JSON-serializable. Downstream phases recover the
+    # profile via ``DEFAULT_REGISTRY.get(active_domain_profile_name)``.
+    # None means no profile was activated (current baked-in behavior persists).
+    active_domain_profile_name: str | None = None
+    # QA verdict captured during the EVALUATE phase (RFC #809 Phase 2.1).
+    # Persisted so a resumed session reuses the verdict without re-invoking
+    # the LLM-driven judge when the underlying artifact has not changed.
+    # ``evaluate_artifact_hash`` is a sha256 of the run artifact that was
+    # graded: if the hash on resume matches the cached one, the cached
+    # verdict is honored; otherwise the evaluator re-runs.
+    last_qa_score: float | None = None
+    last_qa_verdict: str | None = None
+    # The QA handler's canonical pass condition is ``score >= pass_threshold``
+    # (see ``QAHandler``), which can be True even when ``verdict`` is
+    # ``"revise"``. Persist the boolean separately so the EVALUATE cache
+    # resume path reuses the authoritative passed flag instead of
+    # re-deriving from verdict text (the LLM's free-form verdict string
+    # is not the source of truth for the pass decision).
+    last_qa_passed: bool | None = None
+    last_qa_differences: list[str] = field(default_factory=list)
+    last_qa_suggestions: list[str] = field(default_factory=list)
+    evaluate_artifact_hash: str | None = None
+    # The actual artifact text graded during EVALUATE. Persisted verbatim
+    # on first entry into ``_run_evaluate`` so a timeout / exception /
+    # transient QA error leaves a recoverable trail: on ``--resume`` the
+    # pipeline re-enters EVALUATE with this artifact rather than dropping
+    # into the "no cached verdict and no artifact" BLOCKED branch. Stored
+    # without truncation so the recomputed hash on resume matches the
+    # persisted ``evaluate_artifact_hash`` — truncation would silently
+    # invalidate the cache.
+    evaluate_artifact: str | None = None
+    # RFC #809 Phase 2.2 — UNSTUCK_LATERAL persona output captured after an
+    # EVALUATE fail. Persisted so a resumed session reuses the persona
+    # suggestion without re-invoking the lateral_think tool when nothing
+    # has changed. ``lateral_input_hash`` is sha256 of
+    # ``f"{persona}:{differences}:{suggestions}"`` — if the hash on resume
+    # matches the persisted one, the cached persona text is honored.
+    last_lateral_persona: str | None = None
+    last_lateral_approach_summary: str | None = None
+    last_lateral_text: str | None = None
+    lateral_input_hash: str | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -558,6 +621,41 @@ class AutoPipelineState:
                 return AutoResumeCapability.PARTIAL_RESUME
             return AutoResumeCapability.NONE
 
+        # EVALUATE phase (RFC #809 Phase 2.1). Recovery requires either the
+        # persisted artifact (so the evaluator can re-grade) OR a cached
+        # verdict matching the persisted hash (so the cache hit drives the
+        # decision without re-invoking the LLM). Neither present → NONE.
+        #
+        # ``is not None`` rather than truthiness on ``evaluate_artifact``:
+        # an empty-string artifact is a valid graded input, so a session
+        # blocked after persisting ``""`` is still resumable.
+        if recoverable == AutoPhase.EVALUATE:
+            if self.evaluate_artifact is not None or (
+                self.evaluate_artifact_hash is not None and self.last_qa_passed is not None
+            ):
+                return AutoResumeCapability.RESUME
+            return AutoResumeCapability.NONE
+
+        # UNSTUCK_LATERAL phase (RFC #809 Phase 2.2). Recovery requires the
+        # persisted lateral input hash so the cache short-circuit can return
+        # the cached persona suggestion without re-invoking the lateral_think
+        # tool. If the cache is empty but the QA fail context is intact,
+        # resume can still classify a persona and re-run lateral.
+        if recoverable == AutoPhase.UNSTUCK_LATERAL:
+            if self.lateral_input_hash is not None or self.last_lateral_text is not None:
+                return AutoResumeCapability.RESUME
+            # ``_run_lateral`` can drive forward as long as we have ANY
+            # QA-fail signal (differences OR suggestions); both feed the
+            # persona's ``problem_context``. Earlier this branch required
+            # ``differences`` specifically, which suppressed the resume
+            # hint for suggestions-only failures even though resume would
+            # actually work.
+            if self.last_qa_passed is False and (
+                self.last_qa_differences or self.last_qa_suggestions
+            ):
+                return AutoResumeCapability.RESUME
+            return AutoResumeCapability.NONE
+
         return AutoResumeCapability.NONE  # defensive
 
     def to_dict(self) -> dict[str, Any]:
@@ -609,6 +707,18 @@ class AutoPipelineState:
         payload.setdefault("deadline_at", None)
         payload.setdefault("deadline_at_epoch", None)
         payload.setdefault("user_preferences", {})
+        payload.setdefault("last_qa_score", None)
+        payload.setdefault("last_qa_verdict", None)
+        payload.setdefault("last_qa_passed", None)
+        payload.setdefault("last_qa_differences", [])
+        payload.setdefault("last_qa_suggestions", [])
+        payload.setdefault("evaluate_artifact_hash", None)
+        payload.setdefault("evaluate_artifact", None)
+        payload.setdefault("last_lateral_persona", None)
+        payload.setdefault("last_lateral_approach_summary", None)
+        payload.setdefault("last_lateral_text", None)
+        payload.setdefault("lateral_input_hash", None)
+        payload.setdefault("active_domain_profile_name", None)
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -781,6 +891,56 @@ class AutoPipelineState:
                     "MCP handler which validates against REQUIRED_SECTIONS"
                 )
                 raise ValueError(msg)
+        if self.last_qa_score is not None and (
+            isinstance(self.last_qa_score, bool) or not isinstance(self.last_qa_score, int | float)
+        ):
+            msg = "last_qa_score must be a number or null"
+            raise ValueError(msg)
+        if self.last_qa_verdict is not None and (
+            not isinstance(self.last_qa_verdict, str) or not self.last_qa_verdict.strip()
+        ):
+            msg = "last_qa_verdict must be a non-empty string or null"
+            raise ValueError(msg)
+        if self.last_qa_passed is not None and not isinstance(self.last_qa_passed, bool):
+            msg = "last_qa_passed must be a boolean or null"
+            raise ValueError(msg)
+        if not isinstance(self.last_qa_differences, list) or any(
+            not isinstance(item, str) for item in self.last_qa_differences
+        ):
+            msg = "last_qa_differences must be a list of strings"
+            raise ValueError(msg)
+        if not isinstance(self.last_qa_suggestions, list) or any(
+            not isinstance(item, str) for item in self.last_qa_suggestions
+        ):
+            msg = "last_qa_suggestions must be a list of strings"
+            raise ValueError(msg)
+        if self.evaluate_artifact_hash is not None and (
+            not isinstance(self.evaluate_artifact_hash, str)
+            or not self.evaluate_artifact_hash.strip()
+        ):
+            msg = "evaluate_artifact_hash must be a non-empty string or null"
+            raise ValueError(msg)
+        if self.evaluate_artifact is not None and not isinstance(self.evaluate_artifact, str):
+            msg = "evaluate_artifact must be a string or null"
+            raise ValueError(msg)
+        if self.last_lateral_persona is not None and (
+            not isinstance(self.last_lateral_persona, str) or not self.last_lateral_persona.strip()
+        ):
+            msg = "last_lateral_persona must be a non-empty string or null"
+            raise ValueError(msg)
+        if self.last_lateral_approach_summary is not None and not isinstance(
+            self.last_lateral_approach_summary, str
+        ):
+            msg = "last_lateral_approach_summary must be a string or null"
+            raise ValueError(msg)
+        if self.last_lateral_text is not None and not isinstance(self.last_lateral_text, str):
+            msg = "last_lateral_text must be a string or null"
+            raise ValueError(msg)
+        if self.lateral_input_hash is not None and (
+            not isinstance(self.lateral_input_hash, str) or not self.lateral_input_hash.strip()
+        ):
+            msg = "lateral_input_hash must be a non-empty string or null"
+            raise ValueError(msg)
         if self.provenance is not None:
             if not isinstance(self.provenance, dict):
                 msg = "provenance must be an object or null"
@@ -824,6 +984,7 @@ class AutoPipelineState:
             "pending_question",
             "last_tool_name",
             "last_error",
+            "active_domain_profile_name",
         )
         for field_name in optional_string_fields:
             value = getattr(self, field_name)

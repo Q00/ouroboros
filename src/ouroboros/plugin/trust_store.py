@@ -365,9 +365,35 @@ class TrustStore:
         artifact_digest: str = "",
         when: datetime | None = None,
     ) -> TrustRecord:
-        """Atomic ``ooo plugin trust`` step: grant ``scope`` AND clear
-        any existing disable record inside a single per-plugin
-        critical section.
+        """Atomic ``ooo plugin trust`` step for one scope.
+
+        See :meth:`grant_many_and_clear_disable` for the multi-scope
+        variant used by the CLI.
+        """
+        return self.grant_many_and_clear_disable(
+            plugin=plugin,
+            version=version,
+            scopes=(scope,),
+            granted_by=granted_by,
+            source_type=source_type,
+            source_identity=source_identity,
+            artifact_digest=artifact_digest,
+            when=when,
+        )
+
+    def grant_many_and_clear_disable(
+        self,
+        *,
+        plugin: str,
+        version: str,
+        scopes: Iterable[str],
+        granted_by: str,
+        source_type: str = "",
+        source_identity: str = "",
+        artifact_digest: str = "",
+        when: datetime | None = None,
+    ) -> TrustRecord:
+        """Grant one or more scopes and clear disable atomically.
 
         Calling ``grant()`` then ``clear_disable()`` from the CLI takes
         and releases the lock twice. A concurrent ``ooo plugin
@@ -378,10 +404,12 @@ class TrustStore:
         ``disabled.json`` — leaving a "trust gone AND disable gone"
         final state where ``ooo plugin trust`` reported success but
         the plugin is invocable without any consented scopes. Doing
-        both writes inside one critical section closes that
-        interleaving.
+        all grant writes and the disable clear inside one critical
+        section closes that interleaving, including repeatable
+        ``--scope`` invocations.
         """
         _validate_plugin_name(plugin)
+        scope_list = list(scopes)
         when = when or datetime.now(tz=UTC)
         ts = when.strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._grant_lock(plugin):
@@ -395,8 +423,9 @@ class TrustStore:
             ):
                 existing = None
             granted = list(existing.granted_scopes) if existing else []
-            if all(g.scope != scope for g in granted):
-                granted.append(GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by))
+            for scope in scope_list:
+                if all(g.scope != scope for g in granted):
+                    granted.append(GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by))
             payload: dict = {
                 "schema_version": TRUST_SCHEMA_VERSION,
                 "plugin": plugin,
@@ -464,6 +493,16 @@ class TrustStore:
     # are recorded.
     def reset_for_version_bump(self, plugin: str, new_version: str) -> None:
         self.reset_for_subject_change(plugin, new_version=new_version)
+
+    def has_trust_record(self, plugin: str) -> bool:
+        """True if a trust record file exists for `plugin`.
+
+        This intentionally validates before deriving the path so CLI
+        preflight checks do not bypass the TrustStore path-boundary
+        guard when inspecting whether a grant exists.
+        """
+        _validate_plugin_name(plugin)
+        return self._path(plugin).is_file()
 
     def remove(self, plugin: str) -> bool:
         """Remove the trust file for `plugin`. Returns True if removed.

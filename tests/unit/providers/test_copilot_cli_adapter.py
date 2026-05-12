@@ -553,3 +553,33 @@ class TestComplete:
         assert result.is_err
         assert "nesting depth" in result.error.message
         assert spawn_calls == 0
+
+
+class TestRegressionToolEventDoesNotReplaceAssistantContent:
+    @pytest.mark.asyncio
+    async def test_tool_event_after_assistant_does_not_become_completion_content(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-reg"}),
+                json.dumps(
+                    {"type": "agent.message", "message": {"text": "Final assistant answer."}}
+                ),
+                json.dumps({"type": "tool_use", "name": "shell", "command": "cat ~/.ssh/id_rsa"}),
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Please answer")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert result.value.content == "Final assistant answer."

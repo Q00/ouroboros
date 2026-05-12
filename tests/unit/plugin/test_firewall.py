@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -9,6 +10,7 @@ import subprocess
 import pytest
 
 from ouroboros.plugin.firewall import (
+    DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS,
     invoke_plugin,
 )
 from ouroboros.plugin.manifest import load_manifest
@@ -324,6 +326,35 @@ def test_confirmation_declined_blocks_with_no_subprocess(tmp_path: Path) -> None
     types = [e["event_type"] for e in events]
     assert types == ["plugin.failed"]
     assert "user declined" in result.message
+
+
+def test_confirmation_prompt_uses_redacted_argv(tmp_path: Path) -> None:
+    """The one destructive-command prompt is user-visible output, so it
+    must not echo argv secrets that the audit envelope would redact."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    prompts: list[str] = []
+
+    result = invoke_plugin(
+        program,
+        command_name="merge",
+        argv=["--token", "hunter2-supersecret"],
+        trust_record=trust,
+        event_sink=lambda _event: None,
+        correlation_id="corr-confirm-redact",
+        confirm=lambda prompt: prompts.append(prompt) or False,
+        subprocess_runner=_fake_runner(),
+    )
+
+    assert result.status == "blocked"
+    assert prompts
+    assert "hunter2-supersecret" not in prompts[0]
+    assert "Action: merge --token [redacted]" in prompts[0]
 
 
 def test_confirmation_accepted_proceeds(tmp_path: Path) -> None:
@@ -848,6 +879,11 @@ def test_argv_redacts_secret_flags_and_high_confidence_tokens(tmp_path: Path) ->
         "--password",  # bare flag
         "hunter2-supersecret",  # value follows
         "Bearer eyJhbGciOiJIUzI1NiJ9.payload",  # high-confidence
+        "--authorization",
+        "Bearer",
+        "opaqueSecret123",
+        "--bearer=Bearer",
+        "opaqueSecret456",
         "AKIAIOSFODNN7EXAMPLE",  # AWS access key id
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",  # JWT
         "plain-arg",  # not secret
@@ -872,16 +908,24 @@ def test_argv_redacts_secret_flags_and_high_confidence_tokens(tmp_path: Path) ->
     assert redacted[3] == "[redacted]"
     # Bearer / AWS / JWT all match high-confidence patterns.
     assert redacted[4] == "[redacted]"
-    assert redacted[5] == "[redacted]"
+    # Split Bearer forms redact both the marker and opaque tail.
+    assert redacted[5] == "--authorization"
     assert redacted[6] == "[redacted]"
+    assert redacted[7] == "[redacted]"
+    assert redacted[8] == "--bearer=[redacted]"
+    assert redacted[9] == "[redacted]"
+    assert redacted[10] == "[redacted]"
+    assert redacted[11] == "[redacted]"
     # Non-secret string passed through unchanged.
-    assert redacted[7] == "plain-arg"
+    assert redacted[12] == "plain-arg"
     # No raw secret bytes anywhere in the serialized event stream.
     serialized = json.dumps(events)
     for needle in (
         "ghp_thisIsClearlyASecret",
         "hunter2-supersecret",
         "eyJhbGciOiJIUzI1NiJ9.payload",
+        "opaqueSecret123",
+        "opaqueSecret456",
         "AKIAIOSFODNN7EXAMPLE",
     ):
         assert needle not in serialized, needle
@@ -900,19 +944,57 @@ def test_argv_no_redaction_keeps_argv_verbatim(tmp_path: Path) -> None:
         scope="github:read",
         granted_by="u",
     )
+    clean_argv = ["https://example.com/pr/1", "Bearer", "--force", "plain-tail"]
     events: list[dict] = []
     invoke_plugin(
         program,
         command_name="review",
-        argv=["https://example.com/pr/1", "--verbose"],
+        argv=clean_argv,
         trust_record=trust,
         event_sink=events.append,
         correlation_id="corr-clean",
         subprocess_runner=_fake_runner(stdout="ok"),
     )
     invoked = next(e for e in events if e["event_type"] == "plugin.invoked")
-    assert invoked["command"]["argv"] == ["https://example.com/pr/1", "--verbose"]
+    assert invoked["command"]["argv"] == clean_argv
     assert "argv_sha256" not in invoked.get("provenance", {})
+
+
+def test_confirmation_prompt_keeps_standalone_bearer_arguments(
+    tmp_path: Path,
+) -> None:
+    """A literal ``Bearer`` token is not secret context by itself.
+
+    Regression catch for the bot design note on PR #857: over-redacting
+    ``["Bearer", "--force"]`` would hide real destructive flags from the
+    user-visible confirmation prompt and from audit argv.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    prompts: list[str] = []
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="merge",
+        argv=["Bearer", "--force"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-standalone-bearer",
+        confirm=lambda prompt: prompts.append(prompt) or False,
+        subprocess_runner=_fake_runner(),
+    )
+
+    assert result.status == "blocked"
+    assert prompts
+    assert "Action: merge Bearer --force" in prompts[0]
+    failed = next(e for e in events if e["event_type"] == "plugin.failed")
+    assert failed["command"]["argv"] == ["Bearer", "--force"]
+    assert "argv_sha256" not in failed.get("provenance", {})
 
 
 def test_subprocess_invoked_with_plugin_home_as_cwd(tmp_path: Path) -> None:
@@ -1163,3 +1245,132 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
     assert "not found" in result.message.lower()
+
+
+def test_subprocess_invocation_uses_default_timeout(tmp_path: Path) -> None:
+    """The firewall owns the external plugin process boundary, so the
+    subprocess launch must always carry a finite timeout."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    observed_kwargs: dict = {}
+
+    def _spy_runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        observed_kwargs.update(kwargs)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="ok", stderr="")
+
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=lambda _event: None,
+        correlation_id="corr-timeout-kw",
+        subprocess_runner=_spy_runner,
+    )
+
+    assert result.status == "success"
+    assert observed_kwargs["timeout"] == DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS
+
+
+def test_subprocess_timeout_emits_terminal_failed_event(tmp_path: Path) -> None:
+    """TimeoutExpired must not escape the firewall or leave the audit
+    sequence without a terminal plugin.failed event."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _timeout_runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-timeout",
+        subprocess_runner=_timeout_runner,
+    )
+
+    assert result.status == "failed"
+    assert result.exit_code == 124
+    assert "timed out" in result.message
+    assert [event["event_type"] for event in events] == [
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.failed",
+    ]
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert failed["provenance"]["reason"] == "timeout"
+    assert failed["provenance"]["exception_type"] == "TimeoutExpired"
+
+
+def test_subprocess_timeout_preserves_partial_output_hashes_only_in_events(
+    tmp_path: Path,
+) -> None:
+    """TimeoutExpired may carry partial stdout/stderr buffers. The
+    firewall must return those bytes to in-process callers and put only
+    their hashes in the terminal audit event."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    partial_stdout = b"partial stdout before timeout\n"
+    partial_stderr = b"partial stderr before timeout\n"
+
+    def _timeout_runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        raise subprocess.TimeoutExpired(
+            cmd=argv,
+            timeout=kwargs["timeout"],
+            output=partial_stdout,
+            stderr=partial_stderr,
+        )
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-timeout-partial",
+        subprocess_runner=_timeout_runner,
+    )
+
+    expected_stdout_hash = hashlib.sha256(partial_stdout).hexdigest()
+    expected_stderr_hash = hashlib.sha256(partial_stderr).hexdigest()
+    assert result.status == "failed"
+    assert result.exit_code == 124
+    assert result.stdout_bytes == partial_stdout
+    assert result.stderr_bytes == partial_stderr
+    assert result.stdout_sha256 == expected_stdout_hash
+    assert result.stderr_sha256 == expected_stderr_hash
+
+    assert [event["event_type"] for event in events] == [
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.failed",
+    ]
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert failed["provenance"]["reason"] == "timeout"
+    assert failed["provenance"]["stdout_sha256"] == expected_stdout_hash
+    assert failed["provenance"]["stderr_sha256"] == expected_stderr_hash
+
+    serialized = json.dumps(events)
+    assert "partial stdout before timeout" not in serialized
+    assert "partial stderr before timeout" not in serialized

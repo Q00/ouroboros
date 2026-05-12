@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import (
+    AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS,
+    AGENT_SDK_CLI_FIXED_FRAMING_CHARS,
+    AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS,
+    AGENT_SDK_CLI_SAFE_PROMPT_CHARS,
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     InterviewEngine,
@@ -22,6 +26,15 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+
+EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS = 16_000
+
+
+def estimated_agent_sdk_cli_prompt_chars(messages: list) -> int:
+    """Mirror the tested CLI prompt envelope: raw content plus framing reserve."""
+    return AGENT_SDK_CLI_FIXED_FRAMING_CHARS + sum(
+        len(message.content) + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS for message in messages
+    )
 
 
 def create_mock_completion_response(
@@ -221,10 +234,11 @@ class TestInterviewEngineInit:
         assert not state_dir.exists()
 
         mock_adapter = MagicMock()
-        InterviewEngine(llm_adapter=mock_adapter, state_dir=state_dir)
+        engine = InterviewEngine(llm_adapter=mock_adapter, state_dir=state_dir)
 
         assert state_dir.exists()
         assert state_dir.is_dir()
+        assert engine.llm_adapter is mock_adapter
 
     def test_default_state_dir(self) -> None:
         """InterviewEngine uses default state directory."""
@@ -233,6 +247,17 @@ class TestInterviewEngineInit:
 
         expected_dir = Path.home() / ".ouroboros" / "data"
         assert engine.state_dir == expected_dir
+
+    def test_init_does_not_wrap_adapter_with_strict_mcp_config_helper(self, tmp_path: Path) -> None:
+        """InterviewEngine keeps adapter isolation scoped to explicit callers."""
+        wrapped_adapter = MagicMock()
+        adapter = MagicMock()
+        adapter.with_strict_mcp_config.return_value = wrapped_adapter
+
+        engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path)
+
+        assert engine.llm_adapter is adapter
+        adapter.with_strict_mcp_config.assert_not_called()
 
 
 class TestInterviewEngineStartInterview:
@@ -296,6 +321,25 @@ class TestInterviewEngineStartInterview:
 class TestInterviewEngineAskNextQuestion:
     """Test InterviewEngine.ask_next_question method."""
 
+    def test_total_prompt_cap_stays_within_empirical_cli_ceiling(self) -> None:
+        """Serialized prompt budget must stay below the observed CLI ceiling."""
+        assert (
+            AGENT_SDK_CLI_EMPIRICAL_EMPTY_RESPONSE_CHARS
+            == EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
+        assert AGENT_SDK_CLI_FIXED_FRAMING_CHARS > 0
+        assert AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS > 0
+        assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS > 4_800
+        assert AGENT_SDK_CLI_SAFE_PROMPT_CHARS < EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        assert (
+            EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS - AGENT_SDK_CLI_SAFE_PROMPT_CHARS >= 2_000
+        )
+        assert (
+            AGENT_SDK_CLI_FIXED_FRAMING_CHARS + AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS
+            < EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
+        assert InterviewEngine._MAX_TOTAL_PROMPT_CHARS == AGENT_SDK_CLI_SAFE_PROMPT_CHARS
+
     @pytest.mark.asyncio
     async def test_ask_first_question(self) -> None:
         """ask_next_question generates first question."""
@@ -345,13 +389,13 @@ class TestInterviewEngineAskNextQuestion:
     async def test_long_initial_context_stays_below_cli_failure_cap(
         self, context_length: int
     ) -> None:
-        """Long initial_context is split so the system prompt stays below 3500 chars."""
+        """Long initial_context stays below the empirical Agent SDK CLI ceiling."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
         async def _complete(messages, _config):
             total_prompt_chars = sum(len(message.content) for message in messages)
-            if total_prompt_chars > engine._MAX_TOTAL_PROMPT_CHARS:
+            if total_prompt_chars > EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS:
                 return Result.err(
                     ProviderError(
                         "Command failed with exit code 1. Check stderr output for details"
@@ -370,7 +414,10 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
-        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert (
+            estimated_agent_sdk_cli_prompt_chars(messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
         assert "Initial context continues in the first user message" in messages[0].content
         assert messages[1].role == MessageRole.USER
         assert "Additional initial context omitted" in messages[1].content
@@ -399,7 +446,10 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
-        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert (
+            estimated_agent_sdk_cli_prompt_chars(messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
         assert messages[1].role == MessageRole.USER
         assert "Additional initial context omitted" in messages[1].content
 
@@ -513,9 +563,41 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         prompt_content = "\n".join(message.content for message in messages)
-        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert (
+            estimated_agent_sdk_cli_prompt_chars(messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
         assert "Additional initial context omitted" in prompt_content
         assert "TAIL_MARKER" in prompt_content
+
+    @pytest.mark.asyncio
+    async def test_many_short_history_messages_stay_under_serialized_cli_cap(self) -> None:
+        """Per-message CLI framing is budgeted, not just raw content length."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_many_short_turns",
+            initial_context="Build a CLI tool",
+        )
+        for i in range(80):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=i + 1,
+                    question=f"Q{i}",
+                    user_response=f"A{i}",
+                )
+            )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert (
+            estimated_agent_sdk_cli_prompt_chars(messages)
+            <= EMPIRICAL_AGENT_SDK_CLI_EMPTY_RESPONSE_CHARS
+        )
 
     @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:

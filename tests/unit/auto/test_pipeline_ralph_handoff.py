@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto import pipeline as pipeline_module
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import (
@@ -196,8 +197,12 @@ def test_state_machine_allows_run_to_ralph_handoff() -> None:
 
 
 def test_state_machine_allows_ralph_handoff_terminal_transitions() -> None:
-    """RALPH_HANDOFF must be terminal-bound to COMPLETE/BLOCKED/FAILED."""
+    """RALPH_HANDOFF must reach COMPLETE/BLOCKED/FAILED. EVALUATE is the
+    intermediate verification gate added by RFC #809 Phase 2.1, but it is
+    not itself terminal — the assertion checks that every direct successor
+    of RALPH_HANDOFF is either terminal or the EVALUATE bridge."""
     assert _ALLOWED_TRANSITIONS[AutoPhase.RALPH_HANDOFF] == {
+        AutoPhase.EVALUATE,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
@@ -329,6 +334,35 @@ async def test_ralph_job_id_persisted_while_starter_waits_for_terminal(tmp_path)
     release.set()
     result = await task
     assert result.status == "complete"
+
+
+@pytest.mark.asyncio
+async def test_run_handoff_uses_contract_idempotency_field_and_kwarg(tmp_path, monkeypatch) -> None:
+    state = _state_at_run_phase(tmp_path)
+    received: dict[str, str] = {}
+
+    monkeypatch.setattr(pipeline_module, "IDEMPOTENCY_KEY_FIELD", "goal")
+    monkeypatch.setattr(pipeline_module, "IDEMPOTENCY_KWARG_NAME", "contract_key")
+
+    async def run_starter(_seed: Seed, *, contract_key: str = "") -> dict[str, Any]:
+        received["contract_key"] = contract_key
+        return {
+            "job_id": "job_run_contract",
+            "session_id": "exec_session_contract",
+            "execution_id": "execution_contract",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=run_starter,
+        reviewer=_PassReviewer(),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert received == {"contract_key": state.goal}
 
 
 # ---------------------------------------------------------------------------

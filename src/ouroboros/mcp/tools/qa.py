@@ -492,7 +492,7 @@ class QAHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a QA verdict request."""
         artifact = arguments.get("artifact")
-        if not artifact:
+        if "artifact" not in arguments or not isinstance(artifact, str):
             return Result.err(
                 MCPToolError(
                     "artifact is required",

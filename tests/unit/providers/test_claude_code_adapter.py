@@ -253,6 +253,48 @@ class TestExecuteSingleRequestSystemPrompt:
 class TestAdapterOverheadReductions:
     """Test per-call overhead optimizations in ClaudeCodeAdapter."""
 
+    def test_with_strict_mcp_config_clones_adapter_config(self) -> None:
+        """Explicit strict-MCP opt-in returns a configured clone."""
+        allowed_tools = ["Read"]
+
+        def on_message(message_type: str, content: str) -> None:
+            assert message_type
+            assert content
+
+        adapter = ClaudeCodeAdapter(
+            permission_mode="acceptEdits",
+            cli_path="/bin/sh",
+            cwd="/tmp/project",
+            allowed_tools=allowed_tools,
+            max_turns=3,
+            on_message=on_message,
+            timeout=12.5,
+        )
+
+        strict_adapter = adapter.with_strict_mcp_config()
+
+        assert strict_adapter is not adapter
+        assert adapter._strict_mcp_config is False
+        assert strict_adapter._strict_mcp_config is True
+        assert strict_adapter._permission_mode == adapter._permission_mode
+        assert strict_adapter._cli_path == adapter._cli_path
+        assert strict_adapter._cwd == adapter._cwd
+        assert strict_adapter._allowed_tools == adapter._allowed_tools
+        assert strict_adapter._allowed_tools is not adapter._allowed_tools
+        assert strict_adapter._max_turns == adapter._max_turns
+        assert strict_adapter._on_message is on_message
+        assert strict_adapter._timeout == adapter._timeout
+
+        allowed_tools.append("Grep")
+        assert adapter._allowed_tools == ["Read"]
+        assert strict_adapter._allowed_tools == ["Read"]
+
+    def test_with_strict_mcp_config_is_idempotent(self) -> None:
+        """Already-strict adapters are returned unchanged."""
+        adapter = ClaudeCodeAdapter(strict_mcp_config=True)
+
+        assert adapter.with_strict_mcp_config() is adapter
+
     @pytest.mark.asyncio
     async def test_version_check_skip_env_defaults_to_one(self) -> None:
         """CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK defaults to '1' when OUROBOROS_SKIP_VERSION_CHECK is unset."""
@@ -923,6 +965,200 @@ class TestJsonSchemaHandling:
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert "strict_mcp_config" not in options_call_kwargs
         assert "strict-mcp-config" not in (options_call_kwargs.get("extra_args") or {})
+
+    @pytest.mark.asyncio
+    async def test_strict_mcp_config_closes_parent_context_leak_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``strict_mcp_config=True`` must also zero out every parent-context
+        leak surface the SDK exposes (skills / sub-agents / plugins /
+        settings / hooks).
+
+        ``--strict-mcp-config`` alone only blocks MCP-server discovery,
+        not the other descriptor sources that the parent Claude Code
+        session leaks into the spawned subprocess.  Leaving them open
+        gives the sub-CLI's model enough tool descriptors that it
+        emits a ``ToolUseBlock`` on the only allowed turn, exhausts
+        ``max_turns=1`` before any text streams, and ultimately surfaces
+        as the bare-``Exception`` failure path described in #869.
+        """
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset(
+                {
+                    "extra_args",
+                    "allowed_tools",
+                    "tools",
+                    "strict_mcp_config",
+                    "setting_sources",
+                    "skills",
+                    "agents",
+                    "plugins",
+                    "hooks",
+                    "include_hook_events",
+                }
+            ),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=[], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert options_call_kwargs.get("strict_mcp_config") is True
+        assert options_call_kwargs.get("setting_sources") == []
+        assert options_call_kwargs.get("skills") == []
+        assert options_call_kwargs.get("agents") == []
+        assert options_call_kwargs.get("plugins") == []
+        assert options_call_kwargs.get("hooks") == {}
+        assert options_call_kwargs.get("include_hook_events") is False
+
+    @pytest.mark.asyncio
+    async def test_strict_mcp_config_isolation_is_noop_when_sdk_lacks_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each isolation override must be gated by SDK field presence.
+
+        Older SDK releases predate ``skills`` / ``agents`` / ``plugins`` /
+        ``setting_sources`` / ``hooks`` / ``include_hook_events`` on
+        ``ClaudeAgentOptions``.  Forwarding them unconditionally would
+        crash with ``TypeError`` at ``ClaudeAgentOptions(**options_kwargs)``.
+        On those releases the adapter still forwards ``strict_mcp_config``
+        (or its ``extra_args`` fallback) and simply omits the rest.
+        """
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset({"extra_args", "allowed_tools", "tools", "strict_mcp_config"}),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=[], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert options_call_kwargs.get("strict_mcp_config") is True
+        for absent in (
+            "setting_sources",
+            "skills",
+            "agents",
+            "plugins",
+            "hooks",
+            "include_hook_events",
+        ):
+            assert absent not in options_call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_isolation_overrides_skipped_without_strict_mcp_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-isolation callers must keep parent context (skills, plugins,
+        settings) intact.  The isolation overrides are scoped to opt-in
+        ``strict_mcp_config=True`` callers only — generic explicit
+        envelopes that need ``mcp__*`` tool access or project-scoped
+        skills/agents must not silently lose them.
+        """
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset(
+                {
+                    "extra_args",
+                    "allowed_tools",
+                    "tools",
+                    "strict_mcp_config",
+                    "setting_sources",
+                    "skills",
+                    "agents",
+                    "plugins",
+                    "hooks",
+                    "include_hook_events",
+                }
+            ),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=["Read", "mcp__ouroboros__qa"])
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        for absent in (
+            "strict_mcp_config",
+            "setting_sources",
+            "skills",
+            "agents",
+            "plugins",
+            "hooks",
+            "include_hook_events",
+        ):
+            assert absent not in options_call_kwargs
 
 
 class TestErrorDiagnostics:

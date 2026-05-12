@@ -359,6 +359,11 @@ class CopilotCliLLMAdapter:
                 return value.strip()
         return None
 
+    @staticmethod
+    def _is_completion_content_event(event: dict[str, Any]) -> bool:
+        event_type = event.get("type")
+        return event_type in {"agent.message", "message"}
+
     def _emit_callback_for_event(self, event: dict[str, Any]) -> None:
         if self._on_message is None:
             return
@@ -494,9 +499,10 @@ class CopilotCliLLMAdapter:
             if extracted:
                 session_id = extracted
             self._emit_callback_for_event(event)
-            event_content = self._extract_text(event)
-            if event_content:
-                last_content = event_content
+            if self._is_completion_content_event(event):
+                event_content = self._extract_text(event)
+                if event_content:
+                    last_content = event_content
 
         return stdout_lines, stderr_lines, session_id, last_content
 
@@ -655,9 +661,10 @@ class CopilotCliLLMAdapter:
                     session_id = event_session_id
 
                 self._emit_callback_for_event(event)
-                event_content = self._extract_text(event)
-                if event_content:
-                    last_content = event_content
+                if self._is_completion_content_event(event):
+                    event_content = self._extract_text(event)
+                    if event_content:
+                        last_content = event_content
 
         stdout_task = asyncio.create_task(_read_stdout())
 

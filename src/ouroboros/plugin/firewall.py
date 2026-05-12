@@ -50,6 +50,7 @@ from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
 
 SCHEMA_VERSION = "0.1"
+DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS = 300.0
 
 EventSink = Callable[[dict], None]
 ConfirmFn = Callable[[str], bool]
@@ -167,18 +168,28 @@ def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
     redacted: list[str] = []
     fired = False
     pending_value_redact = False
+    pending_bearer_tail_redact = False
     for token in argv:
+        if pending_bearer_tail_redact:
+            redacted.append(_REDACTED)
+            fired = True
+            pending_bearer_tail_redact = False
+            continue
         if pending_value_redact:
             redacted.append(_REDACTED)
             fired = True
             pending_value_redact = False
+            if token == "Bearer":
+                pending_bearer_tail_redact = True
             continue
         # `--flag=value` form: split on first `=`.
         if token.startswith("-") and "=" in token:
-            flag, _, _ = token.partition("=")
+            flag, _, value = token.partition("=")
             if flag in _SECRET_FLAG_NAMES:
                 redacted.append(f"{flag}={_REDACTED}")
                 fired = True
+                if value == "Bearer":
+                    pending_bearer_tail_redact = True
                 continue
         # Bare flag form: value is the next argv element.
         if token in _SECRET_FLAG_NAMES:
@@ -186,7 +197,10 @@ def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
             pending_value_redact = True
             continue
         # High-confidence value-shaped match (Bearer …, gh*_…, sk-…,
-        # AKIA…, JWT-shaped).
+        # AKIA…, JWT-shaped).  Split ``Bearer`` auth values are only
+        # treated as secret context when introduced by a known secret flag
+        # above; a standalone literal ``Bearer`` may be ordinary user input
+        # and must not hide subsequent real flags from prompts/audit logs.
         if _is_secret_value(token):
             redacted.append(_REDACTED)
             fired = True
@@ -195,6 +209,10 @@ def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
     if pending_value_redact:
         # Trailing `--token` with no value: nothing to redact, but the
         # plugin will reject it at parse-time anyway. Emit it as-is.
+        pass
+    if pending_bearer_tail_redact:
+        # Trailing `Bearer` without a credential tail was already
+        # redacted above. Nothing else to consume.
         pass
     return redacted, fired
 
@@ -685,10 +703,11 @@ def invoke_plugin(
 
     # 2. Confirmation gate (locked Q2 — ONE prompt, command-level).
     if command.requires_confirmation:
+        redacted_prompt_argv, _ = _redact_argv(list(argv))
         prompt = (
             f"This command is destructive and requires confirmation.\n"
             f"Plugin: {manifest.name} {manifest.version}\n"
-            f"Action: {command_name} {' '.join(argv)}\n"
+            f"Action: {command_name} {' '.join(redacted_prompt_argv)}\n"
             f"Continue?"
         )
         if not confirm(prompt):
@@ -815,9 +834,28 @@ def invoke_plugin(
     run_kwargs: dict = {
         "capture_output": True,
         "check": False,
+        "timeout": DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS,
     }
     if plugin_home is not None:
         run_kwargs["cwd"] = str(plugin_home)
+
+    # Coerce stdout/stderr to bytes for hashing, regardless of whether
+    # the runner returned ``bytes`` (real subprocess.run without
+    # ``text=True``) or ``str`` (test fakes that pre-decode). This also
+    # handles partial buffers attached to ``subprocess.TimeoutExpired``.
+    # ``surrogateescape`` round-trips arbitrary byte sequences through
+    # str without raising, matching how Python decodes filesystem paths.
+    def _to_bytes(value: object) -> bytes:
+        if value is None:
+            return b""
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            return value.encode("utf-8", errors="surrogateescape")
+        # Defensive: any other type is treated as empty so we never
+        # crash on an unexpected runner return shape.
+        return b""
+
     try:
         completed = runner(cmd_argv, **run_kwargs)
     except FileNotFoundError as exc:
@@ -840,6 +878,49 @@ def invoke_plugin(
             status="failed",
             exit_code=127,
             message=message,
+            events=tuple(emitted),
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A plugin command is an external process under the firewall's
+        # control boundary. Bound its lifetime the same way the Auto and
+        # Ralph runtimes bound their agent loops, and always close the
+        # audit sequence with a terminal ``plugin.failed`` event rather
+        # than leaving the caller hung indefinitely.
+        stdout_bytes = _to_bytes(exc.stdout)
+        stderr_bytes = _to_bytes(exc.stderr)
+        stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
+        stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
+        message = (
+            f"entrypoint timed out after "
+            f"{DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS:g}s: {cmd_argv[0]!r}"
+        )
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={
+                    "correlation_id": correlation_id,
+                    "reason": "timeout",
+                    "exception_type": type(exc).__name__,
+                    "timeout_seconds": f"{DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS:g}",
+                    "stdout_sha256": stdout_hash,
+                    "stderr_sha256": stderr_hash,
+                },
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=124,
+            message=message,
+            stdout_sha256=stdout_hash,
+            stderr_sha256=stderr_hash,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
             events=tuple(emitted),
         )
     except OSError as exc:
@@ -872,22 +953,6 @@ def invoke_plugin(
             message=message,
             events=tuple(emitted),
         )
-
-    # Coerce stdout/stderr to bytes for hashing, regardless of whether
-    # the runner returned ``bytes`` (real subprocess.run without
-    # ``text=True``) or ``str`` (test fakes that pre-decode).
-    # ``surrogateescape`` round-trips arbitrary byte sequences through
-    # str without raising, matching how Python decodes filesystem paths.
-    def _to_bytes(value: object) -> bytes:
-        if value is None:
-            return b""
-        if isinstance(value, bytes):
-            return value
-        if isinstance(value, str):
-            return value.encode("utf-8", errors="surrogateescape")
-        # Defensive: any other type is treated as empty so we never
-        # crash on an unexpected runner return shape.
-        return b""
 
     stdout_bytes = _to_bytes(completed.stdout)
     stderr_bytes = _to_bytes(completed.stderr)

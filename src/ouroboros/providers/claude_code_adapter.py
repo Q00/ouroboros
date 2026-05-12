@@ -172,6 +172,28 @@ class ClaudeCodeAdapter:
             timeout_seconds=self._timeout,
         )
 
+    def with_strict_mcp_config(self) -> ClaudeCodeAdapter:
+        """Return an adapter clone with ``strict_mcp_config=True``.
+
+        Nested MCP question-generation paths must prevent the spawned
+        ``claude`` subprocess from booting plugin-provided MCP servers,
+        including ouroboros's own ``.mcp.json``.
+
+        Returns ``self`` when already strict (idempotent).
+        """
+        if self._strict_mcp_config:
+            return self
+        return ClaudeCodeAdapter(
+            permission_mode=self._permission_mode,
+            cli_path=self._cli_path,
+            cwd=self._cwd,
+            allowed_tools=self._allowed_tools,
+            max_turns=self._max_turns,
+            on_message=self._on_message,
+            timeout=self._timeout,
+            strict_mcp_config=True,
+        )
+
     def _resolve_cli_path(self, cli_path: str | Path | None) -> Path | None:
         """Resolve the CLI path from parameter, config, or environment variable.
 
@@ -715,6 +737,39 @@ class ClaudeCodeAdapter:
                         "required_options_field": "extra_args or strict_mcp_config",
                     },
                 )
+
+            # Pure-interviewer envelope: close every parent-context leak path
+            # the SDK exposes.  ``strict_mcp_config`` only blocks MCP-server
+            # discovery; skills / sub-agents / plugins / settings / hooks
+            # still inherit from the parent Claude Code session, so the
+            # spawned sub-CLI's system prompt grows tool descriptors that
+            # tempt the model into emitting a ``ToolUseBlock`` on the only
+            # allowed turn.  When ``max_turns=1`` that consumes the budget
+            # before any text streams and the CLI emits a ``{"type":
+            # "error"}`` control message which the SDK re-raises as a bare
+            # ``Exception`` before any ``ResultMessage`` reaches the
+            # adapter (see ``claude_agent_sdk/_internal/query.py``).  Each
+            # override is gated by SDK field presence so older releases
+            # that have not yet introduced the field stay no-op.  See
+            # https://github.com/Q00/ouroboros/issues/869.
+            _ISOLATION_OVERRIDES: tuple[tuple[str, object], ...] = (
+                ("setting_sources", []),
+                ("skills", []),
+                ("agents", []),
+                ("plugins", []),
+                ("hooks", {}),
+                ("include_hook_events", False),
+            )
+            applied_isolation: list[str] = []
+            for option_name, isolated_value in _ISOLATION_OVERRIDES:
+                if option_name in field_names:
+                    options_kwargs[option_name] = isolated_value
+                    applied_isolation.append(option_name)
+            log.debug(
+                "claude_code_adapter.strict_mcp_isolation_applied",
+                applied=applied_isolation,
+                skipped=sorted(name for name, _ in _ISOLATION_OVERRIDES if name not in field_names),
+            )
 
         # Pass model from CompletionConfig if specified
         # "default" is not a valid SDK model — treat it as None (use SDK default)
