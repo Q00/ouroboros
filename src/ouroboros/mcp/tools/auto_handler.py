@@ -520,6 +520,10 @@ class StartAutoHandler:
         runner_arguments = dict(arguments)
         if has_resume:
             auto_session_id = resume.strip()
+            try:
+                self._store.load(auto_session_id)
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
         else:
             try:
                 state = self._preallocate_state(

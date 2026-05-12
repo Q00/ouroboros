@@ -76,6 +76,24 @@ class TestRequiredArguments:
         result = await h.handle({"goal": "   ", "resume": "   "})
         assert result.is_err
 
+    @pytest.mark.asyncio
+    async def test_missing_resume_session_errors_before_enqueue(
+        self, event_store, tmp_path
+    ) -> None:
+        job_manager = MagicMock()
+        job_manager.start_job = AsyncMock()
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=AutoStore(tmp_path),
+        )
+
+        result = await h.handle({"resume": "auto_missing123"})
+
+        assert result.is_err
+        assert "Auto session not found" in result.error.message
+        job_manager.start_job.assert_not_called()
+
 
 class TestBackgroundJobPath:
     @pytest.mark.asyncio
