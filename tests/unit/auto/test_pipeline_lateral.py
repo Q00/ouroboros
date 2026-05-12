@@ -1495,6 +1495,113 @@ async def test_fingerprint_guard_sets_sticky_flag(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_transient_evaluator_failures_do_not_consume_round_budget(tmp_path) -> None:
+    """RFC #809 Phase 2.2b — the round counter advances ONLY when a real
+    QA result is in hand. Evaluator timeouts, exceptions, and transient
+    ``eval_result.error`` responses must not decrement the recovery
+    budget; otherwise a streak of infra-only failures would trip
+    ``round_budget`` and permanently block a session that has not
+    actually completed any QA round."""
+    state = _state_at_run_phase(tmp_path)
+    state.phase = AutoPhase.EVALUATE
+    state.evaluate_artifact = "x"
+    import hashlib
+
+    state.evaluate_artifact_hash = hashlib.sha256(b"x").hexdigest()
+
+    # Case 1: evaluator raises an exception → round NOT consumed
+    async def evaluator_raises(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        raise RuntimeError("simulated transient infra failure")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(),
+        complete_product=True,
+        evaluator=evaluator_raises,
+    )
+    starting_round = state.evaluate_round
+    await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text=None,
+        stop_reason=None,
+    )
+    assert state.evaluate_round == starting_round  # not consumed
+    assert state.recovery_guard_tripped is None  # no sticky tag for transient
+
+    # Case 2: evaluator returns ``error`` field → round NOT consumed
+    state.phase = AutoPhase.EVALUATE  # reset transition (mark_blocked moved to BLOCKED)
+    state.last_error = None
+
+    async def evaluator_transient_error(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False,
+            score=0.0,
+            verdict="fail",
+            error="adapter returned transient error",
+        )
+
+    pipeline2 = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(),
+        complete_product=True,
+        evaluator=evaluator_transient_error,
+    )
+    starting_round = state.evaluate_round
+    await pipeline2._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text=None,
+        stop_reason=None,
+    )
+    assert state.evaluate_round == starting_round
+    assert state.recovery_guard_tripped is None
+
+    # Case 3: evaluator returns a real verdict (even a failing one) →
+    # round IS consumed
+    state.phase = AutoPhase.EVALUATE
+    state.last_error = None
+
+    async def evaluator_real_fail(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False, score=0.4, verdict="fail", differences=("real fail",)
+        )
+
+    pipeline3 = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(),
+        complete_product=True,
+        evaluator=evaluator_real_fail,
+    )
+    starting_round = state.evaluate_round
+    await pipeline3._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text=None,
+        stop_reason=None,
+    )
+    assert state.evaluate_round == starting_round + 1  # consumed for real result
+
+
+@pytest.mark.asyncio
 async def test_fresh_artifact_resets_recovery_guard_state(tmp_path) -> None:
     """A new run output (different ``evaluate_artifact_hash``) clears the
     sticky guard tag AND the loop counters so the session can start over

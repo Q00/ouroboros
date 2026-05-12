@@ -1556,18 +1556,19 @@ class AutoPipeline:
         state.evaluate_artifact = artifact
         state.evaluate_artifact_hash = artifact_hash
 
-        # RFC #809 Phase 2.2b — recovery-loop round budget guard. The
-        # counter increments on every fresh evaluator call (cache hits
-        # skip this branch, so a resumed session does not re-spend a
-        # round). Past ``MAX_EVALUATE_ROUNDS`` the failure mode is
-        # structural rather than a transient grading miss; surface a
-        # BLOCKED with the three operator choices instead of spending
-        # another LLM budget cycle.
-        state.evaluate_round += 1
-        if state.evaluate_round > MAX_EVALUATE_ROUNDS:
+        # RFC #809 Phase 2.2b — recovery-loop round budget guard. Check
+        # BEFORE the evaluator call; the counter is incremented AFTER a
+        # real evaluation result is in hand (post ``eval_result.error``
+        # filter, below). This split matters because transient
+        # infrastructure failures (timeout, exception, transient adapter
+        # error) must NOT consume the finite recovery budget — otherwise
+        # a streak of infra-only failures would trip ``round_budget``
+        # and permanently block a session that has not actually
+        # completed any QA round.
+        if state.evaluate_round >= MAX_EVALUATE_ROUNDS:
             state.mark_blocked(
-                f"recovery loop: evaluate_round {state.evaluate_round} "
-                f"exceeded MAX_EVALUATE_ROUNDS={MAX_EVALUATE_ROUNDS}; "
+                f"recovery loop: evaluate_round budget exhausted "
+                f"(MAX_EVALUATE_ROUNDS={MAX_EVALUATE_ROUNDS}); "
                 f"{_RECOVERY_BLOCKED_CHOICES}",
                 tool_name="evaluator",
             )
@@ -1626,6 +1627,13 @@ class AutoPipeline:
             return self._result(
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
+
+        # RFC #809 Phase 2.2b — only consume a round once a real QA
+        # result is in hand. Transient evaluator failures (timeout,
+        # exception, ``eval_result.error``) returned above must not
+        # decrement the recovery budget; resuming through them is part
+        # of normal infrastructure recovery, not loop progress.
+        state.evaluate_round += 1
 
         state.last_qa_score = float(eval_result.score)
         state.last_qa_verdict = str(eval_result.verdict)
