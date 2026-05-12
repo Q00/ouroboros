@@ -27,6 +27,14 @@ from dataclasses import dataclass
 DEFAULT_TOTAL_CHARS: int = 12_000
 DEFAULT_PARENT_SUMMARY_RESERVE: int = 1_500
 _TRUNCATED_SUFFIX: str = "\n…[truncated by context governor]"
+
+# Fixed overheads that ComposedContext.render() introduces. The budget
+# must charge against these so the rendered output stays under the
+# advertised hard limit.
+_AC_HEADER: str = "## AC\n"
+_PARENT_HEADER: str = "## Parent context\n"
+_SIBLING_HEADER: str = "## Sibling status\n"
+_SECTION_JOINER: str = "\n\n"
 # Module-level singleton so callers can pass-through "use defaults" without
 # constructing the frozen dataclass in argument defaults (ruff B008).
 _DEFAULT_BUDGET: ContextBudget
@@ -135,34 +143,61 @@ def compose_context(
     """
     if budget is None:
         budget = _DEFAULT_BUDGET
-    used = len(ac.strip())
-    if used > budget.total_chars:
-        # The caller violated the precondition. Don't try to salvage —
-        # the orchestrator must split the AC further first.
+
+    ac_stripped = ac.strip()
+    parent_stripped = parent_summary.strip()
+
+    # The AC section is non-negotiable. Charge the header against the
+    # budget here so the rendered output (which always carries the
+    # "## AC\n" prefix) stays under total_chars.
+    ac_section_cost = len(_AC_HEADER) + len(ac_stripped)
+    if ac_section_cost > budget.total_chars:
         msg = (
             f"AC alone exceeds context budget "
-            f"(ac={used} chars > total={budget.total_chars}); "
-            "decompose further before dispatching."
+            f"(ac={len(ac_stripped)} chars + header={len(_AC_HEADER)} "
+            f"> total={budget.total_chars}); decompose further before "
+            "dispatching."
         )
         raise ValueError(msg)
+    used = ac_section_cost
 
+    # Sibling section bookkeeping: include the header + section-joiner
+    # cost only if at least one sibling line lands in the output.
     sibling_lines: list[str] = []
+    sibling_overhead = len(_SIBLING_HEADER) + len(_SECTION_JOINER)
+    sibling_inner = 0  # bytes inside the section (lines + newline joins).
     sibling_ceiling = budget.total_chars - budget.parent_summary_reserve
     for sib in siblings:
         line = sib.to_line()
-        cost = len(line) + 1  # +1 for the newline join
-        if used + cost > sibling_ceiling:
+        # `\n` joiner between sibling lines, only after the first.
+        joiner_cost = 1 if sibling_lines else 0
+        prospective_section = sibling_overhead + sibling_inner + joiner_cost + len(line)
+        if used + prospective_section > sibling_ceiling:
             break
+        sibling_inner += joiner_cost + len(line)
         sibling_lines.append(line)
-        used += cost
+    if sibling_lines:
+        used += sibling_overhead + sibling_inner
 
-    remaining = budget.total_chars - used
-    summary, truncated = _truncate(parent_summary.strip(), max(0, remaining))
+    # Parent summary section: header + joiner only count if the summary
+    # actually lands. Without enough room for the header itself, the
+    # summary is dropped entirely and the flag is set so callers can
+    # log it.
+    parent_overhead = len(_PARENT_HEADER) + len(_SECTION_JOINER)
+    remaining_for_parent = budget.total_chars - used
+    if parent_stripped and remaining_for_parent > parent_overhead:
+        summary_budget = remaining_for_parent - parent_overhead
+        summary, truncated = _truncate(parent_stripped, summary_budget)
+    elif parent_stripped:
+        # Not enough headroom even for the parent header — drop it.
+        summary, truncated = "", True
+    else:
+        summary, truncated = "", False
 
     return ComposedContext(
         parent_summary=summary,
         sibling_lines=tuple(sibling_lines),
-        ac=ac.strip(),
+        ac=ac_stripped,
         truncated=truncated,
     )
 

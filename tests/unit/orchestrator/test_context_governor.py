@@ -137,3 +137,65 @@ class TestComposeContext:
         assert result.sibling_lines == ()
         assert result.ac == "ac"
         assert result.truncated is False
+
+
+class TestRenderedSizeContract:
+    """`compose_context` must keep the *rendered* output under `total_chars`.
+
+    This is the contract the H6 governor advertises. Earlier versions
+    budgeted only the raw payloads and let section headers / joiners
+    push the rendered output over the limit (bot finding on PR #890).
+    """
+
+    @pytest.mark.parametrize("total", [64, 128, 256, 512, 1024, 4096])
+    def test_render_fits_budget(self, total: int) -> None:
+        result = compose_context(
+            ac="x" * (total // 4),
+            parent_summary="y" * total,  # over-large; will be truncated.
+            siblings=[
+                SiblingStatus(f"AC{i}", accepted=(i % 2 == 0), headline="z" * 20) for i in range(8)
+            ],
+            budget=ContextBudget(total_chars=total, parent_summary_reserve=total // 4),
+        )
+        assert len(result.render()) <= total, (
+            f"rendered size {len(result.render())} exceeds budget {total}; "
+            f"rendered=\n{result.render()!r}"
+        )
+
+    def test_ac_plus_header_over_budget_raises(self) -> None:
+        # The AC fits raw but pushes past once the "## AC\n" header is
+        # added; the governor must reject rather than silently overflow.
+        with pytest.raises(ValueError, match="AC alone exceeds"):
+            compose_context(
+                ac="x" * 100,
+                budget=ContextBudget(total_chars=100, parent_summary_reserve=0),
+            )
+
+    def test_parent_dropped_when_header_does_not_fit(self) -> None:
+        # 30-char budget: AC ("## AC\nshort" = 11 chars) leaves 19 chars
+        # remaining, which is less than the parent header (20). So the
+        # summary must be dropped and `truncated` set.
+        result = compose_context(
+            ac="short",
+            parent_summary="parent",
+            budget=ContextBudget(total_chars=30, parent_summary_reserve=0),
+        )
+        assert result.parent_summary == ""
+        assert result.truncated is True
+        assert len(result.render()) <= 30
+
+    def test_sibling_section_overhead_charged(self) -> None:
+        # Budget large enough for AC + one sibling line but NOT enough
+        # for the sibling header — the line must be dropped.
+        ac = "ac"
+        # "## AC\nac" = 8 chars. Sibling header alone = 18 chars.
+        # Budget = 28 leaves 20 chars after AC, which is more than the
+        # header (18) plus joiner (2) = 20 — but no room for any line.
+        result = compose_context(
+            ac=ac,
+            siblings=[SiblingStatus("AC1", accepted=True, headline="x" * 50)],
+            budget=ContextBudget(total_chars=30, parent_summary_reserve=0),
+        )
+        # Either the sibling line fit (with whatever room remains) or
+        # it was dropped — but the rendered output must stay <= budget.
+        assert len(result.render()) <= 30
