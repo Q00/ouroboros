@@ -1657,38 +1657,35 @@ def create_ouroboros_server(
         if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
         else ""
     )
+    start_execute_seed = StartExecuteSeedHandler(
+        execute_handler=execute_seed,
+        event_store=event_store,
+        job_manager=job_manager,
+        agent_runtime_backend=resolved_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    interview = InterviewHandler(
+        event_store=event_store,
+        llm_adapter=llm_adapter,
+        llm_backend=llm_backend,
+        agent_runtime_backend=resolved_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    generate_seed = GenerateSeedHandler(
+        event_store=event_store,
+        llm_adapter=llm_adapter,
+        llm_backend=llm_backend,
+        agent_runtime_backend=resolved_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
     tool_handlers = [
         execute_seed,
-        StartExecuteSeedHandler(
-            execute_handler=execute_seed,
-            event_store=event_store,
-            job_manager=job_manager,
-            agent_runtime_backend=resolved_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
+        start_execute_seed,
         AutoHandler(
-            interview_handler=InterviewHandler(
-                event_store=event_store,
-                llm_adapter=llm_adapter,
-                llm_backend=llm_backend,
-                agent_runtime_backend=resolved_runtime_backend,
-                opencode_mode=opencode_mode,
-            ),
-            generate_seed_handler=GenerateSeedHandler(
-                event_store=event_store,
-                llm_adapter=llm_adapter,
-                llm_backend=llm_backend,
-                agent_runtime_backend=resolved_runtime_backend,
-                opencode_mode=opencode_mode,
-            ),
-            start_execute_seed_handler=StartExecuteSeedHandler(
-                execute_handler=execute_seed,
-                event_store=event_store,
-                job_manager=job_manager,
-                agent_runtime_backend=resolved_runtime_backend,
-                opencode_mode=opencode_mode,
-            ),
+            interview_handler=interview,
+            generate_seed_handler=generate_seed,
+            start_execute_seed_handler=start_execute_seed,
             llm_backend=llm_backend,
             agent_runtime_backend=resolved_runtime_backend,
             opencode_mode=opencode_mode,
@@ -1696,6 +1693,9 @@ def create_ouroboros_server(
             mcp_tool_prefix=auto_mcp_prefix,
         ),
         StartAutoHandler(
+            interview_handler=interview,
+            generate_seed_handler=generate_seed,
+            start_execute_seed_handler=start_execute_seed,
             event_store=event_store,
             job_manager=job_manager,
             llm_backend=llm_backend,

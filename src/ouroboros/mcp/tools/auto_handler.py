@@ -166,7 +166,7 @@ class AutoHandler:
                         "(e.g. runtime_context, constraints, non_goals). The Driver "
                         "tags matching answers with [from-auto][user_preference] in the "
                         "ledger. Keys must be valid ledger section names; values must "
-                        "be non-empty strings."
+                        "be non-empty strings or non-empty lists of strings/numbers."
                     ),
                     required=False,
                 ),
@@ -415,16 +415,14 @@ class StartAutoHandler:
     via ``ouroboros_job_status`` / ``ouroboros_job_wait`` /
     ``ouroboros_job_result``.
 
-    Design choice (JobLinks): the ``auto_session_id`` is only minted
-    inside :meth:`AutoPipeline.run`, so it is not pre-known at
-    ``start_job`` time. We enqueue with ``JobLinks(session_id=None)`` and
-    surface the eventual ``auto_session_id`` via the underlying
-    ``AutoHandler`` MCP result (readable through ``ouroboros_job_result``).
-    This keeps the diff minimal and avoids leaking AutoPipeline internals
-    into the start path. Plugin-mode is not short-circuited here — the
-    inner ``AutoHandler._run`` already routes plugin dispatch correctly
-    for its sub-handlers (Ralph etc.), so the background job inherits
-    that behavior transparently.
+    For new sessions, this handler pre-allocates and persists an
+    ``AutoPipelineState`` before enqueuing the job, then runs the inner
+    ``AutoHandler`` through the normal resume path. That makes the
+    ``auto_session_id`` immediately available for recovery even if the MCP
+    server exits before the caller fetches ``ouroboros_job_result``.
+    Plugin-mode is not short-circuited here — the inner ``AutoHandler._run``
+    already routes plugin dispatch correctly for its sub-handlers (Ralph
+    etc.), so the background job inherits that behavior transparently.
     """
 
     interview_handler: InterviewHandler | None = field(default=None, repr=False)
@@ -442,11 +440,12 @@ class StartAutoHandler:
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
         self._job_manager = self.job_manager or JobManager(self._event_store)
+        self._store = self.store or AutoStore()
         self._inner_auto = AutoHandler(
             interview_handler=self.interview_handler,
             generate_seed_handler=self.generate_seed_handler,
             start_execute_seed_handler=self.start_execute_seed_handler,
-            store=self.store,
+            store=self._store,
             llm_backend=self.llm_backend,
             agent_runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
@@ -461,9 +460,9 @@ class StartAutoHandler:
             name="ouroboros_start_auto",
             description=(
                 "Start ooo auto in the background and return auto_session_id + "
-                "job_id immediately. Poll with ouroboros_job_status / "
-                "ouroboros_job_wait and read final state via "
-                "ouroboros_job_result."
+                "job_id immediately. Resume with the returned auto_session_id; "
+                "poll with ouroboros_job_status / ouroboros_job_wait and read "
+                "final state via ouroboros_job_result."
             ),
             parameters=inner_def.parameters,
         )
@@ -487,14 +486,60 @@ class StartAutoHandler:
                     tool_name="ouroboros_start_auto",
                 )
             )
+        try:
+            attach_requested = any(
+                _optional_text_arg(arguments, field_name)
+                for field_name in ("attach_execution", "attach_job", "attach_session")
+            )
+            requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
+        if attach_requested and not has_resume:
+            return Result.err(
+                MCPToolError(
+                    "attach_* arguments require resume",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+        if bool(arguments.get("reconcile_run", False)) and not has_resume:
+            return Result.err(
+                MCPToolError(
+                    "reconcile_run requires resume",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+        if has_resume and requested_pipeline_timeout is not None:
+            return Result.err(
+                MCPToolError(
+                    "pipeline_timeout_seconds cannot be changed on resume; the "
+                    "original deadline is preserved across process restarts",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
+
+        runner_arguments = dict(arguments)
+        if has_resume:
+            auto_session_id = resume.strip()
+        else:
+            try:
+                state = self._preallocate_state(
+                    arguments,
+                    goal.strip(),  # type: ignore[union-attr]
+                    pipeline_timeout_seconds=requested_pipeline_timeout,
+                )
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
+            auto_session_id = state.auto_session_id
+            runner_arguments["resume"] = auto_session_id
+            runner_arguments.pop("pipeline_timeout_seconds", None)
 
         async def _runner() -> MCPToolResult:
-            result = await self._inner_auto.handle(arguments)
+            result = await self._inner_auto.handle(runner_arguments)
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value
 
-        initial_label = resume.strip() if has_resume else goal.strip()[:80]  # type: ignore[union-attr]
+        initial_label = auto_session_id if has_resume else goal.strip()[:80]  # type: ignore[union-attr]
         snapshot = await self._job_manager.start_job(
             job_type="auto",
             initial_message=f"Queued ooo auto for {initial_label}",
@@ -503,11 +548,12 @@ class StartAutoHandler:
                 intent="auto",
                 work_fn=lambda _handle: _runner(),
             ),
-            links=JobLinks(session_id=None),
+            links=JobLinks(session_id=auto_session_id),
         )
 
         text = (
             f"Started background auto session. job_id={snapshot.job_id}\n\n"
+            f"Auto session ID: {auto_session_id}\n\n"
             "Poll with ouroboros_job_status / ouroboros_job_wait."
         )
         return Result.ok(
@@ -516,11 +562,40 @@ class StartAutoHandler:
                 is_error=False,
                 meta={
                     "job_id": snapshot.job_id,
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
                     "status": "queued",
                     "dispatch_mode": "job",
                 },
             )
         )
+
+    def _preallocate_state(
+        self,
+        arguments: dict[str, Any],
+        goal: str,
+        *,
+        pipeline_timeout_seconds: float | None,
+    ) -> AutoPipelineState:
+        """Persist a new auto session before the background job starts."""
+        cwd = str(_resolve_cwd(arguments.get("cwd")))
+        state = AutoPipelineState(goal=goal, cwd=cwd)
+        state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 12)
+        state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
+        state.skip_run = bool(arguments.get("skip_run", False))
+        state.complete_product = bool(arguments.get("complete_product", False))
+        if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
+            state.user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
+        if pipeline_timeout_seconds is not None:
+            state.pipeline_timeout_seconds = pipeline_timeout_seconds
+        runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
+        opencode_mode = _resolved_opencode_mode(runtime_backend, self.opencode_mode)
+        state.runtime_backend = runtime_backend
+        state.opencode_mode = opencode_mode
+        if opencode_mode is not None:
+            state.ralph_opencode_mode = opencode_mode
+        self._store.save(state)
+        return state
 
 
 def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
