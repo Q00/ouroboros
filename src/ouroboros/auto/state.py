@@ -1066,8 +1066,7 @@ class AutoPipelineState:
             msg = "evaluate_round must be a non-negative integer"
             raise ValueError(msg)
         if not isinstance(self.failure_fingerprints, list) or any(
-            not isinstance(item, str) or not item.strip()
-            for item in self.failure_fingerprints
+            not isinstance(item, str) or not item.strip() for item in self.failure_fingerprints
         ):
             msg = "failure_fingerprints must be a list of non-empty strings"
             raise ValueError(msg)

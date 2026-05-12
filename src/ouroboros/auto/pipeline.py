@@ -1673,17 +1673,15 @@ class AutoPipeline:
             )
             failure_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
             same_text = bool(
-                state.failure_fingerprints
-                and state.failure_fingerprints[-1] == failure_fingerprint
+                state.failure_fingerprints and state.failure_fingerprints[-1] == failure_fingerprint
             )
             # ``previous_qa_score`` is the score from the PRIOR round
             # captured before this round overwrote ``state.last_qa_score``.
             # First-ever round has ``previous_qa_score is None`` and
             # cannot trip the guard.
-            score_did_not_advance = (
-                previous_qa_score is not None
-                and float(eval_result.score) <= float(previous_qa_score)
-            )
+            score_did_not_advance = previous_qa_score is not None and float(
+                eval_result.score
+            ) <= float(previous_qa_score)
             if same_text and score_did_not_advance:
                 state.mark_blocked(
                     f"recovery loop: same QA-fail fingerprint twice "

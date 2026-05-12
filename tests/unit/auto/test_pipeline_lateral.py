@@ -1531,9 +1531,7 @@ async def test_fingerprint_guard_sets_sticky_flag(tmp_path) -> None:
     state.last_qa_score = 0.3
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
-        return EvaluateResult(
-            passed=False, score=0.3, verdict="fail", differences=("frozen fail",)
-        )
+        return EvaluateResult(passed=False, score=0.3, verdict="fail", differences=("frozen fail",))
 
     pipeline = AutoPipeline(
         _StubInterviewDriver(),
@@ -1631,9 +1629,7 @@ async def test_transient_evaluator_failures_do_not_consume_round_budget(tmp_path
     state.last_error = None
 
     async def evaluator_real_fail(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
-        return EvaluateResult(
-            passed=False, score=0.4, verdict="fail", differences=("real fail",)
-        )
+        return EvaluateResult(passed=False, score=0.4, verdict="fail", differences=("real fail",))
 
     pipeline3 = AutoPipeline(
         _StubInterviewDriver(),
@@ -1754,9 +1750,7 @@ async def test_personas_exhausted_guard_sets_sticky_flag(tmp_path) -> None:
     ]
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
-        return EvaluateResult(
-            passed=False, score=0.3, verdict="fail", differences=("any",)
-        )
+        return EvaluateResult(passed=False, score=0.3, verdict="fail", differences=("any",))
 
     async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001 # pragma: no cover
         return LateralResult(persona="hacker", approach_summary="X", text="Y")
