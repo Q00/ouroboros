@@ -23,6 +23,10 @@ from ouroboros.auto.adapters import (
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+
+# Import the built-in profile package once so CLI domain activation sees
+# production registrations, not just profiles manually loaded by tests.
+import ouroboros.auto.profiles  # noqa: F401,E402
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.provenance import resolve_provenance
 from ouroboros.auto.resume_render import render_resume_lines
