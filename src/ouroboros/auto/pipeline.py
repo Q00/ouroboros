@@ -1417,6 +1417,31 @@ class AutoPipeline:
         """
         assert self.evaluator is not None  # noqa: S101 — guarded by caller
 
+        # RFC #809 Phase 2.2b — sticky guard check. If a previous round
+        # exhausted a recovery guard (round budget, duplicate fingerprint,
+        # or persona-once chain), this resume MUST NOT re-enter the
+        # cache-fast-path or fall through to ``_finalize_evaluate``: doing
+        # so would honour a cached ``passed=False`` verdict and spend
+        # another lateral persona slot for a surface that was already
+        # declared exhausted. Re-mark the session as BLOCKED (the
+        # ``--resume`` transition above flipped the phase back to
+        # EVALUATE for re-entry; flip it back) and surface the original
+        # exhaustion reason verbatim.
+        if state.recovery_guard_tripped is not None:
+            state.mark_blocked(
+                state.last_error
+                or f"recovery guard '{state.recovery_guard_tripped}' already exhausted",
+                tool_name=state.last_tool_name or "evaluator",
+            )
+            self._save(state)
+            return self._result(
+                state,
+                ledger,
+                review=review,
+                blocker=state.last_error,
+                run_subagent=run_subagent,
+            )
+
         # Resolve the artifact:
         # 1. Fresh call from the Ralph terminal path → use ``ralph_result_text``
         #    (``is not None`` so an empty-but-valid artifact still grades)
@@ -1522,6 +1547,7 @@ class AutoPipeline:
                 f"{_RECOVERY_BLOCKED_CHOICES}",
                 tool_name="evaluator",
             )
+            state.recovery_guard_tripped = "round_budget"
             self._save(state)
             return self._result(
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
@@ -1606,6 +1632,7 @@ class AutoPipeline:
                     f"({failure_fingerprint}); {_RECOVERY_BLOCKED_CHOICES}",
                     tool_name="evaluator",
                 )
+                state.recovery_guard_tripped = "duplicate_fingerprint"
                 self._save(state)
                 return self._result(
                     state,
@@ -1738,6 +1765,28 @@ class AutoPipeline:
 
         assert self.lateral_thinker is not None  # noqa: S101 — guarded by caller
 
+        # RFC #809 Phase 2.2b — sticky guard check (mirrors ``_run_evaluate``).
+        # If a previous round exhausted any recovery guard, a resume that
+        # lands directly in ``UNSTUCK_LATERAL`` (via
+        # ``_recoverable_phase_for_tool("lateral_thinker")``) must not
+        # spend another persona slot or hit the lateral cache; re-mark
+        # the session BLOCKED and surface the original exhaustion
+        # blocker verbatim instead.
+        if state.recovery_guard_tripped is not None:
+            state.mark_blocked(
+                state.last_error
+                or f"recovery guard '{state.recovery_guard_tripped}' already exhausted",
+                tool_name=state.last_tool_name or "lateral_thinker",
+            )
+            self._save(state)
+            return self._result(
+                state,
+                ledger,
+                review=review,
+                blocker=state.last_error,
+                run_subagent=run_subagent,
+            )
+
         # RFC #809 Phase 2.2b — exclude personas already routed in this
         # session so a resumed --resume picks a different angle rather
         # than re-emitting the same advice. Each persisted string is a
@@ -1760,6 +1809,7 @@ class AutoPipeline:
                 f"{_RECOVERY_BLOCKED_CHOICES}",
                 tool_name="lateral_thinker",
             )
+            state.recovery_guard_tripped = "personas_exhausted"
             self._save(state)
             return self._result(
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent

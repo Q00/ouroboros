@@ -453,6 +453,19 @@ class AutoPipelineState:
     evaluate_round: int = 0
     failure_fingerprints: list[str] = field(default_factory=list)
     personas_invoked: list[str] = field(default_factory=list)
+    # RFC #809 Phase 2.2b — sticky "guard tripped" flag. Set to a short
+    # tag identifying *which* recovery guard exhausted the budget the
+    # first time one of them blocked the pipeline (one of
+    # ``"round_budget"``, ``"duplicate_fingerprint"``, ``"personas_exhausted"``).
+    # ``_run_evaluate`` and ``_run_lateral`` both inspect this on entry
+    # so a ``--resume`` after a guard-driven BLOCKED does NOT re-enter
+    # the cache-fast-path or spend another persona slot — the surface
+    # had been declared exhausted, and silently un-exhausting it would
+    # undermine the guard contract. Cleared only on a successful
+    # forward transition out of the recovery loop (e.g. COMPLETE), so a
+    # fresh artifact reaching EVALUATE through a deliberate operator
+    # workflow can start over with a clean budget.
+    recovery_guard_tripped: str | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -787,6 +800,7 @@ class AutoPipelineState:
         payload.setdefault("evaluate_round", 0)
         payload.setdefault("failure_fingerprints", [])
         payload.setdefault("personas_invoked", [])
+        payload.setdefault("recovery_guard_tripped", None)
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset

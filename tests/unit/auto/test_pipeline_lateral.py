@@ -1314,3 +1314,215 @@ async def test_recovery_blocked_message_includes_operator_choices(tmp_path) -> N
     # must NOT appear — late-phase resume ignores on-disk seed edits.
     assert "edited seed" not in msg
     assert "relax AC" not in msg
+
+
+# ---------------------------------------------------------------------------
+# RFC #809 Phase 2.2b — sticky guard semantics (bot review #3 BLOCKING)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sticky_guard_prevents_evaluate_cache_fastpath_on_resume(tmp_path) -> None:
+    """When a recovery guard has tripped, a resume that re-enters
+    ``_run_evaluate`` must NOT honor the cached failing verdict and fall
+    through to ``_finalize_evaluate`` (which would transition to
+    ``UNSTUCK_LATERAL`` and spend another persona slot). The cache
+    fast-path is bypassed and the original exhaustion blocker is
+    surfaced verbatim."""
+    state = _state_at_run_phase(tmp_path)
+    state.phase = AutoPhase.EVALUATE
+    state.recovery_guard_tripped = "duplicate_fingerprint"
+    state.last_error = "recovery loop: same QA-fail fingerprint twice (abc); next: ..."
+    # Plant a cached failing verdict that the legacy fast-path would honour
+    state.evaluate_artifact = "stale artifact"
+    import hashlib
+
+    state.evaluate_artifact_hash = hashlib.sha256(b"stale artifact").hexdigest()
+    state.last_qa_passed = False
+    state.last_qa_score = 0.3
+    state.last_qa_verdict = "fail"
+    state.last_qa_differences = ["frozen"]
+
+    eval_calls = 0
+    lateral_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001 # pragma: no cover
+        nonlocal eval_calls
+        eval_calls += 1
+        return EvaluateResult(passed=True, score=0.99, verdict="pass")
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001 # pragma: no cover
+        nonlocal lateral_calls
+        lateral_calls += 1
+        return LateralResult(persona="hacker", approach_summary="X", text="Y")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text=None,
+        stop_reason=None,
+    )
+
+    # Neither the evaluator NOR the lateral handler was invoked: the
+    # sticky guard short-circuited everything.
+    assert eval_calls == 0
+    assert lateral_calls == 0
+    assert result.status == "blocked"
+    assert "fingerprint" in (state.last_error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_sticky_guard_prevents_lateral_cache_fastpath_on_resume(tmp_path) -> None:
+    """Resume that lands directly in ``UNSTUCK_LATERAL`` (via
+    ``_recoverable_phase_for_tool("lateral_thinker")``) also bypasses
+    the lateral cache when a guard has tripped — the persona-once
+    contract cannot be repaired by spending another slot."""
+    state = _state_at_run_phase(tmp_path)
+    state.phase = AutoPhase.UNSTUCK_LATERAL
+    state.recovery_guard_tripped = "personas_exhausted"
+    state.last_error = "recovery loop: all lateral personas exhausted; next: ..."
+
+    lateral_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001 # pragma: no cover
+        return EvaluateResult(passed=True, score=1.0, verdict="pass")
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001 # pragma: no cover
+        nonlocal lateral_calls
+        lateral_calls += 1
+        return LateralResult(persona="hacker", approach_summary="X", text="Y")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline._run_lateral(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        qa_score=0.3,
+        qa_verdict="fail",
+        qa_differences=("any",),
+        qa_suggestions=(),
+        cache_suffix="",
+        review=None,
+        run_subagent=None,
+    )
+
+    assert lateral_calls == 0
+    assert result.status == "blocked"
+    assert "personas exhausted" in (state.last_error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_round_budget_guard_sets_sticky_flag(tmp_path) -> None:
+    """The round-budget guard persists ``recovery_guard_tripped`` so a
+    subsequent resume cannot un-exhaust the loop by waiting out the
+    counter."""
+    state = _state_at_run_phase(tmp_path)
+    from ouroboros.auto.state import MAX_EVALUATE_ROUNDS
+
+    state.evaluate_round = MAX_EVALUATE_ROUNDS
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(passed=True, score=1.0, verdict="pass")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    await pipeline.run(state)
+
+    assert state.recovery_guard_tripped == "round_budget"
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_guard_sets_sticky_flag(tmp_path) -> None:
+    """Same-fingerprint-twice guard also persists the sticky flag."""
+    state = _state_at_run_phase(tmp_path)
+    import hashlib
+
+    fp = hashlib.sha256(b"frozen fail::").hexdigest()[:16]
+    state.failure_fingerprints = [fp]
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False, score=0.3, verdict="fail", differences=("frozen fail",)
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    await pipeline.run(state)
+
+    assert state.recovery_guard_tripped == "duplicate_fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_personas_exhausted_guard_sets_sticky_flag(tmp_path) -> None:
+    """Persona-chain-exhausted guard also persists the sticky flag."""
+    state = _state_at_run_phase(tmp_path)
+    state.personas_invoked = [
+        ThinkingPersona.HACKER.value,
+        ThinkingPersona.ARCHITECT.value,
+        ThinkingPersona.RESEARCHER.value,
+        ThinkingPersona.SIMPLIFIER.value,
+        ThinkingPersona.CONTRARIAN.value,
+    ]
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False, score=0.3, verdict="fail", differences=("any",)
+        )
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001 # pragma: no cover
+        return LateralResult(persona="hacker", approach_summary="X", text="Y")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    await pipeline.run(state)
+
+    assert state.recovery_guard_tripped == "personas_exhausted"
