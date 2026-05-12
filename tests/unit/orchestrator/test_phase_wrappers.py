@@ -13,6 +13,7 @@ from ouroboros.orchestrator.phase_wrappers import (
 from ouroboros.orchestrator.profile_loader import (
     EvidenceSchema,
     ExecutionProfile,
+    VerifierCapability,
     load_profile,
 )
 
@@ -126,6 +127,7 @@ class TestPostBlock:
             axis="a",
             min_unit="m",
             verifier_focus="v",
+            verifier_capability=VerifierCapability.READ_ONLY_DISCOVERY,
             evidence_schema=EvidenceSchema(),
         )
         block = build_post_block(bare)
