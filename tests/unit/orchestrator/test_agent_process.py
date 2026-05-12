@@ -2,7 +2,7 @@
 
 Issue: #518 — slice 1 of M6. Pins the cooperative lifecycle, the
 directive emission shape (target_type=agent_process), and the
-deferred-implementation surface (replay raises NotImplementedError).
+durable replay behavior for empty, partial, in-flight, and completed journals.
 """
 
 from __future__ import annotations
@@ -33,6 +33,61 @@ class _FakeEventStore:
 
     async def append(self, event: BaseEvent) -> None:
         self.appended.append(event)
+
+    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:  # noqa: ARG002
+        return list(self.appended)
+
+
+class _FailingAppendReplayStore:
+    async def append(self, event: BaseEvent) -> None:  # noqa: ARG002
+        raise RuntimeError("simulated append failure")
+
+    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:  # noqa: ARG002
+        return []
+
+
+class _DropAfterFirstAppendReplayStore:
+    def __init__(self) -> None:
+        self.appended: list[BaseEvent] = []
+
+    async def append(self, event: BaseEvent) -> None:
+        if self.appended:
+            raise RuntimeError("simulated later append failure")
+        self.appended.append(event)
+
+    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:  # noqa: ARG002
+        return list(self.appended)
+
+
+class _BlockingSecondAppendStore:
+    def __init__(self) -> None:
+        self.appended: list[BaseEvent] = []
+        self.second_append_started = asyncio.Event()
+        self.release_second_append = asyncio.Event()
+
+    async def append(self, event: BaseEvent) -> None:
+        if self.appended:
+            self.second_append_started.set()
+            await self.release_second_append.wait()
+        self.appended.append(event)
+
+    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:  # noqa: ARG002
+        return list(self.appended)
+
+
+class _DropSecondAppendReplayStore:
+    def __init__(self) -> None:
+        self.appended: list[BaseEvent] = []
+        self.append_attempts = 0
+
+    async def append(self, event: BaseEvent) -> None:
+        self.append_attempts += 1
+        if self.append_attempts == 2:
+            raise RuntimeError("simulated second append failure")
+        self.appended.append(event)
+
+    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:  # noqa: ARG002
+        return list(self.appended)
 
 
 class _BlockingWaitEventStore(_FakeEventStore):
@@ -66,6 +121,27 @@ async def _wait_for_status(handle, status: AgentProcessStatus) -> None:
     raise AssertionError(f"status did not become {status}")
 
 
+async def _wait_for_projected_status(
+    store: EventStore, process_id: str, status: AgentProcessStatus
+) -> None:
+    for _ in range(100):
+        snapshot = project_agent_process_snapshot(
+            await store.replay("agent_process", process_id), process_id=process_id
+        )
+        if snapshot is not None and snapshot.status is status:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"persisted status did not become {status}")
+
+
+async def _wait_for_no_pending_emit(handle) -> None:
+    for _ in range(100):
+        if not handle._pending_emit_statuses:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("pending lifecycle emit did not finish")
+
+
 @pytest.mark.asyncio
 async def test_spawn_initializes_concrete_event_store_before_emitting() -> None:
     store = EventStore("sqlite+aiosqlite:///:memory:")
@@ -77,6 +153,7 @@ async def test_spawn_initializes_concrete_event_store_before_emitting() -> None:
     try:
         handle = await process.spawn(intent="ralph", work_fn=work)
         await handle.wait_until_complete(timeout=1.0)
+        await _wait_for_no_pending_emit(handle)
         events = await store.replay("agent_process", handle.process_id)
     finally:
         await store.close()
@@ -334,7 +411,7 @@ async def test_failed_work_unblocks_waiters_when_terminal_directive_emit_fails()
 
 
 @pytest.mark.asyncio
-async def test_replay_is_not_yet_implemented() -> None:
+async def test_replay_without_event_store_raises_runtime_error() -> None:
     process = AgentProcess(event_store=None)
 
     async def _trivial_work(handle) -> None:  # noqa: ARG001 — handle unused on trivial work
@@ -343,8 +420,278 @@ async def test_replay_is_not_yet_implemented() -> None:
     handle = await process.spawn(intent="ralph", work_fn=_trivial_work)
     await handle.wait_until_complete(timeout=1.0)
 
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(RuntimeError, match="requires an event store"):
         await handle.replay()
+
+
+@pytest.mark.asyncio
+async def test_replay_with_empty_persisted_lifecycle_raises_runtime_error() -> None:
+    process = AgentProcess(event_store=_FailingAppendReplayStore())
+
+    async def work(handle):  # noqa: ARG001 — handle unused on trivial work
+        return None
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await handle.wait_until_complete(timeout=1.0)
+
+    assert handle.status() is AgentProcessStatus.COMPLETED
+    with pytest.raises(RuntimeError, match="no persisted lifecycle events"):
+        await handle.replay()
+
+
+@pytest.mark.asyncio
+async def test_replay_during_in_flight_pause_append_uses_last_durable_status() -> None:
+    store = _BlockingSecondAppendStore()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await handle.pause()
+    await asyncio.wait_for(store.second_append_started.wait(), timeout=1.0)
+
+    assert handle.status() is AgentProcessStatus.PAUSED
+    snapshot = await handle.replay()
+    assert snapshot.status is AgentProcessStatus.RUNNING
+
+    store.release_second_append.set()
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    await _wait_for_no_pending_emit(handle)
+    snapshot = await handle.replay()
+    assert snapshot.status is AgentProcessStatus.PAUSED
+
+    await handle.cancel()
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_directives_serialize_when_pause_append_is_slow() -> None:
+    store = _BlockingSecondAppendStore()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await handle.pause()
+    await asyncio.wait_for(store.second_append_started.wait(), timeout=1.0)
+
+    resume_task = asyncio.create_task(handle.resume())
+    await asyncio.sleep(0)
+    snapshot = await handle.replay()
+    assert snapshot.status is AgentProcessStatus.RUNNING
+
+    store.release_second_append.set()
+    await asyncio.wait_for(resume_task, timeout=1.0)
+    await _wait_for_no_pending_emit(handle)
+
+    snapshot = await handle.replay()
+    assert snapshot.status is AgentProcessStatus.RUNNING
+    assert _directives(store.appended)[:3] == ["continue", "wait", "continue"]
+
+    await handle.cancel()
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_replay_detects_lost_intermediate_pause_when_final_status_matches() -> None:
+    store = _DropSecondAppendReplayStore()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await handle.pause()
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    await handle.resume()
+    await _wait_for_status(handle, AgentProcessStatus.RUNNING)
+    await _wait_for_no_pending_emit(handle)
+
+    snapshot = project_agent_process_snapshot(store.appended, process_id=handle.process_id)
+    assert snapshot is not None
+    assert snapshot.status is AgentProcessStatus.RUNNING
+    with pytest.raises(RuntimeError, match="partial lifecycle history"):
+        await handle.replay()
+
+    await handle.cancel()
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_terminal_status_does_not_wait_for_in_flight_append() -> None:
+    store = _BlockingSecondAppendStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):  # noqa: ARG001 — handle unused on trivial work
+        return None
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(store.second_append_started.wait(), timeout=1.0)
+
+    final = await handle.wait_until_complete(timeout=1.0)
+    assert final is AgentProcessStatus.COMPLETED
+    snapshot = await handle.replay()
+    assert snapshot.status is AgentProcessStatus.RUNNING
+
+    store.release_second_append.set()
+
+
+@pytest.mark.asyncio
+async def test_wedged_terminal_append_finishes_work_task_and_replay_fails_closed() -> None:
+    store = _BlockingSecondAppendStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):  # noqa: ARG001 — handle unused on trivial work
+        return None
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(store.second_append_started.wait(), timeout=1.0)
+
+    final = await handle.wait_until_complete(timeout=1.0)
+    assert final is AgentProcessStatus.COMPLETED
+    assert handle._work_task is not None
+    await asyncio.wait_for(handle._work_task, timeout=2.0)
+
+    with pytest.raises(RuntimeError, match="partial lifecycle history"):
+        await handle.replay()
+
+
+@pytest.mark.asyncio
+async def test_replay_with_lost_terminal_directive_raises_runtime_error() -> None:
+    process = AgentProcess(event_store=_DropAfterFirstAppendReplayStore())
+
+    async def work(handle):  # noqa: ARG001 — handle unused on trivial work
+        return None
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await handle.wait_until_complete(timeout=1.0)
+
+    assert handle.status() is AgentProcessStatus.COMPLETED
+    with pytest.raises(RuntimeError, match="(stale lifecycle state|partial lifecycle history)"):
+        await handle.replay()
+
+
+@pytest.mark.asyncio
+async def test_replay_with_lost_pause_directive_raises_runtime_error() -> None:
+    process = AgentProcess(event_store=_DropAfterFirstAppendReplayStore())
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await handle.pause()
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    with pytest.raises(RuntimeError, match="(stale lifecycle state|partial lifecycle history)"):
+        await handle.replay()
+
+    await handle.cancel()
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_replay_after_completed_returns_completed_snapshot() -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):  # noqa: ARG001 — handle unused on trivial work
+        return None
+
+    try:
+        handle = await process.spawn(intent="evolve-step", work_fn=work)
+        await handle.wait_until_complete(timeout=1.0)
+        await _wait_for_no_pending_emit(handle)
+
+        snapshot = await handle.replay()
+    finally:
+        await store.close()
+
+    assert snapshot.status is AgentProcessStatus.COMPLETED
+    assert snapshot.is_terminal is True
+    assert snapshot.process_id == handle.process_id
+    assert snapshot.directive_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_replay_after_cancel_returns_cancelled_snapshot() -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await asyncio.sleep(0.005)
+
+    try:
+        handle = await process.spawn(intent="ralph", work_fn=work)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await handle.cancel(reason="user requested")
+        await handle.wait_until_complete(timeout=1.0)
+        await _wait_for_no_pending_emit(handle)
+
+        snapshot = await handle.replay()
+    finally:
+        await store.close()
+
+    assert snapshot.status is AgentProcessStatus.CANCELLED
+    assert snapshot.is_terminal is True
+
+
+@pytest.mark.asyncio
+async def test_replay_during_pause_returns_paused_snapshot() -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    try:
+        handle = await process.spawn(intent="ralph", work_fn=work)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await handle.pause()
+        await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+        await _wait_for_projected_status(store, handle.process_id, AgentProcessStatus.PAUSED)
+        await _wait_for_no_pending_emit(handle)
+
+        snapshot = await handle.replay()
+        await handle.resume()
+        await handle.cancel()
+        await handle.wait_until_complete(timeout=1.0)
+    finally:
+        await store.close()
+
+    assert snapshot.status is AgentProcessStatus.PAUSED
+    assert snapshot.is_terminal is False
 
 
 @pytest.mark.asyncio
