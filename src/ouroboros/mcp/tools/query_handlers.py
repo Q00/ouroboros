@@ -105,10 +105,7 @@ class SessionStatusHandler:
                 "dispatch_mode": "plugin",
                 "guidance": ("ralph delegated to OpenCode Task widget; follow that lifecycle"),
             }
-        if (
-            state.phase is AutoPhase.RALPH_HANDOFF
-            and state.ralph_dispatch_mode == "plugin_pending"
-        ):
+        if state.phase is AutoPhase.RALPH_HANDOFF and state.ralph_dispatch_mode == "plugin_pending":
             return {
                 "dispatch_mode": "plugin_pending",
                 "lineage_id": state.ralph_lineage_id,

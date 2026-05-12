@@ -49,8 +49,7 @@ def _format_auto_status(state) -> str:
         and state.ralph_dispatch_mode not in {"plugin", "plugin_pending"}
     )
     is_plugin_pending = (
-        state.phase is AutoPhase.RALPH_HANDOFF
-        and state.ralph_dispatch_mode == "plugin_pending"
+        state.phase is AutoPhase.RALPH_HANDOFF and state.ralph_dispatch_mode == "plugin_pending"
     )
 
     if state.ralph_dispatch_mode == "plugin":
