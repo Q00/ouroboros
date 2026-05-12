@@ -33,6 +33,7 @@ from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
+    MAX_EVALUATE_ROUNDS,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
@@ -41,6 +42,17 @@ from ouroboros.auto.state import (
     utc_now_iso,
 )
 from ouroboros.core.seed import Seed
+from ouroboros.resilience.lateral import ThinkingPersona
+
+# RFC #809 Phase 2.2b — operator-choice cue suffixed onto every recovery-loop
+# BLOCKED message so the operator sees their next move without having to
+# read the rest of the surface. Three explicit choices, in increasing-effort
+# order, intentionally avoiding any "let the system rewrite the spec"
+# option: keep the spec contract under human control.
+_RECOVERY_BLOCKED_CHOICES: str = (
+    "next: (1) relax AC via --resume + edited seed; "
+    "(2) re-interview to refine the spec; (3) abandon this session"
+)
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
 
@@ -1464,6 +1476,26 @@ class AutoPipeline:
             state.lateral_input_hash = None
         state.evaluate_artifact = artifact
         state.evaluate_artifact_hash = artifact_hash
+
+        # RFC #809 Phase 2.2b — recovery-loop round budget guard. The
+        # counter increments on every fresh evaluator call (cache hits
+        # skip this branch, so a resumed session does not re-spend a
+        # round). Past ``MAX_EVALUATE_ROUNDS`` the failure mode is
+        # structural rather than a transient grading miss; surface a
+        # BLOCKED with the three operator choices instead of spending
+        # another LLM budget cycle.
+        state.evaluate_round += 1
+        if state.evaluate_round > MAX_EVALUATE_ROUNDS:
+            state.mark_blocked(
+                f"recovery loop: evaluate_round {state.evaluate_round} "
+                f"exceeded MAX_EVALUATE_ROUNDS={MAX_EVALUATE_ROUNDS}; "
+                f"{_RECOVERY_BLOCKED_CHOICES}",
+                tool_name="evaluator",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
         self._save(state)
 
         phase_timeout = state.phase_timeout_seconds(AutoPhase.EVALUATE)
@@ -1526,6 +1558,33 @@ class AutoPipeline:
         state.last_qa_differences = list(eval_result.differences)
         state.last_qa_suggestions = list(eval_result.suggestions)
         state.evaluate_artifact_hash = artifact_hash
+
+        # RFC #809 Phase 2.2b — same-fingerprint-twice guard. When two
+        # consecutive EVALUATE rounds produce the same failure shape, the
+        # recovery loop is not making material progress on the AC surface
+        # (lateral advice did not move the needle on the run output that
+        # gets graded). Block rather than spend another round; the
+        # operator chooses how to break the symmetry.
+        if not bool(eval_result.passed):
+            fingerprint_input = (
+                "|".join(eval_result.differences) + "::" + "|".join(eval_result.suggestions)
+            )
+            failure_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
+            if state.failure_fingerprints and state.failure_fingerprints[-1] == failure_fingerprint:
+                state.mark_blocked(
+                    f"recovery loop: same QA-fail fingerprint twice "
+                    f"({failure_fingerprint}); {_RECOVERY_BLOCKED_CHOICES}",
+                    tool_name="evaluator",
+                )
+                self._save(state)
+                return self._result(
+                    state,
+                    ledger,
+                    review=review,
+                    blocker=state.last_error,
+                    run_subagent=run_subagent,
+                )
+            state.failure_fingerprints.append(failure_fingerprint)
         self._save(state)
 
         return await self._finalize_evaluate(
@@ -1649,7 +1708,32 @@ class AutoPipeline:
 
         assert self.lateral_thinker is not None  # noqa: S101 — guarded by caller
 
-        persona = select_persona_for_qa_failure(qa_differences, qa_suggestions)
+        # RFC #809 Phase 2.2b — exclude personas already routed in this
+        # session so a resumed --resume picks a different angle rather
+        # than re-emitting the same advice. Each persisted string is a
+        # ``ThinkingPersona.value``; map back through the enum so an
+        # unrecognized legacy value raises explicitly instead of
+        # silently disabling the exclusion guard.
+        already_tried: tuple[ThinkingPersona, ...] = tuple(
+            ThinkingPersona(value) for value in state.personas_invoked
+        )
+        persona = select_persona_for_qa_failure(
+            qa_differences, qa_suggestions, already_tried_personas=already_tried
+        )
+        if persona is None:
+            # All five personas exhausted across this session. No further
+            # persona-driven reframing is available; surface the operator
+            # choices so the human resolves the spec instead.
+            state.mark_blocked(
+                f"recovery loop: all lateral personas exhausted "
+                f"(tried {', '.join(state.personas_invoked) or 'none'}); "
+                f"{_RECOVERY_BLOCKED_CHOICES}",
+                tool_name="lateral_thinker",
+            )
+            self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+            )
         # Include the evaluate artifact hash in the cache key. The lateral
         # prompt's ``current_approach`` payload incorporates the run
         # artifact, so two EVALUATE rounds that grade different artifacts
@@ -1747,6 +1831,14 @@ class AutoPipeline:
         state.last_lateral_persona = lateral_result.persona or persona.value
         state.last_lateral_approach_summary = lateral_result.approach_summary
         state.last_lateral_text = lateral_result.text
+        # RFC #809 Phase 2.2b — record the persona we just routed so the
+        # next ``_run_lateral`` (after --resume) skips it. Use the canonical
+        # ``persona.value`` (not ``lateral_result.persona``) so the
+        # exclusion set matches what ``select_persona_for_qa_failure``
+        # returns, even when the lateral handler echoes a different
+        # display name back.
+        if persona.value not in state.personas_invoked:
+            state.personas_invoked.append(persona.value)
         self._save(state)
 
         return self._finalize_lateral(
@@ -1792,6 +1884,11 @@ class AutoPipeline:
         sug_preview = "; ".join(qa_suggestions[:3]) if qa_suggestions else ""
         if sug_preview:
             summary_parts.append(f"suggestions: {sug_preview}")
+        # RFC #809 Phase 2.2b — surface the operator-choice cue alongside
+        # the persona's advisory so a session that BLOCKED here points the
+        # operator at the next move (relax AC / re-interview / abandon)
+        # rather than leaving them parsing the QA differences in isolation.
+        summary_parts.append(_RECOVERY_BLOCKED_CHOICES)
         state.mark_blocked("; ".join(summary_parts), tool_name="lateral_thinker")
         self._save(state)
         return self._result(

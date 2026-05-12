@@ -683,7 +683,19 @@ async def test_run_resume_from_evaluate_reaches_handler(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_pipeline_lateral_resume_cache_hit_skips_re_invocation(tmp_path) -> None:
     """Re-entering UNSTUCK_LATERAL with the same input hash and a persisted
-    persona text must NOT re-invoke the lateral thinker."""
+    persona text must NOT re-invoke the lateral thinker — provided the same
+    persona would be picked again.
+
+    RFC #809 Phase 2.2b changed the persona-selection contract so the
+    router now skips ``state.personas_invoked``; a naive resume of a
+    completed lateral round would therefore pick a DIFFERENT persona on
+    the second call (HACKER → CONTRARIAN), produce a different cache
+    key, and re-invoke the handler. To exercise the cache-hit path
+    deliberately, the test clears ``personas_invoked`` before the resume
+    call so the router lands on the same primary persona and the cache
+    key matches. This is exactly the contract operators rely on when
+    --resume is meant to surface the previously-cached advisory rather
+    than spend another persona slot."""
     state = _state_at_run_phase(tmp_path)
     call_count = 0
 
@@ -714,6 +726,12 @@ async def test_pipeline_lateral_resume_cache_hit_skips_re_invocation(tmp_path) -
     assert call_count == 1
     assert state.last_lateral_text == "advice text"
     first_hash = state.lateral_input_hash
+
+    # Drop the persona-once exclusion so the resume call lands on the
+    # same HACKER primary and exercises the cache-hit path. Without
+    # this, P2.2b's multi-persona advisory would (correctly) pick a
+    # different persona and re-invoke the handler.
+    state.personas_invoked = []
 
     # Simulate resume by re-entering UNSTUCK_LATERAL with the same QA shape.
     state.phase = AutoPhase.UNSTUCK_LATERAL
@@ -876,11 +894,17 @@ async def test_lateral_cache_invalidated_when_evaluate_artifact_changes(tmp_path
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
         nonlocal eval_calls
         eval_calls += 1
+        # P2.2b note: the differences string must DIFFER between rounds so
+        # the same-fingerprint-twice guard does not block round 2 before
+        # lateral is even invoked. The cache invalidation under test here
+        # (lateral cache flushed when evaluate_artifact_hash changes) is
+        # orthogonal to the fingerprint guard — both must be exercised on
+        # genuinely distinct failure shapes.
         return EvaluateResult(
             passed=False,
             score=0.3,
             verdict="fail",
-            differences=("identical failure across rounds",),
+            differences=(f"failure on round {eval_calls}",),
         )
 
     async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001
@@ -910,10 +934,16 @@ async def test_lateral_cache_invalidated_when_evaluate_artifact_changes(tmp_path
     a_lateral_hash = state.lateral_input_hash
     assert state.last_lateral_text == "advice for round 1"
 
-    # Now simulate a second EVALUATE call with a DIFFERENT artifact but
-    # the same QA differences. The evaluate-artifact hash change must
-    # invalidate the lateral cache; otherwise the persona's "advice for
-    # round 1" (about artifact A) would be reused against artifact B.
+    # Drop the persona-once exclusion so round 2 picks the same primary
+    # persona (HACKER) and isolates the lateral-cache invalidation under
+    # test from P2.2b's multi-persona advisory path.
+    state.personas_invoked = []
+
+    # Now simulate a second EVALUATE call with a DIFFERENT artifact and
+    # a distinct (per the evaluator above) failure shape. The
+    # evaluate-artifact hash change must invalidate the lateral cache;
+    # otherwise "advice for round 1" (about artifact A) would be reused
+    # against artifact B.
     state.phase = AutoPhase.EVALUATE
     await pipeline._run_evaluate(
         state,
@@ -1068,3 +1098,207 @@ async def test_handler_lateral_thinker_truncates_long_artifact() -> None:
     # Approach text fits the truncation marker
     assert "truncated" in args["current_approach"]
     assert str(50_000) in args["current_approach"]
+
+
+# ---------------------------------------------------------------------------
+# RFC #809 Phase 2.2b — recovery-loop guards
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the four deterministic guards that bound the
+# EVALUATE ⇄ UNSTUCK_LATERAL retry cycle: round budget, same-fingerprint
+# twice, persona exhaustion, and the operator-choice cue surfaced in the
+# final BLOCKED message. SEED_REGENERATE is deliberately NOT exercised —
+# see the AutoPhase deferral comment in state.py for the spec-first
+# rationale (system must not silently rewrite the spec the user agreed to).
+# Wall-clock budget reuses the existing ``state.deadline_at`` /
+# ``_enforce_deadline`` machinery already exercised by the Phase 2.1
+# tests, so no new test is needed here.
+
+
+@pytest.mark.asyncio
+async def test_recovery_round_budget_blocks_after_max(tmp_path) -> None:
+    """When ``evaluate_round`` has already reached ``MAX_EVALUATE_ROUNDS``
+    on entry, the next fresh evaluator call must NOT spend another budget
+    cycle. The pipeline marks BLOCKED with the operator-choice cue."""
+    from ouroboros.auto.state import MAX_EVALUATE_ROUNDS
+
+    state = _state_at_run_phase(tmp_path)
+    state.evaluate_round = MAX_EVALUATE_ROUNDS  # at-the-edge; next call exceeds
+    eval_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal eval_calls
+        eval_calls += 1
+        return EvaluateResult(passed=True, score=0.95, verdict="pass")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    result = await pipeline.run(state)
+
+    assert eval_calls == 0  # evaluator NOT invoked once budget exceeded
+    assert result.status == "blocked"
+    assert "MAX_EVALUATE_ROUNDS" in (state.last_error or "")
+    assert "relax AC" in (state.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_recovery_same_fingerprint_twice_blocks(tmp_path) -> None:
+    """Two consecutive EVALUATE rounds with the same QA-fail fingerprint
+    means lateral advice did not move the needle on the failure surface.
+    The pipeline blocks rather than spending another round."""
+    state = _state_at_run_phase(tmp_path)
+    # Pre-seed a matching fingerprint as if a previous round had already
+    # recorded it. The next failing evaluator call computes the same
+    # fingerprint and trips the guard.
+    fingerprint_input = "identical fail::"
+    import hashlib
+
+    pre_seeded = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
+    state.failure_fingerprints = [pre_seeded]
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False, score=0.3, verdict="fail", differences=("identical fail",)
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "fingerprint" in (state.last_error or "").lower()
+    assert "relax AC" in (state.last_error or "")
+    # The pre-seeded fingerprint is still there; we did not double-record.
+    assert state.failure_fingerprints == [pre_seeded]
+
+
+@pytest.mark.asyncio
+async def test_recovery_personas_exhausted_blocks(tmp_path) -> None:
+    """When every persona in the deterministic fallback chain has already
+    been routed in this session, the next lateral call returns ``None``
+    and the pipeline blocks with a ``"personas exhausted"`` reason."""
+    state = _state_at_run_phase(tmp_path)
+    # All five personas in the fallback chain marked as already routed.
+    state.personas_invoked = [
+        ThinkingPersona.HACKER.value,
+        ThinkingPersona.ARCHITECT.value,
+        ThinkingPersona.RESEARCHER.value,
+        ThinkingPersona.SIMPLIFIER.value,
+        ThinkingPersona.CONTRARIAN.value,
+    ]
+    lateral_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False, score=0.3, verdict="fail", differences=("Xcode unavailable",)
+        )
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001 # pragma: no cover
+        nonlocal lateral_calls
+        lateral_calls += 1
+        return LateralResult(persona="hacker", approach_summary="X", text="Y")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline.run(state)
+
+    assert lateral_calls == 0  # router returned None → no handler call
+    assert result.status == "blocked"
+    last_error = state.last_error or ""
+    assert "personas exhausted" in last_error.lower()
+    assert "relax AC" in last_error
+
+
+@pytest.mark.asyncio
+async def test_recovery_personas_invoked_persists_after_lateral(tmp_path) -> None:
+    """After a successful lateral advisory call, the picked persona is
+    appended to ``state.personas_invoked`` so a subsequent --resume routes
+    a different persona instead of recycling the same advice."""
+    state = _state_at_run_phase(tmp_path)
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False, score=0.3, verdict="fail", differences=("Xcode unavailable",)
+        )
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:
+        return LateralResult(
+            persona=kwargs["persona"].value,
+            approach_summary="advice",
+            text="advice body",
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    await pipeline.run(state)
+
+    # The persona selected on this round is now persisted.
+    assert state.personas_invoked == [ThinkingPersona.HACKER.value]
+
+
+@pytest.mark.asyncio
+async def test_recovery_blocked_message_includes_operator_choices(tmp_path) -> None:
+    """Every recovery-loop BLOCKED message surfaces the three operator
+    choices (relax AC / re-interview / abandon) so the operator's next
+    move is on-screen rather than buried in QA differences."""
+    state = _state_at_run_phase(tmp_path)
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False, score=0.3, verdict="fail", differences=("Xcode unavailable",)
+        )
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001
+        return LateralResult(persona="hacker", approach_summary="brew install xcode", text="…")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    await pipeline.run(state)
+
+    msg = state.last_error or ""
+    assert "relax AC" in msg
+    assert "re-interview" in msg
+    assert "abandon" in msg
