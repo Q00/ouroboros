@@ -80,13 +80,35 @@ class TestVerifierRoute:
         )
         assert route.tier == ModelTier.OPUS
 
-    def test_read_only_tool_set(self, code_profile: ExecutionProfile) -> None:
+    def test_excludes_file_mutation_tools(self, code_profile: ExecutionProfile) -> None:
+        # H1 read-only contract is about source files. Edit/Write must
+        # be filtered out of the verifier tool set.
         route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
-        assert set(route.tools) == {"Read", "Glob", "Grep"}
-        # Mutating tools must not appear.
         assert "Edit" not in route.tools
         assert "Write" not in route.tools
+
+    def test_keeps_bash_for_code_profile(self, code_profile: ExecutionProfile) -> None:
+        # code profile's verifier_focus says "Run the project's test
+        # command". The verifier MUST be able to invoke Bash or the
+        # routing layer chooses a tool set that cannot satisfy its own
+        # verifier contract (bot finding on #889).
+        route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
+        assert "Bash" in route.tools
+
+    def test_verifier_tools_derived_from_profile(self) -> None:
+        # Research profile has no Bash; verifier tools should reflect
+        # that even though Bash is generally permitted for verifiers.
+        from ouroboros.orchestrator.profile_loader import EvidenceSchema
+
+        custom = load_profile("research").model_copy(
+            update={
+                "suggested_tools": ("Read", "Glob", "Grep"),
+                "evidence_schema": EvidenceSchema(),
+            }
+        )
+        route = decide_route(role=DispatchRole.VERIFIER, profile=custom)
         assert "Bash" not in route.tools
+        assert set(route.tools) == {"Read", "Glob", "Grep"}
 
 
 class TestRationaleStrings:
