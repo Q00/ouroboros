@@ -543,6 +543,7 @@ class CopilotCliLLMAdapter:
     ) -> str:
         """Use stdout lines that are not Copilot JSONL event envelopes."""
         content_lines: list[str] = []
+        raw_json_content_lines: list[str] = []
         has_stream_context = self._has_copilot_stream_context(stdout_lines)
 
         for line in stdout_lines:
@@ -563,8 +564,11 @@ class CopilotCliLLMAdapter:
                     continue
                 if self._is_copilot_event_envelope(event):
                     continue
+                if not preserve_structured_json:
+                    raw_json_content_lines.append(line)
+                    continue
             content_lines.append(line)
-        return "\n".join(content_lines)
+        return "\n".join(content_lines or raw_json_content_lines)
 
     # ------------------------------------------------------ stream/process io
 

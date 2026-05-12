@@ -503,6 +503,33 @@ class TestComplete:
         assert result.value.raw_response["session_id"] == "sess-plain-json"
 
     @pytest.mark.asyncio
+    async def test_plain_fallback_prefers_plain_text_over_incidental_json(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-plain"}),
+                json.dumps({"type": "result", "progress": 50}),
+                "Final answer",
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return text")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert result.value.content == "Final answer"
+
+    @pytest.mark.asyncio
     async def test_plain_fallback_still_drops_single_transport_envelope(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
         stdout = json.dumps({"type": "session.started", "session_id": "sess-only"})
