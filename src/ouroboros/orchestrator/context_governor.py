@@ -173,10 +173,16 @@ def compose_context(
     # The parent-summary reserve is a floor only when there's a parent
     # summary to place. With no parent, withholding the reserve from
     # siblings would silently discard sibling status that fits in the
-    # total budget (bot finding on #890 r2).
+    # total budget (bot finding on #890 r2). When a parent IS present,
+    # the reserve must also account for the parent section's own
+    # render overhead ("## Parent context\n" + "\n\n"); otherwise
+    # siblings can eat into bytes meant for the parent header, and
+    # the actual parent_summary content lands below the reserved size
+    # (bot finding on #890 r3).
+    parent_overhead = len(_PARENT_HEADER) + len(_SECTION_JOINER)
     sibling_ceiling = budget.total_chars
     if parent_stripped:
-        sibling_ceiling -= budget.parent_summary_reserve
+        sibling_ceiling -= budget.parent_summary_reserve + parent_overhead
     for sib in siblings:
         line = sib.to_line()
         # `\n` joiner between sibling lines, only after the first.
@@ -192,8 +198,8 @@ def compose_context(
     # Parent summary section: header + joiner only count if the summary
     # actually lands. Without enough room for the header itself, the
     # summary is dropped entirely and the flag is set so callers can
-    # log it.
-    parent_overhead = len(_PARENT_HEADER) + len(_SECTION_JOINER)
+    # log it. (parent_overhead defined above when computing
+    # sibling_ceiling.)
     remaining_for_parent = budget.total_chars - used
     if parent_stripped and remaining_for_parent > parent_overhead:
         summary_budget = remaining_for_parent - parent_overhead

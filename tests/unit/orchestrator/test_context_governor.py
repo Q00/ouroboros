@@ -221,6 +221,32 @@ class TestRenderedSizeContract:
         assert len(result.parent_summary) > 0
         assert len(result.render()) <= 200
 
+    def test_parent_actual_content_meets_reserve_floor(self) -> None:
+        # Bot finding on #890 r3: the reserve was applied to the
+        # sibling ceiling without accounting for the parent section
+        # header + joiner overhead. Siblings could therefore eat into
+        # the 20 chars of "## Parent context\n\n" overhead, and the
+        # actual parent_summary content would land below the
+        # advertised reserve.
+        #
+        # Bot's exact repro: total=100, reserve=50, ac='a', one sibling
+        # with 16-char headline, non-empty parent. The previous
+        # behavior returned a 100-char render with parent_summary only
+        # 30 chars long — 20 chars short of the reserved 50.
+        large_parent = "x" * 200
+        result = compose_context(
+            ac="a",
+            parent_summary=large_parent,
+            siblings=[SiblingStatus("AC1", accepted=True, headline="x" * 16)],
+            budget=ContextBudget(total_chars=100, parent_summary_reserve=50),
+        )
+        assert len(result.parent_summary) >= 50, (
+            f"parent_summary={len(result.parent_summary)} chars violates "
+            f"the reserve=50 floor; the sibling allocator must charge "
+            "parent_overhead too"
+        )
+        assert len(result.render()) <= 100
+
     def test_sibling_section_overhead_charged(self) -> None:
         # Budget large enough for AC + one sibling line but NOT enough
         # for the sibling header — the line must be dropped.
