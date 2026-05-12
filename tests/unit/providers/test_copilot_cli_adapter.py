@@ -650,6 +650,40 @@ class TestComplete:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        "event",
+        [
+            {"type": "session.started", "session_id": "sess-json"},
+            {"type": "telemetry", "payload": {"phase": "done"}},
+            {"type": "run.progress", "payload": {"phase": "future"}},
+        ],
+    )
+    async def test_single_structured_transport_envelope_is_not_returned_as_content(
+        self,
+        event: dict[str, Any],
+    ) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        stdout = json.dumps(event)
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return JSON")],
+                CompletionConfig(
+                    model="default",
+                    response_format={"type": "json_object"},
+                ),
+            )
+
+        assert result.is_err
+        assert "empty response" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         "answer",
         [
             {"type": "result", "payload": {"value": "ok"}},
