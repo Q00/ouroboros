@@ -315,6 +315,7 @@ def test_store_load_rejects_malformed_optional_strings(tmp_path) -> None:
         ("seed_path", {"path": "seed.json"}),
         ("seed_id", ""),
         ("execution_id", []),
+        ("ralph_opencode_mode", []),
         ("last_progress_message", []),
     ):
         data = state.to_dict()

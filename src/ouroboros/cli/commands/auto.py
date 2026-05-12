@@ -385,13 +385,30 @@ async def _run_auto(
         pass
 
     if runtime == "opencode":
-        opencode_mode = state.opencode_mode or get_opencode_mode()
+        # Q00/ouroboros#782 review-7 BLOCKING #3 + review-8 BLOCKING #1: keep
+        # the un-demoted opencode_mode for the Ralph handoff so a CLI launched
+        # from *inside* an OpenCode plugin session can still dispatch the new
+        # ``--complete-product`` Ralph loop via the plugin ``_subagent``
+        # envelope (matching the MCP entrypoint's behavior). The historical
+        # CLI demotion to ``subprocess`` was uniform and therefore disabled
+        # the plugin Ralph contract introduced by this PR.
+        #
+        # Persist the un-demoted value as ``state.ralph_opencode_mode`` and
+        # honor a previously persisted value on resume — ``state.opencode_mode``
+        # itself stores the demoted form (used by authoring/run-handoff
+        # handlers), so it cannot serve as a source of truth for plugin Ralph.
+        ralph_opencode_mode = (
+            state.ralph_opencode_mode or state.opencode_mode or get_opencode_mode()
+        )
+        opencode_mode = ralph_opencode_mode
         if opencode_mode == "plugin":
             opencode_mode = "subprocess"
     else:
         opencode_mode = None
+        ralph_opencode_mode = None
     state.runtime_backend = runtime
     state.opencode_mode = opencode_mode
+    state.ralph_opencode_mode = ralph_opencode_mode
     state.skip_run = skip_run
     if incoming_provenance is not None:
         if resume and state.provenance is None:
@@ -426,7 +443,11 @@ async def _run_auto(
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
     )
     ralph_handler = (
-        RalphHandler(agent_runtime_backend=runtime, opencode_mode=opencode_mode)
+        # Q00/ouroboros#782 review-7/8/10: pass the un-demoted
+        # ``ralph_opencode_mode`` so an OpenCode plugin session can take the
+        # plugin ``_subagent`` dispatch path. ``opencode_mode`` (demoted) is
+        # still correct for the authoring/run-handoff handlers above.
+        RalphHandler(agent_runtime_backend=runtime, opencode_mode=ralph_opencode_mode)
         if complete_product
         else None
     )

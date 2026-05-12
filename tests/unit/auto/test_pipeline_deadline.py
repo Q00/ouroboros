@@ -324,6 +324,21 @@ async def test_legacy_blocked_session_arms_deadline_on_recovery(tmp_path) -> Non
     assert armed.deadline_at_epoch > time.time()
 
 
+def test_legacy_nonterminal_state_load_arms_deadline() -> None:
+    """Legacy resumed sessions without deadline fields still get a top-level timeout."""
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "starting interview")
+    payload = state.to_dict()
+    payload.pop("deadline_at", None)
+    payload.pop("deadline_at_epoch", None)
+
+    loaded = AutoPipelineState.from_dict(payload)
+
+    assert loaded.deadline_at is not None
+    assert loaded.deadline_at_epoch is not None
+    assert not loaded.is_deadline_expired()
+
+
 @pytest.mark.asyncio
 async def test_resume_after_deadline_expired_immediately_blocks(tmp_path) -> None:
     """Loading a state whose deadline already passed must transition to BLOCKED on entry."""

@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
@@ -39,12 +40,17 @@ class SessionStatusHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
+    auto_store: AutoStore | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the session repository after dataclass creation."""
         self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._session_repo = SessionRepository(self._event_store)
+        # Auto sessions are read from a separate JSON-file store; the
+        # repository is created lazily so callers that never query an
+        # ``auto_<id>`` session do not pay the file-system cost.
+        self._auto_store = self.auto_store or AutoStore()
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -78,6 +84,139 @@ class SessionStatusHandler:
             ),
         )
 
+    def _build_ralph_block(self, state: Any) -> dict[str, Any] | None:
+        """Build the ``ralph`` sub-block for an auto session, if applicable.
+
+        Returns ``None`` when no ralph context exists yet (no lineage, no
+        job, no plugin delegation). When a ``ralph_dispatch_mode`` is
+        ``"plugin"`` the block intentionally omits ``job_id`` per the issue
+        contract — the OpenCode Task widget owns the lifecycle and the
+        block instead exposes the operator-facing guidance string.
+
+        For job-mode dispatch the block carries the four mirror fields
+        populated by ``ouroboros.auto.listeners`` plus the ``lineage_id``
+        already pinned at handoff time. ``last_event_at`` is forwarded
+        as-is even though it is a monotonic-clock reading; the unified
+        status surface only uses it for ordering, never for absolute time
+        rendering.
+        """
+        if state.ralph_dispatch_mode == "plugin":
+            return {
+                "dispatch_mode": "plugin",
+                "guidance": ("ralph delegated to OpenCode Task widget; follow that lifecycle"),
+            }
+        if state.phase is AutoPhase.RALPH_HANDOFF and state.ralph_dispatch_mode == "plugin_pending":
+            return {
+                "dispatch_mode": "plugin_pending",
+                "lineage_id": state.ralph_lineage_id,
+                "status": "interrupted_plugin_dispatch",
+                "guidance": "plugin dispatch unconfirmed; resume will retry or block",
+            }
+        if state.ralph_job_id is not None:
+            return {
+                "job_id": state.ralph_job_id,
+                "lineage_id": state.ralph_lineage_id,
+                "status": state.ralph_job_status,
+                "last_event_at": state.ralph_last_event_at,
+                "current_generation": state.ralph_current_generation,
+                "stop_reason": state.ralph_stop_reason,
+                "dispatch_mode": state.ralph_dispatch_mode or "job",
+            }
+        return None
+
+    def _handle_auto_session(
+        self,
+        session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Build the unified status response for an ``auto_<id>`` session.
+
+        Synchronous because ``AutoStore`` is a JSON-file store, not async.
+        The handler intentionally returns a ``MCPToolError`` with the same
+        ``tool_name`` as the orchestrator branch so client error handling
+        does not need to special-case the auto path.
+        """
+        try:
+            state = self._auto_store.load(session_id)
+        except ValueError as exc:
+            return Result.err(
+                MCPToolError(
+                    f"Auto session not found: {exc}",
+                    tool_name="ouroboros_session_status",
+                )
+            )
+
+        # Gap window per the issue contract: between RUN's run_handoff_status
+        # transitioning to "started" and the RALPH_HANDOFF entry persisting a
+        # job_id, the session phase is reported as ``ralph_handoff`` with a
+        # ``pending`` marker so the operator never sees a missing-status hole.
+        is_gap_window = (
+            state.phase is AutoPhase.RALPH_HANDOFF
+            and state.ralph_lineage_id is not None
+            and state.ralph_job_id is None
+            and state.ralph_dispatch_mode not in {"plugin", "plugin_pending"}
+        )
+        phase_value = "ralph_handoff" if is_gap_window else state.phase.value
+        is_terminal = state.phase in {
+            AutoPhase.COMPLETE,
+            AutoPhase.BLOCKED,
+            AutoPhase.FAILED,
+        }
+        ralph_block = self._build_ralph_block(state)
+
+        # Render a short text block; the structured detail lives in ``meta``
+        # so machine consumers do not have to parse strings. Keep the layout
+        # stable so the CLI snapshot test in ``tests/integration/auto`` can
+        # pin it.
+        lines = [
+            f"Auto session: {state.auto_session_id}",
+            f"Phase: {phase_value}",
+            f"Terminal: {is_terminal}",
+            f"Last progress: {state.last_progress_message}",
+        ]
+        if state.last_grade:
+            lines.append(f"Seed grade: {state.last_grade}")
+        if is_gap_window:
+            lines.append("Pending: starting ralph")
+        if ralph_block is not None:
+            lines.append("Ralph:")
+            for key in (
+                "dispatch_mode",
+                "job_id",
+                "lineage_id",
+                "status",
+                "current_generation",
+                "stop_reason",
+                "guidance",
+            ):
+                if key in ralph_block:
+                    lines.append(f"  {key}: {ralph_block[key]}")
+        status_text = "\n".join(lines) + "\n"
+
+        meta: dict[str, Any] = {
+            "session_id": state.auto_session_id,
+            "auto_session_id": state.auto_session_id,
+            "phase": phase_value,
+            "is_terminal": is_terminal,
+            "ralph_job_id": state.ralph_job_id,
+            "ralph_lineage_id": state.ralph_lineage_id,
+            "last_progress_message": state.last_progress_message,
+            "last_progress_at": state.last_progress_at,
+        }
+        if state.last_error:
+            meta["blocker"] = state.last_error
+        if is_gap_window:
+            meta["pending"] = "starting ralph"
+        if ralph_block is not None:
+            meta["ralph"] = ralph_block
+
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=status_text),),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
     async def handle(
         self,
         arguments: dict[str, Any],
@@ -100,6 +239,24 @@ class SessionStatusHandler:
             )
 
         log.info("mcp.tool.session_status", session_id=session_id)
+
+        # Q00/ouroboros#782: ``ouroboros_session_status`` is the unified
+        # surface for both orchestrator sessions (``exec_*`` / arbitrary IDs
+        # tracked by ``SessionRepository``) and ``ooo auto`` sessions
+        # (``auto_<hex>`` tracked by ``AutoStore``). The auto branch returns a
+        # superset shape with a ``ralph`` sub-block when a ralph job has been
+        # linked or is being prepared.
+        if isinstance(session_id, str) and session_id.startswith("auto_"):
+            try:
+                return self._handle_auto_session(session_id)
+            except Exception as e:  # pragma: no cover - defensive
+                log.error("mcp.tool.session_status.auto_error", error=str(e))
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to get auto session status: {e}",
+                        tool_name="ouroboros_session_status",
+                    )
+                )
 
         try:
             # Ensure event store is initialized

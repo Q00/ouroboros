@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 import inspect
 import threading
@@ -25,6 +26,7 @@ from ouroboros.auto.handoff_contract import (
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
 from ouroboros.auto.ledger import SeedDraftLedger
+from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON, mirror_ralph_job_events
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
@@ -98,6 +100,16 @@ _MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
 # the top-level pipeline deadline contract pinned by Q00/ouroboros#779.
 _MIN_RALPH_PER_ITERATION_SECONDS = 30.0
 _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
+
+# Q00/ouroboros#782 review-12 BLOCKING #1: when the top-level deadline has
+# already expired but a persisted Ralph job awaits reconciliation, give the
+# resume poller a brief grace window so an already-terminal job is detected
+# (snapshot returns immediately) before ``_enforce_deadline`` trips
+# ``pipeline_timeout``. ``asyncio.wait_for(coro, 0)`` cancels the coroutine
+# before it can read the first snapshot, so the inner ``get_snapshot`` would
+# never run without this floor — silently demoting a legitimately completed
+# Ralph loop to a false ``pipeline_timeout`` BLOCKED.
+_RALPH_RESUME_PEEK_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,10 +287,23 @@ class AutoPipeline:
         # message is the literal one the issue contract requires so external
         # surfaces can distinguish a resume-expired session from a freshly
         # tripped deadline mid-run.
+        #
+        # Q00/ouroboros#782 review-12 BLOCKING #1: never gate ``RALPH_HANDOFF``
+        # resume on the deadline-expired early returns when there is a
+        # persisted Ralph job / confirmed plugin dispatch waiting on
+        # reconciliation. Falling through to ``_resume_ralph_handoff`` lets
+        # the poller (or plugin-confirmed transition) finalize the auto
+        # phase if Ralph already finished in the background while the
+        # client was disconnected. If the job is still running, the
+        # poller's own deadline-aware wait fires the same ``pipeline_timeout``
+        # BLOCKED state via ``_enforce_deadline``. Same exception applies
+        # to the second ``_enforce_deadline`` gate after the BLOCKED/FAILED
+        # recovery branch below.
         if (
             state.deadline_at is not None
             and not state.is_terminal()
             and state.is_deadline_expired()
+            and not _has_reconciliable_ralph_resume_checkpoint(state)
         ):
             state.last_tool_name = PIPELINE_DEADLINE_TOOL_NAME
             state.mark_blocked(
@@ -327,7 +352,14 @@ class AutoPipeline:
             self._save(state)
 
         review: SeedReview | None = None
-        if self._enforce_deadline(state):
+        # Q00/ouroboros#782 review-12 BLOCKING #1: same exception as the
+        # early-return above — let RALPH_HANDOFF resume reach
+        # ``_resume_ralph_handoff`` so an already-terminal Ralph job can be
+        # reconciled. The poller's deadline-aware ``wait_for`` (and
+        # subsequent ``_enforce_deadline`` call inside ``_poll_ralph_job``)
+        # still fires ``pipeline_timeout`` if the job is genuinely still
+        # running after the persisted budget has expired.
+        if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
             # Arm the top-level pipeline deadline (#779) on the first
@@ -410,7 +442,10 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
-        if self._enforce_deadline(state):
+        # Q00/ouroboros#782 review-12 BLOCKING #1: same exception — let
+        # ``RALPH_HANDOFF`` resume reach ``_resume_ralph_handoff`` so the
+        # poller can reconcile an already-terminal Ralph job.
+        if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.SEED_GENERATION:
             if state.seed_artifact:
@@ -515,7 +550,7 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase == AutoPhase.RALPH_HANDOFF:
-            return await self._resume_ralph_handoff(state, ledger, seed, review=review)
+            return await self._resume_ralph_handoff(state, ledger, review=review, seed=seed)
 
         if state.phase == AutoPhase.EVALUATE:
             # Re-enter the evaluator. ``_run_evaluate`` is idempotent via the
@@ -952,12 +987,23 @@ class AutoPipeline:
         widget guidance to the operator.
         """
         assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
-        lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
-        state.ralph_lineage_id = lineage_id
-        state.transition(
-            AutoPhase.RALPH_HANDOFF,
-            f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
+        # Preserve a previously persisted lineage on resume so the re-dispatch
+        # remains correlated with prior ``mcp.job.*`` events; only mint a fresh
+        # one when this is the first handoff attempt for the session.
+        lineage_id = state.ralph_lineage_id or (
+            f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
         )
+        state.ralph_lineage_id = lineage_id
+        if state.phase != AutoPhase.RALPH_HANDOFF:
+            state.transition(
+                AutoPhase.RALPH_HANDOFF,
+                f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
+            )
+        else:
+            state.mark_progress(
+                "re-entering Ralph handoff after resume",
+                tool_name="ralph_starter",
+            )
         self._save(state)
         max_total_seconds: float | None = None
         per_iteration_timeout_seconds: float | None = None
@@ -996,6 +1042,8 @@ class AutoPipeline:
                 min(_DEFAULT_RALPH_PER_ITERATION_SECONDS, remaining),
             )
 
+        ralph_mirror_task: asyncio.Task[None] | None = None
+
         # Q00/ouroboros#773 (review-6): persist the Ralph dispatch handle as
         # soon as the background job exists, BEFORE we await terminal
         # completion. Without this checkpoint, a process restart, deadline
@@ -1007,6 +1055,7 @@ class AutoPipeline:
         # solve. The starter callable invokes this hook BEFORE blocking on
         # the terminal-status poll.
         def _checkpoint_dispatch(envelope: dict[str, Any]) -> None:
+            nonlocal ralph_mirror_task
             state.ralph_job_id = _optional_str(envelope.get("job_id"))
             state.ralph_dispatch_mode = _optional_str(envelope.get("dispatch_mode"))
             persisted_lineage = _optional_str(envelope.get("lineage_id"))
@@ -1014,6 +1063,22 @@ class AutoPipeline:
                 state.ralph_lineage_id = persisted_lineage
             state.last_tool_name = "ralph_starter"
             self._save(state)
+            if (
+                self.store is not None
+                and state.ralph_job_id is not None
+                and state.ralph_dispatch_mode != "plugin"
+                and ralph_mirror_task is None
+            ):
+                event_store = getattr(self.ralph_starter, "job_event_store", None)
+                if event_store is not None:
+                    ralph_mirror_task = asyncio.create_task(
+                        mirror_ralph_job_events(
+                            state,
+                            self.store,
+                            event_store,
+                            state.ralph_job_id,
+                        )
+                    )
 
         # Q00/ouroboros#773 (review-7): decide compatibility BEFORE invocation,
         # never by retrying on a post-dispatch ``TypeError``. ``RalphHandler``
@@ -1059,11 +1124,13 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
         except Exception as exc:
+            await _cancel_ralph_status_mirror(ralph_mirror_task)
             state.mark_failed(f"ralph handoff failed: {exc}", tool_name="ralph_starter")
             self._save(state)
             return self._result(
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
+        await _drain_ralph_status_mirror(ralph_mirror_task)
         if not isinstance(ralph_meta, dict):
             state.mark_failed(
                 f"ralph starter returned {type(ralph_meta).__name__}, expected dict",
@@ -1077,6 +1144,13 @@ class AutoPipeline:
         state.ralph_dispatch_mode = _optional_str(ralph_meta.get("dispatch_mode"))
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
+        current_generation = _ralph_current_generation_from_meta(ralph_meta)
+        if terminal_status is not None:
+            state.ralph_job_status = terminal_status
+        if stop_reason is not None:
+            state.ralph_stop_reason = stop_reason
+        if current_generation is not None:
+            state.ralph_current_generation = current_generation
         # Plugin delegation: nothing to await, transition straight to
         # COMPLETE and surface the OpenCode Task widget guidance.
         if state.ralph_dispatch_mode == "plugin":
@@ -1085,12 +1159,25 @@ class AutoPipeline:
                 "Track progress through the OpenCode Task widget; this auto "
                 "session will not block on the loop's completion."
             )
+            # Q00/ouroboros#782 review-5 BLOCKING #1: surface Ralph's
+            # ``_subagent`` envelope so the OpenCode bridge actually spawns
+            # the child session. In ``--complete-product`` plugin mode the
+            # Ralph subagent supersedes the run-handoff subagent — the run
+            # already kicked off and the loop is what the plugin must own.
+            ralph_subagent = (
+                ralph_meta.get("_subagent")
+                if isinstance(ralph_meta.get("_subagent"), dict)
+                else None
+            )
+            effective_subagent = ralph_subagent or run_subagent
+            if ralph_subagent is not None:
+                state.run_subagent = ralph_subagent
             state.transition(
                 AutoPhase.COMPLETE,
                 "ralph loop delegated to OpenCode plugin child session",
             )
             self._save(state)
-            return self._result(state, ledger, review=review, run_subagent=run_subagent)
+            return self._result(state, ledger, review=review, run_subagent=effective_subagent)
         if terminal_status == "completed":
             return await self._evaluate_or_complete(
                 state,
@@ -1100,6 +1187,13 @@ class AutoPipeline:
                 run_subagent=run_subagent,
                 stop_reason=stop_reason,
                 ralph_result_text=_artifact_text(ralph_meta.get("result_text")),
+            )
+        if terminal_status == "cancelled":
+            if state.phase is not AutoPhase.BLOCKED:
+                state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
+                self._save(state)
+            return self._result(
+                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
@@ -1618,9 +1712,9 @@ class AutoPipeline:
         self,
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
-        seed: Seed,
         *,
         review: SeedReview | None,
+        seed: Seed | None = None,
     ) -> AutoPipelineResult:
         """Resume a persisted Ralph handoff checkpoint.
 
@@ -1635,7 +1729,37 @@ class AutoPipeline:
         no ``ralph_job_id`` was persisted) the method falls back to
         guidance-only behavior so callers without a job-manager handle
         still get a coherent message instead of a polling failure.
+
+        ``seed`` is required to recover from an unconfirmed plugin dispatch
+        (``ralph_dispatch_mode == "plugin_pending"``); the dispatch is
+        retried via :meth:`_handoff_to_ralph` so a crash *before* the bridge
+        actually received the ``_subagent`` envelope does not falsely
+        transition the auto session to COMPLETE
+        (Q00/ouroboros#782 review-12 BLOCKING #2).
         """
+        # Q00/ouroboros#782 review-12 BLOCKING #2: retry an interrupted
+        # plugin dispatch BEFORE trusting the confirmed-plugin marker. A
+        # ``"plugin_pending"`` checkpoint means the auto pipeline persisted
+        # the dispatch intent but the actual ``ouroboros_ralph`` handler
+        # call did not return a delegated_to_plugin response, so the bridge
+        # may never have received the child-session envelope. Redispatch
+        # with the same persisted lineage so any half-emitted events stay
+        # correlated.
+        if state.ralph_dispatch_mode == "plugin_pending":
+            if seed is not None and self.ralph_starter is not None:
+                state.ralph_dispatch_mode = None
+                state.ralph_job_id = None
+                self._save(state)
+                return await self._handoff_to_ralph(
+                    state, ledger, seed, review=review, run_subagent=None
+                )
+            state.mark_blocked(
+                "ralph plugin dispatch was interrupted before confirmation; "
+                "resume could not retry without a persisted Seed",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
         if state.ralph_dispatch_mode == "plugin":
             state.run_handoff_guidance = (
                 state.run_handoff_guidance
@@ -1643,6 +1767,17 @@ class AutoPipeline:
                 "Track progress through the OpenCode Task widget; this auto "
                 "session will not block on the loop's completion."
             )
+            # Q00/ouroboros#782 review-13 BLOCKING #1: a confirmed plugin
+            # dispatch is a one-shot side effect — the bridge already received
+            # the ``_subagent`` envelope and may have already spawned the
+            # child session. Re-emitting the persisted ``state.run_subagent``
+            # on resume can trigger a duplicate OpenCode child session via
+            # ``meta["_subagent"]`` in :class:`AutoHandler.handle`. Clear the
+            # persisted envelope here so neither this ``_result(...)`` call
+            # nor any future re-resume replays it. ``state.run_subagent``
+            # is typed as a dict, so we reset to ``{}`` rather than ``None``;
+            # ``_result()`` treats the empty dict as falsy and emits ``None``.
+            state.run_subagent = {}
             state.transition(
                 AutoPhase.COMPLETE,
                 "resumed OpenCode plugin Ralph delegation checkpoint",
@@ -1687,14 +1822,38 @@ class AutoPipeline:
         """
         assert self.ralph_resumer is not None  # noqa: S101 - guarded by caller
         assert state.ralph_job_id is not None  # noqa: S101 - guarded by caller
+        ralph_mirror_task: asyncio.Task[None] | None = None
+        if (
+            self.store is not None
+            and state.ralph_dispatch_mode != "plugin"
+            and state.ralph_job_id is not None
+        ):
+            event_store = getattr(self.ralph_resumer, "job_event_store", None)
+            if event_store is not None:
+                ralph_mirror_task = asyncio.create_task(
+                    mirror_ralph_job_events(
+                        state,
+                        self.store,
+                        event_store,
+                        state.ralph_job_id,
+                    )
+                )
         try:
             poll_call = self.ralph_resumer(job_id=state.ralph_job_id)
             if state.deadline_at is None:
                 ralph_meta = await poll_call
             else:
-                poll_timeout = max(0.0, state.deadline_at - time.monotonic())
+                # Q00/ouroboros#782 review-12 BLOCKING #1: floor at
+                # ``_RALPH_RESUME_PEEK_SECONDS`` so an already-terminal Ralph
+                # job can be reconciled even when the top-level deadline has
+                # expired. ``asyncio.wait_for`` with timeout=0 cancels the
+                # coroutine before it can read the first snapshot, which
+                # would silently turn a completed loop into ``pipeline_timeout``.
+                remaining = state.deadline_at - time.monotonic()
+                poll_timeout = max(remaining, _RALPH_RESUME_PEEK_SECONDS)
                 ralph_meta = await asyncio.wait_for(poll_call, timeout=poll_timeout)
         except TimeoutError:
+            await _cancel_ralph_status_mirror(ralph_mirror_task)
             if self._enforce_deadline(state):
                 return self._result(state, ledger, review=review, blocker=state.last_error)
             state.mark_blocked(
@@ -1704,9 +1863,11 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
         except Exception as exc:
+            await _cancel_ralph_status_mirror(ralph_mirror_task)
             state.mark_failed(f"ralph resume poll failed: {exc}", tool_name="ralph_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
+        await _drain_ralph_status_mirror(ralph_mirror_task)
         if not isinstance(ralph_meta, dict):
             state.mark_failed(
                 f"ralph resumer returned {type(ralph_meta).__name__}, expected dict",
@@ -1716,6 +1877,13 @@ class AutoPipeline:
             return self._result(state, ledger, review=review, blocker=state.last_error)
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
+        current_generation = _ralph_current_generation_from_meta(ralph_meta)
+        if terminal_status is not None:
+            state.ralph_job_status = terminal_status
+        if stop_reason is not None:
+            state.ralph_stop_reason = stop_reason
+        if current_generation is not None:
+            state.ralph_current_generation = current_generation
         if terminal_status == "completed":
             return await self._evaluate_or_complete(
                 state,
@@ -1727,6 +1895,17 @@ class AutoPipeline:
                 ralph_result_text=_artifact_text(ralph_meta.get("result_text")),
                 resumed=True,
             )
+        # Q00/ouroboros#782 review-10 BLOCKING #2: ``terminal_status ==
+        # "cancelled"`` must map to BLOCKED with the pinned
+        # ``RALPH_CANCEL_BLOCKER_REASON`` — same as the live ``_handoff_to_ralph``
+        # path. Falling through to the generic failure branch would mark a
+        # user-cancelled session FAILED on resume, regressing the live-path
+        # contract for a normal user action.
+        if terminal_status == "cancelled":
+            if state.phase is not AutoPhase.BLOCKED:
+                state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
+                self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
@@ -1740,6 +1919,127 @@ class AutoPipeline:
         state.mark_failed(message, tool_name="ralph_starter")
         self._save(state)
         return self._result(state, ledger, review=review, blocker=state.last_error)
+
+    def _remaining_deadline_seconds(self, state: AutoPipelineState) -> float | None:
+        """Return remaining pipeline budget in seconds, if a deadline is armed."""
+        if state.deadline_at is None or state.is_terminal():
+            return None
+        return max(0.0, state.deadline_at - time.monotonic())
+
+    def _phase_timeout_with_deadline(self, state: AutoPipelineState, phase_timeout: float) -> float:
+        """Cap a phase-local timeout by the remaining top-level pipeline budget."""
+        remaining = self._remaining_deadline_seconds(state)
+        if remaining is None:
+            return phase_timeout
+        return max(0.0, min(phase_timeout, remaining))
+
+    def _deadline_timeout_elapsed(self, state: AutoPipelineState) -> bool:
+        """Return True when a wait_for timeout should be classified as pipeline_timeout."""
+        return state.deadline_at is not None and state.is_deadline_expired()
+
+    def _mark_pipeline_timeout(self, state: AutoPipelineState) -> None:
+        """Persist a top-level deadline BLOCKED state after an in-flight await overruns."""
+        remaining = (state.deadline_at - time.monotonic()) if state.deadline_at is not None else 0.0
+        message = (
+            f"pipeline_timeout: deadline exceeded by "
+            f"{abs(remaining):.1f}s during {state.phase.value}"
+        )
+        state.last_tool_name = PIPELINE_DEADLINE_TOOL_NAME
+        state.mark_blocked(message, tool_name=PIPELINE_DEADLINE_TOOL_NAME)
+        self._save(state)
+
+    async def _reattach_ralph_job(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+    ) -> AutoPipelineResult:
+        """Wait on an already-dispatched Ralph job rather than dispatching a duplicate.
+
+        Q00/ouroboros#782 review-6 BLOCKING #2. Resume after a crash that
+        happened between ``persist_started_ralph`` saving ``ralph_job_id``
+        and the original ``HandlerRalphStarter`` finishing its terminal
+        wait. Calls ``ralph_starter`` with ``attach_job_id=state.ralph_job_id``
+        so no fresh ``mcp.subagent.dispatched`` / job-create side effect
+        runs; the same terminal-status mapping handles the result.
+
+        Intentionally does NOT call ``_enforce_deadline`` first
+        (Q00/ouroboros#782 review-7 BLOCKING #1): re-attach is just
+        observing an already-dispatched job's terminal state, so a long
+        offline gap that pushed past ``deadline_at`` must NOT strand a
+        successfully completed Ralph job as a false ``pipeline_timeout``.
+        """
+        assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
+        ralph_mirror_task: asyncio.Task[None] | None = None
+        if (
+            self.store is not None
+            and state.ralph_dispatch_mode != "plugin"
+            and state.ralph_job_id is not None
+        ):
+            event_store = getattr(self.ralph_starter, "job_event_store", None)
+            if event_store is not None:
+                ralph_mirror_task = asyncio.create_task(
+                    mirror_ralph_job_events(
+                        state,
+                        self.store,
+                        event_store,
+                        state.ralph_job_id,
+                    )
+                )
+        try:
+            ralph_meta = await self.ralph_starter(
+                None,  # type: ignore[arg-type]
+                lineage_id=state.ralph_lineage_id or "",
+                attach_job_id=state.ralph_job_id,
+            )
+        except Exception as exc:
+            await _cancel_ralph_status_mirror(ralph_mirror_task)
+            state.mark_failed(
+                f"ralph re-attach failed: {exc}",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
+        await _drain_ralph_status_mirror(ralph_mirror_task)
+        if not isinstance(ralph_meta, dict):
+            state.mark_failed(
+                f"ralph re-attach returned {type(ralph_meta).__name__}, expected dict",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
+        terminal_status = _optional_str(ralph_meta.get("terminal_status"))
+        stop_reason = _optional_str(ralph_meta.get("stop_reason"))
+        current_generation = _ralph_current_generation_from_meta(ralph_meta)
+        if terminal_status is not None:
+            state.ralph_job_status = terminal_status
+        if stop_reason is not None:
+            state.ralph_stop_reason = stop_reason
+        if current_generation is not None:
+            state.ralph_current_generation = current_generation
+        if terminal_status == "completed":
+            state.transition(
+                AutoPhase.COMPLETE,
+                f"ralph loop completed on re-attach ({stop_reason or 'qa passed'})",
+            )
+            self._save(state)
+            return self._result(state, ledger)
+        if terminal_status == "cancelled":
+            if state.phase is not AutoPhase.BLOCKED:
+                state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
+                self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
+        if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
+            state.mark_blocked(stop_reason, tool_name="ralph_starter")
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
+        message = (
+            f"ralph loop failed on re-attach: {stop_reason}"
+            if stop_reason
+            else f"ralph loop failed on re-attach: terminal_status={terminal_status or 'unknown'}"
+        )
+        state.mark_failed(message, tool_name="ralph_starter")
+        self._save(state)
+        return self._result(state, ledger, blocker=state.last_error)
 
     def _enforce_deadline(self, state: AutoPipelineState) -> bool:
         """Return True when the pipeline must abort because the deadline expired.
@@ -2117,6 +2417,18 @@ def _arm_legacy_missing_deadline(state: AutoPipelineState) -> bool:
     return True
 
 
+def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool:
+    """Return True when deadline gating should allow Ralph reconciliation.
+
+    Only persisted job handles and confirmed plugin dispatches qualify. An
+    unconfirmed ``plugin_pending`` checkpoint must still obey normal deadline
+    enforcement because resume has to retry the side-effecting plugin dispatch.
+    """
+    if state.phase is not AutoPhase.RALPH_HANDOFF:
+        return False
+    return state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
+
+
 def _first_nonempty(*values: str | None) -> str | None:
     for value in values:
         normalized = _optional_str(value)
@@ -2127,6 +2439,49 @@ def _first_nonempty(*values: str | None) -> str | None:
 
 def _optional_str(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _last_int(value: object) -> int | None:
+    if not isinstance(value, list):
+        return None
+    for item in reversed(value):
+        found = _optional_int(item)
+        if found is not None:
+            return found
+    return None
+
+
+def _ralph_current_generation_from_meta(meta: dict[str, Any]) -> int | None:
+    current_generation = _optional_int(meta.get("current_generation"))
+    if current_generation is not None:
+        return current_generation
+    generations_generation = _last_int(meta.get("generations"))
+    if generations_generation is not None:
+        return generations_generation
+    return _optional_int(meta.get("iterations"))
+
+
+async def _drain_ralph_status_mirror(task: asyncio.Task[None] | None) -> None:
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+    except TimeoutError:
+        await _cancel_ralph_status_mirror(task)
+    except Exception:
+        pass
+
+
+async def _cancel_ralph_status_mirror(task: asyncio.Task[None] | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 def _artifact_text(value: object) -> str | None:

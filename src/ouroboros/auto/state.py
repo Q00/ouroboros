@@ -294,6 +294,18 @@ class AutoPipelineState:
     ralph_job_id: str | None = None
     ralph_lineage_id: str | None = None
     ralph_dispatch_mode: str | None = None
+    # Q00/ouroboros#782 review-8: preserve the un-demoted OpenCode mode used
+    # to construct the Ralph handler across resume. ``state.opencode_mode`` may
+    # be demoted from plugin→subprocess for authoring/run-handoff handlers, but
+    # Ralph still needs the original plugin mode to return a subagent envelope.
+    ralph_opencode_mode: str | None = None
+    # Q00/ouroboros#782: best-effort mirror of the linked Ralph job's most
+    # recent observation, populated from mcp.job.* events. Defaults keep legacy
+    # state files compatible and let status surfaces render the handoff gap.
+    ralph_job_status: str | None = None
+    ralph_last_event_at: float | None = None
+    ralph_stop_reason: str | None = None
+    ralph_current_generation: int | None = None
     # Q00/ouroboros#773: persisted intent for ``--complete-product`` /
     # ``complete_product=True``. The flag is durable session state — not a
     # per-invocation argument — so a session originally started with
@@ -683,6 +695,11 @@ class AutoPipelineState:
         payload.setdefault("ralph_job_id", None)
         payload.setdefault("ralph_lineage_id", None)
         payload.setdefault("ralph_dispatch_mode", None)
+        payload.setdefault("ralph_opencode_mode", None)
+        payload.setdefault("ralph_job_status", None)
+        payload.setdefault("ralph_last_event_at", None)
+        payload.setdefault("ralph_stop_reason", None)
+        payload.setdefault("ralph_current_generation", None)
         payload.setdefault("complete_product", False)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
@@ -709,8 +726,9 @@ class AutoPipelineState:
         # epoch field is present, derive ``deadline_at`` from the offset
         # between ``time.monotonic()`` and ``time.time()`` so the absolute
         # deadline survives a process restart. If both fields are missing
-        # (legacy state file or never-armed session), leave them None and let
-        # ``arm_deadline()`` decide when to set them.
+        # (legacy state file or never-armed non-terminal session), arm a fresh
+        # deadline after construction so resumed sessions still honor the
+        # top-level timeout contract.
         epoch_value = payload.get("deadline_at_epoch")
         if isinstance(epoch_value, int | float) and not isinstance(epoch_value, bool):
             now_epoch = time.time()
@@ -742,6 +760,12 @@ class AutoPipelineState:
         ):
             state.arm_deadline()
         state._validate_loaded()
+        if (
+            state.deadline_at is None
+            and state.deadline_at_epoch is None
+            and not state.is_terminal()
+        ):
+            state.arm_deadline()
         return state
 
     def _validate_loaded(self) -> None:
@@ -785,6 +809,25 @@ class AutoPipelineState:
                 continue
             if isinstance(value, bool) or not isinstance(value, int | float):
                 msg = f"{field_name} must be a number or null"
+                raise ValueError(msg)
+
+        # Q00/ouroboros#782 ralph mirror fields. ``ralph_last_event_at`` is a
+        # ``time.monotonic()``-domain reading set by the listener; persisted
+        # values from a prior process are still numerically valid for sorting
+        # but must not be reused as live monotonic deltas across processes.
+        if self.ralph_last_event_at is not None:
+            if isinstance(self.ralph_last_event_at, bool) or not isinstance(
+                self.ralph_last_event_at, int | float
+            ):
+                msg = "ralph_last_event_at must be a number or null"
+                raise ValueError(msg)
+        if self.ralph_current_generation is not None:
+            if (
+                isinstance(self.ralph_current_generation, bool)
+                or not isinstance(self.ralph_current_generation, int)
+                or self.ralph_current_generation < 0
+            ):
+                msg = "ralph_current_generation must be a non-negative integer or null"
                 raise ValueError(msg)
 
         for field_name in (
@@ -936,6 +979,9 @@ class AutoPipelineState:
             "ralph_job_id",
             "ralph_lineage_id",
             "ralph_dispatch_mode",
+            "ralph_opencode_mode",
+            "ralph_job_status",
+            "ralph_stop_reason",
             "last_grade",
             "pending_question",
             "last_tool_name",
