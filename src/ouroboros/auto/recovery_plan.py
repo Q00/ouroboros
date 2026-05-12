@@ -35,6 +35,9 @@ class AutoRecoveryPlan:
     instruction: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.action, RecoveryPlanAction):
+            msg = "action must be a RecoveryPlanAction"
+            raise ValueError(msg)
         if not isinstance(self.safe_to_redispatch, bool):
             msg = "safe_to_redispatch must be a boolean"
             raise ValueError(msg)

@@ -46,6 +46,17 @@ def test_empty_lateral_advice_is_manual_intervention() -> None:
     assert plan.instruction
 
 
+def test_direct_construction_rejects_string_action() -> None:
+    with pytest.raises(ValueError, match="action"):
+        AutoRecoveryPlan(
+            action="ralph_redispatch",  # type: ignore[arg-type]
+            safe_to_redispatch=True,
+            reason="x",
+            qa_score=0.1,
+            qa_verdict="fail",
+        )
+
+
 def test_manual_plan_is_not_auto_dispatchable() -> None:
     plan = build_manual_recovery_plan(
         qa_score=0.25,
