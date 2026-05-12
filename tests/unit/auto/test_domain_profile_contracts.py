@@ -394,7 +394,20 @@ def test_importing_contracts_module_does_not_import_builtin_profiles() -> None:
     code = (
         "import sys; "
         "import ouroboros.auto.domain_profile; "
-        "assert 'ouroboros.auto.profiles.coding' not in sys.modules"
+        "assert 'ouroboros.auto.profiles.coding' not in sys.modules; "
+        "assert 'ouroboros.auto.grading' not in sys.modules; "
+        "assert 'ouroboros.auto.pipeline' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_auto_package_exports_are_lazy() -> None:
+    code = (
+        "import sys; "
+        "import ouroboros.auto as auto; "
+        "assert 'ouroboros.auto.grading' not in sys.modules; "
+        "assert auto.GradeGate.__name__ == 'GradeGate'; "
+        "assert 'ouroboros.auto.grading' in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
