@@ -1417,31 +1417,6 @@ class AutoPipeline:
         """
         assert self.evaluator is not None  # noqa: S101 — guarded by caller
 
-        # RFC #809 Phase 2.2b — sticky guard check. If a previous round
-        # exhausted a recovery guard (round budget, duplicate fingerprint,
-        # or persona-once chain), this resume MUST NOT re-enter the
-        # cache-fast-path or fall through to ``_finalize_evaluate``: doing
-        # so would honour a cached ``passed=False`` verdict and spend
-        # another lateral persona slot for a surface that was already
-        # declared exhausted. Re-mark the session as BLOCKED (the
-        # ``--resume`` transition above flipped the phase back to
-        # EVALUATE for re-entry; flip it back) and surface the original
-        # exhaustion reason verbatim.
-        if state.recovery_guard_tripped is not None:
-            state.mark_blocked(
-                state.last_error
-                or f"recovery guard '{state.recovery_guard_tripped}' already exhausted",
-                tool_name=state.last_tool_name or "evaluator",
-            )
-            self._save(state)
-            return self._result(
-                state,
-                ledger,
-                review=review,
-                blocker=state.last_error,
-                run_subagent=run_subagent,
-            )
-
         # Resolve the artifact:
         # 1. Fresh call from the Ralph terminal path → use ``ralph_result_text``
         #    (``is not None`` so an empty-but-valid artifact still grades)
@@ -1460,6 +1435,55 @@ class AutoPipeline:
             artifact_hash = state.evaluate_artifact_hash
         else:
             artifact_hash = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
+
+        # RFC #809 Phase 2.2b — fresh-artifact reset. A new run output
+        # (artifact_hash differs from the persisted one) means the
+        # failure surface changed; any prior recovery exhaustion no
+        # longer applies and must be cleared BEFORE the sticky-guard
+        # check below — otherwise ``recovery_guard_tripped`` would be a
+        # permanent poison pill that no operator-driven workflow could
+        # escape within the same session. The reset is conditional on
+        # ``state.evaluate_artifact_hash`` already being populated so
+        # the first evaluator call of a session does not trip it on
+        # default-None state. This is the same "fresh artifact = fresh
+        # budget" contract the ``recovery_guard_tripped`` field
+        # docstring on AutoPipelineState promises; Stack 2's automated
+        # re-dispatch will be the most common producer of fresh
+        # artifacts arriving at EVALUATE.
+        if (
+            state.evaluate_artifact_hash is not None
+            and artifact_hash is not None
+            and state.evaluate_artifact_hash != artifact_hash
+        ):
+            state.recovery_guard_tripped = None
+            state.evaluate_round = 0
+            state.failure_fingerprints = []
+            state.personas_invoked = []
+
+        # RFC #809 Phase 2.2b — sticky guard check (post-reset). If the
+        # previous round exhausted a recovery guard AND the artifact
+        # has not changed, this resume MUST NOT re-enter the
+        # cache-fast-path or fall through to ``_finalize_evaluate``:
+        # doing so would honour a cached ``passed=False`` verdict and
+        # spend another lateral persona slot for a surface already
+        # declared exhausted. Re-mark the session BLOCKED (the
+        # ``--resume`` transition above flipped the phase back to
+        # EVALUATE for re-entry; flip it back) and surface the
+        # original exhaustion reason verbatim.
+        if state.recovery_guard_tripped is not None:
+            state.mark_blocked(
+                state.last_error
+                or f"recovery guard '{state.recovery_guard_tripped}' already exhausted",
+                tool_name=state.last_tool_name or "evaluator",
+            )
+            self._save(state)
+            return self._result(
+                state,
+                ledger,
+                review=review,
+                blocker=state.last_error,
+                run_subagent=run_subagent,
+            )
 
         # Cache hit requires the persisted ``last_qa_passed`` boolean — the
         # canonical pass decision derived from ``score >= pass_threshold``

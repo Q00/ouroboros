@@ -1494,6 +1494,70 @@ async def test_fingerprint_guard_sets_sticky_flag(tmp_path) -> None:
     assert state.recovery_guard_tripped == "duplicate_fingerprint"
 
 
+@pytest.mark.asyncio
+async def test_fresh_artifact_resets_recovery_guard_state(tmp_path) -> None:
+    """A new run output (different ``evaluate_artifact_hash``) clears the
+    sticky guard tag AND the loop counters so the session can start over
+    with a clean budget. Without this, ``recovery_guard_tripped`` would
+    be a permanent poison pill no operator-driven re-entry could
+    escape."""
+    state = _state_at_run_phase(tmp_path)
+    state.phase = AutoPhase.EVALUATE
+    # Plant prior exhaustion + an old artifact hash so a new artifact
+    # arrives with a different hash and triggers the reset.
+    state.recovery_guard_tripped = "duplicate_fingerprint"
+    state.evaluate_round = 3
+    state.failure_fingerprints = ["old_fp_1", "old_fp_2"]
+    state.personas_invoked = [
+        ThinkingPersona.HACKER.value,
+        ThinkingPersona.CONTRARIAN.value,
+    ]
+    state.evaluate_artifact_hash = "stale_hash_does_not_match_new_artifact"
+    state.last_qa_passed = False
+    state.last_qa_score = 0.3
+    state.last_qa_verdict = "fail"
+    state.last_error = "old fingerprint blocker"
+
+    eval_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal eval_calls
+        eval_calls += 1
+        return EvaluateResult(passed=True, score=0.95, verdict="pass")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    # Hand a brand-new ralph artifact whose hash will not match the planted
+    # stale_hash; the reset path must clear the guard before the sticky
+    # check fires, then the evaluator runs and the session passes.
+    result = await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text="brand new artifact bytes",
+        stop_reason=None,
+    )
+
+    # Guard tag + loop counters cleared
+    assert state.recovery_guard_tripped is None
+    assert state.evaluate_round == 1  # incremented this round, was 0 after reset
+    assert state.failure_fingerprints == []
+    assert state.personas_invoked == []
+    # Evaluator actually ran; session passed (not stuck on the old blocker)
+    assert eval_calls == 1
+    assert result.status == "complete"
+
+
 def test_resume_capability_is_none_when_recovery_guard_tripped(tmp_path) -> None:
     """``resume_capability`` must return NONE when ``recovery_guard_tripped``
     is set: a guarded BLOCKED session cannot make forward progress on
