@@ -188,14 +188,14 @@ Marking as a decision point for later."
 class QuestionClassifier:
     """Classifies interview questions as PM-answerable, DEV-only, or decide-later.
 
-    Uses a Sonnet-grade LLM to judge whether questions are appropriate
-    for a PM audience, reframes technical questions when possible, and
-    identifies premature questions that should be returned to the user
+    Uses the configured clarification model to judge whether questions are
+    appropriate for a PM audience, reframes technical questions when possible,
+    and identifies premature questions that should be returned to the user
     with the option to defer.
 
     Attributes:
         llm_adapter: LLM adapter for classification calls.
-        model: Model to use (Sonnet-grade for judgment quality).
+        model: Model to use. Defaults to the configured clarification model.
         temperature: Low temperature for consistent classification.
         codebase_context: Shared codebase exploration context for informed classification.
     """
