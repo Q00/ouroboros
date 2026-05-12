@@ -49,6 +49,18 @@ def test_research_beats_weak_git_coding_signal(tmp_path: Path) -> None:
     assert best.name == "research"
 
 
+def test_research_paper_beats_weak_source_coding_signal(tmp_path: Path) -> None:
+    """A paper-shaped repo with incidental source dirs remains research."""
+    repo = tmp_path / "paper_with_src_repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "paper.tex").write_text("\\documentclass{article}\n")
+
+    best = DEFAULT_REGISTRY.detect_best(repo)
+    assert best is not None
+    assert best.name == "research"
+
+
 def test_detect_best_returns_coding_for_python_repo(tmp_path: Path) -> None:
     """A repo with pyproject.toml is detected as coding (when that profile is present)."""
     names = {p.name for p in DEFAULT_REGISTRY.all()}

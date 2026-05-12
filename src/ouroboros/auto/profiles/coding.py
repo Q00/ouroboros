@@ -264,7 +264,7 @@ def _coding_detector(cwd: Path) -> float:
         return 1.0
     has_git_marker = (cwd / ".git").exists()
     has_dir_marker = any((cwd / marker).is_dir() for marker in _CODING_DIR_MARKERS)
-    return 0.4 if has_git_marker or has_dir_marker else 0.0
+    return 0.1 if has_git_marker or has_dir_marker else 0.0
 
 
 # ---------------------------------------------------------------------------
