@@ -87,6 +87,7 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     evaluate_capability_policy,
 )
+from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
@@ -252,6 +253,18 @@ async def get_pending_cancellations() -> frozenset[str]:
 # =============================================================================
 # Prompt Building
 # =============================================================================
+
+
+def _execution_profile_for_seed(seed: Seed) -> ExecutionProfile | None:
+    """Return the execution profile matching a seed task_type, if available."""
+    try:
+        return load_profile(seed.task_type)
+    except ProfileError:
+        log.warning(
+            "orchestrator.runner.execution_profile_unavailable",
+            task_type=seed.task_type,
+        )
+        return None
 
 
 def build_system_prompt(
@@ -2673,6 +2686,8 @@ class OrchestratorRunner:
                 f"  Stage {stage.stage_number}: ACs {[idx + 1 for idx in stage.ac_indices]}"
             )
 
+        execution_profile = _execution_profile_for_seed(seed)
+
         # Execute in parallel
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
@@ -2684,6 +2699,7 @@ class OrchestratorRunner:
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
             checkpoint_store=self._checkpoint_store,
+            execution_profile=execution_profile,
         )
 
         # Check for cancellation before starting parallel execution

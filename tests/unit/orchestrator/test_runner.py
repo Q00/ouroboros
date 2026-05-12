@@ -2038,6 +2038,74 @@ class TestOrchestratorRunner:
         assert kwargs["session_id"] == tracker.session_id
 
     @pytest.mark.asyncio
+    async def test_execute_parallel_passes_execution_profile_to_executor(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Runner wiring should make profile-aware decomposition live in production."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=sample_seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=sample_seed.acceptance_criteria[0],
+                    success=True,
+                    final_message="done",
+                ),
+            ),
+            success_count=1,
+            failure_count=0,
+            total_messages=1,
+        )
+        captured_init: dict[str, Any] = {}
+
+        class _FakeParallelExecutor:
+            def __init__(self, **kwargs: Any) -> None:
+                captured_init.update(kwargs)
+
+            async def execute_parallel(self, **kwargs: Any) -> ParallelExecutionResult:  # noqa: ARG002
+                return parallel_result
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                _FakeParallelExecutor,
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id="exec_parallel",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok
+        profile = captured_init["execution_profile"]
+        assert profile is not None
+        assert profile.profile == sample_seed.task_type == "code"
+        assert profile.axis == "testable_unit"
+
+    @pytest.mark.asyncio
     async def test_execute_parallel_builds_dependency_analyzer_with_llm_adapter(
         self,
         runner: OrchestratorRunner,
