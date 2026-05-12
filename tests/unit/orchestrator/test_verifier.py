@@ -469,6 +469,30 @@ class TestEvidenceShortCircuit:
         assert first.verdict is None
         assert any("tests_passed == []" in line for line in executor.feedbacks[1])
 
+    def test_malformed_blocker_validation_retries_without_crashing(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        malformed_blocker = json.dumps({"status": "blocked", "blocker": {"code": "MISSING_TOOL"}})
+        executor = ScriptedExecutor(outputs=[malformed_blocker, _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[VerifierVerdict(passed=True)])
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=verifier,
+            profile=code_profile,
+            ac="x",
+        )
+
+        assert result.accepted is True
+        assert verifier.calls == 1
+        first = result.attempts[0]
+        assert first.record is not None
+        assert first.validation_error is not None
+        assert "blocker.reason" in first.validation_error
+        assert first.validation is None
+        assert first.verdict is None
+        assert any("evidence validation failed" in line for line in executor.feedbacks[1])
+
     def test_evidence_fail_exhausts_budget_without_verifier(
         self, code_profile: ExecutionProfile
     ) -> None:

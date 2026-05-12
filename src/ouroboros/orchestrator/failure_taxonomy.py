@@ -139,7 +139,7 @@ def classify(attempt: Attempt) -> FailureClass | None:
             # rather than crashing the orchestrator.
             return FailureClass.STALL
 
-    if attempt.evidence_error is not None:
+    if attempt.evidence_error is not None or attempt.validation_error is not None:
         return FailureClass.EVIDENCE_MISSING
 
     if attempt.validation is not None and attempt.validation.blocker is not None:

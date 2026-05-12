@@ -180,6 +180,7 @@ class Attempt:
     evidence_error: str | None
     validation: ValidationResult | None
     verdict: VerifierVerdict | None
+    validation_error: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -209,6 +210,8 @@ def _failure_reasons(attempt: Attempt) -> tuple[str, ...]:
     """Collect surfaceable reasons from an attempt's failure mode."""
     if attempt.evidence_error is not None:
         return (f"evidence parse failed: {attempt.evidence_error}",)
+    if attempt.validation_error is not None:
+        return (f"evidence validation failed: {attempt.validation_error}",)
     out: list[str] = []
     if attempt.validation is not None and not attempt.validation.ok:
         out.extend(attempt.validation.reasons())
@@ -259,11 +262,16 @@ def run_with_verifier(
             evidence_error = str(exc)
 
         validation: ValidationResult | None = None
+        validation_error: str | None = None
         verdict: VerifierVerdict | None = None
 
         if record is not None:
-            validation = validate_evidence(profile, record)
-            if validation.ok:
+            try:
+                validation = validate_evidence(profile, record)
+            except EvidenceError as exc:
+                validation_error = str(exc)
+                validation = None
+            if validation is not None and validation.ok:
                 try:
                     raw_verdict = verifier(
                         profile=profile,
@@ -314,6 +322,7 @@ def run_with_verifier(
             leaf_output=leaf_output,
             record=record,
             evidence_error=evidence_error,
+            validation_error=validation_error,
             validation=validation,
             verdict=verdict,
         )
