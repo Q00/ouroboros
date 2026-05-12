@@ -87,31 +87,40 @@ class TestSystemPromptFragment:
         assert "tradeoffs" in a.lower() or "trade-offs" in a.lower()
         assert "structured analytical" in a.lower()
 
-    def test_fragment_does_not_tell_executor_to_stop(self, profile: ExecutionProfile) -> None:
-        # Bot finding on #891 r3: reusing build_post_block (which says
-        # "emit one JSON block, then stop") in the system prompt
-        # contradicted the task suffix's "continue through every AC"
-        # cue. Because system prompt has higher precedence, the run
-        # would terminate after the first criterion. The fragment must
-        # use multi-AC-aware wording.
+    def test_fragment_directs_consolidated_record(self, profile: ExecutionProfile) -> None:
+        # Bot finding on #891 r6 round 2: H2's extract_evidence parses
+        # ONE JSON object per dispatch, so the multi-AC contract must
+        # ask for a single consolidated record (not one per AC). The
+        # fragment must reflect that: "every AC", "single ... record".
         fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
-        assert "then stop" not in fragment
-        assert "continue" in fragment.lower()
-        # Reinforce: the per-AC iteration cue is present.
-        assert "next criterion" in fragment or "next AC" in fragment
+        assert "every acceptance criterion" in fragment.lower() or "every AC" in fragment
+        # "exactly ONE" or "single ... record" — accept either wording.
+        assert "exactly one" in fragment.lower() or "single" in fragment.lower()
+
+    def test_fragment_routes_blocker_through_record(self, profile: ExecutionProfile) -> None:
+        # Bot finding on #891 r6 round 2: a blocker surfaced as prose
+        # without JSON gets classified as EVIDENCE_MISSING, not BLOCKED.
+        # The system prompt must direct the executor to encode blockers
+        # inside the evidence record so H7 can route them correctly.
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        assert "blocker" in fragment.lower() or "blocked" in fragment.lower()
 
     def test_suffix_demands_restatement_and_preconditions(self, profile: ExecutionProfile) -> None:
         suffix = ProfileBackedStrategy(profile).get_task_prompt_suffix()
         assert "[PRE" in suffix
         assert "restate" in suffix.lower()
         assert "precondition" in suffix.lower()
-        assert "blocker" in suffix.lower()
+        # Blocker handling is encoded in the suffix so H7 routes BLOCKED
+        # vs EVIDENCE_MISSING correctly.
+        assert "blocker" in suffix.lower() or "BLOCKED" in suffix
 
 
 class TestTaskPromptSuffix:
-    def test_forbids_self_declared_done(self, profile: ExecutionProfile) -> None:
+    def test_directs_evidence_record_on_completion(self, profile: ExecutionProfile) -> None:
+        # The suffix must direct the executor to emit the consolidated
+        # evidence record described in the system prompt, not declare
+        # DONE in prose.
         suffix = ProfileBackedStrategy(profile).get_task_prompt_suffix()
-        assert "DONE" in suffix
         assert "evidence" in suffix.lower()
 
     def test_suffix_is_profile_independent(self) -> None:
@@ -121,15 +130,14 @@ class TestTaskPromptSuffix:
         r = ProfileBackedStrategy(load_profile("research")).get_task_prompt_suffix()
         assert c == r
 
-    def test_suffix_does_not_terminate_after_first_ac(self) -> None:
-        # Bot finding on #891 r2: the runner non-parallel path renders
-        # ALL acceptance criteria into one prompt. A "stop after first
-        # evidence record" instruction would abort the run before the
-        # remaining criteria executed. Suffix must direct the executor
-        # to continue through every AC.
+    def test_suffix_blocker_routes_through_record(self) -> None:
+        # Bot finding on #891 r6 round 2: a blocker surfaced as prose
+        # without JSON gets classified as EVIDENCE_MISSING, not BLOCKED.
+        # The PRE gate must route the blocker through the evidence
+        # record, not via prose-only output.
         suffix = ProfileBackedStrategy(load_profile("code")).get_task_prompt_suffix()
-        assert "next AC" in suffix or "move on" in suffix
-        assert "every acceptance criterion" in suffix.lower()
+        assert "do not surface" in suffix.lower() or "encode" in suffix.lower()
+        assert "EVIDENCE_MISSING" in suffix or "evidence record" in suffix.lower()
 
 
 class TestActivityMap:

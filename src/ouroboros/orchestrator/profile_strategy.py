@@ -8,9 +8,10 @@ a YAML edit, not a Python + markdown edit.
 
 This module ships a `ProfileBackedStrategy` that satisfies the existing
 `ExecutionStrategy` Protocol but reads tools and system-prompt fragment
-from a loaded `ExecutionProfile`. The system prompt fragment carries
-the H3 `[POST]` block (`build_post_block`) so the evidence_schema
-flows through `runner.build_system_prompt`; the `[PRE]` restate-and-
+from a loaded `ExecutionProfile`. The system prompt fragment composes a
+custom multi-AC POST section inline (it intentionally does NOT call
+`phase_wrappers.build_post_block`, whose "emit one block, then stop"
+contract is single-dispatch only); the `[PRE]` restate-and-
 preconditions gate lives in `get_task_prompt_suffix` so it grounds in
 the AC list `runner.build_task_prompt` renders immediately above it.
 
@@ -176,16 +177,33 @@ class ProfileBackedStrategy:
         )
         guidance_template = _PROFILE_GUIDANCE.get(self.profile.profile, _DEFAULT_GUIDANCE_TEMPLATE)
         guidance = guidance_template.format(tools=tools_csv)
+        # H2's extract_evidence() consumes exactly ONE fenced JSON
+        # object per dispatch. Earlier rounds asked the executor for
+        # "one record per AC"; the parser would silently drop every
+        # record after the first, so the multi-AC transcript could
+        # not be validated. Instead, instruct the executor to emit a
+        # single consolidated evidence record at the very end of the
+        # dispatch, with per-AC entries inside it. Blocked ACs are
+        # also represented inside that record (e.g. by populating the
+        # rejected_if-bearing fields with a blocked-marker), so the
+        # downstream H7 classifier sees structured evidence rather
+        # than a parse failure that degrades to EVIDENCE_MISSING
+        # (bot finding on #891 r6 round 2).
         contract = (
-            "[POST — harness-injected; per-AC evidence contract]\n"
-            "For each acceptance criterion you complete, emit a single "
-            "fenced JSON evidence record on its own line and continue "
-            f"to the next criterion. Required fields per record: "
-            f"{required}.\n"
+            "[POST — harness-injected; consolidated evidence contract]\n"
+            "When you have worked through every acceptance criterion "
+            "above (or surfaced a blocker for one), emit exactly ONE "
+            "fenced JSON evidence record at the end of your response. "
+            "The record must cover every AC you addressed — populate "
+            f"its required fields ({required}) with the cumulative "
+            "evidence across all ACs. If an AC is blocked, populate the "
+            "record's fields with a marker that describes the blocker "
+            "(e.g. an empty list or a `BLOCKED:` string) so the verifier "
+            "can route the failure through the H7 taxonomy.\n"
             f"Automatic rejection rules: {rejected}.\n"
             "Do not declare DONE in prose — the harness adjudicates via "
-            "an external verifier pass. The run finishes when every "
-            "criterion above has its own evidence record."
+            "an external verifier pass. Emit the single evidence record, "
+            "then stop."
         )
         return f"{anchor}\n\n{guidance}\n\n{contract}"
 
@@ -203,14 +221,13 @@ class ProfileBackedStrategy:
             "[PRE — harness-injected; restate before any action]\n"
             "For each acceptance criterion above, restate it in one "
             "sentence and list every precondition you are assuming "
-            "(paths, commands, external services, access tokens). Do "
-            "not begin execution if any precondition is unverified — "
-            "surface the blocker instead.\n\n"
-            "When you finish the work for an AC, emit a single fenced "
-            "JSON evidence record per the active profile, then move on "
-            "to the next AC. Continue until every acceptance criterion "
-            "above has its own evidence record. Do not declare DONE in "
-            "prose — the harness adjudicates via the verifier loop."
+            "(paths, commands, external services, access tokens).\n\n"
+            "When the work for all reachable ACs is complete (or a "
+            "precondition cannot be verified for one of them), emit the "
+            "single consolidated evidence record described in the "
+            "system prompt. Encode any blocker inside that record — do "
+            "not surface the blocker as prose only, or the H7 classifier "
+            "will degrade it to EVIDENCE_MISSING instead of BLOCKED."
         )
 
     def get_activity_map(self) -> dict[str, ActivityType]:
