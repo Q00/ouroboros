@@ -441,7 +441,9 @@ class InputValidator:
 
     # Fields that carry freetext content (code, prompts, descriptions).
     # These are exempt from shell-metacharacter checks because no
-    # Ouroboros tool ever passes them to a shell.
+    # Ouroboros tool ever passes them to a shell. ``user_preferences``
+    # carries operator-supplied freetext per ledger section (see
+    # ``answerer.py``) and likewise never reaches a shell.
     FREETEXT_FIELDS: set[str] = {
         "artifact",
         "quality_bar",
@@ -460,6 +462,7 @@ class InputValidator:
         "desc",
         "entry",
         "reason",
+        "user_preferences",
     }
 
     def __init__(self) -> None:

@@ -1371,7 +1371,7 @@ async def test_auto_handler_passes_state_interview_timeout_to_driver(monkeypatch
     result = await AutoHandler().handle({"goal": "Build a CLI", "cwd": str(tmp_path)})
 
     assert result.is_ok
-    assert captured["driver_timeout_seconds"] == 120.0
+    assert captured["driver_timeout_seconds"] == 600.0
 
 
 @pytest.mark.asyncio

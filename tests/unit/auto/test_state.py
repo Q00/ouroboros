@@ -20,7 +20,7 @@ def test_state_transition_and_stale_detection() -> None:
     assert state.phase == AutoPhase.INTERVIEW
     assert state.last_progress_message == "starting interview"
 
-    future = datetime.fromisoformat(state.last_progress_at) + timedelta(seconds=121)
+    future = datetime.fromisoformat(state.last_progress_at) + timedelta(seconds=601)
     assert state.is_stale(future)
 
 
@@ -71,7 +71,7 @@ def test_phase_timeout_seconds_falls_back_to_canonical_default() -> None:
     state.timeout_seconds_by_phase.pop(AutoPhase.INTERVIEW.value)
 
     expected = float(DEFAULT_TIMEOUT_SECONDS_BY_PHASE[AutoPhase.INTERVIEW.value])
-    assert expected == 120.0
+    assert expected == 600.0
     assert state.phase_timeout_seconds(AutoPhase.INTERVIEW) == expected
 
 
@@ -726,3 +726,24 @@ def test_resume_capability_failed_mirrors_blocked() -> None:
     assert state.phase is AutoPhase.FAILED
     assert state.interview_session_id is None
     assert state.resume_capability() is AutoResumeCapability.RETRY
+
+
+def test_phase_timeout_env_override_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OUROBOROS_PHASE_TIMEOUT_<PHASE>_SECONDS overrides the default at import."""
+    from ouroboros.auto import state as state_module
+
+    monkeypatch.setenv("OUROBOROS_PHASE_TIMEOUT_INTERVIEW_SECONDS", "900")
+    monkeypatch.setenv("OUROBOROS_PHASE_TIMEOUT_RUN_SECONDS", "0")  # invalid -> ignored
+    monkeypatch.setenv("OUROBOROS_PHASE_TIMEOUT_REVIEW_SECONDS", "garbage")  # invalid
+
+    merged = state_module._apply_phase_timeout_env_overrides(
+        {
+            AutoPhase.INTERVIEW.value: 600,
+            AutoPhase.RUN.value: 60,
+            AutoPhase.REVIEW.value: 90,
+        }
+    )
+
+    assert merged[AutoPhase.INTERVIEW.value] == 900
+    assert merged[AutoPhase.RUN.value] == 60  # invalid override silently ignored
+    assert merged[AutoPhase.REVIEW.value] == 90  # invalid override silently ignored

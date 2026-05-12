@@ -6,10 +6,14 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 import json
+import logging
+import os
 from pathlib import Path
 import time
 from typing import Any
 from uuid import uuid4
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AutoPhase(StrEnum):
@@ -76,14 +80,48 @@ class SeedOrigin(StrEnum):
 
 
 DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
-    AutoPhase.INTERVIEW.value: 120,
-    AutoPhase.SEED_GENERATION.value: 120,
+    AutoPhase.INTERVIEW.value: 600,
+    AutoPhase.SEED_GENERATION.value: 300,
     AutoPhase.REVIEW.value: 90,
     AutoPhase.REPAIR.value: 90,
     AutoPhase.RUN.value: 60,
     AutoPhase.EVALUATE.value: 90,
     AutoPhase.UNSTUCK_LATERAL.value: 60,
 }
+
+
+def _apply_phase_timeout_env_overrides(
+    defaults: dict[str, int],
+) -> dict[str, int]:
+    """Merge ``OUROBOROS_PHASE_TIMEOUT_<PHASE>_SECONDS`` overrides into ``defaults``.
+
+    Each phase listed in ``defaults`` may be overridden via an environment
+    variable named ``OUROBOROS_PHASE_TIMEOUT_<PHASE_UPPERCASE>_SECONDS`` (for
+    example ``OUROBOROS_PHASE_TIMEOUT_INTERVIEW_SECONDS=900``). Invalid values
+    (non-integer, non-positive) are ignored with a warning rather than raising
+    so a typo in the shell cannot crash module import.
+    """
+    overridden = dict(defaults)
+    for phase_value in defaults:
+        env_name = f"OUROBOROS_PHASE_TIMEOUT_{phase_value.upper()}_SECONDS"
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            _LOGGER.warning("Ignoring %s=%r: must be a positive integer", env_name, raw)
+            continue
+        if parsed <= 0:
+            _LOGGER.warning("Ignoring %s=%r: must be a positive integer", env_name, raw)
+            continue
+        overridden[phase_value] = parsed
+    return overridden
+
+
+DEFAULT_TIMEOUT_SECONDS_BY_PHASE = _apply_phase_timeout_env_overrides(
+    DEFAULT_TIMEOUT_SECONDS_BY_PHASE
+)
 
 # RFC #809 Phase 2.2b — closed-loop recovery cap. Three EVALUATE rounds is
 # the SeedRepairer convention re-applied to the EVALUATE ⇄ UNSTUCK_LATERAL
@@ -115,9 +153,10 @@ _VALID_RECOVERY_GUARD_TAGS: frozenset[str] = frozenset(
 )
 
 # Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
-# a typical product-bootstrap chain — interview ≤ 120s × 12 rounds + seed gen
-# 120s + review/repair ≤ 90s × 5 + run kick-off + ralph 10 generations × 5–15
-# min — with ~2× headroom and stays well under "user has gone home" scenarios.
+# a typical product-bootstrap chain — interview ≤ 600s (one LLM call per round
+# across up to 12 rounds, capped at the phase budget) + seed gen ≤ 300s +
+# review/repair ≤ 90s × 5 + run kick-off + ralph 10 generations × 5–15 min —
+# with headroom, and stays well under "user has gone home" scenarios.
 DEFAULT_PIPELINE_TIMEOUT_SECONDS: float = 7200.0
 MIN_PIPELINE_TIMEOUT_SECONDS: float = 60.0
 MAX_PIPELINE_TIMEOUT_SECONDS: float = 86400.0

@@ -235,6 +235,22 @@ class TestInputValidator:
         assert result.is_err
         assert "Shell metacharacter" in str(result.error)
 
+    def test_validate_allows_user_preferences_punctuation_as_freetext(self) -> None:
+        """Operator-supplied user_preferences carry freetext, never shell input."""
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_auto",
+            {
+                "goal": "g",
+                "user_preferences": {
+                    "constraints": "no shell here; just a semicolon",
+                    "non_goals": ["item one", "item; two"],
+                },
+            },
+        )
+
+        assert result.is_ok
+
 
 class TestRateLimiter:
     """Test RateLimiter class."""
