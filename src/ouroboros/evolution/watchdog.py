@@ -57,9 +57,12 @@ class GenerationProgressWatchdog:
     ---------------
     The EventStore is the recovery substrate. When ``watch()`` raises
     ``GenerationWatchdogTimeout``, the cancelled task is gone but every event
-    from that attempt — including the trailing ``lineage.generation.watchdog_decision``
-    and the ``control.directive.emitted`` written by the watchdog — remains
-    durably persisted.  The production loop treats
+    from that attempt remains durably persisted. When watchdog decision
+    persistence succeeds, the trailing ``lineage.generation.watchdog_decision``
+    and ``control.directive.emitted`` events are appended atomically. If that
+    persistence fails, the original ``GenerationWatchdogTimeout`` is preserved
+    and re-raised with no partial watchdog decision or directive events. The
+    production loop treats
     ``GenerationWatchdogTimeout`` as ``StepAction.FAILED``; replay consumers
     read the trailing directive via ``event_store.replay("lineage", lineage_id)``.
     Because the watchdog timeout path does not currently pass a real
