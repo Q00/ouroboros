@@ -502,6 +502,7 @@ class TestComplete:
                 json.dumps({"type": "session.started", "session_id": "sess-json"}),
                 json.dumps({"type": "tool_use", "name": "shell", "command": "pwd"}),
                 json.dumps({"type": "telemetry", "payload": {"phase": "done"}}),
+                json.dumps({"type": "run.progress", "payload": {"phase": "future"}}),
                 json.dumps({"answer": "ok"}),
                 json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
             ]
@@ -527,6 +528,7 @@ class TestComplete:
         assert result.value.raw_response["session_id"] == "sess-json"
         assert "tool_use" not in result.value.content
         assert "telemetry" not in result.value.content
+        assert "run.progress" not in result.value.content
 
     @pytest.mark.asyncio
     async def test_structured_completion_event_wins_over_stray_stdout(self) -> None:

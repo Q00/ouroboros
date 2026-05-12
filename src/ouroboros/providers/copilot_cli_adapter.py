@@ -455,7 +455,7 @@ class CopilotCliLLMAdapter:
         *,
         preserve_structured_json: bool = False,
     ) -> str:
-        """Use stdout lines that are not known Copilot event envelopes."""
+        """Use stdout lines that are not Copilot JSONL event envelopes."""
         content_lines: list[str] = []
         nonempty_lines = [line for line in stdout_lines if line.strip()]
         has_stream_context = len(nonempty_lines) > 1 and any(
@@ -471,7 +471,10 @@ class CopilotCliLLMAdapter:
             if preserve_structured_json and event is not None and not has_stream_context:
                 content_lines.append(line)
                 continue
-            if event is not None and self._is_copilot_event_envelope(event):
+            if event is not None and (
+                self._is_copilot_event_envelope(event)
+                or (has_stream_context and isinstance(event.get("type"), str))
+            ):
                 continue
             content_lines.append(line)
         return "\n".join(content_lines)
