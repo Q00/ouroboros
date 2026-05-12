@@ -94,3 +94,32 @@ class TestRationaleStrings:
         for role in DispatchRole:
             route = decide_route(role=role, profile=code_profile)
             assert route.rationale, f"{role} returned empty rationale"
+
+
+class TestRoleValidation:
+    """Unknown role types must fail fast, not silently route to VERIFIER.
+
+    Without this guard a raw string from config/JSON (e.g. "EXECUTOR")
+    would compare with `is` to the enum member, fall through every
+    `is` check, and silently end up on the verifier branch — wrong
+    model tier, wrong tools, no error.
+    """
+
+    def test_raw_string_rejected(self, code_profile: ExecutionProfile) -> None:
+        with pytest.raises(TypeError, match="DispatchRole"):
+            decide_route(role="EXECUTOR", profile=code_profile)  # type: ignore[arg-type]
+
+    def test_none_rejected(self, code_profile: ExecutionProfile) -> None:
+        with pytest.raises(TypeError, match="DispatchRole"):
+            decide_route(role=None, profile=code_profile)  # type: ignore[arg-type]
+
+    def test_int_rejected(self, code_profile: ExecutionProfile) -> None:
+        with pytest.raises(TypeError, match="DispatchRole"):
+            decide_route(role=0, profile=code_profile)  # type: ignore[arg-type]
+
+    def test_error_message_lists_valid_roles(self, code_profile: ExecutionProfile) -> None:
+        with pytest.raises(TypeError) as exc:
+            decide_route(role="VERIFIER", profile=code_profile)  # type: ignore[arg-type]
+        msg = str(exc.value)
+        for role in DispatchRole:
+            assert role.name in msg

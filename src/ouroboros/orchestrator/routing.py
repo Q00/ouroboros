@@ -92,7 +92,21 @@ def decide_route(
     Returns:
         RouteDecision with the chosen tier, the resolved tool tuple,
         and a one-line rationale for logs.
+
+    Raises:
+        TypeError: If `role` is not a `DispatchRole` member. The public
+            routing seam fails fast on unknown inputs (e.g. a raw
+            string from config/JSON) rather than silently falling
+            through to the verifier branch with the wrong tools.
     """
+    if not isinstance(role, DispatchRole):
+        msg = (
+            f"decide_route(role=...) requires a DispatchRole member, "
+            f"got {role!r} of type {type(role).__name__}. "
+            f"Valid roles: {[r.name for r in DispatchRole]}."
+        )
+        raise TypeError(msg)
+
     if role is DispatchRole.DECOMPOSER:
         return RouteDecision(
             tier=ModelTier.HAIKU,
@@ -116,19 +130,24 @@ def decide_route(
             ),
         )
 
-    # role == VERIFIER
-    executor_tier = _executor_tier(profile, fabrication_retry=fabrication_retry)
-    verifier_tier = _bump_tier(executor_tier)
-    return RouteDecision(
-        tier=verifier_tier,
-        # Read-only: verifier must not mutate state. Tools intentionally
-        # exclude Write/Edit/Bash; PR 9 plumbs these through the adapter.
-        tools=("Read", "Glob", "Grep"),
-        rationale=(
-            "Verifier runs one tier above the executor; read-only "
-            "toolset keeps the pass non-destructive."
-        ),
-    )
+    if role is DispatchRole.VERIFIER:
+        executor_tier = _executor_tier(profile, fabrication_retry=fabrication_retry)
+        verifier_tier = _bump_tier(executor_tier)
+        return RouteDecision(
+            tier=verifier_tier,
+            # Read-only: verifier must not mutate state. Tools intentionally
+            # exclude Write/Edit/Bash; PR 9 plumbs these through the adapter.
+            tools=("Read", "Glob", "Grep"),
+            rationale=(
+                "Verifier runs one tier above the executor; read-only "
+                "toolset keeps the pass non-destructive."
+            ),
+        )
+
+    # Exhaustive — every DispatchRole member handled above. Reached only
+    # if a new role is added without updating decide_route.
+    msg = f"Unhandled DispatchRole: {role!r}"
+    raise NotImplementedError(msg)
 
 
 __all__ = [
