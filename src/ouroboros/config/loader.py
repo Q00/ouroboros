@@ -1200,26 +1200,6 @@ def get_clarification_model(backend: str | None = None) -> str:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
 
-def get_classifier_model(backend: str | None = None) -> str:
-    """Get classifier model from environment variable or config, defaulting to Sonnet."""
-    env_model = os.environ.get("OUROBOROS_CLARIFICATION_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        result = _normalize_configured_model_for_backend(
-            config.clarification.default_model,
-            default_model="claude-opus-4-6",
-            backend=backend,
-        )
-        if result == "claude-opus-4-6":
-            return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
-        return result
-    except ConfigError:
-        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
-
-
 def get_qa_model(backend: str | None = None) -> str:
     """Get QA model from environment variable or config."""
     env_model = os.environ.get("OUROBOROS_QA_MODEL", "").strip()
@@ -1492,19 +1472,3 @@ def get_consensus_judge_model(backend: str | None = None) -> str:
         )
     except ConfigError:
         return _default_model_for_backend(_DEFAULT_CONSENSUS_JUDGE_MODEL, backend=backend)
-
-
-def get_execution_model(backend: str | None = None) -> str:
-    """Get execution model from environment variable or clarification model fallback."""
-    env_model = os.environ.get("OUROBOROS_EXECUTION_MODEL", "").strip()
-    if env_model:
-        return env_model
-    return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
-
-
-def get_validation_model(backend: str | None = None) -> str:
-    """Get validation model from environment variable or clarification model fallback."""
-    env_model = os.environ.get("OUROBOROS_VALIDATION_MODEL", "").strip()
-    if env_model:
-        return env_model
-    return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
