@@ -295,6 +295,19 @@ def test_legacy_state_without_active_domain_profile_loads(tmp_path) -> None:
     assert loaded.active_domain_profile_name is None
 
 
+def test_store_load_accepts_non_empty_active_domain_profile_name(tmp_path) -> None:
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    data = state.to_dict()
+    data["active_domain_profile_name"] = "research"
+    path = store.path_for(state.auto_session_id)
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    loaded = store.load(state.auto_session_id)
+
+    assert loaded.active_domain_profile_name == "research"
+
+
 def test_store_load_rejects_session_id_mismatch(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
@@ -329,6 +342,9 @@ def test_store_load_rejects_malformed_optional_strings(tmp_path) -> None:
         ("seed_id", ""),
         ("execution_id", []),
         ("last_progress_message", []),
+        ("active_domain_profile_name", ""),
+        ("active_domain_profile_name", "   "),
+        ("active_domain_profile_name", {"name": "coding"}),
     ):
         data = state.to_dict()
         data[field_name] = value
