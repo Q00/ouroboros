@@ -1208,11 +1208,14 @@ def get_classifier_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return _normalize_configured_model_for_backend(
+        result = _normalize_configured_model_for_backend(
             config.clarification.default_model,
-            default_model="claude-sonnet-4-6",
+            default_model="claude-opus-4-6",
             backend=backend,
         )
+        if result == "claude-opus-4-6":
+            return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
+        return result
     except ConfigError:
         return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
