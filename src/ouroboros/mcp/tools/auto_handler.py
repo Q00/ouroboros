@@ -564,7 +564,11 @@ class StartAutoHandler:
         if already_running is not None:
             return Result.err(already_running)
 
-        plugin_dispatch = should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        plugin_dispatch = _state_dispatches_via_plugin(
+            state,
+            fallback_runtime_backend=self.agent_runtime_backend,
+            fallback_opencode_mode=self.opencode_mode,
+        )
         lease_token, lease_error = _reserve_start_lease(
             self._store,
             auto_session_id,
@@ -835,6 +839,23 @@ def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
     if isinstance(resume, str) and resume.strip():
         return resume.strip()
     return None
+
+
+def _state_dispatches_via_plugin(
+    state: AutoPipelineState,
+    *,
+    fallback_runtime_backend: str | None,
+    fallback_opencode_mode: str | None,
+) -> bool:
+    runtime_backend = state.runtime_backend or fallback_runtime_backend
+    if runtime_backend is None and state.opencode_mode is not None:
+        runtime_backend = "opencode"
+    runtime_backend = resolve_agent_runtime_backend(runtime_backend)
+    opencode_mode = _resolved_opencode_mode(
+        runtime_backend,
+        state.opencode_mode or fallback_opencode_mode,
+    )
+    return should_dispatch_via_plugin(runtime_backend, opencode_mode)
 
 
 def _start_auto_lease_token_from_arguments(arguments: dict[str, Any]) -> str | None:

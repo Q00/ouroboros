@@ -218,6 +218,64 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_resume_uses_persisted_plugin_runtime_for_dispatch(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        state.runtime_backend = "opencode"
+        state.opencode_mode = "plugin"
+        store.save(state)
+        job_manager = MagicMock()
+        job_manager.start_job = AsyncMock()
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert result.value.meta["dispatch_mode"] == "plugin"
+        assert result.value.meta["job_id"] is None
+        job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_uses_persisted_subprocess_runtime_for_dispatch(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        state.runtime_backend = "opencode"
+        state.opencode_mode = "subprocess"
+        store.save(state)
+        snapshot = MagicMock()
+        snapshot.job_id = "job_subprocess_resume"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager = MagicMock()
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert result.value.meta["dispatch_mode"] == "job"
+        assert result.value.meta["job_id"] == "job_subprocess_resume"
+        job_manager.start_job.assert_awaited_once()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_enqueue_failure_returns_persisted_auto_session_id(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
