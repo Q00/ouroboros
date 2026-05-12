@@ -907,22 +907,50 @@ async def run_with_agent_process[T](
             error_box.append(exc)
             raise
 
-    process = AgentProcess(event_store=event_store)
-    handle = await process.spawn(intent=intent, work_fn=_work)
-    try:
-        final_status = await handle.wait_until_complete(timeout=timeout)
-    except (asyncio.CancelledError, TimeoutError):
+    async def _request_work_cancellation() -> asyncio.Task[None] | None:
         await handle.cancel(reason="cancelled by job runner")
         work_task = handle._work_task
         if work_task is not None and not work_task.done():
             work_task.cancel()
-            done, _pending = await asyncio.wait({work_task}, timeout=1.0)
+        return work_task
+
+    process = AgentProcess(event_store=event_store)
+    handle = await process.spawn(intent=intent, work_fn=_work)
+    try:
+        final_status = await handle.wait_until_complete(timeout=timeout)
+    except asyncio.CancelledError:
+        work_task = await _request_work_cancellation()
+        if work_task is not None:
+            while not work_task.done():
+                try:
+                    await asyncio.shield(work_task)
+                except asyncio.CancelledError:
+                    # The JobManager may cancel this wrapper more than once.
+                    # Do not re-cancel the work task while it is already
+                    # unwinding; a second injected CancelledError can abort
+                    # workflow cleanup and create the false-terminal state this
+                    # adapter is responsible for preventing.
+                    continue
+        if handle.status() not in _TERMINAL_STATUSES:
+            await handle._mark_cancelled()
+        raise
+    except TimeoutError:
+        work_task = await _request_work_cancellation()
+        if work_task is not None and not work_task.done():
+            done, pending = await asyncio.wait({work_task}, timeout=1.0)
             for completed in done:
                 try:
                     await completed
                 except asyncio.CancelledError:
                     pass
-        await handle._mark_cancelled()
+            if pending:
+                # Timeout callers may return, but the lifecycle must not claim
+                # terminal cancellation until the owned work task really exits.
+                # The AgentProcess runner will publish the terminal transition
+                # later if the workflow eventually honors cancellation.
+                raise
+        if handle.status() not in _TERMINAL_STATUSES:
+            await handle._mark_cancelled()
         raise
 
     await _wait_for_lifecycle_emit_drain(handle)
