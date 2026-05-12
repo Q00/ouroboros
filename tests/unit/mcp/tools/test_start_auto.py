@@ -13,6 +13,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import inspect
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -337,6 +338,8 @@ class TestBackgroundJobPath:
                     "job_id": "job_stale",
                     "created_at": datetime.now(UTC).isoformat(),
                     "updated_at": datetime.now(UTC).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
                 }
             ),
             encoding="utf-8",
@@ -383,6 +386,64 @@ class TestBackgroundJobPath:
         assert result.is_ok
         assert result.value.meta["job_id"] == "job_new"
         job_manager.start_job.assert_awaited_once()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_live_job_lease_blocks_other_process_without_local_task(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").write_text(
+            json.dumps(
+                {
+                    "token": "lease_job",
+                    "mode": "job",
+                    "job_id": "job_live_elsewhere",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        active_snapshot = MagicMock()
+        active_snapshot.job_id = "job_live_elsewhere"
+        active_snapshot.is_terminal = False
+        active_snapshot.status.value = "running"
+
+        class OtherProcessJobManager:
+            start_job = AsyncMock()
+
+            async def get_snapshot(self, job_id):
+                assert job_id == "job_live_elsewhere"
+                return active_snapshot
+
+            def has_live_job_task(self, job_id):
+                assert job_id == "job_live_elsewhere"
+                return False
+
+            async def find_active_job_by_session(self, session_id, *, job_type=None):
+                assert session_id == state.auto_session_id
+                assert job_type == "auto"
+                return active_snapshot
+
+        job_manager = OtherProcessJobManager()
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,  # type: ignore[arg-type]
+            store=store,
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "active background job" in result.error.message
+        assert result.error.details["job_id"] == "job_live_elsewhere"
+        job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio

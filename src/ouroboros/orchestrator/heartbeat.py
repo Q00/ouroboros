@@ -143,6 +143,32 @@ def is_owned_by_current_process(session_id: str) -> bool:
     return True
 
 
+def current_process_identity() -> tuple[int, float | None]:
+    """Return the current PID with its start time when the platform exposes it."""
+    pid = os.getpid()
+    return pid, _get_process_start_time(pid)
+
+
+def is_process_identity_alive(pid: int, start_time: float | None = None) -> bool:
+    """Return True when ``pid`` is alive and still has ``start_time``.
+
+    ``start_time`` is optional for legacy callers, but when present it guards
+    against treating a recycled PID as the original owner.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+
+    if start_time is not None:
+        current_start = _get_process_start_time(pid)
+        if current_start is not None and abs(current_start - start_time) > 2.0:
+            return False
+    return True
+
+
 def is_holder_alive(session_id: str) -> bool:
     """Check if the lock holder for a session is still alive.
 
@@ -171,26 +197,9 @@ def is_holder_alive(session_id: str) -> bool:
 
     recorded_start = float(parts[1]) if len(parts) > 1 and parts[1] != "None" else None
 
-    # Check if process exists
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    if not is_process_identity_alive(pid, recorded_start):
         release(session_id)  # Clean up stale lock
         return False
-    except PermissionError:
-        pass  # Process exists, different user
-
-    # Guard against PID recycling
-    if recorded_start is not None:
-        current_start = _get_process_start_time(pid)
-        if current_start is not None and abs(current_start - recorded_start) > 2.0:
-            # PID was recycled — different process
-            log.info(
-                "session_lock.pid_recycled",
-                extra={"session_id": session_id, "pid": pid},
-            )
-            release(session_id)
-            return False
 
     return True
 

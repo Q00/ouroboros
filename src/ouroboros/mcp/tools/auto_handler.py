@@ -66,6 +66,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.orchestrator.agent_process import run_with_agent_process
+from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
 from ouroboros.persistence.event_store import EventStore
 
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
@@ -700,13 +701,13 @@ class StartAutoHandler:
 
     async def _active_session_error(self, auto_session_id: str) -> MCPToolError | None:
         """Return an error when another start_auto already owns this session."""
-        lease_error = await self._active_start_lease_error(auto_session_id)
+        lease_error, released_stale_lease = await self._active_start_lease_error(auto_session_id)
         if lease_error is not None:
             return lease_error
+        if released_stale_lease:
+            return None
         active_job = await self._find_active_job(auto_session_id)
         if active_job is not None:
-            if not self._job_snapshot_has_live_worker(active_job):
-                return None
             return MCPToolError(
                 "Auto session already has an active background job: "
                 f"auto_session_id={auto_session_id}, job_id={active_job.job_id}. "
@@ -728,13 +729,15 @@ class StartAutoHandler:
             return None
         return await finder(auto_session_id, job_type="auto")
 
-    async def _active_start_lease_error(self, auto_session_id: str) -> MCPToolError | None:
+    async def _active_start_lease_error(
+        self, auto_session_id: str
+    ) -> tuple[MCPToolError | None, bool]:
         lease = _read_start_lease(self._store, auto_session_id)
         if lease is None:
-            return None
+            return None, False
         if _lease_is_expired(lease):
             _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
-            return None
+            return None, True
         mode = str(lease.get("mode") or "unknown")
         job_id = lease.get("job_id")
         if isinstance(job_id, str) and job_id:
@@ -742,68 +745,72 @@ class StartAutoHandler:
                 snapshot = await self._job_manager.get_snapshot(job_id)
             except ValueError:
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
-                return None
+                return None, True
             if snapshot.is_terminal:
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
-                return None
-            if not self._job_snapshot_has_live_worker(snapshot):
+                return None, True
+            if not _lease_owner_is_alive(lease):
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
-                return None
-            return MCPToolError(
-                "Auto session already has an active background job: "
-                f"auto_session_id={auto_session_id}, job_id={job_id}. "
-                "Poll that job or cancel it before starting another resume.",
-                tool_name="ouroboros_start_auto",
-                is_retriable=True,
-                details={
-                    "auto_session_id": auto_session_id,
-                    "session_id": auto_session_id,
-                    "job_id": job_id,
-                    "status": snapshot.status.value,
-                    "lease_mode": mode,
-                },
+                return None, True
+            return (
+                MCPToolError(
+                    "Auto session already has an active background job: "
+                    f"auto_session_id={auto_session_id}, job_id={job_id}. "
+                    "Poll that job or cancel it before starting another resume.",
+                    tool_name="ouroboros_start_auto",
+                    is_retriable=True,
+                    details={
+                        "auto_session_id": auto_session_id,
+                        "session_id": auto_session_id,
+                        "job_id": job_id,
+                        "status": snapshot.status.value,
+                        "lease_mode": mode,
+                        "lease_owner_pid": lease.get("owner_pid"),
+                    },
+                ),
+                False,
             )
         if mode.startswith("plugin"):
             try:
                 state = self._store.load(auto_session_id)
             except ValueError:
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
-                return None
+                return None, True
             if state.phase in TERMINAL_PHASES:
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
-                return None
-            return MCPToolError(
-                "Auto session already has an active plugin dispatch: "
-                f"auto_session_id={auto_session_id}. Wait for the OpenCode task "
-                "to finish or retry after the dispatch lease expires.",
+                return None, True
+            return (
+                MCPToolError(
+                    "Auto session already has an active plugin dispatch: "
+                    f"auto_session_id={auto_session_id}. Wait for the OpenCode task "
+                    "to finish or retry after the dispatch lease expires.",
+                    tool_name="ouroboros_start_auto",
+                    is_retriable=True,
+                    details={
+                        "auto_session_id": auto_session_id,
+                        "session_id": auto_session_id,
+                        "dispatch_mode": "plugin",
+                        "lease_expires_at": lease.get("expires_at"),
+                        "lease_mode": mode,
+                    },
+                ),
+                False,
+            )
+        return (
+            MCPToolError(
+                "Auto session already has a pending start lease: "
+                f"auto_session_id={auto_session_id}. Retry after the lease expires.",
                 tool_name="ouroboros_start_auto",
                 is_retriable=True,
                 details={
                     "auto_session_id": auto_session_id,
                     "session_id": auto_session_id,
-                    "dispatch_mode": "plugin",
                     "lease_expires_at": lease.get("expires_at"),
                     "lease_mode": mode,
                 },
-            )
-        return MCPToolError(
-            "Auto session already has a pending start lease: "
-            f"auto_session_id={auto_session_id}. Retry after the lease expires.",
-            tool_name="ouroboros_start_auto",
-            is_retriable=True,
-            details={
-                "auto_session_id": auto_session_id,
-                "session_id": auto_session_id,
-                "lease_expires_at": lease.get("expires_at"),
-                "lease_mode": mode,
-            },
+            ),
+            False,
         )
-
-    def _job_snapshot_has_live_worker(self, snapshot) -> bool:
-        checker = getattr(type(self._job_manager), "has_live_job_task", None)
-        if checker is None:
-            return True
-        return self._job_manager.has_live_job_task(snapshot.job_id) is True
 
 
 def _build_auto_subagent(
@@ -905,6 +912,7 @@ def _reserve_start_lease(
                 "mode": mode,
                 "created_at": _utc_iso(),
                 "expires_at": _utc_iso(ttl_seconds=ttl_seconds),
+                **_current_lease_owner(),
             },
         )
     return token, None
@@ -966,6 +974,27 @@ def _lease_is_expired(lease: dict[str, Any]) -> bool:
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
     return expires <= datetime.now(UTC)
+
+
+def _current_lease_owner() -> dict[str, Any]:
+    pid, start_time = current_process_identity()
+    return {
+        "owner_pid": pid,
+        "owner_start_time": start_time,
+    }
+
+
+def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
+    pid = lease.get("owner_pid")
+    if not isinstance(pid, int):
+        # Legacy non-expiring job leases did not record an owner. Treat them as
+        # active because process-local task state cannot prove cross-process
+        # staleness.
+        return True
+    start_time = lease.get("owner_start_time")
+    if start_time is not None and not isinstance(start_time, int | float):
+        start_time = None
+    return is_process_identity_alive(pid, float(start_time) if start_time is not None else None)
 
 
 def _lease_conflict_error(auto_session_id: str, lease: dict[str, Any]) -> MCPToolError:
