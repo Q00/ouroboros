@@ -80,6 +80,24 @@ class TestExtractEvidence:
         record = extract_evidence('```JSON\n{"x": 1}\n```\n')
         assert record.data == {"x": 1}
 
+    def test_triple_backtick_inside_json_string_value(self) -> None:
+        # Regression: an earlier fence-scanner stopped at the first raw
+        # ``` after the opener, even when it sat inside a quoted JSON
+        # string value (bot finding on PR #883 round 2). The JSON-aware
+        # raw_decode must let `json.JSONDecoder` decide where the value
+        # ends.
+        text = '```json\n{"note": "embedded ``` triple-backtick survives", "ok": true}\n```\n'
+        record = extract_evidence(text)
+        assert record.data["ok"] is True
+        assert "triple-backtick" in record.data["note"]
+
+    def test_extra_text_after_object_is_ignored(self) -> None:
+        # raw_decode stops at the end of the first JSON value, so trailing
+        # narrative text inside the fence does not corrupt parsing.
+        text = '```json\n{"x": 1}\nsome trailing prose\n```\n'
+        record = extract_evidence(text)
+        assert record.data == {"x": 1}
+
 
 class TestValidateCodeProfile:
     def test_accepts_complete_record(self, code_profile) -> None:
