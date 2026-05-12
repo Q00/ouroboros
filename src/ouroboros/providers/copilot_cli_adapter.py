@@ -400,10 +400,10 @@ class CopilotCliLLMAdapter:
         if not content.strip():
             return False
         try:
-            parsed = json.loads(content)
+            json.loads(content)
         except json.JSONDecodeError:
             return False
-        return isinstance(parsed, dict | list)
+        return True
 
     def _should_preserve_structured_event_line(self, event: dict[str, Any]) -> bool:
         event_type = event.get("type")

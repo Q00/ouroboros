@@ -622,9 +622,13 @@ class TestComplete:
         assert result.value.content == json.dumps(answer)
 
     @pytest.mark.asyncio
-    async def test_single_structured_completion_event_returns_assistant_payload(self) -> None:
+    @pytest.mark.parametrize("payload", ['{"answer":"ok"}', "42", "true", "null", '"foo"'])
+    async def test_single_structured_completion_event_returns_assistant_payload(
+        self,
+        payload: str,
+    ) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
-        stdout = json.dumps({"type": "message", "content": '{"answer":"ok"}'})
+        stdout = json.dumps({"type": "message", "content": payload})
 
         async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
             return _FakeProcess(stdout=stdout, returncode=0)
@@ -642,7 +646,7 @@ class TestComplete:
             )
 
         assert result.is_ok
-        assert result.value.content == '{"answer":"ok"}'
+        assert result.value.content == payload
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
