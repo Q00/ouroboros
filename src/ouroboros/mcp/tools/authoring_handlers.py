@@ -29,6 +29,8 @@ from ouroboros.bigbang.ambiguity import (
     qualifies_for_seed_completion,
 )
 from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
@@ -222,6 +224,19 @@ def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
     return milestone.value
 
 
+def _compute_transcript_chars(state: InterviewState) -> int:
+    """Sum question + user_response length over every round in ``state``.
+
+    Used by the response-shape diagnostic event (Q00/ouroboros#831) so we
+    can correlate hang reports with cumulative interview context size.
+    """
+    total = 0
+    for round_data in state.rounds:
+        total += len(round_data.question or "")
+        total += len(round_data.user_response or "")
+    return total
+
+
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
     """Attach the current ambiguity score to a question for display.
 
@@ -233,6 +248,35 @@ def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None)
     if score is None:
         return question
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
+
+
+def _is_initial_context_length_guard_question(question: str) -> bool:
+    """Return True when ``question`` is the length-guard meta-directive.
+
+    The interview engine surfaces a fixed string as the "next question" when
+    ``initial_context`` exceeds ``MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS``.
+    That string is not a real interview question — it asks the *caller* to
+    re-send a shorter summary — so MCP responses carrying it must carry a
+    distinguishing meta signal.  See Q00/ouroboros#831.
+    """
+    return question == INITIAL_CONTEXT_SUMMARY_QUESTION
+
+
+def _length_guard_meta_fields() -> dict[str, Any]:
+    """Return the meta keys that mark a length-guard response.
+
+    The handler merges these into the existing ``meta`` dict (``session_id``,
+    ``ambiguity_score``, etc.) when the returned question is the length-guard
+    meta-directive.  Clients can branch on ``meta.reason`` to handle the case
+    programmatically instead of mis-routing the question to a human via
+    AskUserQuestion.
+    """
+    return {
+        "recoverable": True,
+        "reason": "initial_context_too_large",
+        "expected_action": "resend_with_summary",
+        "max_chars": MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    }
 
 
 def _ambiguity_warning_for_failed_question(
@@ -1435,28 +1479,56 @@ class InterviewHandler:
                     session_id=state.interview_id,
                 )
 
+                is_length_guard = _is_initial_context_length_guard_question(question)
+                start_meta: dict[str, Any] = {
+                    "session_id": state.interview_id,
+                    "ambiguity_score": (
+                        live_score.overall_score if live_score is not None else None
+                    ),
+                    "milestone": _milestone_for_score(live_score),
+                    "seed_ready": (
+                        live_score.is_ready_for_seed if live_score is not None else None
+                    ),
+                }
+                if is_length_guard:
+                    # Q00/ouroboros#831 (Direction A): surface the length-guard
+                    # meta-directive via structured meta keys so clients can
+                    # branch on ``meta.reason`` instead of mis-routing the text
+                    # body to a human via AskUserQuestion.  ``is_error`` is
+                    # intentionally left ``False`` -- the wire success/failure
+                    # axis must not flip or ``HandlerInterviewBackend.start``
+                    # would raise on every oversized ``initial_context``.
+                    start_meta.update(_length_guard_meta_fields())
+
+                start_response_text = (
+                    f"Interview started. Session ID: {state.interview_id}\n\n{display_question}"
+                )
+                # Q00/ouroboros#831 (diagnostics): capture the shape of every
+                # MCP question-bearing response so future hang reports can be
+                # correlated with response size / transcript pressure.
+                from ouroboros.events.interview import interview_response_emitted
+
+                self._emit_event_bg(
+                    interview_response_emitted(
+                        state.interview_id,
+                        response_kind="start",
+                        round_number=len(state.rounds),
+                        payload_chars=len(start_response_text),
+                        transcript_chars=_compute_transcript_chars(state),
+                        ambiguity_prefix_present=start_response_text.startswith("(ambiguity:"),
+                        is_length_guard=is_length_guard,
+                    )
+                )
                 return Result.ok(
                     MCPToolResult(
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=(
-                                    f"Interview started. Session ID: {state.interview_id}\n\n"
-                                    f"{display_question}"
-                                ),
+                                text=start_response_text,
                             ),
                         ),
                         is_error=False,
-                        meta={
-                            "session_id": state.interview_id,
-                            "ambiguity_score": (
-                                live_score.overall_score if live_score is not None else None
-                            ),
-                            "milestone": _milestone_for_score(live_score),
-                            "seed_ready": (
-                                live_score.is_ready_for_seed if live_score is not None else None
-                            ),
-                        },
+                        meta=start_meta,
                     )
                 )
 
@@ -1475,32 +1547,61 @@ class InterviewHandler:
                 _interview_id = session_id
 
                 if not answer and state.rounds and state.rounds[-1].user_response is None:
+                    pending_question = state.rounds[-1].question
                     display_question = _format_question_with_ambiguity(
-                        state.rounds[-1].question,
+                        pending_question,
                         _load_state_ambiguity_score(state),
+                    )
+                    resume_is_length_guard = _is_initial_context_length_guard_question(
+                        pending_question
+                    )
+                    resume_meta: dict[str, Any] = {
+                        "session_id": session_id,
+                        "ambiguity_score": state.ambiguity_score,
+                        "milestone": (
+                            get_milestone(state.ambiguity_score)[0].value
+                            if state.ambiguity_score is not None
+                            else None
+                        ),
+                        "seed_ready": (
+                            state.ambiguity_score is not None
+                            and state.ambiguity_score <= AMBIGUITY_THRESHOLD
+                        ),
+                    }
+                    if resume_is_length_guard:
+                        # Q00/ouroboros#831 (Direction A): structured signal
+                        # when resuming an interview whose pending round is
+                        # the length-guard meta-directive.  ``is_error`` stays
+                        # ``False`` so the auto driver does not treat the
+                        # summarize prompt as a hard failure.
+                        resume_meta.update(_length_guard_meta_fields())
+
+                    resume_response_text = f"Session {session_id}\n\n{display_question}"
+                    # Q00/ouroboros#831 (diagnostics): response-shape event for
+                    # the resume-pending branch.  Pure observability.
+                    from ouroboros.events.interview import interview_response_emitted
+
+                    self._emit_event_bg(
+                        interview_response_emitted(
+                            session_id,
+                            response_kind="resume_pending",
+                            round_number=len(state.rounds),
+                            payload_chars=len(resume_response_text),
+                            transcript_chars=_compute_transcript_chars(state),
+                            ambiguity_prefix_present=resume_response_text.startswith("(ambiguity:"),
+                            is_length_guard=resume_is_length_guard,
+                        )
                     )
                     return Result.ok(
                         MCPToolResult(
                             content=(
                                 MCPContentItem(
                                     type=ContentType.TEXT,
-                                    text=f"Session {session_id}\n\n{display_question}",
+                                    text=resume_response_text,
                                 ),
                             ),
                             is_error=False,
-                            meta={
-                                "session_id": session_id,
-                                "ambiguity_score": state.ambiguity_score,
-                                "milestone": (
-                                    get_milestone(state.ambiguity_score)[0].value
-                                    if state.ambiguity_score is not None
-                                    else None
-                                ),
-                                "seed_ready": (
-                                    state.ambiguity_score is not None
-                                    and state.ambiguity_score <= AMBIGUITY_THRESHOLD
-                                ),
-                            },
+                            meta=resume_meta,
                         )
                     )
 
@@ -1844,25 +1945,50 @@ class InterviewHandler:
                     session_id=session_id,
                 )
 
+                answer_is_length_guard = _is_initial_context_length_guard_question(question)
+                answer_meta: dict[str, Any] = {
+                    "session_id": session_id,
+                    "ambiguity_score": (
+                        live_score.overall_score if live_score is not None else None
+                    ),
+                    "milestone": _milestone_for_score(live_score),
+                    "seed_ready": (
+                        live_score.is_ready_for_seed if live_score is not None else None
+                    ),
+                }
+                if answer_is_length_guard:
+                    # Q00/ouroboros#831 (Direction A): structured signal when
+                    # the next question after an answer is again the length-
+                    # guard meta-directive.  ``is_error`` stays ``False`` so
+                    # the auto driver's ``answer()`` path is not raised on.
+                    answer_meta.update(_length_guard_meta_fields())
+
+                answer_response_text = f"Session {session_id}\n\n{display_question}"
+                # Q00/ouroboros#831 (diagnostics): response-shape event for
+                # the answer branch.  Pure observability.
+                from ouroboros.events.interview import interview_response_emitted
+
+                self._emit_event_bg(
+                    interview_response_emitted(
+                        session_id,
+                        response_kind="answer",
+                        round_number=len(state.rounds),
+                        payload_chars=len(answer_response_text),
+                        transcript_chars=_compute_transcript_chars(state),
+                        ambiguity_prefix_present=answer_response_text.startswith("(ambiguity:"),
+                        is_length_guard=answer_is_length_guard,
+                    )
+                )
                 return Result.ok(
                     MCPToolResult(
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=f"Session {session_id}\n\n{display_question}",
+                                text=answer_response_text,
                             ),
                         ),
                         is_error=False,
-                        meta={
-                            "session_id": session_id,
-                            "ambiguity_score": (
-                                live_score.overall_score if live_score is not None else None
-                            ),
-                            "milestone": _milestone_for_score(live_score),
-                            "seed_ready": (
-                                live_score.is_ready_for_seed if live_score is not None else None
-                            ),
-                        },
+                        meta=answer_meta,
                     )
                 )
 

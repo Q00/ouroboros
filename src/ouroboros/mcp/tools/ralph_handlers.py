@@ -29,6 +29,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.ralph_loop import (
     DEFAULT_GRADE_REGRESSION_WINDOW,
@@ -410,7 +411,11 @@ class RalphHandler:
         snapshot = await self._job_manager.start_job(
             job_type="ralph",
             initial_message=f"Queued Ralph loop for {config.lineage_id}",
-            runner=_run_loop(),
+            runner=run_with_agent_process(
+                event_store=self._event_store,
+                intent="ralph",
+                work_fn=lambda _handle: _run_loop(),
+            ),
             links=JobLinks(lineage_id=config.lineage_id),
         )
 

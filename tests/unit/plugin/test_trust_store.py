@@ -217,6 +217,8 @@ def test_invalid_plugin_name_rejected(tmp_path: Path, bad_name: str) -> None:
     with pytest.raises(ValueError, match="invalid plugin name"):
         store.reset_for_version_bump(bad_name, new_version="0.2.0")
     with pytest.raises(ValueError, match="invalid plugin name"):
+        store.has_trust_record(bad_name)
+    with pytest.raises(ValueError, match="invalid plugin name"):
         store.remove(bad_name)
 
 
@@ -385,6 +387,35 @@ def test_grant_and_clear_disable_is_atomic(tmp_path: Path) -> None:
         artifact_digest="sha256:" + "0" * 64,
     )
     assert record.has_scope("github:read")
+    assert not store.is_disabled(plugin)
+
+
+def test_grant_many_and_clear_disable_is_atomic(tmp_path: Path) -> None:
+    """CLI-shaped multi-scope re-trust must also be one atomic trust
+    transition: all requested grants are persisted and the disable
+    record is cleared under the same per-plugin lock.
+    """
+    store = TrustStore(root=tmp_path)
+    plugin = "atomic-trust-many"
+    store.write_disable(
+        plugin,
+        source_type="local_path",
+        source_identity="/tmp/installs/atomic-trust-many",
+        disabled_by="user:test",
+    )
+    assert store.is_disabled(plugin)
+
+    record = store.grant_many_and_clear_disable(
+        plugin=plugin,
+        version="0.1.0",
+        scopes=("github:read", "github:write"),
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity="/tmp/installs/atomic-trust-many",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+
+    assert [g.scope for g in record.granted_scopes] == ["github:read", "github:write"]
     assert not store.is_disabled(plugin)
 
 

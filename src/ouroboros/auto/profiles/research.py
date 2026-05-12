@@ -40,20 +40,23 @@ class _CitationFormatPredicate:
 
 
 class _ResearchIntentClassifier:
-    _PATTERNS = {
-        "literature_review": re.compile(r"\b(survey|review|state of the art|sota)\b", re.I),
-        "hypothesis_check": re.compile(r"\b(hypothesis|claim|assertion)\b", re.I),
-        "evidence_gather": re.compile(r"\b(evidence|finding|source|citation)\b", re.I),
-    }
+    _PATTERNS = (
+        ("runtime_context", re.compile(r"\b(survey|review|state of the art|sota)\b", re.I)),
+        ("verification", re.compile(r"\b(hypothesis|claim|assertion|verify|validate)\b", re.I)),
+        (
+            "acceptance_criteria",
+            re.compile(r"\b(evidence|finding|source|sources|citation|citations)\b", re.I),
+        ),
+    )
 
     def classify(self, question: str) -> str | None:
-        for label, pat in self._PATTERNS.items():
+        for label, pat in self._PATTERNS:
             if pat.search(question):
                 return label
         return None
 
     def supported_intents(self) -> frozenset[str]:
-        return frozenset(self._PATTERNS)
+        return frozenset(label for label, _pat in self._PATTERNS)
 
 
 class _ResearchRepoExtractor:

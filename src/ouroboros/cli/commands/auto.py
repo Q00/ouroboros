@@ -20,6 +20,7 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
+from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
@@ -175,6 +176,18 @@ def auto_command(
             ),
         ),
     ] = False,
+    domain: Annotated[
+        str | None,
+        typer.Option(
+            "--domain",
+            hidden=True,
+            help=(
+                "Explicitly activate a domain profile by name (e.g. 'coding'). "
+                "Overrides auto-detection. Use 'ooo auto --domain coding <goal>' "
+                "to force the coding profile regardless of cwd."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -220,9 +233,12 @@ def auto_command(
                 reconcile_source=reconcile_source,
                 pipeline_timeout_seconds=timeout,
                 complete_product=complete_product,
+                domain=domain,
                 progress_callback=_make_progress_renderer(quiet=quiet),
             )
         )
+    except typer.Exit:
+        raise
     except Exception as exc:
         print_error(f"Auto pipeline failed: {exc}")
         raise typer.Exit(1) from exc
@@ -263,6 +279,7 @@ async def _run_auto(
     reconcile_source: str | None = None,
     pipeline_timeout_seconds: float | None = None,
     complete_product: bool = False,
+    domain: str | None = None,
     progress_callback: AutoProgressCallback | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
@@ -346,6 +363,26 @@ async def _run_auto(
         state.complete_product = complete_product
         if pipeline_timeout_seconds is not None:
             state.pipeline_timeout_seconds = float(pipeline_timeout_seconds)
+
+    # 3-step domain profile activation (PR-3, Q00/ouroboros#809 P3):
+    # 1. --domain explicit flag wins.
+    # 2. Otherwise, auto-detect from cwd via DEFAULT_REGISTRY.detect_best.
+    # 3. Otherwise, None (current baked-in behavior remains in charge).
+    if domain is not None:
+        active_profile = DEFAULT_REGISTRY.get(domain)
+        if active_profile is None:
+            print_error(
+                f"Unknown domain profile: {domain!r}. Register it with DEFAULT_REGISTRY before use."
+            )
+            raise typer.Exit(1)
+        state.active_domain_profile_name = active_profile.name
+    elif not resume:
+        active_profile = DEFAULT_REGISTRY.detect_best(Path(state.cwd))
+        state.active_domain_profile_name = active_profile.name if active_profile else None
+    else:
+        # Resume preserves the session-start profile unless the operator
+        # explicitly passes --domain to intentionally retarget it.
+        pass
 
     if runtime == "opencode":
         opencode_mode = state.opencode_mode or get_opencode_mode()

@@ -6,7 +6,9 @@ Contains handlers for drift measurement, evaluation, and lateral thinking tools:
 - LateralThinkHandler: Generates alternative thinking approaches via personas.
 """
 
+import base64
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -1458,13 +1460,48 @@ class LateralThinkHandler(BridgeAwareMixin):
                 )
 
             combined = "\n\n---\n\n".join(sections)
+            # Expose the canonical per-persona payloads on inline responses
+            # too, so non-plugin runtimes (Claude Code, Codex CLI, OpenCode
+            # subprocess) can drive their own sub-agent fan-out from the
+            # same structured prompts that plugin mode dispatches via
+            # `_subagents`. The FastMCP adapter only forwards `text_content`
+            # to the wire (`adapter.py:923`); `meta` is dropped. So the
+            # dispatch payload has to ride inside `content` to survive
+            # transport.
+            #
+            # Format: a hidden HTML-comment block with a versioned sentinel,
+            # carrying the dispatch JSON base64-encoded inside the comment.
+            # Two reasons for base64:
+            #   1. Base64's alphabet is [A-Za-z0-9+/=]. It cannot contain
+            #      `-->`, so a user-supplied `problem_context` like an
+            #      HTML/JS debugging snippet that itself includes `-->`
+            #      cannot prematurely close the comment and leak the
+            #      payload into the visible markdown.
+            #   2. Base64 has no significant whitespace, so line wrapping
+            #      and trimming can't corrupt the encoded body.
+            payload_dicts = [p.to_dict() for p in payloads]
+            dispatch_blob = json.dumps(
+                {
+                    "dispatch_mode": "inline_fallback",
+                    "persona_count": len(sections),
+                    "payloads": payload_dicts,
+                }
+            )
+            dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
+            content_text = (
+                f"{combined}\n\n"
+                "<!-- ouroboros-lateral-inline-dispatch-v1 base64\n"
+                f"{dispatch_b64}\n"
+                "-->"
+            )
             return Result.ok(
                 MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=combined),),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=content_text),),
                     is_error=False,
                     meta={
                         "persona_count": len(sections),
                         "dispatch_mode": "inline_fallback",
+                        "payloads": payload_dicts,
                     },
                 )
             )

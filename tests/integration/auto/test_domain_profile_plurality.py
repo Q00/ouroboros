@@ -72,3 +72,16 @@ def test_research_profile_find_verifiable_predicate() -> None:
 
     no_match = profile.find_verifiable_predicate("output must be correct")
     assert no_match is None
+
+
+def test_research_profile_classifier_uses_canonical_routing_labels() -> None:
+    """Activated research profile feeds the same labels consumed by core routing."""
+    profile = DEFAULT_REGISTRY.get("research")
+    assert profile is not None
+
+    assert profile.intent_classifier.classify("Survey the prior literature") == "runtime_context"
+    assert profile.intent_classifier.classify("Verify the hypothesis") == "verification"
+    assert profile.intent_classifier.classify("Require 5 cited sources") == "acceptance_criteria"
+    assert profile.intent_classifier.supported_intents() == frozenset(
+        {"runtime_context", "verification", "acceptance_criteria"}
+    )

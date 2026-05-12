@@ -1958,3 +1958,104 @@ async def test_auto_handler_meta_always_emits_provenance_keys_when_empty(monkeyp
     assert meta["ledger_provenance"] == {}
     assert meta["evidence_backed_sections"] == []
     assert meta["assumption_only_sections"] == []
+
+
+def test_auto_save_seed_encodes_path_traversal_seed_id_inside_seed_dir(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id="../outside"),
+    )
+
+    path = Path(save_seed(seed, seeds_dir=seeds_dir)).resolve()
+
+    assert path == (seeds_dir / "%2E%2E%2Foutside.yaml").resolve()
+    assert path.exists()
+    assert not (tmp_path / "outside.yaml").exists()
+    assert load_seed(path).metadata.seed_id == "../outside"
+
+
+def test_auto_save_seed_encodes_whitespace_padded_seed_id_without_metadata_drift(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id="seed_safe_123 "),
+    )
+
+    path = Path(save_seed(seed, seeds_dir=seeds_dir)).resolve()
+
+    assert path == (seeds_dir / "seed_safe_123%20.yaml").resolve()
+    assert path.exists()
+    assert not (seeds_dir / "seed_safe_123.yaml").exists()
+    assert load_seed(path).metadata.seed_id == "seed_safe_123 "
+
+
+def test_auto_save_seed_encodes_previously_accepted_punctuation_seed_id(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id="seed.v1"),
+    )
+
+    path = Path(save_seed(seed, seeds_dir=seeds_dir)).resolve()
+
+    assert path == (seeds_dir / "seed%2Ev1.yaml").resolve()
+    assert path.exists()
+    assert load_seed(path).metadata.seed_id == "seed.v1"
+
+
+def test_auto_save_seed_encodes_windows_reserved_basename_seed_id(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id="CON"),
+    )
+
+    path = Path(save_seed(seed, seeds_dir=seeds_dir)).resolve()
+
+    assert path == (seeds_dir / "%43ON.yaml").resolve()
+    assert path.exists()
+    assert not (seeds_dir / "CON.yaml").exists()
+    assert load_seed(path).metadata.seed_id == "CON"
+
+
+def test_auto_save_seed_accepts_default_seed_id_inside_seed_dir(tmp_path: Path) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id="seed_safe_123"),
+    )
+
+    path = Path(save_seed(seed, seeds_dir=seeds_dir)).resolve()
+
+    assert path == (seeds_dir / "seed_safe_123.yaml").resolve()
+    assert path.exists()
+    assert load_seed(path).metadata.seed_id == "seed_safe_123"

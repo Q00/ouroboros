@@ -1010,13 +1010,93 @@ def test_list_survives_corrupt_trust_with_readable_manifest(
     data = json.loads(result.output.strip())
     assert isinstance(data, list) and len(data) == 2
     by_name = {row["name"]: row for row in data}
-    # The clean plugin's row is fully populated.
+    # The clean plugin's row is fully populated and carries the new
+    # ``trust_read_error`` key with a None default — ``--json``
+    # consumers can therefore rely on the field always being present.
     assert "clean-plugin" in by_name
+    assert by_name["clean-plugin"]["trust_read_error"] is None
     # The corrupt-trust plugin's row is degraded but PRESENT — that is
     # the contract being restored.
     assert "bad-plugin" in by_name
     bad_row = by_name["bad-plugin"]
     assert bad_row["granted_scopes"] == []
+    # The row must surface the trust read failure deterministically:
+    # ``trust_state`` flips to ``trust_unreadable`` and the new
+    # ``trust_read_error`` field carries a non-empty diagnostic message
+    # so ``--json`` consumers can distinguish "no trust grant yet" from
+    # "trust file is malformed".
+    assert bad_row["trust_state"] == "trust_unreadable"
+    assert isinstance(bad_row["trust_read_error"], str)
+    assert bad_row["trust_read_error"]
+
+
+def test_list_table_warns_on_unreadable_trust_via_stderr(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for #806: when ``ooo plugin list`` (no ``--json``) walks
+    a row whose ``trust.json`` is malformed, the table column already
+    flips to ``trust_unreadable`` but the parser's reason is lost. The
+    table view must surface that fact on **stderr** so an operator
+    reading the human output sees both which plugin's trust file is
+    broken and the literal recovery command, while stdout stays clean
+    for piping/screenshotting.
+
+    The ``--json`` path is covered by
+    ``test_list_survives_corrupt_trust_with_readable_manifest`` (the
+    ``trust_read_error`` field assertion); this test pins the human
+    surface that consumes the same signal.
+    """
+    clean_home = tmp_path / "clean_home"
+    _write_manifest(clean_home, {**REFERENCE_MANIFEST, "name": "clean-plugin"})
+    bad_home = tmp_path / "bad_home"
+    _write_manifest(bad_home, {**REFERENCE_MANIFEST, "name": "bad-plugin"})
+
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    lock = Lockfile(lock_path)
+    for name, home in (("clean-plugin", clean_home), ("bad-plugin", bad_home)):
+        lock.add(
+            LockEntry(
+                name=name,
+                version="0.1.0",
+                source_kind="local",
+                repository=None,
+                git_sha=None,
+                manifest_checksum="sha256:0",
+                installed_at="2026-05-08T00:00:00Z",
+                plugin_home=str(home),
+            )
+        )
+    bad_trust = trust_root / "bad-plugin" / "trust.json"
+    bad_trust.parent.mkdir(parents=True, exist_ok=True)
+    bad_trust.write_text("{not valid json")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # The warning lands on stderr, names the offending plugin, and
+    # points at the recovery command. Operators piping stdout to
+    # ``less`` / ``column`` still see the structured table; the warning
+    # is delivered out-of-band on stderr.
+    assert "trust file for 'bad-plugin' is unreadable" in result.stderr
+    assert "ooo plugin trust bad-plugin" in result.stderr
+    # The clean plugin must not appear in any warning line — only the
+    # row whose trust file actually failed gets surfaced.
+    assert "clean-plugin" not in result.stderr
+    # The table itself still renders on stdout (so the operator sees
+    # every installed plugin alongside the warning).
+    assert "bad-plugin" in result.stdout
+    assert "clean-plugin" in result.stdout
+    # And stdout must remain free of the warning prefix so it is safe
+    # to pipe / screenshot without the side-channel signal bleeding in.
+    assert "warning:" not in result.stdout
 
 
 FIRST_PARTY_REQUIRED_MANIFEST: dict = {

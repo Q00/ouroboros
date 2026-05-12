@@ -29,14 +29,26 @@ def test_detector_scores_bibliography_dot_dir(tmp_path: Path) -> None:
     assert score >= 0.6
 
 
-def test_intent_classifier_picks_literature_review() -> None:
+def test_intent_classifier_maps_literature_review_to_runtime_context() -> None:
     clf = _ResearchIntentClassifier()
-    assert clf.classify("Write a survey of transformer models") == "literature_review"
+    assert clf.classify("Write a survey of transformer models") == "runtime_context"
 
 
-def test_intent_classifier_picks_hypothesis_check() -> None:
+def test_intent_classifier_maps_hypothesis_check_to_verification() -> None:
     clf = _ResearchIntentClassifier()
-    assert clf.classify("Verify the hypothesis that X causes Y") == "hypothesis_check"
+    assert clf.classify("Verify the hypothesis that X causes Y") == "verification"
+
+
+def test_intent_classifier_maps_evidence_gathering_to_acceptance_criteria() -> None:
+    clf = _ResearchIntentClassifier()
+    assert clf.classify("Require at least 5 citations") == "acceptance_criteria"
+
+
+def test_intent_classifier_advertises_only_canonical_intents() -> None:
+    clf = _ResearchIntentClassifier()
+    assert clf.supported_intents() == frozenset(
+        {"runtime_context", "verification", "acceptance_criteria"}
+    )
 
 
 def test_intent_classifier_returns_none_for_unmatched_question() -> None:
