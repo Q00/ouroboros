@@ -161,7 +161,7 @@ async def test_question_failure_event_uses_compact_provider_error(
 async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_path: Path) -> None:
     """Provider compact diagnostics are not automatically safe for lifecycle events."""
     provider_error = ProviderError(
-        "Claude Agent SDK request failed in /Users/alice/workspace/project, see /tmp/project and C:\\Program Files\\Claude\\claude.exe and then https://api.openai.com/v1/responses plus cwd:/tmp/project+secrets(Old):v2; disk ratio 1/2 exceeded; use /api/v1/resource; failed at C:\\repo\\foo because timeout; FileNotFoundError: [Errno 2] No such file or directory: '/tmp/foo'; path:'/Users/alice/.codex/config.json'",
+        "Claude Agent SDK request failed in /Users/alice/workspace/project, see /tmp/project and C:\\Program Files\\Claude\\claude.exe and then https://api.openai.com/v1/responses plus cwd:/tmp/project+secrets(Old):v2; disk ratio 1/2 exceeded; use /api/v1/resource; failed at C:\\repo\\foo because timeout; FileNotFoundError: [Errno 2] No such file or directory: '/tmp/foo'; path:'/Users/alice/.codex/config.json'; wrapped=(/tmp/wrapped); list=[/tmp/listed]; root=/root/.codex/auth.json",
         provider="claude_code",
         details={
             "error_type": "RuntimeError",
@@ -210,6 +210,9 @@ async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_pat
     assert "project+secrets" not in event_error
     assert "/tmp/foo" not in event_error
     assert ".codex/config.json" not in event_error
+    assert "/tmp/wrapped" not in event_error
+    assert "/tmp/listed" not in event_error
+    assert "/root/.codex/auth.json" not in event_error
     assert "disk ratio 1/2 exceeded" in event_error
     assert "use /api/v1/resource" in event_error
     assert "because timeout" in event_error
