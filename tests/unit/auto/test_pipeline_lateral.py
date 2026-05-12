@@ -104,6 +104,20 @@ def _state_at_run_phase(tmp_path) -> AutoPipelineState:
     return state
 
 
+def _stale_recovery_plan() -> dict[str, Any]:
+    return {
+        "action": "ralph_redispatch",
+        "safe_to_redispatch": True,
+        "reason": "stale successful lateral advice from an earlier round",
+        "qa_score": 0.2,
+        "qa_verdict": "fail",
+        "differences": ["old failure"],
+        "suggestions": ["old suggestion"],
+        "persona": "hacker",
+        "instruction": "old redispatch instruction",
+    }
+
+
 async def _run_starter_ok(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
     return {
         "job_id": "job_run_001",
@@ -371,6 +385,42 @@ async def test_pipeline_qa_fail_enters_unstuck_lateral_and_blocks_with_persona(t
 
 
 @pytest.mark.asyncio
+async def test_pipeline_empty_lateral_advice_is_not_dispatchable(tmp_path) -> None:
+    state = _state_at_run_phase(tmp_path)
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False,
+            score=0.30,
+            verdict="fail",
+            differences=("Xcode is not available in the sandbox",),
+            suggestions=("try CLI build via swift test",),
+        )
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001
+        return LateralResult(persona="hacker", approach_summary="", text="")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_recovery_plan is not None
+    assert state.last_recovery_plan["action"] == "manual_intervention"
+    assert state.last_recovery_plan["safe_to_redispatch"] is False
+    assert state.last_recovery_plan["instruction"]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_qa_fail_without_lateral_thinker_falls_back_to_phase_2_1(tmp_path) -> None:
     """When lateral_thinker is None, QA fail must land in BLOCKED with the
     Phase 2.1 message (no persona consultation)."""
@@ -437,6 +487,7 @@ async def test_pipeline_lateral_skipped_when_complete_product_false(tmp_path) ->
 async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(tmp_path) -> None:
     state = _state_at_run_phase(tmp_path)
     state.timeout_seconds_by_phase[AutoPhase.UNSTUCK_LATERAL.value] = 1
+    state.last_recovery_plan = _stale_recovery_plan()
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
         return EvaluateResult(passed=False, score=0.1, verdict="fail", differences=("xx",))
@@ -460,11 +511,13 @@ async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(tmp_pa
     assert result.status == "blocked"
     assert state.last_tool_name == "lateral_thinker"
     assert "timed out" in (state.last_error or "")
+    assert state.last_recovery_plan is None
 
 
 @pytest.mark.asyncio
 async def test_pipeline_lateral_handler_error_blocks(tmp_path) -> None:
     state = _state_at_run_phase(tmp_path)
+    state.last_recovery_plan = _stale_recovery_plan()
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
         return EvaluateResult(passed=False, score=0.1, verdict="fail", differences=("xx",))
@@ -492,6 +545,7 @@ async def test_pipeline_lateral_handler_error_blocks(tmp_path) -> None:
     assert result.status == "blocked"
     assert state.last_tool_name == "lateral_thinker"
     assert "lateral_think tool unreachable" in (state.last_error or "")
+    assert state.last_recovery_plan is None
 
 
 @pytest.mark.asyncio
@@ -1288,6 +1342,7 @@ async def test_recovery_personas_exhausted_blocks(tmp_path) -> None:
     been routed in this session, the next lateral call returns ``None``
     and the pipeline blocks with a ``"personas exhausted"`` reason."""
     state = _state_at_run_phase(tmp_path)
+    state.last_recovery_plan = _stale_recovery_plan()
     # All five personas in the fallback chain marked as already routed.
     state.personas_invoked = [
         ThinkingPersona.HACKER.value,
@@ -1326,6 +1381,7 @@ async def test_recovery_personas_exhausted_blocks(tmp_path) -> None:
     last_error = state.last_error or ""
     assert "personas exhausted" in last_error.lower()
     assert "re-interview" in last_error
+    assert state.last_recovery_plan is None
 
 
 @pytest.mark.asyncio

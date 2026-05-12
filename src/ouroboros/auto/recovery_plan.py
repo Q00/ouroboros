@@ -164,6 +164,18 @@ def build_lateral_recovery_plan(
     if lateral_text:
         instruction_parts.append(lateral_text)
     instruction = "\n\n".join(instruction_parts).strip()
+    if not instruction:
+        return AutoRecoveryPlan(
+            action=RecoveryPlanAction.MANUAL_INTERVENTION,
+            safe_to_redispatch=False,
+            reason="QA failed but lateral recovery advice was empty.",
+            qa_score=qa_score,
+            qa_verdict=qa_verdict,
+            differences=tuple(differences),
+            suggestions=tuple(suggestions),
+            persona=persona,
+            instruction="Inspect QA differences manually before redispatch.",
+        )
     return AutoRecoveryPlan(
         action=RecoveryPlanAction.RALPH_REDISPATCH,
         safe_to_redispatch=True,

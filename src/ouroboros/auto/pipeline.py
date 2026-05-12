@@ -1837,6 +1837,7 @@ class AutoPipeline:
         import hashlib
 
         assert self.lateral_thinker is not None  # noqa: S101 — guarded by caller
+        state.last_recovery_plan = None
 
         # RFC #809 Phase 2.2b — sticky guard check (mirrors ``_run_evaluate``).
         # If a previous round exhausted any recovery guard, a resume that

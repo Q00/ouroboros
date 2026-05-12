@@ -29,6 +29,23 @@ def test_lateral_recovery_plan_round_trips() -> None:
     assert AutoRecoveryPlan.from_dict(plan.to_dict()) == plan
 
 
+def test_empty_lateral_advice_is_manual_intervention() -> None:
+    plan = build_lateral_recovery_plan(
+        qa_score=0.42,
+        qa_verdict="fail",
+        differences=("missing CLI output",),
+        suggestions=("inspect stdout",),
+        persona="hacker",
+        approach_summary="",
+        lateral_text="",
+    )
+
+    assert plan.action is RecoveryPlanAction.MANUAL_INTERVENTION
+    assert plan.safe_to_redispatch is False
+    assert plan.persona == "hacker"
+    assert plan.instruction
+
+
 def test_manual_plan_is_not_auto_dispatchable() -> None:
     plan = build_manual_recovery_plan(
         qa_score=0.25,
