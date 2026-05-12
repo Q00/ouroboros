@@ -203,3 +203,24 @@ class TestBackgroundJobPath:
         assert body["auto_session_id"] == meta["auto_session_id"]
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enqueue_failure_returns_persisted_auto_session_id(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        job_manager = MagicMock()
+        job_manager.start_job = AsyncMock(side_effect=RuntimeError("queue unavailable"))
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_err
+        persisted = list(tmp_path.glob("auto_*.json"))
+        assert len(persisted) == 1
+        auto_session_id = persisted[0].stem
+        assert auto_session_id in result.error.message
+        assert result.error.details["auto_session_id"] == auto_session_id
+        assert "resume" in result.error.message
+        fake_inner_auto.handle.assert_not_called()

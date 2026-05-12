@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import difflib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -570,16 +571,32 @@ class StartAutoHandler:
             return result.value
 
         initial_label = auto_session_id if has_resume else goal.strip()[:80]  # type: ignore[union-attr]
-        snapshot = await self._job_manager.start_job(
-            job_type="auto",
-            initial_message=f"Queued ooo auto for {initial_label}",
-            runner=run_with_agent_process(
-                event_store=self._event_store,
-                intent="auto",
-                work_fn=lambda _handle: _runner(),
-            ),
-            links=JobLinks(session_id=auto_session_id),
+        runner = run_with_agent_process(
+            event_store=self._event_store,
+            intent="auto",
+            work_fn=lambda _handle: _runner(),
         )
+        try:
+            snapshot = await self._job_manager.start_job(
+                job_type="auto",
+                initial_message=f"Queued ooo auto for {initial_label}",
+                runner=runner,
+                links=JobLinks(session_id=auto_session_id),
+            )
+        except Exception as exc:
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return Result.err(
+                MCPToolError(
+                    "Failed to enqueue background auto session "
+                    f"{auto_session_id}: {exc}. The auto session was persisted; "
+                    f"resume with ouroboros_start_auto resume={auto_session_id} "
+                    f"or ouroboros_auto resume={auto_session_id}.",
+                    tool_name="ouroboros_start_auto",
+                    is_retriable=True,
+                    details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+                )
+            )
 
         text = (
             f"Started background auto session. job_id={snapshot.job_id}\n\n"
