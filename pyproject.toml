@@ -80,6 +80,9 @@ exclude = [
 # so they must reach the installed wheel as package data, not just the
 # source tree.
 "src/ouroboros/plugin/schemas" = "ouroboros/plugin/schemas"
+# Execution profile YAMLs (RFC v2 #830). The loader resolves them via
+# Path(__file__).parent.parent / "profiles", so they must ship with the wheel.
+"src/ouroboros/profiles" = "ouroboros/profiles"
 
 [dependency-groups]
 dev = [
