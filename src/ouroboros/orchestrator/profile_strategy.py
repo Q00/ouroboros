@@ -6,6 +6,15 @@ in `execution_strategy.py` reads its system-prompt fragment from
 moves both of those into the profile YAMLs so adding a new domain is
 a YAML edit, not a Python + markdown edit.
 
+Once the #830 stack lands and the default strategy is flipped to the
+profile-backed variant, the legacy `agents/{name}.md` files can be
+removed. They are intentionally NOT annotated as deprecated in their
+own text — that text is the live system prompt for the legacy code
+path; any "deprecated" banner inside the markdown would become part
+of the prompt the model receives and skew runtime behavior on the
+unflipped legacy path (bot finding on #891 r8). Treat the legacy
+markdown files as inert prompt content; the deprecation lives here.
+
 This module ships a `ProfileBackedStrategy` that satisfies the existing
 `ExecutionStrategy` Protocol but reads tools and system-prompt fragment
 from a loaded `ExecutionProfile`. The system prompt fragment composes a
