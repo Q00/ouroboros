@@ -286,16 +286,46 @@ _INTERVIEW_EVENT_ERROR_DETAIL_KEYS = (
     "depth",
 )
 
-_INTERVIEW_EVENT_WINDOWS_PATH_RE = re.compile(
-    r"[A-Za-z]:\\.*?(?=(?:\s+(?:and|or|from|in|at|with|to)\b)|[,;:'\")\]}]|$)"
-)
 _INTERVIEW_EVENT_POSIX_PATH_RE = re.compile(
-    r"(?:"
-    r"~[/\\][^\s,;:'\")\]}]+"
-    r"|/(?:[^\s,;'\"\]}]+)"
+    r"(^|[\s:=])"
+    r"("
+    r"~[/\\][^\s,;'\"\]}]+"
+    r"|/(?:Applications|Users|Volumes|etc|home|mnt|opt|private|repo|tmp|usr|var|workspace)(?:/[^\s,;'\"\]}]+)*"
     r")"
 )
 _INTERVIEW_EVENT_URL_RE = re.compile(r"https?://[^\s,;:'\")\]}]+")
+_INTERVIEW_EVENT_WINDOWS_DRIVE_RE = re.compile(r"[A-Za-z]:\\")
+_INTERVIEW_EVENT_PATH_REDACTION = "[redacted path]"
+
+
+def _redact_interview_event_posix_path(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_INTERVIEW_EVENT_PATH_REDACTION}"
+
+
+def _redact_interview_event_windows_paths(text: str) -> str:
+    """Redact Windows drive paths without consuming unrelated sentence tails."""
+    redacted: list[str] = []
+    cursor = 0
+    while match := _INTERVIEW_EVENT_WINDOWS_DRIVE_RE.search(text, cursor):
+        redacted.append(text[cursor : match.start()])
+        index = match.end()
+        while index < len(text):
+            char = text[index]
+            if char in "\r\n,;:'\")]}":
+                break
+            if char.isspace():
+                next_space = index + 1
+                while next_space < len(text) and not text[next_space].isspace():
+                    if text[next_space] in "\r\n,;:'\")]}":
+                        break
+                    next_space += 1
+                if "\\" not in text[index + 1 : next_space]:
+                    break
+            index += 1
+        redacted.append(_INTERVIEW_EVENT_PATH_REDACTION)
+        cursor = index
+    redacted.append(text[cursor:])
+    return "".join(redacted)
 
 
 def _redact_interview_event_error_text(text: str) -> str:
@@ -307,8 +337,8 @@ def _redact_interview_event_error_text(text: str) -> str:
         return f"__INTERVIEW_EVENT_URL_{len(urls) - 1}__"
 
     protected = _INTERVIEW_EVENT_URL_RE.sub(protect_url, text)
-    redacted = _INTERVIEW_EVENT_WINDOWS_PATH_RE.sub("[redacted path]", protected)
-    redacted = _INTERVIEW_EVENT_POSIX_PATH_RE.sub("[redacted path]", redacted)
+    redacted = _redact_interview_event_windows_paths(protected)
+    redacted = _INTERVIEW_EVENT_POSIX_PATH_RE.sub(_redact_interview_event_posix_path, redacted)
     for index, url in enumerate(urls):
         redacted = redacted.replace(f"__INTERVIEW_EVENT_URL_{index}__", url)
     return redacted

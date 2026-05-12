@@ -161,7 +161,7 @@ async def test_question_failure_event_uses_compact_provider_error(
 async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_path: Path) -> None:
     """Provider compact diagnostics are not automatically safe for lifecycle events."""
     provider_error = ProviderError(
-        "Claude Agent SDK request failed in /Users/alice/workspace/project, see /tmp/project and C:\\Program Files\\Claude\\claude.exe and then https://api.openai.com/v1/responses plus cwd:/tmp/project+secrets(Old):v2",
+        "Claude Agent SDK request failed in /Users/alice/workspace/project, see /tmp/project and C:\\Program Files\\Claude\\claude.exe and then https://api.openai.com/v1/responses plus cwd:/tmp/project+secrets(Old):v2; disk ratio 1/2 exceeded; use /api/v1/resource; failed at C:\\repo\\foo because timeout",
         provider="claude_code",
         details={
             "error_type": "RuntimeError",
@@ -208,6 +208,9 @@ async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_pat
     assert "https://api.openai.com/v1/responses" in event_error
     assert "see [redacted path] and [redacted path] and then https://" in event_error
     assert "project+secrets" not in event_error
+    assert "disk ratio 1/2 exceeded" in event_error
+    assert "use /api/v1/resource" in event_error
+    assert "because timeout" in event_error
     assert "configured_cli_path" not in event_error
     assert "stderr" not in event_error
     assert "claude_code_entrypoint" not in event_error
