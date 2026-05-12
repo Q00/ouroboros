@@ -343,12 +343,9 @@ class AutoPipeline:
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
-            has_ralph_checkpoint_to_reconcile = (
-                resume_phase is AutoPhase.RALPH_HANDOFF
-                and (
-                    state.ralph_dispatch_mode == "plugin"
-                    or (state.ralph_job_id is not None and self.ralph_resumer is not None)
-                )
+            has_ralph_checkpoint_to_reconcile = resume_phase is AutoPhase.RALPH_HANDOFF and (
+                state.ralph_dispatch_mode == "plugin"
+                or (state.ralph_job_id is not None and self.ralph_resumer is not None)
             )
             retry_ralph_handoff = (
                 resume_phase is AutoPhase.RALPH_HANDOFF
