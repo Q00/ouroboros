@@ -103,6 +103,13 @@ def detectable_profile(isolated_default_registry, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_cli_import_bootstraps_builtin_research_profile() -> None:
+    """Production CLI imports register built-in profiles before domain lookup."""
+    from ouroboros.cli.commands import auto as auto_command
+
+    assert auto_command.DEFAULT_REGISTRY.get("research") is not None
+
+
 def test_auto_help_hides_domain_option(isolated_default_registry) -> None:
     """The dormant domain activation hook is accepted but not publicly advertised."""
     assert DEFAULT_REGISTRY.all() == ()

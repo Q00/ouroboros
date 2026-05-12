@@ -11,13 +11,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ouroboros.bigbang.interview import InterviewState, InterviewStatus
+from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
-from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+from ouroboros.mcp.tools.authoring_handlers import (
+    InterviewHandler,
+    _redact_interview_event_error_text,
+)
+from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
 
 class _RecoverableProviderError(MCPServerError):
@@ -39,6 +46,7 @@ class _FakeInterviewEngine:
 
     state_dir: Path
     saved_states: list[InterviewState] = field(default_factory=list)
+    question_error: Any | None = None
 
     async def start_interview(
         self, initial_context: str, cwd: str | None = None, interview_id: str | None = None
@@ -53,6 +61,8 @@ class _FakeInterviewEngine:
         return Result.ok(state)
 
     async def ask_next_question(self, state: InterviewState) -> Result[str, MCPServerError]:
+        if self.question_error is not None:
+            return Result.err(self.question_error)
         return Result.err(_RecoverableProviderError("Question generation timed out"))
 
     async def save_state(self, state: InterviewState) -> Result[Path, MCPServerError]:
@@ -96,6 +106,146 @@ async def test_subprocess_handler_persists_session_id_on_question_failure(tmp_pa
         "interview state file must exist on disk after first-question failure"
     )
     assert engine.saved_states, "engine.save_state must have been invoked"
+
+
+@pytest.mark.asyncio
+async def test_question_failure_event_uses_compact_provider_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persisted interview failure events must not stringify full auth paths.
+
+    Codex auth diagnostics intentionally keep structured context on the
+    ProviderError, but lifecycle event text is a broader persistence/logging
+    surface.  Use ``format_details()`` there so local ``CODEX_HOME`` / ``HOME``
+    paths do not cross into ``interview.failed`` text.
+    """
+    home = Path("/Users/alice")
+    codex_home = home / ".codex"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    auth_error = "401 Unauthorized from api.openai.com"
+    details = CodexCliLLMAdapter._codex_failure_details(
+        returncode=1,
+        session_id="thread_path",
+        stderr="",
+        stdout_errors=[auth_error],
+        message=auth_error,
+    )
+    provider_error = ProviderError(auth_error, provider="codex_cli", details=details)
+
+    mock_store = AsyncMock()
+    engine = _FakeInterviewEngine(state_dir=tmp_path, question_error=provider_error)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=mock_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle({"initial_context": "Build a CLI", "cwd": str(tmp_path)})
+    await handler.close()
+
+    assert outcome.is_ok
+    failed_events = [
+        call.args[0]
+        for call in mock_store.append.await_args_list
+        if getattr(call.args[0], "type", None) == "interview.failed"
+    ]
+    assert failed_events, "question-generation failure must emit interview.failed"
+    event_error = failed_events[-1].data["error"]
+    assert auth_error in event_error
+    assert str(codex_home) not in event_error
+    assert str(home) not in event_error
+    assert "codex_auth_context" not in event_error
+
+
+@pytest.mark.asyncio
+async def test_question_failure_event_excludes_provider_path_diagnostics(tmp_path: Path) -> None:
+    """Provider compact diagnostics are not automatically safe for lifecycle events."""
+    provider_error = ProviderError(
+        "Claude Agent SDK request failed in /Users/alice/workspace/project, see /tmp/project and C:\\Program Files\\Claude\\claude.exe and then https://api.openai.com/v1/responses plus cwd:/tmp/project+secrets(Old):v2; FileNotFoundError: '/tmp/foo'",
+        provider="claude_code",
+        details={
+            "error_type": "RuntimeError",
+            "session_id": "claude-session-1",
+            "stderr": "trace mentions /Users/alice/.claude/config.json",
+            "claudecode_present": True,
+            "claude_code_entrypoint": r"C:\\Program Files\\Claude\\claude.exe",
+            "configured_cli_path": "/opt/homebrew/bin/claude",
+            "cwd": "/tmp",
+            "env_override_keys": ["ANTHROPIC_API_KEY"],
+        },
+    )
+
+    mock_store = AsyncMock()
+    engine = _FakeInterviewEngine(state_dir=tmp_path, question_error=provider_error)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=mock_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle({"initial_context": "Build a CLI", "cwd": str(tmp_path)})
+    await handler.close()
+
+    assert outcome.is_ok
+    failed_events = [
+        call.args[0]
+        for call in mock_store.append.await_args_list
+        if getattr(call.args[0], "type", None) == "interview.failed"
+    ]
+    assert failed_events, "question-generation failure must emit interview.failed"
+    event_error = failed_events[-1].data["error"]
+    assert "Claude Agent SDK request failed" in event_error
+    assert "error_type: RuntimeError" in event_error
+    assert "session_id: claude-session-1" in event_error
+    assert "/Users/alice" not in event_error
+    assert "/opt/homebrew" not in event_error
+    assert "/tmp" not in event_error
+    assert "C:" not in event_error
+    assert "Program Files" not in event_error
+    assert r"Files\Claude" not in event_error
+    assert "https://api.openai.com/v1/responses" in event_error
+    assert "see [redacted path] and [redacted path] and then https://" in event_error
+    assert "project+secrets" not in event_error
+    assert "/tmp/foo" not in event_error
+    assert "configured_cli_path" not in event_error
+    assert "stderr" not in event_error
+    assert "claude_code_entrypoint" not in event_error
+
+
+def test_interview_failure_redactor_preserves_non_path_diagnostics() -> None:
+    text = (
+        "disk ratio 1/2 exceeded; use /api/v1/resource; "
+        "failed at C:\\repo\\foo because timeout; "
+        "path:'/Users/alice/.codex/config.json'; wrapped=(/tmp/wrapped); "
+        "list=[/tmp/listed]; root=/root/.codex/auth.json; "
+        "markdown=`/tmp/markdown`; angle=</tmp/angle>; "
+        "/srv/app/config.yml /run/user/1000/codex.sock /bin/bash /nix/store/hash; "
+        "endpoint https://api.openai.com/v1/responses"
+    )
+
+    redacted = _redact_interview_event_error_text(text)
+
+    assert "disk ratio 1/2 exceeded" in redacted
+    assert "use /api/v1/resource" in redacted
+    assert "because timeout" in redacted
+    assert "https://api.openai.com/v1/responses" in redacted
+    assert "/Users/alice" not in redacted
+    assert ".codex/config.json" not in redacted
+    assert "/tmp/wrapped" not in redacted
+    assert "/tmp/listed" not in redacted
+    assert "/root/.codex/auth.json" not in redacted
+    assert "/tmp/markdown" not in redacted
+    assert "/tmp/angle" not in redacted
+    assert "/srv/app/config.yml" not in redacted
+    assert "/run/user/1000/codex.sock" not in redacted
+    assert "/bin/bash" not in redacted
+    assert "/nix/store/hash" not in redacted
+    assert "C:" not in redacted
 
 
 @pytest.mark.asyncio

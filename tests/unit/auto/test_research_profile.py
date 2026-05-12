@@ -1,0 +1,105 @@
+"""Unit tests for the research DomainProfile (#809 P3, PR 6/6)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from ouroboros.auto.profiles.research import (
+    RESEARCH_PROFILE,
+    _CitationFormatPredicate,
+    _research_detector,
+    _ResearchIntentClassifier,
+    _SourceCountPredicate,
+)
+
+
+def test_detector_zero_on_empty_dir(tmp_path: Path) -> None:
+    assert _research_detector(tmp_path) == 0.0
+
+
+def test_detector_scores_bibliography_directory(tmp_path: Path) -> None:
+    (tmp_path / "references.bib").write_text("")
+    score = _research_detector(tmp_path)
+    assert score >= 0.6
+
+
+def test_detector_scores_bibliography_dot_dir(tmp_path: Path) -> None:
+    (tmp_path / ".bibliography").mkdir()
+    score = _research_detector(tmp_path)
+    assert score >= 0.6
+
+
+def test_intent_classifier_maps_literature_review_to_runtime_context() -> None:
+    clf = _ResearchIntentClassifier()
+    assert clf.classify("Write a survey of transformer models") == "runtime_context"
+
+
+def test_intent_classifier_maps_hypothesis_check_to_verification() -> None:
+    clf = _ResearchIntentClassifier()
+    assert clf.classify("Verify the hypothesis that X causes Y") == "verification"
+
+
+def test_intent_classifier_maps_evidence_gathering_to_acceptance_criteria() -> None:
+    clf = _ResearchIntentClassifier()
+    assert clf.classify("Require at least 5 citations") == "acceptance_criteria"
+
+
+def test_intent_classifier_advertises_only_canonical_intents() -> None:
+    clf = _ResearchIntentClassifier()
+    assert clf.supported_intents() == frozenset(
+        {"runtime_context", "verification", "acceptance_criteria"}
+    )
+
+
+def test_intent_classifier_returns_none_for_unmatched_question() -> None:
+    clf = _ResearchIntentClassifier()
+    assert clf.classify("What is the weather today?") is None
+
+
+def test_source_count_predicate_matches_numeric_criterion() -> None:
+    pred = _SourceCountPredicate()
+    assert pred.matches("must cite at least 5 sources")
+    assert pred.matches("include 3 citations")
+    assert pred.matches("list 4 references")
+    assert not pred.matches("no numbers here")
+    assert not pred.matches("source without digit")
+
+
+def test_source_count_predicate_ignores_source_substrings() -> None:
+    pred = _SourceCountPredicate()
+    assert not pred.matches("resource limit must stay under 512MB")
+    assert not pred.matches("support 3 open-source formats")
+
+
+def test_source_count_predicate_ignores_non_count_numbers() -> None:
+    pred = _SourceCountPredicate()
+    assert not pred.matches("references must use APA 7 style")
+    assert not pred.matches("cite sources published after 2020")
+    assert not pred.matches("include DOI 10.1234 references")
+    assert not pred.matches("source map v3 must work")
+    assert not pred.matches("update 3 source files")
+    assert not pred.matches("compare 2 reference implementations")
+
+
+def test_citation_format_predicate_matches_citation_keyword() -> None:
+    pred = _CitationFormatPredicate()
+    assert pred.matches("citation style must be APA")
+    assert pred.matches("bibliography entries are required")
+    assert pred.matches("include references section")
+    assert not pred.matches("run all unit tests")
+    assert not pred.matches("use a reference implementation")
+    assert not pred.matches("compare 2 reference implementations")
+
+
+def test_vague_terms_contain_research_specific_words() -> None:
+    vague = RESEARCH_PROFILE.vague_terms
+    assert "thorough" in vague
+    assert "comprehensive" in vague
+    assert "rigorous" in vague
+
+
+def test_research_profile_is_registered_in_default_registry() -> None:
+    from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
+
+    names = {p.name for p in DEFAULT_REGISTRY.all()}
+    assert "research" in names

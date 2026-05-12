@@ -314,6 +314,113 @@ def _ambiguity_warning_for_failed_question(
     return ""
 
 
+_INTERVIEW_EVENT_ERROR_DETAIL_KEYS = (
+    "error_type",
+    "session_id",
+    "failure_category",
+    "auth_plane",
+    "openai_responses_endpoint_seen",
+    "returncode",
+    "subtype",
+    "stop_reason",
+    "partial_rejected",
+    "content_length",
+    "timeout_seconds",
+    "attempt",
+    "depth",
+)
+
+_INTERVIEW_EVENT_POSIX_PATH_RE = re.compile(
+    r"(^|[\s,;:='\"`(<{\[])"
+    r"("
+    r"~[/\\][^\s,;'\"\]}]+"
+    r"|/(?!api(?:/|$))[^\s,;'\"\]}]+"
+    r")"
+)
+_INTERVIEW_EVENT_URL_RE = re.compile(r"https?://[^\s,;:'\")\]}]+")
+_INTERVIEW_EVENT_WINDOWS_DRIVE_RE = re.compile(r"[A-Za-z]:\\")
+_INTERVIEW_EVENT_PATH_REDACTION = "[redacted path]"
+
+
+def _redact_interview_event_posix_path(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_INTERVIEW_EVENT_PATH_REDACTION}"
+
+
+def _redact_interview_event_windows_paths(text: str) -> str:
+    """Redact Windows drive paths without consuming unrelated sentence tails."""
+    redacted: list[str] = []
+    cursor = 0
+    while match := _INTERVIEW_EVENT_WINDOWS_DRIVE_RE.search(text, cursor):
+        redacted.append(text[cursor : match.start()])
+        index = match.end()
+        while index < len(text):
+            char = text[index]
+            if char in "\r\n,;:'\")]}":
+                break
+            if char.isspace():
+                next_space = index + 1
+                while next_space < len(text) and not text[next_space].isspace():
+                    if text[next_space] in "\r\n,;:'\")]}":
+                        break
+                    next_space += 1
+                if "\\" not in text[index + 1 : next_space]:
+                    break
+            index += 1
+        redacted.append(_INTERVIEW_EVENT_PATH_REDACTION)
+        cursor = index
+    redacted.append(text[cursor:])
+    return "".join(redacted)
+
+
+def _redact_interview_event_error_text(text: str) -> str:
+    """Remove local path-shaped substrings from persisted interview event text."""
+    urls: list[str] = []
+
+    def protect_url(match: re.Match[str]) -> str:
+        urls.append(match.group(0))
+        return f"__INTERVIEW_EVENT_URL_{len(urls) - 1}__"
+
+    protected = _INTERVIEW_EVENT_URL_RE.sub(protect_url, text)
+    redacted = _redact_interview_event_windows_paths(protected)
+    redacted = _INTERVIEW_EVENT_POSIX_PATH_RE.sub(_redact_interview_event_posix_path, redacted)
+    for index, url in enumerate(urls):
+        redacted = redacted.replace(f"__INTERVIEW_EVENT_URL_{index}__", url)
+    return redacted
+
+
+def _format_interview_failure_event_error(error: Any) -> str:
+    """Return an event-safe error string for interview failure events.
+
+    Provider errors can carry rich machine diagnostics in ``details``.  Those
+    details are intentionally useful for structured callers, but event text is a
+    persisted/user-adjacent surface.  Render only the provider message plus an
+    explicit allowlist of scalar, non-path diagnostic fields; keep path-bearing
+    fields such as ``cwd`` and ``configured_cli_path`` in the original error
+    object for internal diagnostics only.
+    """
+    message = getattr(error, "message", None)
+    if not isinstance(message, str) or not message:
+        message = str(error)
+    rendered = [_redact_interview_event_error_text(message)]
+
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        for key in _INTERVIEW_EVENT_ERROR_DETAIL_KEYS:
+            value = details.get(key)
+            if value is None or isinstance(value, dict | list | tuple | set):
+                continue
+            rendered.append(f"{key}: {_redact_interview_event_error_text(str(value))}")
+
+    provider = getattr(error, "provider", None)
+    if provider:
+        rendered.append(f"provider: {_redact_interview_event_error_text(str(provider))}")
+    status_code = getattr(error, "status_code", None)
+    if status_code is not None:
+        rendered.append(f"status_code: {status_code}")
+
+    return "\n".join(rendered)
+
+
 def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
     """Rebuild a stored ambiguity snapshot from interview state."""
     if state.ambiguity_score is None:
@@ -1374,12 +1481,13 @@ class InterviewHandler:
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
+                    event_error_msg = _format_interview_failure_event_error(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
                     self._emit_event_bg(
                         interview_failed(
                             state.interview_id,
-                            error_msg,
+                            event_error_msg,
                             phase="question_generation",
                         )
                     )
@@ -1421,8 +1529,8 @@ class InterviewHandler:
                     # using the persisted ``session_id`` instead of losing
                     # the interview handle (Q00/ouroboros#687).  Truncate
                     # ``error_msg`` to avoid leaking provider internals into
-                    # the user-facing envelope; full details remain in the
-                    # ``interview_failed`` event emitted above.
+                    # the user-facing envelope.  The lifecycle event uses the
+                    # provider's compact formatter for the same boundary.
                     safe_error = error_msg[:200] if error_msg else "unknown error"
                     return Result.ok(
                         MCPToolResult(
@@ -1877,12 +1985,13 @@ class InterviewHandler:
                     question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
+                    event_error_msg = _format_interview_failure_event_error(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
                     self._emit_event_bg(
                         interview_failed(
                             session_id,
-                            error_msg,
+                            event_error_msg,
                             phase="question_generation",
                         )
                     )
@@ -2008,7 +2117,7 @@ class InterviewHandler:
                 self._emit_event_bg(
                     interview_failed(
                         _interview_id,
-                        str(e),
+                        _format_interview_failure_event_error(e),
                         phase="unexpected_error",
                     )
                 )

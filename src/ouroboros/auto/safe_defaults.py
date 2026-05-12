@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import re
+from typing import TYPE_CHECKING
 import unicodedata
 
 from ouroboros.auto.ledger import (
@@ -13,6 +15,17 @@ from ouroboros.auto.ledger import (
     SeedDraftLedger,
 )
 
+# Forward reference only — imported lazily to avoid circular imports.
+# Callers that pass ``active_profile`` will have already imported DomainProfile.
+if TYPE_CHECKING:
+    from ouroboros.auto.domain_profile import DomainProfile
+
+
+@dataclass(frozen=True, slots=True)
+class _DefaultSpec:
+    value: str
+    rationale: str
+
 
 @dataclass(frozen=True, slots=True)
 class SafeDefaultFinalization:
@@ -20,17 +33,23 @@ class SafeDefaultFinalization:
 
     defaulted_sections: tuple[str, ...]
     unsafe_gaps: tuple[str, ...]
+    defaulted_specs: tuple[tuple[str, _DefaultSpec], ...] = ()
 
     @property
     def completed(self) -> bool:
         """Return True when all remaining gaps were safely defaulted."""
         return bool(self.defaulted_sections) and not self.unsafe_gaps
 
+    def default_spec_for(self, section: str) -> _DefaultSpec | None:
+        """Return the resolved default spec written for *section*, if tracked."""
+        for spec_section, spec in self.defaulted_specs:
+            if spec_section == section:
+                return spec
+        return None
 
-@dataclass(frozen=True, slots=True)
-class _DefaultSpec:
-    value: str
-    rationale: str
+
+def _is_valid_default_spec(spec: _DefaultSpec) -> bool:
+    return bool(spec.value.strip() and spec.rationale.strip())
 
 
 _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
@@ -147,6 +166,33 @@ _AUTO_ANSWER_PREFIX = AUTO_ANSWER_PREFIX
 _SAFE_DEFAULT_SYNTHESIS_TAG = SAFE_DEFAULT_SYNTHESIS_TAG
 
 
+def _resolve_spec(
+    section: str,
+    active_profile: DomainProfile | None,
+) -> _DefaultSpec | None:
+    """Return the _DefaultSpec for *section*, preferring *active_profile* over the hardcoded dict."""
+    if active_profile is not None:
+        profile_raw = active_profile.safe_defaults.get(section)
+        if isinstance(profile_raw, _DefaultSpec):
+            if _is_valid_default_spec(profile_raw):
+                return profile_raw
+        if isinstance(profile_raw, Mapping):
+            value = profile_raw.get("value")
+            rationale = profile_raw.get("rationale")
+            if (
+                isinstance(value, str)
+                and value.strip()
+                and isinstance(rationale, str)
+                and rationale.strip()
+            ):
+                spec = _DefaultSpec(value=value, rationale=rationale)
+                if _is_valid_default_spec(spec):
+                    return spec
+        if isinstance(profile_raw, str) and profile_raw.strip():
+            return _DefaultSpec(value=profile_raw, rationale=f"{section} domain default")
+    return _SAFE_DEFAULTS.get(section)
+
+
 def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
     """Build a synthesis answer text describing every defaulted section.
 
@@ -174,7 +220,7 @@ def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
         "if a stricter answer is required.",
     ]
     for section in finalization.defaulted_sections:
-        spec = _SAFE_DEFAULTS.get(section)
+        spec = finalization.default_spec_for(section) or _SAFE_DEFAULTS.get(section)
         if spec is None:
             continue
         lines.append(f"- {section}: {spec.value} ({spec.rationale})")
@@ -187,6 +233,7 @@ def finalize_safe_defaultable_gaps(
     goal: str,
     provenance: str,
     pending_question: str | None = None,
+    active_profile: DomainProfile | None = None,
 ) -> SafeDefaultFinalization:
     """Fill safe-defaultable required gaps with auditable assumptions.
 
@@ -195,6 +242,11 @@ def finalize_safe_defaultable_gaps(
     include unsafe authority, irreversible production actions, payment/billing,
     legal/medical/security-sensitive decisions, or ambiguous external effects.
     Conflicting, blocked, or missing-goal gaps remain hard blockers.
+
+    When *active_profile* is supplied its ``safe_defaults`` dict is consulted
+    first for each section; missing keys fall through to the hardcoded
+    ``_SAFE_DEFAULTS`` dict so the coding-domain fallback always applies when
+    no domain-specific override exists.
     """
     gaps = ledger.open_gaps()
     if not gaps:
@@ -203,6 +255,7 @@ def finalize_safe_defaultable_gaps(
     unsafe_reason = _unsafe_context_reason(ledger, goal=goal, pending_question=pending_question)
     statuses = ledger.section_statuses()
     defaulted: list[str] = []
+    defaulted_specs: list[tuple[str, _DefaultSpec]] = []
     unsafe: list[str] = []
 
     for section in gaps:
@@ -216,7 +269,8 @@ def finalize_safe_defaultable_gaps(
         if unsafe_reason is not None:
             unsafe.append(f"{section}: unsafe default context ({unsafe_reason})")
             continue
-        spec = _SAFE_DEFAULTS.get(section)
+        # Prefer domain-profile override; fall back to hardcoded coding defaults.
+        spec = _resolve_spec(section, active_profile)
         if spec is None:
             unsafe.append(f"{section}: no safe default policy")
             continue
@@ -236,6 +290,7 @@ def finalize_safe_defaultable_gaps(
             ),
         )
         defaulted.append(section)
+        defaulted_specs.append((section, spec))
 
     if not unsafe and ledger.open_gaps():
         unsafe.extend(
@@ -243,7 +298,7 @@ def finalize_safe_defaultable_gaps(
             for section in ledger.open_gaps()
         )
 
-    return SafeDefaultFinalization(tuple(defaulted), tuple(unsafe))
+    return SafeDefaultFinalization(tuple(defaulted), tuple(unsafe), tuple(defaulted_specs))
 
 
 def _unsafe_context_reason(

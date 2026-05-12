@@ -195,8 +195,13 @@ class DomainProfileRegistry:
         self._loaded = loader is None
         self._loading = False
 
-    def _ensure_loaded(self) -> None:
-        """Load built-in profiles on first read without coupling module imports."""
+    def _ensure_loaded(self, *, allow_existing_fallback: bool = False) -> None:
+        """Load built-in profiles on first default read.
+
+        Explicitly registered profiles remain usable even if built-in profile
+        imports are unavailable.  Loader failures are not marked as loaded, so
+        later reads can retry after the environment is fixed.
+        """
         if self._loaded or self._loading:
             return
         if self._profiles is not self._profile_storage:
@@ -213,6 +218,10 @@ class DomainProfileRegistry:
         try:
             self._loader(self)
             self._loaded = True
+        except Exception:
+            if allow_existing_fallback and self._profiles:
+                return
+            raise
         finally:
             self._loading = False
 
@@ -230,6 +239,10 @@ class DomainProfileRegistry:
 
     def get(self, name: str) -> DomainProfile | None:
         """Return the profile registered under *name*, or None."""
+        for profile in self._profiles:
+            if profile.name == name:
+                return profile
+
         self._ensure_loaded()
         for profile in self._profiles:
             if profile.name == name:
@@ -238,7 +251,7 @@ class DomainProfileRegistry:
 
     def all(self) -> tuple[DomainProfile, ...]:
         """Return all registered profiles in registration order."""
-        self._ensure_loaded()
+        self._ensure_loaded(allow_existing_fallback=True)
         return tuple(self._profiles)
 
     def detect_best(self, cwd: Path) -> DomainProfile | None:
@@ -248,7 +261,12 @@ class DomainProfileRegistry:
         by registration order (earlier registration wins).  Returns ``None``
         when no profiles are registered or all detectors return 0.0.
         """
-        self._ensure_loaded()
+        best_profile, _best_confidence = self._best_profile(cwd)
+        self._ensure_loaded(allow_existing_fallback=best_profile is not None)
+        best_profile, _best_confidence = self._best_profile(cwd)
+        return best_profile
+
+    def _best_profile(self, cwd: Path) -> tuple[DomainProfile | None, float]:
         best_profile: DomainProfile | None = None
         best_confidence: float = 0.0
         for profile in self._profiles:
@@ -256,7 +274,7 @@ class DomainProfileRegistry:
             if confidence > best_confidence:
                 best_confidence = confidence
                 best_profile = profile
-        return best_profile
+        return best_profile, best_confidence
 
     def union_predicates(
         self, cwd: Path, threshold: float = 0.5
@@ -275,7 +293,7 @@ class DomainProfileRegistry:
             Minimum detector confidence required for a profile's predicates
             to be included.  Default is ``0.5``.
         """
-        self._ensure_loaded()
+        self._ensure_loaded(allow_existing_fallback=bool(self._profiles))
         seen_codes: set[str] = set()
         result: list[VerifiablePredicate] = []
         for profile in self._profiles:

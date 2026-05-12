@@ -281,6 +281,12 @@ class AutoHandler:
                 state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend
         state.opencode_mode = opencode_mode
+        # Q00/ouroboros#782 review-8 BLOCKING #1: persist the (un-demoted)
+        # mode for the Ralph handoff so resume reconstructs plugin Ralph
+        # dispatch even when the historical demoted form is later relied on
+        # for authoring/run-handoff handlers (matches the CLI behavior).
+        if opencode_mode is not None:
+            state.ralph_opencode_mode = state.ralph_opencode_mode or opencode_mode
         state.skip_run = skip_run
 
         authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
@@ -313,10 +319,18 @@ class AutoHandler:
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
         )
+        # Q00/ouroboros#782 review-11 BLOCKING #1: pass the un-demoted
+        # ``state.ralph_opencode_mode`` (already populated above at line 251-252,
+        # and preserved across CLI-created sessions where ``state.opencode_mode``
+        # holds the demoted authoring/run-handoff form) so MCP-side resumes of
+        # an OpenCode plugin ``--complete-product`` session take the plugin
+        # ``_subagent`` dispatch path instead of silently downgrading Ralph to
+        # in-process job mode. Mirrors the CLI fix in ``cli/commands/auto.py``.
+        ralph_opencode_mode = state.ralph_opencode_mode or opencode_mode
         ralph_handler = (
             RalphHandler(
                 agent_runtime_backend=runtime_backend,
-                opencode_mode=opencode_mode,
+                opencode_mode=ralph_opencode_mode,
             )
             if complete_product
             else None

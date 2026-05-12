@@ -413,6 +413,47 @@ def test_auto_package_exports_are_lazy() -> None:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_default_registry_get_returns_existing_profile_without_loading_builtins() -> None:
+    registry = DomainProfileRegistry(
+        loader=lambda _registry: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    profile = _make_profile(name="custom")
+    registry.register(profile)
+
+    assert registry.get("custom") is profile
+
+
+def test_default_registry_detect_best_falls_back_to_registered_profile_on_loader_failure(
+    tmp_path: Path,
+) -> None:
+    registry = DomainProfileRegistry(
+        loader=lambda _registry: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    profile = _make_profile(name="custom", confidence=0.9)
+    registry.register(profile)
+
+    assert registry.detect_best(tmp_path) is profile
+
+
+def test_default_registry_loader_failure_retries_after_failed_empty_read() -> None:
+    calls = 0
+
+    def _loader(registry: DomainProfileRegistry) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary import failure")
+        registry.register(_make_profile(name="loaded"))
+
+    registry = DomainProfileRegistry(loader=_loader)
+
+    with pytest.raises(RuntimeError, match="temporary import failure"):
+        registry.get("loaded")
+
+    assert registry.get("loaded") is not None
+    assert calls == 2
+
+
 def test_default_registry_contains_coding_after_pr2(tmp_path: Path) -> None:
     # DEFAULT_REGISTRY is a module-level singleton. Querying it should lazily
     # expose built-in default profiles without importing them at contract-module
