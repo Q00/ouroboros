@@ -69,36 +69,6 @@ _TIER_ORDER: tuple[ModelTier, ...] = (ModelTier.HAIKU, ModelTier.SONNET, ModelTi
 # route through a dedicated read-only test runner — see module docstring.
 _VERIFIER_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
 
-# Phrases in profile.verifier_focus that signal the verifier needs to
-# execute subprocesses (typically test commands). When detected, the
-# router raises NotImplementedError so the caller knows to plumb a
-# dedicated read-only test runner instead of silently routing a
-# profile whose verifier contract this seam cannot satisfy
-# (bot finding on #889 r4).
-_VERIFIER_SUBPROCESS_MARKERS: tuple[str, ...] = (
-    "test command",
-    "subprocess",
-    "shell command",
-    "pytest",
-)
-
-
-def _check_verifier_supported(profile: ExecutionProfile) -> None:
-    """Raise NotImplementedError if the profile needs subprocess verifier."""
-    focus_lower = profile.verifier_focus.lower()
-    for marker in _VERIFIER_SUBPROCESS_MARKERS:
-        if marker in focus_lower:
-            msg = (
-                f"Profile {profile.profile!r} declares verifier_focus that "
-                f"requires {marker!r} (subprocess execution). The current "
-                f"verifier route is hard-fixed to {list(_VERIFIER_TOOLS)} "
-                "to enforce H1 read-only-ness structurally, so it cannot "
-                "complete this profile's verifier contract. Wire a "
-                "dedicated read-only test runner before routing "
-                "DispatchRole.VERIFIER for this profile."
-            )
-            raise NotImplementedError(msg)
-
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -155,14 +125,15 @@ def decide_route(
             routing seam fails fast on unknown inputs (e.g. a raw
             string from config/JSON) rather than silently falling
             through to the verifier branch with the wrong tools.
-        NotImplementedError: For DispatchRole.VERIFIER when the
-            profile's verifier_focus requires subprocess invocation
-            (e.g. code profile's "Run the project's test command").
-            The current verifier-tool envelope is hard-fixed read-only
-            (Read/Glob/Grep) for H1 contract enforcement and cannot
-            satisfy such profiles — the caller must wire a dedicated
-            read-only test runner before using VERIFIER routing for
-            them.
+        NotImplementedError: For DispatchRole.VERIFIER. Routing
+            verifier dispatches requires a structured capability flag
+            on ExecutionProfile (read-only-discovery vs subprocess-
+            test-runner) that does not yet exist. Earlier rounds tried
+            substring-matching `verifier_focus` text — that was
+            rejected as fragile. The seam intentionally refuses to
+            guess; add a `verifier_capability` field to
+            ExecutionProfile (#881 follow-up) or plumb a custom
+            verifier dispatcher before using VERIFIER routing.
     """
     if not isinstance(role, DispatchRole):
         msg = (
@@ -196,30 +167,32 @@ def decide_route(
         )
 
     if role is DispatchRole.VERIFIER:
-        # Profiles whose verifier_focus needs subprocess execution
-        # cannot be satisfied by the read-only (Read/Glob/Grep) envelope
-        # this router enforces. Surface that explicitly instead of
-        # silently returning a route the verifier cannot complete (bot
-        # finding on #889 r4).
-        _check_verifier_supported(profile)
-        executor_tier = _executor_tier(profile, fabrication_retry=fabrication_retry)
-        verifier_tier = _bump_tier(executor_tier)
-        return RouteDecision(
-            tier=verifier_tier,
-            # Hard-fixed read-only set. NOT derived from profile.
-            # Granting Bash here would let a verifier mutate the
-            # workspace via shell commands — the router cannot enforce
-            # read-only-ness on Bash invocations, so it must not
-            # authorize Bash at this seam. Subprocess-based verifier
-            # workflows route through a separate read-only test runner.
-            tools=_VERIFIER_TOOLS,
-            rationale=(
-                f"Verifier runs one tier above the executor on "
-                f"{profile.profile!r} profile; toolset hard-fixed to "
-                f"{list(_VERIFIER_TOOLS)} so the H1 read-only contract "
-                "is enforced structurally, not by prompt obedience."
-            ),
+        # ExecutionProfile does not yet expose a structured capability
+        # flag describing what verifier envelope each profile actually
+        # needs (read-only discovery vs subprocess test runner). The
+        # earlier rounds tried two approximations:
+        #   r3 — silently return (Read, Glob, Grep) for every profile.
+        #        Wrong for code profile whose verifier_focus needs
+        #        `pytest`.
+        #   r4 — substring-match `verifier_focus` for subprocess markers.
+        #        Fragile: prose changes break runtime behavior.
+        # Until ExecutionProfile carries a structured `verifier_capability`
+        # field, the honest answer at this seam is "I don't know what
+        # this profile needs". Fail fast so the caller (#891 wiring
+        # follow-ups) cannot accidentally route a verifier through an
+        # envelope that may not match the profile's contract
+        # (bot finding on #889 r5).
+        msg = (
+            f"DispatchRole.VERIFIER routing for profile "
+            f"{profile.profile!r} is not implemented: ExecutionProfile "
+            "does not yet expose a structured capability flag "
+            "(read-only-discovery vs subprocess-test-runner), and the "
+            "router will not infer it from free-form verifier_focus "
+            "text. Add a `verifier_capability` field to ExecutionProfile "
+            "(follow-up to #881) before wiring the verifier seam, or "
+            "plumb a custom verifier dispatcher for this profile."
         )
+        raise NotImplementedError(msg)
 
     # Exhaustive — every DispatchRole member handled above. Reached only
     # if a new role is added without updating decide_route.
