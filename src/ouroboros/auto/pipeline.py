@@ -260,7 +260,12 @@ class AutoPipeline:
         # so test doubles that omit ``answerer`` are skipped.
         _answerer = getattr(self.interview_driver, "answerer", None)
         if _answerer is not None:
-            _apply_active_profile(state, _answerer)
+            try:
+                _apply_active_profile(state, _answerer)
+            except ValueError as exc:
+                state.mark_blocked(str(exc), tool_name="domain_profile_registry")
+                self._save(state)
+                return self._result(state, ledger, blocker=state.last_error)
         # Validate the persisted Seed artifact BEFORE any other path can
         # trigger a state-validating save. ``AutoStore.save`` re-validates the
         # full state, so a malformed ``seed_artifact`` would otherwise raise a
