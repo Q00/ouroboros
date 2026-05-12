@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
@@ -372,3 +373,97 @@ class TestBackgroundJobPath:
         assert result.value.meta["status"] == "delegated_to_plugin"
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plugin_dispatch_lease_uses_pipeline_timeout(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=MagicMock(),
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI", "pipeline_timeout_seconds": 900})
+
+        assert result.is_ok
+        auto_session_id = result.value.meta["auto_session_id"]
+        lease = json.loads(
+            store.path_for(auto_session_id)
+            .with_suffix(".start_auto_lease.json")
+            .read_text(encoding="utf-8")
+        )
+        lease_window = datetime.fromisoformat(lease["expires_at"]) - datetime.fromisoformat(
+            lease["updated_at"]
+        )
+        assert lease["mode"] == "plugin_dispatched"
+        assert lease_window >= timedelta(seconds=890)
+
+
+class TestAutoHandlerLeaseRelease:
+    @pytest.mark.asyncio
+    async def test_nonterminal_auto_result_releases_start_auto_lease(self, tmp_path) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").write_text(
+            json.dumps(
+                {
+                    "token": "lease_active",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                return AutoPipelineResult(
+                    status="running",
+                    auto_session_id=state.auto_session_id,
+                    phase="interview",
+                    pending_question="Which runtime?",
+                )
+
+        h = StubAutoHandler(store=store)
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert (
+            not store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").exists()
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_auto_result_releases_start_auto_lease(self, tmp_path) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").write_text(
+            json.dumps(
+                {
+                    "token": "lease_active",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                raise RuntimeError("child failed")
+
+        h = StubAutoHandler(store=store)
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert (
+            not store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").exists()
+        )

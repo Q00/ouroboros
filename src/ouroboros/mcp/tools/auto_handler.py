@@ -69,7 +69,6 @@ from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.persistence.event_store import EventStore
 
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
-_START_AUTO_PLUGIN_LEASE_SECONDS = 300.0
 
 
 @dataclass(slots=True)
@@ -200,14 +199,17 @@ class AutoHandler:
         )
 
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
+        auto_session_id = _auto_session_id_from_arguments(arguments)
         try:
             result = await self._run(arguments)
         except Exception as exc:
+            if auto_session_id is not None:
+                _release_start_lease(self.store or AutoStore(), auto_session_id)
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
         store = self.store or AutoStore()
-        if result.auto_session_id and result.status in {"complete", "blocked", "failed"}:
+        if result.auto_session_id:
             _release_start_lease(store, result.auto_session_id)
         meta = _result_meta(result)
         text = _format_result(result)
@@ -583,10 +585,7 @@ class StartAutoHandler:
                     auto_session_id,
                     token=lease_token,
                     mode="plugin_dispatched",
-                    ttl_seconds=min(
-                        _START_AUTO_PLUGIN_LEASE_SECONDS,
-                        max(1.0, state.pipeline_timeout_seconds),
-                    ),
+                    ttl_seconds=max(1.0, state.pipeline_timeout_seconds),
                 )
             except Exception:
                 _release_start_lease(self._store, auto_session_id, token=lease_token)
@@ -814,6 +813,13 @@ def _build_auto_subagent(
             "arguments": arguments,
         },
     )
+
+
+def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
+    resume = arguments.get("resume")
+    if isinstance(resume, str) and resume.strip():
+        return resume.strip()
+    return None
 
 
 def _start_lease_path(store: AutoStore, auto_session_id: str) -> Path:
