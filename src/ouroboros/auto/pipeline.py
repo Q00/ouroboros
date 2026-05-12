@@ -1752,6 +1752,7 @@ class AutoPipeline:
         """
         cache_suffix = " [cached]" if from_cache else ""
         if passed:
+            state.last_recovery_plan = None
             state.transition(
                 AutoPhase.COMPLETE,
                 f"evaluator passed: {verdict} (score {score:.2f}){cache_suffix}"

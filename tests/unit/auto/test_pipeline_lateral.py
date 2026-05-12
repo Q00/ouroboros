@@ -274,6 +274,17 @@ async def test_pipeline_qa_pass_does_not_enter_unstuck_lateral(tmp_path) -> None
     """QA pass path must skip UNSTUCK_LATERAL entirely (Phase 2.1 behaviour
     preserved)."""
     state = _state_at_run_phase(tmp_path)
+    state.last_recovery_plan = {
+        "action": "manual_intervention",
+        "safe_to_redispatch": False,
+        "reason": "stale QA failure from an earlier round",
+        "qa_score": 0.2,
+        "qa_verdict": "fail",
+        "differences": ["old failure"],
+        "suggestions": ["old suggestion"],
+        "persona": None,
+        "instruction": "old recovery instruction",
+    }
     lateral_calls = 0
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
@@ -299,6 +310,7 @@ async def test_pipeline_qa_pass_does_not_enter_unstuck_lateral(tmp_path) -> None
     assert result.status == "complete"
     assert lateral_calls == 0
     assert state.last_lateral_persona is None
+    assert state.last_recovery_plan is None
 
 
 @pytest.mark.asyncio

@@ -66,6 +66,22 @@ def test_manual_plan_is_not_auto_dispatchable() -> None:
             "qa_score": 0.1,
             "qa_verdict": "fail",
         },
+        {
+            "action": "manual_intervention",
+            "safe_to_redispatch": False,
+            "reason": "x",
+            "qa_score": 0.1,
+            "qa_verdict": "fail",
+            "differences": "oops",
+        },
+        {
+            "action": "manual_intervention",
+            "safe_to_redispatch": False,
+            "reason": "x",
+            "qa_score": 0.1,
+            "qa_verdict": "fail",
+            "suggestions": ["ok", 123],
+        },
     ],
 )
 def test_invalid_plan_payloads_raise(payload) -> None:

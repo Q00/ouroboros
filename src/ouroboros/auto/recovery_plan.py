@@ -99,17 +99,31 @@ class AutoRecoveryPlan:
                 f"recovery plan action must be one of {[item.value for item in RecoveryPlanAction]}"
             )
             raise ValueError(msg) from exc
+        differences = _string_tuple_field(data, "differences")
+        suggestions = _string_tuple_field(data, "suggestions")
         return cls(
             action=action,
             safe_to_redispatch=data.get("safe_to_redispatch"),
             reason=data.get("reason"),
             qa_score=data.get("qa_score"),
             qa_verdict=data.get("qa_verdict"),
-            differences=tuple(data.get("differences", ())),
-            suggestions=tuple(data.get("suggestions", ())),
+            differences=differences,
+            suggestions=suggestions,
             persona=data.get("persona"),
             instruction=data.get("instruction", ""),
         )
+
+
+def _string_tuple_field(data: dict[str, Any], field_name: str) -> tuple[str, ...]:
+    """Return a strict tuple-of-strings field from persisted JSON."""
+    raw = data.get(field_name, ())
+    if not isinstance(raw, list | tuple):
+        msg = f"recovery plan {field_name} must be a list of strings"
+        raise ValueError(msg)
+    if any(not isinstance(item, str) for item in raw):
+        msg = f"recovery plan {field_name} must be a list of strings"
+        raise ValueError(msg)
+    return tuple(raw)
 
 
 def build_manual_recovery_plan(
