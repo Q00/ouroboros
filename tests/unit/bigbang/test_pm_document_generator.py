@@ -6,7 +6,7 @@ generation on failure.
 """
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -521,8 +521,26 @@ class TestPMDocumentGeneratorMessages:
         config = call_args[0][1]
 
         assert config.model == "test-model"
+        assert config.model_is_explicit is True
         assert config.temperature == 0.3
         assert config.max_tokens == 8192
+
+    @pytest.mark.asyncio
+    async def test_default_model_path_keeps_document_model_implicit(self):
+        """Implicit document model should preserve downstream profile-based overrides."""
+        adapter = _make_adapter()
+        seed = _make_seed()
+
+        with patch(
+            "ouroboros.bigbang.pm_document.get_clarification_model",
+            return_value="default",
+        ):
+            generator = PMDocumentGenerator(llm_adapter=adapter)
+            await generator.generate(seed)
+
+        config = adapter.complete.call_args[0][1]
+        assert config.model == "default"
+        assert config.model_is_explicit is False
 
     @pytest.mark.asyncio
     async def test_user_message_includes_all_seed_sections(self):

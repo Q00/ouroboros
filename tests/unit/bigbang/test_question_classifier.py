@@ -5,7 +5,7 @@ and QuestionClassifier pass-through, reframe, and defer paths.
 """
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -290,6 +290,72 @@ class TestQuestionClassifierPassthrough:
         assert result.is_ok
         # The original question must be preserved exactly
         assert result.value.question_for_pm == planning_q
+
+
+class TestQuestionClassifierModelRouting:
+    """Regression coverage for implicit vs explicit classifier model routing."""
+
+    @pytest.mark.asyncio
+    async def test_default_model_path_keeps_model_implicit_for_role_profiles(self) -> None:
+        """Implicit default classifier model should not block question_classification profiles."""
+        adapter = MagicMock()
+        question = "What problem does this solve for users?"
+        adapter.complete = AsyncMock(
+            return_value=Result.ok(
+                _mock_completion(
+                    json.dumps(
+                        {
+                            "category": "planning",
+                            "reframed_question": question,
+                            "reasoning": "PM-facing planning question",
+                            "defer_to_dev": False,
+                        }
+                    )
+                )
+            )
+        )
+
+        with patch(
+            "ouroboros.bigbang.question_classifier.get_clarification_model",
+            return_value="default",
+        ):
+            classifier = QuestionClassifier(llm_adapter=adapter)
+            result = await classifier.classify(question)
+
+        assert result.is_ok
+        config = adapter.complete.call_args.args[1]
+        assert config.role == "question_classification"
+        assert config.model == "default"
+        assert config.model_is_explicit is False
+
+    @pytest.mark.asyncio
+    async def test_explicit_model_path_marks_model_as_explicit(self) -> None:
+        """Explicit classifier models should preserve request-model override behavior."""
+        adapter = MagicMock()
+        question = "What success metrics matter most?"
+        adapter.complete = AsyncMock(
+            return_value=Result.ok(
+                _mock_completion(
+                    json.dumps(
+                        {
+                            "category": "planning",
+                            "reframed_question": question,
+                            "reasoning": "PM-facing planning question",
+                            "defer_to_dev": False,
+                        }
+                    )
+                )
+            )
+        )
+
+        classifier = QuestionClassifier(llm_adapter=adapter, model="custom-model")
+        result = await classifier.classify(question)
+
+        assert result.is_ok
+        config = adapter.complete.call_args.args[1]
+        assert config.role == "question_classification"
+        assert config.model == "custom-model"
+        assert config.model_is_explicit is True
 
 
 # ──────────────────────────────────────────────────────────────

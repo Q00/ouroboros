@@ -202,6 +202,7 @@ class PMInterviewEngine:
 
         classifier = QuestionClassifier(
             llm_adapter=llm_adapter,
+            implicit_model=model,
         )
 
         return cls(

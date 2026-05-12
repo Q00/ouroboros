@@ -106,6 +106,24 @@ class TestPMInterviewEngineComposition:
         assert engine.model == "test-model"
         assert engine.inner.state_dir == tmp_path
 
+    def test_create_factory_keeps_classifier_model_implicit(self, tmp_path: Path) -> None:
+        """Explicit interview model must not pin classifier away from role profiles."""
+        adapter = _make_adapter()
+        with patch(
+            "ouroboros.bigbang.pm_interview.get_clarification_model",
+            return_value="default",
+        ):
+            engine = PMInterviewEngine.create(
+                llm_adapter=adapter,
+                model="test-model",
+                state_dir=tmp_path,
+            )
+
+        assert engine.inner.model == "test-model"
+        assert engine.model == "test-model"
+        assert engine.classifier.model == "test-model"
+        assert engine.classifier.model_is_explicit is False
+
     def test_initial_state_is_clean(self, tmp_path: Path) -> None:
         """Newly created engine has empty deferred items and classifications."""
         engine = _make_engine(tmp_path=tmp_path)

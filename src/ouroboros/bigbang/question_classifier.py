@@ -195,13 +195,14 @@ class QuestionClassifier:
 
     Attributes:
         llm_adapter: LLM adapter for classification calls.
-        model: Model to use. Defaults to the configured clarification model.
+        model: Explicit model override for classification calls.
         temperature: Low temperature for consistent classification.
         codebase_context: Shared codebase exploration context for informed classification.
     """
 
     llm_adapter: LLMAdapter
     model: str | None = None
+    implicit_model: str | None = None
     model_is_explicit: bool = field(default=False, init=False)
     temperature: float = _CLASSIFIER_TEMPERATURE
     codebase_context: str = ""
@@ -210,7 +211,7 @@ class QuestionClassifier:
         """Resolve implicit default model while preserving explicit caller pins."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_clarification_model()
+            self.model = self.implicit_model or get_clarification_model()
 
     async def classify(
         self,
