@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 import difflib
 import inspect
 import json
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ouroboros.auto.adapters import (
     HandlerEvaluator,
@@ -39,6 +41,7 @@ from ouroboros.auto.state import (
     AutoStore,
 )
 from ouroboros.config import get_opencode_mode
+from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
@@ -64,6 +67,9 @@ from ouroboros.mcp.types import (
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.persistence.event_store import EventStore
+
+_START_AUTO_PENDING_LEASE_SECONDS = 60.0
+_START_AUTO_PLUGIN_LEASE_SECONDS = 300.0
 
 
 @dataclass(slots=True)
@@ -200,6 +206,9 @@ class AutoHandler:
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
+        store = self.store or AutoStore()
+        if result.auto_session_id and result.status in {"complete", "blocked", "failed"}:
+            _release_start_lease(store, result.auto_session_id)
         meta = _result_meta(result)
         text = _format_result(result)
         if result.run_subagent is not None:
@@ -529,7 +538,7 @@ class StartAutoHandler:
         if has_resume:
             auto_session_id = resume.strip()
             try:
-                self._store.load(auto_session_id)
+                state = self._store.load(auto_session_id)
             except ValueError as exc:
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
             runner_arguments["resume"] = auto_session_id
@@ -550,14 +559,38 @@ class StartAutoHandler:
         if already_running is not None:
             return Result.err(already_running)
 
-        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+        plugin_dispatch = should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        lease_token, lease_error = _reserve_start_lease(
+            self._store,
+            auto_session_id,
+            mode="plugin_pending" if plugin_dispatch else "job_pending",
+            ttl_seconds=_START_AUTO_PENDING_LEASE_SECONDS,
+        )
+        if lease_error is not None:
+            return Result.err(lease_error)
+
+        if plugin_dispatch:
             payload = _build_auto_subagent(runner_arguments, auto_session_id=auto_session_id)
-            await self._event_store.initialize()
-            await emit_subagent_dispatched_event(
-                self._event_store,
-                session_id=auto_session_id,
-                payload=payload,
-            )
+            try:
+                await self._event_store.initialize()
+                await emit_subagent_dispatched_event(
+                    self._event_store,
+                    session_id=auto_session_id,
+                    payload=payload,
+                )
+                _update_start_lease(
+                    self._store,
+                    auto_session_id,
+                    token=lease_token,
+                    mode="plugin_dispatched",
+                    ttl_seconds=min(
+                        _START_AUTO_PLUGIN_LEASE_SECONDS,
+                        max(1.0, state.pipeline_timeout_seconds),
+                    ),
+                )
+            except Exception:
+                _release_start_lease(self._store, auto_session_id, token=lease_token)
+                raise
             return build_subagent_result(
                 payload,
                 response_shape={
@@ -588,9 +621,18 @@ class StartAutoHandler:
                 runner=runner,
                 links=JobLinks(session_id=auto_session_id),
             )
+            _update_start_lease(
+                self._store,
+                auto_session_id,
+                token=lease_token,
+                mode="job",
+                job_id=snapshot.job_id,
+                ttl_seconds=None,
+            )
         except Exception as exc:
             if inspect.iscoroutine(runner):
                 runner.close()
+            _release_start_lease(self._store, auto_session_id, token=lease_token)
             return Result.err(
                 MCPToolError(
                     "Failed to enqueue background auto session "
@@ -651,6 +693,9 @@ class StartAutoHandler:
 
     async def _active_session_error(self, auto_session_id: str) -> MCPToolError | None:
         """Return an error when another start_auto already owns this session."""
+        lease_error = await self._active_start_lease_error(auto_session_id)
+        if lease_error is not None:
+            return lease_error
         active_job = await self._find_active_job(auto_session_id)
         if active_job is not None:
             return MCPToolError(
@@ -666,19 +711,6 @@ class StartAutoHandler:
                     "status": active_job.status.value,
                 },
             )
-        if await self._has_active_plugin_dispatch(auto_session_id):
-            return MCPToolError(
-                "Auto session already has an active plugin dispatch: "
-                f"auto_session_id={auto_session_id}. Wait for the OpenCode task "
-                "to finish before starting another resume.",
-                tool_name="ouroboros_start_auto",
-                is_retriable=True,
-                details={
-                    "auto_session_id": auto_session_id,
-                    "session_id": auto_session_id,
-                    "dispatch_mode": "plugin",
-                },
-            )
         return None
 
     async def _find_active_job(self, auto_session_id: str):
@@ -687,20 +719,73 @@ class StartAutoHandler:
             return None
         return await finder(auto_session_id, job_type="auto")
 
-    async def _has_active_plugin_dispatch(self, auto_session_id: str) -> bool:
-        try:
-            state = self._store.load(auto_session_id)
-        except ValueError:
-            return False
-        if state.phase in TERMINAL_PHASES:
-            return False
-        await self._event_store.initialize()
-        events = await self._event_store.query_events(
-            aggregate_id=auto_session_id,
-            event_type="subagent.dispatched",
-            limit=10,
+    async def _active_start_lease_error(self, auto_session_id: str) -> MCPToolError | None:
+        lease = _read_start_lease(self._store, auto_session_id)
+        if lease is None:
+            return None
+        if _lease_is_expired(lease):
+            _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+            return None
+        mode = str(lease.get("mode") or "unknown")
+        job_id = lease.get("job_id")
+        if isinstance(job_id, str) and job_id:
+            try:
+                snapshot = await self._job_manager.get_snapshot(job_id)
+            except ValueError:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None
+            if snapshot.is_terminal:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None
+            return MCPToolError(
+                "Auto session already has an active background job: "
+                f"auto_session_id={auto_session_id}, job_id={job_id}. "
+                "Poll that job or cancel it before starting another resume.",
+                tool_name="ouroboros_start_auto",
+                is_retriable=True,
+                details={
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "job_id": job_id,
+                    "status": snapshot.status.value,
+                    "lease_mode": mode,
+                },
+            )
+        if mode.startswith("plugin"):
+            try:
+                state = self._store.load(auto_session_id)
+            except ValueError:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None
+            if state.phase in TERMINAL_PHASES:
+                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
+                return None
+            return MCPToolError(
+                "Auto session already has an active plugin dispatch: "
+                f"auto_session_id={auto_session_id}. Wait for the OpenCode task "
+                "to finish or retry after the dispatch lease expires.",
+                tool_name="ouroboros_start_auto",
+                is_retriable=True,
+                details={
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "dispatch_mode": "plugin",
+                    "lease_expires_at": lease.get("expires_at"),
+                    "lease_mode": mode,
+                },
+            )
+        return MCPToolError(
+            "Auto session already has a pending start lease: "
+            f"auto_session_id={auto_session_id}. Retry after the lease expires.",
+            tool_name="ouroboros_start_auto",
+            is_retriable=True,
+            details={
+                "auto_session_id": auto_session_id,
+                "session_id": auto_session_id,
+                "lease_expires_at": lease.get("expires_at"),
+                "lease_mode": mode,
+            },
         )
-        return any(event.data.get("tool_name") == "ouroboros_start_auto" for event in events)
 
 
 def _build_auto_subagent(
@@ -729,6 +814,132 @@ def _build_auto_subagent(
             "arguments": arguments,
         },
     )
+
+
+def _start_lease_path(store: AutoStore, auto_session_id: str) -> Path:
+    return store.path_for(auto_session_id).with_suffix(".start_auto_lease.json")
+
+
+def _read_start_lease(store: AutoStore, auto_session_id: str) -> dict[str, Any] | None:
+    path = _start_lease_path(store, auto_session_id)
+    with file_lock(path):
+        return _read_start_lease_locked(path)
+
+
+def _read_start_lease_locked(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _reserve_start_lease(
+    store: AutoStore,
+    auto_session_id: str,
+    *,
+    mode: str,
+    ttl_seconds: float,
+) -> tuple[str, MCPToolError | None]:
+    path = _start_lease_path(store, auto_session_id)
+    token = uuid4().hex
+    with file_lock(path):
+        existing = _read_start_lease_locked(path)
+        if existing is not None and not _lease_is_expired(existing):
+            return "", _lease_conflict_error(auto_session_id, existing)
+        _write_start_lease_locked(
+            path,
+            {
+                "token": token,
+                "mode": mode,
+                "created_at": _utc_iso(),
+                "expires_at": _utc_iso(ttl_seconds=ttl_seconds),
+            },
+        )
+    return token, None
+
+
+def _update_start_lease(
+    store: AutoStore,
+    auto_session_id: str,
+    *,
+    token: str,
+    mode: str,
+    ttl_seconds: float | None,
+    job_id: str | None = None,
+) -> None:
+    path = _start_lease_path(store, auto_session_id)
+    with file_lock(path):
+        lease = _read_start_lease_locked(path)
+        if lease is None or lease.get("token") != token:
+            return
+        lease["mode"] = mode
+        lease["updated_at"] = _utc_iso()
+        if job_id is not None:
+            lease["job_id"] = job_id
+        if ttl_seconds is None:
+            lease.pop("expires_at", None)
+        else:
+            lease["expires_at"] = _utc_iso(ttl_seconds=ttl_seconds)
+        _write_start_lease_locked(path, lease)
+
+
+def _release_start_lease(
+    store: AutoStore,
+    auto_session_id: str,
+    *,
+    token: object | None = None,
+) -> None:
+    path = _start_lease_path(store, auto_session_id)
+    with file_lock(path):
+        if token is not None:
+            lease = _read_start_lease_locked(path)
+            if lease is not None and lease.get("token") != token:
+                return
+        path.unlink(missing_ok=True)
+
+
+def _write_start_lease_locked(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def _lease_is_expired(lease: dict[str, Any]) -> bool:
+    expires_at = lease.get("expires_at")
+    if not isinstance(expires_at, str) or not expires_at:
+        return False
+    try:
+        expires = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    return expires <= datetime.now(UTC)
+
+
+def _lease_conflict_error(auto_session_id: str, lease: dict[str, Any]) -> MCPToolError:
+    mode = str(lease.get("mode") or "unknown")
+    return MCPToolError(
+        "Auto session already has a pending start lease: "
+        f"auto_session_id={auto_session_id}. Retry after the lease expires.",
+        tool_name="ouroboros_start_auto",
+        is_retriable=True,
+        details={
+            "auto_session_id": auto_session_id,
+            "session_id": auto_session_id,
+            "lease_mode": mode,
+            "lease_expires_at": lease.get("expires_at"),
+        },
+    )
+
+
+def _utc_iso(*, ttl_seconds: float | None = None) -> str:
+    value = datetime.now(UTC)
+    if ttl_seconds is not None:
+        value += timedelta(seconds=ttl_seconds)
+    return value.isoformat()
 
 
 def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:

@@ -9,6 +9,8 @@ under a :class:`JobManager`-backed background task.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 import inspect
 import json
 from unittest.mock import AsyncMock, MagicMock
@@ -17,7 +19,6 @@ import pytest
 
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.core.types import Result
-from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
@@ -251,19 +252,60 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_active_plugin_dispatch_for_session_errors_before_redispatch(
+    async def test_pending_lease_blocks_concurrent_resume_before_job_row_exists(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
         store = AutoStore(tmp_path)
         state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
         store.save(state)
-        await event_store.append(
-            BaseEvent(
-                type="subagent.dispatched",
-                aggregate_type="subagent",
-                aggregate_id=state.auto_session_id,
-                data={"tool_name": "ouroboros_start_auto"},
-            )
+        started = asyncio.Event()
+        release = asyncio.Event()
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_lease"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            started.set()
+            await release.wait()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        first = asyncio.create_task(h.handle({"resume": state.auto_session_id}))
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        second = await h.handle({"resume": state.auto_session_id})
+        release.set()
+        first_result = await first
+
+        assert second.is_err
+        assert "pending start lease" in second.error.message
+        assert second.error.details["auto_session_id"] == state.auto_session_id
+        assert first_result.is_ok
+        assert first_result.value.meta["job_id"] == "job_auto_lease"
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_active_plugin_lease_for_session_errors_before_redispatch(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").write_text(
+            json.dumps(
+                {
+                    "token": "lease_active",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
         )
         job_manager = MagicMock()
         job_manager.find_active_job_by_session = AsyncMock(return_value=None)
@@ -282,5 +324,42 @@ class TestBackgroundJobPath:
         assert result.is_err
         assert "active plugin dispatch" in result.error.message
         assert result.error.details["auto_session_id"] == state.auto_session_id
+        job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_expired_plugin_lease_allows_redispatch(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json").write_text(
+            json.dumps(
+                {
+                    "token": "lease_stale",
+                    "mode": "plugin_dispatched",
+                    "created_at": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+                    "expires_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        job_manager.start_job = AsyncMock()
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "delegated_to_plugin"
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
