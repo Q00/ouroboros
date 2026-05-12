@@ -10,28 +10,36 @@ IDs — the integration PR (PR 9) maps `ModelTier.HAIKU / SONNET / OPUS`
 onto the adapter's current model knobs. Decoupling lets profile
 authors think in cost/quality bands rather than vendor SKU drift.
 
-Routing rules at this PR:
-    decomposer  → HAIKU, no tools
-    executor    → SONNET (default) or OPUS for FABRICATION_SUSPECTED
-                  retries (the H7 ESCALATE_MODEL hook).
-                  Tools come from profile.suggested_tools.
-    verifier    → one tier above the executor.
-                  Tools are hard-fixed to Read / Glob / Grep — these are
-                  the only operations the H1 read-only contract can
-                  guarantee at the routing layer. The router CANNOT
-                  authorize Bash on the verifier seam: Bash can mutate
-                  the workspace and the router can't inspect command
-                  text. Code-style profiles whose verifier_focus needs
-                  to execute the project's test command must route
-                  that through a dedicated read-only test runner (a
-                  separate follow-up PR), not via this generic
-                  verifier-tool envelope.
+Implementation status at this PR:
 
-This module is wiring-only. parallel_executor still uses its current
-hardcoded adapter call until PR 9. The docstring previously claimed
-AC-aware routing — that is intentionally deferred; `decide_route()`
-takes role + profile + retry hint, no AC, until a profile actually
-demands per-AC routing logic (bot non-blocking suggestion on r2).
+  DECOMPOSER (implemented)
+    Tier HAIKU. Tools = (). Decomposition is structured-output
+    planning; HAIKU keeps the per-AC fixed cost low and tools are
+    intentionally empty.
+
+  EXECUTOR (implemented)
+    Tier SONNET by default. Escalates to OPUS when
+    `fabrication_retry=True` per the H7 ESCALATE_MODEL hook.
+    Tools come from `profile.suggested_tools` verbatim.
+
+  VERIFIER (intentionally NOT implemented — raises NotImplementedError)
+    Routing verifier dispatches requires a structured capability flag
+    on ExecutionProfile (read-only-discovery vs subprocess-test-runner)
+    that does not yet exist on the #881 schema. Earlier rounds of #889
+    review tried two approximations and both were rejected:
+      - hard-fixing the verifier tools to (Read, Glob, Grep) silently
+        breaks the code profile, whose verifier_focus needs subprocess
+        execution.
+      - substring-matching `verifier_focus` prose for subprocess markers
+        is fragile (innocuous wording changes flip runtime behavior).
+    The seam therefore refuses to guess and raises NotImplementedError
+    with a clear pointer: add `verifier_capability` to ExecutionProfile
+    (a #881 follow-up) or plumb a custom verifier dispatcher before
+    using `DispatchRole.VERIFIER`.
+
+This module is wiring-only. `parallel_executor` still uses its current
+hardcoded adapter call. `decide_route()` takes role + profile + retry
+hint — no AC text — until a profile demands per-AC routing.
 """
 
 from __future__ import annotations
