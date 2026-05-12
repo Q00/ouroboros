@@ -252,6 +252,24 @@ def test_lazy_registry_respects_replaced_profile_storage_temporarily() -> None:
     assert calls == ["loaded"]
 
 
+def test_lazy_registry_retries_after_loader_failure() -> None:
+    calls: list[str] = []
+
+    def _loader(registry: DomainProfileRegistry) -> None:
+        calls.append("called")
+        if len(calls) == 1:
+            raise RuntimeError("transient profile import failure")
+        registry.register(_make_profile(name="built-in"))
+
+    registry = DomainProfileRegistry(loader=_loader)
+
+    with pytest.raises(RuntimeError, match="transient"):
+        registry.all()
+
+    assert [profile.name for profile in registry.all()] == ["built-in"]
+    assert calls == ["called", "called"]
+
+
 def test_registry_rejects_duplicate_name() -> None:
     registry = DomainProfileRegistry()
     registry.register(_make_profile(name="coding"))

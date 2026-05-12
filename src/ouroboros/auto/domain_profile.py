@@ -193,10 +193,11 @@ class DomainProfileRegistry:
         self._profile_storage = self._profiles
         self._loader = loader
         self._loaded = loader is None
+        self._loading = False
 
     def _ensure_loaded(self) -> None:
         """Load built-in profiles on first read without coupling module imports."""
-        if self._loaded:
+        if self._loaded or self._loading:
             return
         if self._profiles is not self._profile_storage:
             # Tests and callers may intentionally replace the private backing
@@ -204,9 +205,16 @@ class DomainProfileRegistry:
             # as a temporary opt-out; do not mark the loader complete because
             # monkeypatch-style replacement may later restore the original list.
             return
-        self._loaded = True
-        if self._loader is not None:
+        if self._loader is None:
+            self._loaded = True
+            return
+
+        self._loading = True
+        try:
             self._loader(self)
+            self._loaded = True
+        finally:
+            self._loading = False
 
     def register(self, profile: DomainProfile) -> None:
         """Register *profile*.
