@@ -762,17 +762,6 @@ class EvolutionaryLoop:
                 ontology_similarity=0.0,
                 generation=generation_number,
             )
-            if not gen_result.error.details.get("watchdog_directive_idempotency_key"):
-                await self._emit_step_directive(
-                    StepAction.FAILED,
-                    lineage_id=lineage.lineage_id,
-                    generation_number=generation_number,
-                    phase=await self._phase_for_failed_step_directive(
-                        lineage_id=lineage.lineage_id,
-                        generation_number=generation_number,
-                    ),
-                    reason=conv_signal.reason,
-                )
             return Result.ok(
                 StepResult(
                     generation_result=failed_gen,
