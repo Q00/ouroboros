@@ -11,10 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from ouroboros.auto.domain_profile import (
-    DEFAULT_REGISTRY,
-    DomainProfile,
-)
+from ouroboros.auto.domain_profile import DomainProfile
 
 __all__ = ["RESEARCH_PROFILE"]
 
@@ -119,5 +116,3 @@ RESEARCH_PROFILE: DomainProfile = DomainProfile(
     safe_defaults={"min_sources": 3, "default_citation_style": "APA"},
     detector=_research_detector,
 )
-
-DEFAULT_REGISTRY.register(RESEARCH_PROFILE)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+import importlib
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -187,8 +188,42 @@ class DomainProfileRegistry:
         best = registry.detect_best(Path.cwd())
     """
 
-    def __init__(self) -> None:
+    def __init__(self, loader: Callable[[DomainProfileRegistry], None] | None = None) -> None:
         self._profiles: list[DomainProfile] = []
+        self._profile_storage = self._profiles
+        self._loader = loader
+        self._loaded = loader is None
+        self._loading = False
+
+    def _ensure_loaded(self, *, allow_existing_fallback: bool = False) -> None:
+        """Load built-in profiles on first default read.
+
+        Explicitly registered profiles remain usable even if built-in profile
+        imports are unavailable.  Loader failures are not marked as loaded, so
+        later reads can retry after the environment is fixed.
+        """
+        if self._loaded or self._loading:
+            return
+        if self._profiles is not self._profile_storage:
+            # Tests and callers may intentionally replace the private backing
+            # list to isolate the singleton registry.  Treat that replacement
+            # as a temporary opt-out; do not mark the loader complete because
+            # monkeypatch-style replacement may later restore the original list.
+            return
+        if self._loader is None:
+            self._loaded = True
+            return
+
+        self._loading = True
+        try:
+            self._loader(self)
+            self._loaded = True
+        except Exception:
+            if allow_existing_fallback and self._profiles:
+                return
+            raise
+        finally:
+            self._loading = False
 
     def register(self, profile: DomainProfile) -> None:
         """Register *profile*.
@@ -207,10 +242,16 @@ class DomainProfileRegistry:
         for profile in self._profiles:
             if profile.name == name:
                 return profile
+
+        self._ensure_loaded()
+        for profile in self._profiles:
+            if profile.name == name:
+                return profile
         return None
 
     def all(self) -> tuple[DomainProfile, ...]:
         """Return all registered profiles in registration order."""
+        self._ensure_loaded(allow_existing_fallback=True)
         return tuple(self._profiles)
 
     def detect_best(self, cwd: Path) -> DomainProfile | None:
@@ -220,6 +261,12 @@ class DomainProfileRegistry:
         by registration order (earlier registration wins).  Returns ``None``
         when no profiles are registered or all detectors return 0.0.
         """
+        best_profile, _best_confidence = self._best_profile(cwd)
+        self._ensure_loaded(allow_existing_fallback=best_profile is not None)
+        best_profile, _best_confidence = self._best_profile(cwd)
+        return best_profile
+
+    def _best_profile(self, cwd: Path) -> tuple[DomainProfile | None, float]:
         best_profile: DomainProfile | None = None
         best_confidence: float = 0.0
         for profile in self._profiles:
@@ -227,7 +274,7 @@ class DomainProfileRegistry:
             if confidence > best_confidence:
                 best_confidence = confidence
                 best_profile = profile
-        return best_profile
+        return best_profile, best_confidence
 
     def union_predicates(
         self, cwd: Path, threshold: float = 0.5
@@ -246,6 +293,7 @@ class DomainProfileRegistry:
             Minimum detector confidence required for a profile's predicates
             to be included.  Default is ``0.5``.
         """
+        self._ensure_loaded(allow_existing_fallback=bool(self._profiles))
         seen_codes: set[str] = set()
         result: list[VerifiablePredicate] = []
         for profile in self._profiles:
@@ -257,73 +305,6 @@ class DomainProfileRegistry:
         return tuple(result)
 
 
-class _CodingRepoContextExtractor:
-    """Minimal built-in coding profile repo context extractor.
-
-    Full repository fact extraction remains owned by the auto answerer / driver
-    integration.  The profile still needs a concrete extractor so the built-in
-    ``coding`` profile can satisfy the DomainProfile contract at production
-    bootstrap time.
-    """
-
-    def extract(self, cwd: Path) -> dict[str, Any]:  # noqa: ARG002
-        return {}
-
-
-class _CodingIntentClassifier:
-    """Minimal classifier surface for the built-in coding profile."""
-
-    _SUPPORTED = frozenset(
-        {
-            "acceptance_criteria",
-            "actor_io",
-            "failure_modes",
-            "non_goals",
-            "product_behavior",
-            "runtime_context",
-            "verification",
-            "verification_plan",
-        }
-    )
-
-    def classify(self, question: str) -> str | None:  # noqa: ARG002
-        return None
-
-    def supported_intents(self) -> frozenset[str]:
-        return self._SUPPORTED
-
-
-def _coding_detector(cwd: Path) -> float:
-    """Return a conservative confidence that *cwd* is a coding project."""
-    coding_markers = (
-        ".git",
-        "pyproject.toml",
-        "package.json",
-        "Cargo.toml",
-        "go.mod",
-        "pom.xml",
-        "build.gradle",
-        "src",
-        "tests",
-    )
-    return 0.8 if any((cwd / marker).exists() for marker in coding_markers) else 0.0
-
-
-def _build_coding_profile() -> DomainProfile:
-    """Construct the built-in profile used by auto-mode production bootstrap."""
-    from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS
-
-    return DomainProfile(
-        name="coding",
-        repo_context_extractor=_CodingRepoContextExtractor(),
-        verifiable_predicates=(),
-        intent_classifier=_CodingIntentClassifier(),
-        vague_terms=frozenset({"easy", "clean", "simple", "fast", "robust"}),
-        safe_defaults=_SAFE_DEFAULTS,
-        detector=_coding_detector,
-    )
-
-
 def _detector_confidence(profile: DomainProfile, cwd: Path) -> float:
     try:
         return profile.detector(cwd)
@@ -331,6 +312,18 @@ def _detector_confidence(profile: DomainProfile, cwd: Path) -> float:
         return 0.0
 
 
-#: Module-level singleton registry with the built-in ``coding`` profile registered.
-DEFAULT_REGISTRY: DomainProfileRegistry = DomainProfileRegistry()
-DEFAULT_REGISTRY.register(_build_coding_profile())
+def _load_default_profiles(registry: DomainProfileRegistry) -> None:
+    """Register built-in profiles lazily.
+
+    ``domain_profile`` is the lightweight contracts module.  Importing it must
+    not drag in domain-specific adapters such as ``profiles.coding`` and their
+    transitive dependencies.  The default registry still exposes built-ins to
+    callers, but only when the registry is actually queried.
+    """
+    profiles = importlib.import_module("ouroboros.auto.profiles")
+    profiles.register_default_profiles(registry)
+
+
+#: Module-level singleton registry.  Built-in profiles are loaded lazily on
+#: first access so importing this contracts module remains dependency-light.
+DEFAULT_REGISTRY: DomainProfileRegistry = DomainProfileRegistry(loader=_load_default_profiles)

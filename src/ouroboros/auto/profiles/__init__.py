@@ -1,25 +1,36 @@
-"""Built-in DomainProfile registrations (#809 P3).
-
-Importing this package registers all built-in profiles into
-``DEFAULT_REGISTRY``.  Core code must not import individual profile
-modules directly — import from here so registration side-effects fire
-exactly once.
-"""
+"""Built-in DomainProfile implementations."""
 
 from __future__ import annotations
 
-from importlib import import_module
-from importlib.util import find_spec
-from typing import Any
+from typing import TYPE_CHECKING
 
-# coding profile lands in PR-2 (#809 P3, PR 2/6); import conditionally
-# so this package remains importable before that PR merges.  Check for module
-# absence before import so ImportError raised inside an existing coding profile
-# still propagates instead of being mistaken for an optional missing module.
-CODING_PROFILE: Any = None
-if find_spec(f"{__name__}.coding") is not None:
-    CODING_PROFILE = import_module(f"{__name__}.coding").CODING_PROFILE
+if TYPE_CHECKING:
+    from ouroboros.auto.domain_profile import DomainProfileRegistry
 
-from .research import RESEARCH_PROFILE  # noqa: E402,F401
+__all__ = ["CODING_PROFILE", "RESEARCH_PROFILE", "register_default_profiles"]
 
-__all__ = ["CODING_PROFILE", "RESEARCH_PROFILE"]
+
+def __getattr__(name: str):
+    if name == "CODING_PROFILE":
+        from .coding import CODING_PROFILE
+
+        return CODING_PROFILE
+    if name == "RESEARCH_PROFILE":
+        from .research import RESEARCH_PROFILE
+
+        return RESEARCH_PROFILE
+    raise AttributeError(name)
+
+
+def register_default_profiles(registry: DomainProfileRegistry) -> None:
+    """Register built-in profiles into *registry* on demand."""
+    from .coding import CODING_PROFILE
+    from .research import RESEARCH_PROFILE
+
+    for profile in (CODING_PROFILE, RESEARCH_PROFILE):
+        try:
+            registry.register(profile)
+        except ValueError:
+            # Keep repeated lazy-load/importlib scenarios idempotent and let
+            # callers intentionally pre-register a replacement of the same name.
+            pass
