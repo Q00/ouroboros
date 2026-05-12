@@ -226,11 +226,17 @@ class TestVerifiablePredicateIterationPicksFirstMatch:
         ledger = _ledger()
         # "contrast" question — first predicate matches
         answer = answerer.answer("Does the UI contrast meet accessibility standards?", ledger)
-        # The AC ledger entry should use the contrast predicate repair_template
+        # All verification surfaces should use the contrast predicate repair_template.
+        assert "4.5:1" in answer.text
+        verification_entries = [
+            entry for section, entry in answer.ledger_updates if section == "verification_plan"
+        ]
         ac_entries = [
             entry for section, entry in answer.ledger_updates if section == "acceptance_criteria"
         ]
+        assert verification_entries, "Expected a verification_plan ledger entry"
         assert ac_entries, "Expected an acceptance_criteria ledger entry"
+        assert "4.5:1" in verification_entries[0].value
         assert "4.5:1" in ac_entries[0].value
 
     def test_second_predicate_used_when_first_does_not_match(self):

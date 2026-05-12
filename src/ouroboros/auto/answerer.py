@@ -412,17 +412,21 @@ class AutoAnswerer:
         # verification language appears in the Seed instead of the coding
         # default.  When no predicate matches (or no profile is active), the
         # original hardcoded coding-domain text is used verbatim — safety hatch.
+        fallback_ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
+        fallback_value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
         if self.active_profile is not None:
             matched = self.active_profile.find_verifiable_predicate(question)
             if matched is not None:
                 ac_value = matched.repair_template(question)
+                value = ac_value
             else:
-                ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
+                ac_value = fallback_ac_value
+                value = fallback_value
         else:
-            # Safety hatch: original hardcoded coding-domain AC text.
-            ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
+            # Safety hatch: original hardcoded coding-domain text.
+            ac_value = fallback_ac_value
+            value = fallback_value
         # ---------------------------------------------------------------------
-        value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
         updates = [
             (
                 "verification_plan",

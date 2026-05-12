@@ -249,23 +249,10 @@ class AutoPipeline:
             state.complete_product = True
         elif state.complete_product and not self.complete_product:
             self.complete_product = True
-        # Q00/ouroboros#809 P3 PR-4: thread active domain profile into the
-        # answerer.  Resolve name → DomainProfile via DEFAULT_REGISTRY and
-        # inject it so intent classification, vague-term detection, and
-        # verifiable-predicate repair all delegate to the profile when active.
-        # When the name is None, ``active_profile=None`` preserves the
-        # hardcoded coding-domain safety hatch verbatim.  A non-empty name that
-        # cannot be resolved is a bad durable session contract and fails loudly
-        # instead of silently downgrading to coding defaults. Guard with getattr
-        # so test doubles that omit ``answerer`` are skipped.
-        _answerer = getattr(self.interview_driver, "answerer", None)
-        if _answerer is not None:
-            try:
-                _apply_active_profile(state, _answerer)
-            except ValueError as exc:
-                state.mark_blocked(str(exc), tool_name="domain_profile_registry")
-                self._save(state)
-                return self._result(state, ledger, blocker=state.last_error)
+        # Q00/ouroboros#809 P3 PR-4: active domain profile injection is gated
+        # to the interview phases below, where ``interview_driver.answerer`` is
+        # actually used.  Later resume/result paths must not depend on the
+        # mutable process-local profile registry.
         # Validate the persisted Seed artifact BEFORE any other path can
         # trigger a state-validating save. ``AutoStore.save`` re-validates the
         # full state, so a malformed ``seed_artifact`` would otherwise raise a
@@ -349,6 +336,14 @@ class AutoPipeline:
         if self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
+            _answerer = getattr(self.interview_driver, "answerer", None)
+            if _answerer is not None:
+                try:
+                    _apply_active_profile(state, _answerer)
+                except ValueError as exc:
+                    state.mark_blocked(str(exc), tool_name="domain_profile_registry")
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
             # Arm the top-level pipeline deadline (#779) on the first
             # CREATED → INTERVIEW transition so every later phase entry can
             # compare ``time.monotonic()`` against a stable absolute target.

@@ -7,7 +7,7 @@ import pytest
 from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import AutoPipeline, _apply_active_profile
-from ouroboros.auto.state import AutoPipelineState
+from ouroboros.auto.state import AutoPhase, AutoPipelineState
 
 
 def test_apply_active_profile_preserves_safety_hatch_when_none() -> None:
@@ -69,4 +69,23 @@ async def test_pipeline_blocks_cleanly_when_durable_profile_is_missing() -> None
     assert state.last_tool_name == "domain_profile_registry"
     assert state.last_error == "active domain profile is not registered: missing-profile"
     assert result.blocker == state.last_error
+    assert driver.invocations == 0
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_resolve_profile_after_interview_phase() -> None:
+    state = AutoPipelineState(
+        goal="Build a CLI",
+        cwd="/tmp/project",
+        active_domain_profile_name="missing-profile",
+    )
+    state.phase = AutoPhase.COMPLETE
+    driver = _DriverWithAnswerer()
+    pipeline = AutoPipeline(driver, _unused_seed_generator)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.last_tool_name is None
+    assert state.last_error is None
     assert driver.invocations == 0
