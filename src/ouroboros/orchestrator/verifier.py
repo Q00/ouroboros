@@ -44,6 +44,21 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
 DEFAULT_MAX_RETRIES: int = 2
 
+# Canonical failure classes the H7 router knows how to route. Verifier
+# implementations may set VerifierVerdict.failure_class to any of these
+# (or leave it None); any other string is rejected up front so a typo
+# in a verifier impl surfaces at construction time, not when the
+# downstream classifier silently degrades to STALL.
+_VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
+    {
+        "EVIDENCE_MISSING",
+        "FABRICATION_SUSPECTED",
+        "SCOPE_CREEP",
+        "STALL",
+        "BLOCKED",
+    }
+)
+
 
 @dataclass(frozen=True)
 class VerifierVerdict:
@@ -81,6 +96,17 @@ class VerifierVerdict:
                 "VerifierVerdict(passed=False) must include at least one "
                 "reason; the retry loop feeds reasons back to the "
                 "executor and surfaces them on exhaustion."
+            )
+            raise ValueError(msg)
+        if self.failure_class is not None and self.failure_class not in _VALID_FAILURE_CLASSES:
+            # Verifier impls that emit an unknown failure_class would
+            # silently degrade to STALL in the H7 classifier — a typo
+            # would mask a real fabrication or scope-creep signal.
+            # Reject up front so the H1↔H7 contract stays explicit.
+            valid = ", ".join(sorted(_VALID_FAILURE_CLASSES))
+            msg = (
+                f"VerifierVerdict.failure_class={self.failure_class!r} is "
+                f"not a recognized taxonomy value. Valid: {valid}, or None."
             )
             raise ValueError(msg)
 
@@ -203,12 +229,25 @@ def run_with_verifier(
         if record is not None:
             validation = validate_evidence(profile, record)
             if validation.ok:
-                verdict = verifier(
-                    profile=profile,
-                    ac=ac,
-                    leaf_output=leaf_output,
-                    record=record,
-                )
+                try:
+                    verdict = verifier(
+                        profile=profile,
+                        ac=ac,
+                        leaf_output=leaf_output,
+                        record=record,
+                    )
+                except Exception as exc:
+                    # Verifier impls run tests / query LLMs, so transient
+                    # operational failures (timeout, network, crashed
+                    # subprocess) are part of normal production. Treat
+                    # them as a FAIL with a surfaceable reason rather
+                    # than letting them abort the AC — the retry budget
+                    # exists precisely for this.
+                    verdict = VerifierVerdict(
+                        passed=False,
+                        reasons=(f"verifier raised {type(exc).__name__}: {exc}",),
+                        failure_class="STALL",
+                    )
 
         attempt = Attempt(
             leaf_output=leaf_output,

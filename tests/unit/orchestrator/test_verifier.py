@@ -98,6 +98,98 @@ class TestVerifierVerdict:
         with pytest.raises(ValueError, match="must include at least one reason"):
             VerifierVerdict(passed=False, failure_class="STALL")
 
+    def test_unknown_failure_class_rejected(self) -> None:
+        # The H7 classifier would silently degrade an unknown class to
+        # STALL, masking real fabrication / scope-creep signals from a
+        # verifier impl that typo'd the tag. Reject at construction.
+        with pytest.raises(ValueError, match="not a recognized taxonomy"):
+            VerifierVerdict(passed=False, reasons=("bad",), failure_class="MYSTERY")
+
+    @pytest.mark.parametrize(
+        "klass",
+        [
+            "EVIDENCE_MISSING",
+            "FABRICATION_SUSPECTED",
+            "SCOPE_CREEP",
+            "STALL",
+            "BLOCKED",
+        ],
+    )
+    def test_known_failure_classes_accepted(self, klass: str) -> None:
+        verdict = VerifierVerdict(passed=False, reasons=("r",), failure_class=klass)
+        assert verdict.failure_class == klass
+
+
+class TestVerifierExceptionWrapping:
+    """Verifier impls run tests / LLMs — transient failures become FAIL.
+
+    Per bot review on #884, letting a verifier exception escape would
+    skip the bounded-retry path and produce no LoopResult transcript
+    for upstream escalation. The loop must trap and convert to a FAIL
+    verdict with surfaceable reasons.
+    """
+
+    def test_verifier_runtime_error_becomes_fail_verdict(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        call_count = 0
+
+        def flaky_verifier(
+            *,
+            profile: ExecutionProfile,
+            ac: str,
+            leaf_output: str,
+            record: EvidenceRecord,
+        ) -> VerifierVerdict:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("LLM call timed out")
+            return VerifierVerdict(passed=True)
+
+        executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
+        result = run_with_verifier(
+            executor=executor,
+            verifier=flaky_verifier,
+            profile=code_profile,
+            ac="x",
+        )
+        assert result.accepted is True
+        assert len(result.attempts) == 2
+        first = result.attempts[0]
+        assert first.verdict is not None
+        assert first.verdict.passed is False
+        assert first.verdict.failure_class == "STALL"
+        assert any("TimeoutError" in r for r in first.verdict.reasons)
+        # Retry executor must have seen the wrapped reason as feedback.
+        assert any("TimeoutError" in line for line in executor.feedbacks[1])
+
+    def test_verifier_exhausts_budget_when_always_raises(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        def always_boom(
+            *,
+            profile: ExecutionProfile,
+            ac: str,
+            leaf_output: str,
+            record: EvidenceRecord,
+        ) -> VerifierVerdict:
+            raise RuntimeError("verifier crashed")
+
+        executor = ScriptedExecutor(outputs=[_code_evidence()] * 3)
+        result = run_with_verifier(
+            executor=executor,
+            verifier=always_boom,
+            profile=code_profile,
+            ac="x",
+            max_retries=2,
+        )
+        assert result.accepted is False
+        assert len(result.attempts) == 3
+        for a in result.attempts:
+            assert a.verdict is not None
+            assert a.verdict.failure_class == "STALL"
+
 
 class TestHappyPath:
     def test_passes_on_first_attempt(self, code_profile: ExecutionProfile) -> None:
