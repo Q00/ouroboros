@@ -202,19 +202,31 @@ class AutoHandler:
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
         auto_session_id = _auto_session_id_from_arguments(arguments)
         start_lease_token = _start_auto_lease_token_from_arguments(arguments)
+        store = self.store or AutoStore()
+        if auto_session_id is not None and start_lease_token is None:
+            try:
+                state = store.load(auto_session_id)
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_auto"))
+            start_lease_token, lease_error = _reserve_start_lease(
+                store,
+                auto_session_id,
+                mode="direct_auto",
+                ttl_seconds=max(1.0, state.pipeline_timeout_seconds),
+            )
+            if lease_error is not None:
+                return Result.err(lease_error)
         try:
             result = await self._run(arguments)
         except Exception as exc:
             if auto_session_id is not None and start_lease_token is not None:
-                _release_start_lease(
-                    self.store or AutoStore(), auto_session_id, token=start_lease_token
-                )
+                _release_start_lease(store, auto_session_id, token=start_lease_token)
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
-        store = self.store or AutoStore()
-        if result.auto_session_id and start_lease_token is not None:
-            _release_start_lease(store, result.auto_session_id, token=start_lease_token)
+        release_session_id = result.auto_session_id or auto_session_id
+        if release_session_id and start_lease_token is not None:
+            _release_start_lease(store, release_session_id, token=start_lease_token)
         meta = _result_meta(result)
         text = _format_result(result)
         if result.run_subagent is not None:

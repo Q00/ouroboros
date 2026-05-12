@@ -697,7 +697,7 @@ class TestAutoHandlerLeaseRelease:
         )
 
     @pytest.mark.asyncio
-    async def test_direct_auto_resume_without_token_does_not_clear_start_auto_lease(
+    async def test_direct_auto_resume_without_token_respects_start_auto_lease(
         self, tmp_path
     ) -> None:
         store = AutoStore(tmp_path)
@@ -728,5 +728,32 @@ class TestAutoHandlerLeaseRelease:
         h = StubAutoHandler(store=store)
         result = await h.handle({"resume": state.auto_session_id})
 
-        assert result.is_ok
+        assert result.is_err
+        assert "pending start lease" in result.error.message
         assert lease_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_direct_auto_resume_acquires_and_releases_own_lease(self, tmp_path) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        state.pipeline_timeout_seconds = 900
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                lease = json.loads(lease_path.read_text(encoding="utf-8"))
+                assert lease["mode"] == "direct_auto"
+                assert lease["owner_pid"] == os.getpid()
+                return AutoPipelineResult(
+                    status="running",
+                    auto_session_id=state.auto_session_id,
+                    phase="interview",
+                    pending_question="Which runtime?",
+                )
+
+        h = StubAutoHandler(store=store)
+        result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_ok
+        assert not lease_path.exists()
