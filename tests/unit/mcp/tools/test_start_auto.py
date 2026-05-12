@@ -10,6 +10,7 @@ under a :class:`JobManager`-backed background task.
 from __future__ import annotations
 
 import inspect
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -132,4 +133,36 @@ class TestBackgroundJobPath:
         assert store.path_for(auto_session_id).exists()
         # The inner AutoHandler must NOT have run synchronously — the runner is
         # enqueued on the JobManager only.
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plugin_mode_returns_subagent_without_enqueue(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        job_manager = MagicMock()
+        job_manager.start_job = AsyncMock()
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["job_id"] is None
+        assert meta["status"] == "delegated_to_plugin"
+        assert meta["dispatch_mode"] == "plugin"
+        assert isinstance(meta["auto_session_id"], str)
+        assert store.path_for(meta["auto_session_id"]).exists()
+        assert meta["_subagent"]["tool_name"] == "ouroboros_start_auto"
+        assert meta["_subagent"]["context"]["arguments"]["resume"] == meta["auto_session_id"]
+        body = json.loads(result.value.content[0].text)
+        assert body["auto_session_id"] == meta["auto_session_id"]
+        job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()

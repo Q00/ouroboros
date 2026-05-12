@@ -45,6 +45,12 @@ from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.subagent import (
+    build_subagent_payload,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -420,9 +426,9 @@ class StartAutoHandler:
     ``AutoHandler`` through the normal resume path. That makes the
     ``auto_session_id`` immediately available for recovery even if the MCP
     server exits before the caller fetches ``ouroboros_job_result``.
-    Plugin-mode is not short-circuited here — the inner ``AutoHandler._run``
-    already routes plugin dispatch correctly for its sub-handlers (Ralph
-    etc.), so the background job inherits that behavior transparently.
+    Plugin mode is terminal here: the handler returns an OpenCode subagent
+    envelope directly instead of hiding that envelope inside a background
+    job result that the bridge cannot intercept.
     """
 
     interview_handler: InterviewHandler | None = field(default=None, repr=False)
@@ -537,6 +543,25 @@ class StartAutoHandler:
             runner_arguments["resume"] = auto_session_id
             runner_arguments.pop("pipeline_timeout_seconds", None)
 
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            payload = _build_auto_subagent(runner_arguments, auto_session_id=auto_session_id)
+            await self._event_store.initialize()
+            await emit_subagent_dispatched_event(
+                self._event_store,
+                session_id=auto_session_id,
+                payload=payload,
+            )
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "job_id": None,
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "status": "delegated_to_plugin",
+                    "dispatch_mode": "plugin",
+                },
+            )
+
         async def _runner() -> MCPToolResult:
             result = await self._inner_auto.handle(runner_arguments)
             if result.is_err:
@@ -600,6 +625,34 @@ class StartAutoHandler:
             state.ralph_opencode_mode = opencode_mode
         self._store.save(state)
         return state
+
+
+def _build_auto_subagent(
+    arguments: dict[str, Any],
+    *,
+    auto_session_id: str,
+):
+    """Build the immediate OpenCode dispatch envelope for ``start_auto``."""
+    prompt = (
+        "Run the Ouroboros auto pipeline for the preallocated session below.\n\n"
+        "Use the MCP tool `ouroboros_auto` directly with the provided arguments. "
+        "Do not call `ouroboros_start_auto` from this child session; this dispatch "
+        "already owns the async handoff.\n\n"
+        f"Auto session ID: {auto_session_id}\n\n"
+        "Arguments:\n"
+        f"```json\n{json.dumps(arguments, ensure_ascii=False, indent=2)}\n```\n\n"
+        "Return the final auto result, including any resume guidance or downstream "
+        "run/Ralph delegation receipt surfaced by `ouroboros_auto`."
+    )
+    return build_subagent_payload(
+        tool_name="ouroboros_start_auto",
+        title=f"Auto: {auto_session_id}",
+        prompt=prompt,
+        context={
+            "auto_session_id": auto_session_id,
+            "arguments": arguments,
+        },
+    )
 
 
 def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
