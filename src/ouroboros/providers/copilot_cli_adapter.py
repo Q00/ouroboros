@@ -86,6 +86,27 @@ _AUTH_ERROR_PATTERNS = (
     "authentication required",
 )
 
+_COPILOT_EVENT_TYPES = frozenset(
+    {
+        "agent.message",
+        "error",
+        "fatal",
+        "message",
+        "reasoning",
+        "run.completed",
+        "session.created",
+        "session.ended",
+        "session.ready",
+        "session.started",
+        "thinking",
+        "tool.start",
+        "tool_call",
+        "tool_use",
+        "turn.completed",
+        "turn.failed",
+    }
+)
+
 _JSON_OBJECT_DIRECTIVE = (
     "Respond with a single JSON object. Do not include prose, "
     "Markdown fences, or commentary outside the JSON value."
@@ -320,6 +341,17 @@ class CopilotCliLLMAdapter:
             return None
         return event if isinstance(event, dict) else None
 
+    @staticmethod
+    def _is_copilot_event_envelope(event: dict[str, Any]) -> bool:
+        event_type = event.get("type")
+        return isinstance(event_type, str) and event_type in _COPILOT_EVENT_TYPES
+
+    @staticmethod
+    def _is_structured_response_format(response_format: dict[str, object] | None) -> bool:
+        if not response_format:
+            return False
+        return response_format.get("type") in {"json_object", "json_schema"}
+
     def _extract_text(self, value: object) -> str:
         if isinstance(value, str):
             return value.strip()
@@ -416,11 +448,32 @@ class CopilotCliLLMAdapter:
         text = "\n".join(line for line in stdout_lines if line.strip())
         return text or stderr.strip()
 
-    def _plain_text_stdout_fallback(self, stdout_lines: list[str]) -> str:
-        """Use only non-JSON stdout as successful fallback completion content."""
-        return "\n".join(
-            line for line in stdout_lines if line.strip() and self._parse_json_event(line) is None
+    def _plain_text_stdout_fallback(
+        self,
+        stdout_lines: list[str],
+        *,
+        preserve_structured_json: bool = False,
+    ) -> str:
+        """Use stdout lines that are not known Copilot event envelopes."""
+        content_lines: list[str] = []
+        nonempty_lines = [line for line in stdout_lines if line.strip()]
+        has_stream_context = len(nonempty_lines) > 1 and any(
+            self._is_copilot_event_envelope(event)
+            for line in nonempty_lines
+            if (event := self._parse_json_event(line)) is not None
         )
+
+        for line in stdout_lines:
+            if not line.strip():
+                continue
+            event = self._parse_json_event(line)
+            if preserve_structured_json and event is not None and not has_stream_context:
+                content_lines.append(line)
+                continue
+            if event is not None and self._is_copilot_event_envelope(event):
+                continue
+            content_lines.append(line)
+        return "\n".join(content_lines)
 
     # ------------------------------------------------------ stream/process io
 
@@ -583,11 +636,13 @@ class CopilotCliLLMAdapter:
             return await self._handle_legacy_process(
                 process,
                 normalized_model=normalized_model,
+                response_format=config.response_format,
             )
 
         return await self._handle_streaming_process(
             process,
             normalized_model=normalized_model,
+            response_format=config.response_format,
         )
 
     async def _handle_legacy_process(
@@ -595,6 +650,7 @@ class CopilotCliLLMAdapter:
         process: Any,
         *,
         normalized_model: str | None,
+        response_format: dict[str, object] | None,
     ) -> Result[CompletionResponse, ProviderError]:
         (
             stdout_lines,
@@ -602,8 +658,16 @@ class CopilotCliLLMAdapter:
             session_id,
             last_content,
         ) = await self._collect_legacy_process_output(process)
-
-        content = last_content or self._plain_text_stdout_fallback(stdout_lines)
+        preserve_structured_json = self._is_structured_response_format(response_format)
+        fallback_content = self._plain_text_stdout_fallback(
+            stdout_lines,
+            preserve_structured_json=preserve_structured_json,
+        )
+        content = (
+            fallback_content or last_content
+            if preserve_structured_json
+            else last_content or fallback_content
+        )
 
         if process.returncode != 0:
             return self._error_from_process(
@@ -643,6 +707,7 @@ class CopilotCliLLMAdapter:
         process: Any,
         *,
         normalized_model: str | None,
+        response_format: dict[str, object] | None,
     ) -> Result[CompletionResponse, ProviderError]:
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
@@ -721,7 +786,16 @@ class CopilotCliLLMAdapter:
             await self._cancel_tasks(stdout_task, stderr_task)
             raise
 
-        content = last_content or self._plain_text_stdout_fallback(stdout_lines)
+        preserve_structured_json = self._is_structured_response_format(response_format)
+        fallback_content = self._plain_text_stdout_fallback(
+            stdout_lines,
+            preserve_structured_json=preserve_structured_json,
+        )
+        content = (
+            fallback_content or last_content
+            if preserve_structured_json
+            else last_content or fallback_content
+        )
 
         if process.returncode != 0:
             return self._error_from_process(
