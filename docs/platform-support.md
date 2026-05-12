@@ -61,4 +61,4 @@ If you encounter Windows-specific issues, please [open an issue](https://github.
 | 3.14 beta/RC   | Best effort   |
 | < 3.12         | Not supported |
 
-The minimum required version is **Python >= 3.12** as specified in `pyproject.toml`. Source checkouts default to **stable Python 3.14** through `.python-version`; that default does not narrow the supported runtime range to 3.14-only. If a local 3.14 prerelease or dependency combination fails during contributor setup, rerun the command with an explicit supported stable interpreter such as `uv run --python 3.12 ...`.
+The minimum required version is **Python >= 3.12** as specified in `pyproject.toml`. Source checkouts default to **stable Python 3.14** through `.python-version`; that default does not narrow the supported runtime range to 3.14-only. If a local 3.14 prerelease or dependency combination fails during contributor setup, recreate the environment with an explicit supported stable interpreter such as `uv sync --python 3.12`, then run contributor commands with the same interpreter via `uv run --python 3.12 ...`.

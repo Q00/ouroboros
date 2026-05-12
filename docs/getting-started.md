@@ -141,6 +141,7 @@ uv run ouroboros --version            # verify CLI
 Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Ouroboros still supports Python 3.12+, so if your local 3.14 interpreter is a prerelease build or hits dependency compatibility issues before the CLI starts, pin a supported stable interpreter explicitly:
 
 ```bash
+uv sync --python 3.12
 uv run --python 3.12 ouroboros --version
 uv run --python 3.12 pytest tests/unit/ -q
 ```

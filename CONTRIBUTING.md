@@ -43,7 +43,13 @@ uv run pytest tests/unit/ -q # run tests
 
 **Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv)
 
-> This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for local development. Python 3.12 and 3.13 remain supported. If your local 3.14 interpreter is a beta/RC build or hits dependency compatibility issues, rerun the contributor commands with an explicit stable interpreter, for example `uv run --python 3.12 ouroboros --version` and `uv run --python 3.12 pytest tests/unit/ -q`.
+This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for local development. Python 3.12 and 3.13 remain supported. If your local 3.14 interpreter is a beta/RC build or hits dependency compatibility issues, create and run the contributor environment with an explicit stable interpreter:
+
+```bash
+uv sync --python 3.12
+uv run --python 3.12 ouroboros --version
+uv run --python 3.12 pytest tests/unit/ -q
+```
 
 ---
 
