@@ -462,8 +462,12 @@ async def test_session_activity_resets_idle_timeout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ac_heartbeat_aggregate_resets_idle_timeout() -> None:
+async def test_ac_heartbeat_aggregate_resets_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """AC heartbeats are emitted under AC aggregate IDs, not the execution ID."""
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     session_id = "session-heartbeat"
     execution_id = "evolve:lin-heartbeat:generation:1"
@@ -475,14 +479,21 @@ async def test_ac_heartbeat_aggregate_resets_idle_timeout() -> None:
         generation_no_progress_timeout_seconds=0,
     )
 
-    async def heartbeat_work() -> str:
-        await event_store.append(_session_started(session_id, execution_id))
-        for count in range(1, 5):
-            await asyncio.sleep(0.04)
-            await event_store.append(_ac_heartbeat(session_id, ac_id, count))
-        return "done"
+    await watchdog.initialize_baseline()
+    await event_store.append(_session_started(session_id, execution_id))
+    await watchdog.poll()
 
-    assert await watchdog.watch(heartbeat_work()) == "done"
+    clock.advance(0.06)
+    watchdog._raise_if_threshold_exceeded()
+
+    await event_store.append(_ac_heartbeat(session_id, ac_id, 1))
+    await watchdog.poll()
+
+    assert watchdog._last_event_type == "execution.ac.heartbeat"
+    assert watchdog._last_event_aggregate == f"execution/{ac_id}"
+
+    clock.advance(0.06)
+    watchdog._raise_if_threshold_exceeded()
 
 
 @pytest.mark.asyncio
