@@ -1607,6 +1607,72 @@ async def test_interview_driver_emits_diagnostic_when_readiness_models_disagree(
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_blocks_on_conflict_when_backend_signals_premature_closure(
+    tmp_path,
+) -> None:
+    """A CONFLICTING/BLOCKED gap must surface as a blocker — never get a
+    fabricated auto-answer appended — even when the backend declares closure.
+
+    Regression test for ouroboros-agent[bot] review finding (PR #962): the
+    backend-done branch must not bypass ``_answer_with_gap_steering``'s
+    safety guards against unresolved conflicts.
+    """
+    answer_calls: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answer_calls.append(text)
+        # Backend insists on closure regardless of content — the driver MUST
+        # still refuse to fabricate gap-fills when the next gap is CONFLICTING.
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    # Seed a CONFLICTING actors entry — the rest stays open. The gap detector
+    # surfaces CONFLICTING gaps before plain MISSING ones, so this is the
+    # first gap the disagreement branch will see.
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.conflict",
+            value="Conflicting actor declaration",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.85,
+            status=LedgerStatus.CONFLICTING,
+        ),
+    )
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    # Exactly ONE backend.answer call: the first answer to the start turn
+    # goes through the normal path; backend then returns completed=True and
+    # the very next loop iteration enters the disagreement branch where the
+    # CONFLICTING actors gap MUST short-circuit into a blocker — without
+    # firing a second backend.answer for a fabricated gap-fill.
+    assert len(answer_calls) == 1, (
+        "driver must terminate on CONFLICTING gap immediately after the "
+        f"backend reports closure, not push another answer: {answer_calls!r}"
+    )
+    # The blocker reason must surface the conflict, not be swallowed into
+    # the generic "max_rounds without closure" diagnostic.
+    blocker = result.blocker or ""
+    assert "max_rounds" not in blocker, (
+        f"expected the CONFLICTING gap to surface immediately, "
+        f"not be swallowed into the max_rounds diagnostic: {blocker!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_steers_generic_questions_to_open_gaps(tmp_path) -> None:
     answers: list[str] = []
 

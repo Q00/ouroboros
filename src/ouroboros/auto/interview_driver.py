@@ -217,14 +217,44 @@ class AutoInterviewDriver:
             self._save(state)
 
             if backend_done and not ledger_done:
-                # Backend said done but ledger isn't — pick the first open gap
-                # and answer it. This drives the backend to reopen with
+                # Backend said done but ledger isn't — pick the first detected
+                # gap and answer it. This drives the backend to reopen with
                 # substantive new content; we never accept closure unilaterally.
-                first_gap = ledger.open_gaps()[0]
-                answer = self.answerer.answer_gap(first_gap, ledger, answer_context)
-                question_for_record = (
-                    f"[driver gap-reopen '{first_gap}': backend_completed=True ledger_done=False]"
-                )
+                # Mirror the safety guards that ``_answer_with_gap_steering``
+                # enforces so a backend-reported "done" against a CONFLICTING /
+                # BLOCKED / goal-missing ledger does NOT silently get a
+                # fabricated auto-answer appended — those terminal conditions
+                # must surface the unresolved conflict immediately.
+                detected_gaps = self.gap_detector.detect(ledger)
+                if not detected_gaps:
+                    # Defensive: ``ledger.is_seed_ready()`` was False yet the
+                    # structured detector finds no actionable gap. Treat as
+                    # the canonical "must keep asking" path so we at least
+                    # send something through the backend instead of crashing.
+                    answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
+                    question_for_record = turn.question
+                else:
+                    first_gap = detected_gaps[0]
+                    if first_gap.section == "goal" or first_gap.state in {
+                        LedgerStatus.CONFLICTING,
+                        LedgerStatus.BLOCKED,
+                    }:
+                        blocker_text = first_gap.message
+                        state.mark_blocked(blocker_text, tool_name="auto_answerer")
+                        record_authoring_backend(state)
+                        self._save(state)
+                        return AutoInterviewResult(
+                            "blocked",
+                            state.interview_session_id,
+                            ledger,
+                            state.current_round,
+                            blocker_text,
+                        )
+                    answer = self.answerer.answer_gap(first_gap.section, ledger, answer_context)
+                    question_for_record = (
+                        f"[driver gap-reopen '{first_gap.section}': "
+                        "backend_completed=True ledger_done=False]"
+                    )
             else:
                 answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
                 question_for_record = turn.question
