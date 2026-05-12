@@ -166,9 +166,14 @@ def test_unstuck_lateral_phase_in_allowed_transitions() -> None:
     # BLOCKED when a recovery guard trips. SEED_REGENERATE is intentionally
     # absent (see the AutoPhase deferral comment): an automatic Seed
     # rewrite is a reward-hacking surface that mutates the spec the user
-    # explicitly agreed to. The pipeline instead surfaces the three
-    # operator choices (relax AC, re-interview, abandon) in the final
-    # BLOCKED message and leaves the spec under human control.
+    # explicitly agreed to. The pipeline instead surfaces the operator
+    # choices (re-interview, abandon) in the final BLOCKED message and
+    # leaves the spec under human control. "Relax AC via edited seed" is
+    # not advertised because late-phase resume reconstructs the Seed from
+    # ``state.seed_artifact`` rather than rereading the on-disk seed
+    # file; honoring an edited seed file on EVALUATE / UNSTUCK_LATERAL
+    # resume is a separate change.
+
     assert _ALLOWED_TRANSITIONS[AutoPhase.UNSTUCK_LATERAL] == {
         AutoPhase.EVALUATE,
         AutoPhase.COMPLETE,
@@ -1146,7 +1151,7 @@ async def test_recovery_round_budget_blocks_after_max(tmp_path) -> None:
     assert eval_calls == 0  # evaluator NOT invoked once budget exceeded
     assert result.status == "blocked"
     assert "MAX_EVALUATE_ROUNDS" in (state.last_error or "")
-    assert "relax AC" in (state.last_error or "")
+    assert "re-interview" in (state.last_error or "")
 
 
 @pytest.mark.asyncio
@@ -1183,7 +1188,7 @@ async def test_recovery_same_fingerprint_twice_blocks(tmp_path) -> None:
 
     assert result.status == "blocked"
     assert "fingerprint" in (state.last_error or "").lower()
-    assert "relax AC" in (state.last_error or "")
+    assert "re-interview" in (state.last_error or "")
     # The pre-seeded fingerprint is still there; we did not double-record.
     assert state.failure_fingerprints == [pre_seeded]
 
@@ -1231,7 +1236,7 @@ async def test_recovery_personas_exhausted_blocks(tmp_path) -> None:
     assert result.status == "blocked"
     last_error = state.last_error or ""
     assert "personas exhausted" in last_error.lower()
-    assert "relax AC" in last_error
+    assert "re-interview" in last_error
 
 
 @pytest.mark.asyncio
@@ -1272,9 +1277,13 @@ async def test_recovery_personas_invoked_persists_after_lateral(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_recovery_blocked_message_includes_operator_choices(tmp_path) -> None:
-    """Every recovery-loop BLOCKED message surfaces the three operator
-    choices (relax AC / re-interview / abandon) so the operator's next
-    move is on-screen rather than buried in QA differences."""
+    """Every recovery-loop BLOCKED message surfaces the two functional
+    operator choices (re-interview / abandon) so the operator's next move
+    is on-screen rather than buried in QA differences. "Relax AC via
+    edited seed" is intentionally NOT advertised — late-phase resume
+    reconstructs the Seed from ``state.seed_artifact`` and ignores edits
+    to the on-disk seed file, so that path is non-functional today and
+    would mislead operators if surfaced here."""
     state = _state_at_run_phase(tmp_path)
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
@@ -1299,6 +1308,9 @@ async def test_recovery_blocked_message_includes_operator_choices(tmp_path) -> N
     await pipeline.run(state)
 
     msg = state.last_error or ""
-    assert "relax AC" in msg
     assert "re-interview" in msg
     assert "abandon" in msg
+    # The earlier misleading guidance (edit the seed file and --resume)
+    # must NOT appear — late-phase resume ignores on-disk seed edits.
+    assert "edited seed" not in msg
+    assert "relax AC" not in msg

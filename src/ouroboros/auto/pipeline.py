@@ -46,12 +46,23 @@ from ouroboros.resilience.lateral import ThinkingPersona
 
 # RFC #809 Phase 2.2b — operator-choice cue suffixed onto every recovery-loop
 # BLOCKED message so the operator sees their next move without having to
-# read the rest of the surface. Three explicit choices, in increasing-effort
-# order, intentionally avoiding any "let the system rewrite the spec"
-# option: keep the spec contract under human control.
+# read the rest of the surface. Two explicit choices, intentionally avoiding
+# any "let the system rewrite the spec" option: keep the spec contract under
+# human control.
+#
+# Earlier drafts of this cue advertised a third path ("relax AC via --resume
+# + edited seed"). That guidance was wrong: ``AutoPipeline.run()`` resumes
+# late-phase blockers (EVALUATE / UNSTUCK_LATERAL) by reconstructing the
+# Seed from ``state.seed_artifact``, which is always populated on the
+# normal auto path. Editing the on-disk ``state.seed_path`` file therefore
+# has no effect — the next resume re-grades against the same in-state AC
+# and loops back to the identical blocker. Until the resume contract is
+# changed to honor a freshly-edited seed file on late-phase resume (a
+# separate PR with its own end-to-end coverage), only two operator paths
+# are actually functional, and the cue must say so.
 _RECOVERY_BLOCKED_CHOICES: str = (
-    "next: (1) relax AC via --resume + edited seed; "
-    "(2) re-interview to refine the spec; (3) abandon this session"
+    "next: (1) re-interview with a refined goal (the in-state Seed cannot "
+    "be edited mid-session); (2) abandon this session"
 )
 
 SeedGenerator = Callable[[str], Awaitable[Seed]]
