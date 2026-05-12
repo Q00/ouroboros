@@ -11,6 +11,7 @@ import asyncio
 from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,6 +23,7 @@ from ouroboros.orchestrator.agent_process import (
     AgentProcessHandle,
     AgentProcessStatus,
     project_agent_process_snapshot,
+    run_with_agent_process,
 )
 from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 from ouroboros.persistence.event_store import EventStore
@@ -1508,3 +1510,648 @@ async def test_load_persisted_pause_returns_false_when_no_checkpoint(tmp_path: P
     fresh_process_id = "deadbeefdeadbeefdeadbeefdeadbeef"
 
     assert AgentProcessHandle.load_persisted_pause(fresh_process_id, store=ck_store) is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 of #518 — durable cancel signal via CheckpointStore
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_persists_state_via_checkpoint_store(tmp_path) -> None:
+    """``cancel()`` must write an ``agent_process_cancelled`` checkpoint
+    so a restarted process can detect that a previous run was cancelled
+    via :meth:`AgentProcessHandle.load_persisted_cancel`."""
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+
+    event_store = _FakeEventStore()
+    process = AgentProcess(event_store=event_store)
+
+    async def work(handle):
+        await asyncio.sleep(0.05)
+
+    handle = await process.spawn(intent="canary", work_fn=work)
+    handle._checkpoint_store = store  # noqa: SLF001 — exercise the injection point
+    await handle.cancel(reason="quota exceeded")
+    await handle.wait_until_complete(timeout=1.0)
+
+    found, reason = AgentProcessHandle.load_persisted_cancel(handle.process_id, store=store)
+    assert found is True
+    assert reason == "quota exceeded"
+
+
+@pytest.mark.asyncio
+async def test_cancel_swallows_checkpoint_save_error() -> None:
+    """A failing CheckpointStore must NOT raise out of ``cancel()`` —
+    the in-memory flag is authoritative and the durable hint is best
+    effort."""
+    from ouroboros.core.errors import PersistenceError
+    from ouroboros.core.types import Result
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    class _ExplodingStore(CheckpointStore):
+        def __init__(self) -> None:  # noqa: D401 — minimal stub
+            self.calls: list[Any] = []
+
+        def save(self, checkpoint: Any) -> Result[None, PersistenceError]:
+            self.calls.append(checkpoint)
+            return Result.err(PersistenceError("simulated disk full"))
+
+    event_store = _FakeEventStore()
+    process = AgentProcess(event_store=event_store)
+
+    async def work(handle):
+        await asyncio.sleep(0.05)
+
+    handle = await process.spawn(intent="explode", work_fn=work)
+    bad_store = _ExplodingStore()
+    handle._checkpoint_store = bad_store  # noqa: SLF001
+    await handle.cancel(reason="boom")
+    await handle.wait_until_complete(timeout=1.0)
+
+    # cancel() did not raise; the in-memory transition still happened
+    assert handle.status() is AgentProcessStatus.CANCELLED
+    # And the store attempt was made (so we know the code path executed)
+    assert len(bad_store.calls) == 1
+    assert bad_store.calls[0].phase == "agent_process_cancelled"
+
+
+def test_load_persisted_cancel_returns_false_when_no_checkpoint(tmp_path) -> None:
+    """A fresh ``process_id`` with no prior writes returns ``(False, None)``."""
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    found, reason = AgentProcessHandle.load_persisted_cancel("never-seen-process", store=store)
+    assert found is False
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_uses_process_checkpoint_store_public_spawn_path(tmp_path) -> None:
+    """``AgentProcess(checkpoint_store=...)`` wires durable cancel into spawned handles."""
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
+
+    async def work(handle):
+        while not handle.should_cancel():
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="public-store", work_fn=work)
+    await handle.cancel(reason="operator stop")
+    await handle.wait_until_complete(timeout=1.0)
+
+    found, reason = AgentProcessHandle.load_persisted_cancel(handle.process_id, store=store)
+    assert found is True
+    assert reason == "operator stop"
+
+
+@pytest.mark.asyncio
+async def test_spawn_enters_work_fn_cancelled_when_persisted_cancel_exists(tmp_path) -> None:
+    """Restarting the same process_id must let workflow teardown observe cancel."""
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
+    process_id = "restart-cancelled-process"
+
+    async def first_work(handle):
+        while not handle.should_cancel():
+            await asyncio.sleep(0.005)
+
+    first = await process.spawn(intent="first", process_id=process_id, work_fn=first_work)
+    await first.cancel(reason="operator stop")
+    assert await first.wait_until_complete(timeout=1.0) is AgentProcessStatus.CANCELLED
+    restart_event_offset = len(process.event_store.appended)
+
+    teardown_called = False
+    normal_work_called = False
+
+    async def restarted_work(handle):
+        nonlocal normal_work_called, teardown_called
+        if handle.should_cancel():
+            teardown_called = True
+            return
+        normal_work_called = True
+
+    restarted = await process.spawn(intent="restart", process_id=process_id, work_fn=restarted_work)
+
+    assert await restarted.wait_until_complete(timeout=1.0) is AgentProcessStatus.CANCELLED
+    assert restarted.should_cancel() is True
+    assert teardown_called is True
+    assert normal_work_called is False
+    restart_directives = _directives(process.event_store.appended[restart_event_offset:])
+    assert restart_directives == ["continue", "cancel"]
+
+    third_called = False
+
+    async def third_work(handle):
+        nonlocal third_called
+        third_called = True
+
+    third = await process.spawn(intent="third", process_id=process_id, work_fn=third_work)
+
+    assert await third.wait_until_complete(timeout=1.0) is AgentProcessStatus.COMPLETED
+    assert third_called is True
+
+
+@pytest.mark.asyncio
+async def test_spawn_rejects_process_id_in_cancel_control_namespace(tmp_path) -> None:
+    """Caller-supplied process IDs must not collide with cancel-control keys."""
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
+
+    async def work(handle):
+        return None
+
+    with pytest.raises(ValueError):
+        await process.spawn(
+            intent="reserved",
+            process_id="__ouroboros_agent_process_cancel__:external",
+            work_fn=work,
+        )
+
+
+@pytest.mark.asyncio
+async def test_spawn_returns_cancelled_when_cancel_consumption_fails(tmp_path) -> None:
+    """Consume cleanup failure must not escape after CANCELLED is recorded."""
+    from ouroboros.core.errors import PersistenceError
+    from ouroboros.core.types import Result
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    class _ConsumeFailingStore(CheckpointStore):
+        def save(self, checkpoint: Any) -> Result[None, PersistenceError]:
+            if checkpoint.phase == "agent_process_cancel_consumed":
+                return Result.err(PersistenceError("simulated consume failure"))
+            return super().save(checkpoint)
+
+    store = _ConsumeFailingStore(base_path=tmp_path)
+    store.initialize()
+    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
+    process_id = "consume-fails-process"
+
+    async def first_work(handle):
+        while not handle.should_cancel():
+            await asyncio.sleep(0.005)
+
+    first = await process.spawn(intent="first", process_id=process_id, work_fn=first_work)
+    await first.cancel(reason="operator stop")
+    assert await first.wait_until_complete(timeout=1.0) is AgentProcessStatus.CANCELLED
+
+    teardown_called = False
+    normal_work_called = False
+
+    async def restarted_work(handle):
+        nonlocal normal_work_called, teardown_called
+        if handle.should_cancel():
+            teardown_called = True
+            return
+        normal_work_called = True
+
+    restarted = await process.spawn(intent="restart", process_id=process_id, work_fn=restarted_work)
+
+    assert await restarted.wait_until_complete(timeout=1.0) is AgentProcessStatus.CANCELLED
+    assert teardown_called is True
+    assert normal_work_called is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_survives_ordinary_checkpoint_rotation_after_cancel(tmp_path) -> None:
+    """Durable cancel must not share the ordinary process checkpoint ring."""
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
+
+    async def work(handle):
+        while not handle.should_cancel():
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="rotation-proof", work_fn=work)
+    await handle.cancel(reason="operator stop")
+    await handle.wait_until_complete(timeout=1.0)
+
+    for index in range(store.MAX_ROLLBACK_DEPTH + 2):
+        ordinary_checkpoint = CheckpointData.create(
+            seed_id=handle.process_id,
+            phase="execution",
+            state={"post_cancel_checkpoint": index},
+        )
+        assert store.save(ordinary_checkpoint).is_ok
+
+    found, reason = AgentProcessHandle.load_persisted_cancel(handle.process_id, store=store)
+
+    assert found is True
+    assert reason == "operator stop"
+
+
+def test_load_persisted_cancel_finds_rotated_marker_after_partial_consume(tmp_path) -> None:
+    """If consume write fails after rotation, rollback cancel marker remains active."""
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process_id = "partial-consume-process"
+    seed_id = AgentProcessHandle._cancel_checkpoint_seed(process_id)  # noqa: SLF001
+    checkpoint = CheckpointData.create(
+        seed_id=seed_id,
+        phase="agent_process_cancelled",
+        state={"status": "cancelled", "reason": "operator stop"},
+    )
+    assert store.save(checkpoint).is_ok
+
+    store._rotate_checkpoints(seed_id)  # noqa: SLF001 — simulate post-rotate write failure
+
+    found, reason = AgentProcessHandle.load_persisted_cancel(process_id, store=store)
+
+    assert found is True
+    assert reason == "operator stop"
+
+
+def test_load_persisted_cancel_raises_when_checkpoint_artifact_is_corrupt(tmp_path) -> None:
+    """Restart gate must fail closed when durable state exists but is unreadable."""
+    from ouroboros.core.errors import PersistenceError
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process_id = "corrupt-cancel-process"
+    checkpoint = CheckpointData.create(
+        seed_id=AgentProcessHandle._cancel_checkpoint_seed(process_id),  # noqa: SLF001
+        phase="agent_process_cancelled",
+        state={"status": "cancelled", "reason": "operator stop"},
+    )
+    save_result = store.save(checkpoint)
+    assert save_result.is_ok
+
+    path = store._get_checkpoint_path(  # noqa: SLF001 — corrupt public artifact
+        AgentProcessHandle._cancel_checkpoint_seed(process_id)  # noqa: SLF001
+    )
+    path.write_text("not valid json")
+
+    with pytest.raises(PersistenceError):
+        AgentProcessHandle.load_persisted_cancel(process_id, store=store)
+
+
+def test_load_persisted_cancel_returns_false_without_store() -> None:
+    """``store=None`` means no durable state — return ``(False, None)``
+    rather than raising."""
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+
+    found, reason = AgentProcessHandle.load_persisted_cancel("any-process", store=None)
+    assert found is False
+    assert reason is None
+
+
+def test_load_persisted_cancel_consumed_marker_beats_older_cancel(tmp_path) -> None:
+    """A current consumed marker must not resurrect an older cancel marker."""
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process_id = "consumed-beats-stale-cancel"
+    seed_id = AgentProcessHandle._cancel_checkpoint_seed(process_id)  # noqa: SLF001
+    cancel = CheckpointData.create(
+        seed_id=seed_id,
+        phase="agent_process_cancelled",
+        state={"status": "cancelled", "reason": "old stop"},
+    )
+    consumed = CheckpointData.create(
+        seed_id=seed_id,
+        phase="agent_process_cancel_consumed",
+        state={"status": "cancel_consumed", "reason": "old stop"},
+    )
+
+    assert store.save(cancel).is_ok
+    assert store.save(consumed).is_ok
+
+    found, reason = AgentProcessHandle.load_persisted_cancel(process_id, store=store)
+
+    assert found is False
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_spawn_rejects_sanitized_process_id_cancel_control_collision(tmp_path) -> None:
+    """IDs that sanitize into the reserved cancel namespace must be rejected."""
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
+
+    async def work(handle):
+        return None
+
+    with pytest.raises(ValueError):
+        await process.spawn(
+            intent="reserved-sanitized",
+            process_id="__ouroboros/agent_process_cancel__:external",
+            work_fn=work,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_reuses_durable_cancel_process_id(tmp_path) -> None:
+    """The production helper must expose crash-left durable cancel by stable process ID."""
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process_id = "helper:durable-cancel"
+    checkpoint = CheckpointData.create(
+        seed_id=AgentProcessHandle._cancel_checkpoint_seed(process_id),  # noqa: SLF001
+        phase="agent_process_cancelled",
+        state={"status": "cancelled", "reason": "operator stop"},
+    )
+    assert store.save(checkpoint).is_ok
+
+    teardown_called = False
+    normal_work_called = False
+
+    async def restarted_work(handle):
+        nonlocal normal_work_called, teardown_called
+        if handle.should_cancel():
+            teardown_called = True
+            return "teardown"
+        normal_work_called = True
+        return "normal"
+
+    restart_result = await run_with_agent_process(
+        event_store=_FakeEventStore(),
+        intent="helper",
+        work_fn=restarted_work,
+        checkpoint_store=store,
+        process_id=process_id,
+    )
+
+    assert restart_result == "teardown"
+    assert teardown_called is True
+    assert normal_work_called is False
+
+    fresh_called = False
+
+    async def fresh_work(handle):
+        nonlocal fresh_called
+        fresh_called = True
+        return "fresh"
+
+    fresh_result = await run_with_agent_process(
+        event_store=_FakeEventStore(),
+        intent="helper",
+        work_fn=fresh_work,
+        checkpoint_store=store,
+        process_id=process_id,
+    )
+
+    assert fresh_result == "fresh"
+    assert fresh_called is True
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_keeps_live_cancel_marker_until_restart_consumes(
+    tmp_path,
+) -> None:
+    """Live cancellation must not consume the durable marker too early.
+
+    ``JobManager.cancel_job`` writes the job-scoped marker before the runner sees
+    cancellation. If the same process crashes after live teardown but before job
+    state is durably terminal, the restart must still observe that marker.
+    """
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process_id = "helper:live-cancel"
+
+    async def cancel_work(handle):
+        await handle.cancel(reason="operator stop")
+        return "cancelled"
+
+    cancel_result = await run_with_agent_process(
+        event_store=_FakeEventStore(),
+        intent="helper",
+        work_fn=cancel_work,
+        checkpoint_store=store,
+        process_id=process_id,
+    )
+
+    assert cancel_result == "cancelled"
+    assert AgentProcessHandle.load_persisted_cancel(process_id, store=store) == (
+        True,
+        "operator stop",
+    )
+
+    restart_teardown_called = False
+
+    async def restart_work(handle):
+        nonlocal restart_teardown_called
+        if handle.should_cancel():
+            restart_teardown_called = True
+            return "teardown"
+        return "normal"
+
+    restart_result = await run_with_agent_process(
+        event_store=_FakeEventStore(),
+        intent="helper",
+        work_fn=restart_work,
+        checkpoint_store=store,
+        process_id=process_id,
+    )
+
+    assert restart_result == "teardown"
+    assert restart_teardown_called is True
+    assert AgentProcessHandle.load_persisted_cancel(process_id, store=store) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_spawn_consumes_persisted_cancel_even_without_reason(tmp_path) -> None:
+    """Missing optional reason must not make a durable cancel permanent."""
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
+    process_id = "missing-reason-cancel"
+    checkpoint = CheckpointData.create(
+        seed_id=AgentProcessHandle._cancel_checkpoint_seed(process_id),  # noqa: SLF001
+        phase="agent_process_cancelled",
+        state={"status": "cancelled"},
+    )
+    assert store.save(checkpoint).is_ok
+
+    teardown_called = False
+
+    async def restart_work(handle):
+        nonlocal teardown_called
+        if handle.should_cancel():
+            teardown_called = True
+
+    restarted = await process.spawn(intent="restart", process_id=process_id, work_fn=restart_work)
+
+    assert await restarted.wait_until_complete(timeout=1.0) is AgentProcessStatus.CANCELLED
+    assert teardown_called is True
+
+    second_called = False
+
+    async def second_work(handle):
+        nonlocal second_called
+        second_called = True
+
+    second = await process.spawn(intent="second", process_id=process_id, work_fn=second_work)
+
+    assert await second.wait_until_complete(timeout=1.0) is AgentProcessStatus.COMPLETED
+    assert second_called is True
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_checkpoint_init_failure_is_best_effort(monkeypatch) -> None:
+    """Implicit helper durability must not make background jobs require writable home."""
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    def fail_initialize(self):
+        raise OSError("read-only checkpoint directory")
+
+    monkeypatch.setattr(CheckpointStore, "initialize", fail_initialize)
+
+    async def work(handle):
+        return "completed"
+
+    result = await run_with_agent_process(
+        event_store=_FakeEventStore(),
+        intent="helper",
+        work_fn=work,
+        process_id="helper:init-fails",
+    )
+
+    assert result == "completed"
+
+
+def test_load_persisted_cancel_raises_when_newer_artifact_corrupt_despite_backup(
+    tmp_path,
+) -> None:
+    """A corrupt newer cancel artifact must fail closed instead of using stale rollback."""
+    from ouroboros.core.errors import PersistenceError
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process_id = "corrupt-current-with-backup"
+    seed_id = AgentProcessHandle._cancel_checkpoint_seed(process_id)  # noqa: SLF001
+    consumed = CheckpointData.create(
+        seed_id=seed_id,
+        phase="agent_process_cancel_consumed",
+        state={"status": "cancel_consumed"},
+    )
+    current = CheckpointData.create(
+        seed_id=seed_id,
+        phase="agent_process_cancelled",
+        state={"status": "cancelled", "reason": "new stop"},
+    )
+    assert store.save(consumed).is_ok
+    assert store.save(current).is_ok
+    store._get_checkpoint_path(seed_id).write_text("not valid json")  # noqa: SLF001
+
+    with pytest.raises(PersistenceError):
+        AgentProcessHandle.load_persisted_cancel(process_id, store=store)
+
+
+def test_load_persisted_cancel_raises_on_rotated_consumed_without_current_level(
+    tmp_path,
+) -> None:
+    """A rotated consumed marker with no current file is an ambiguous failed write.
+
+    ``CheckpointStore.save()`` rotates before writing level 0. If a fresh cancel
+    write fails after rotating an older consumed marker, level 0 is absent and
+    level 1 contains stale consumed state. Restart must fail closed instead of
+    treating cancellation as absent.
+    """
+    from ouroboros.core.errors import PersistenceError
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    process_id = "rotated-consumed-without-current"
+    seed_id = AgentProcessHandle._cancel_checkpoint_seed(process_id)  # noqa: SLF001
+    consumed = CheckpointData.create(
+        seed_id=seed_id,
+        phase="agent_process_cancel_consumed",
+        state={"status": "cancel_consumed"},
+    )
+    assert store.save(consumed).is_ok
+    store._rotate_checkpoints(seed_id)  # noqa: SLF001 — simulate failed fresh cancel write
+
+    with pytest.raises(PersistenceError):
+        AgentProcessHandle.load_persisted_cancel(process_id, store=store)
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_separates_lifecycle_id_from_cancel_key(tmp_path) -> None:
+    """Lifecycle process_id can be attempt-unique while cancel_key is restart-stable."""
+    from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    cancel_key = "helper:stable-cancel-key"
+    checkpoint = CheckpointData.create(
+        seed_id=AgentProcessHandle._cancel_checkpoint_seed(cancel_key),  # noqa: SLF001
+        phase="agent_process_cancelled",
+        state={"status": "cancelled", "reason": "operator stop"},
+    )
+    assert store.save(checkpoint).is_ok
+    event_store = _FakeEventStore()
+
+    async def restarted_work(handle):
+        assert handle.process_id == "helper:attempt-1"
+        assert handle.should_cancel() is True
+        return "teardown"
+
+    restart_result = await run_with_agent_process(
+        event_store=event_store,
+        intent="helper",
+        work_fn=restarted_work,
+        checkpoint_store=store,
+        process_id="helper:attempt-1",
+        cancel_key=cancel_key,
+    )
+
+    assert restart_result == "teardown"
+    assert {event.aggregate_id for event in event_store.appended} == {"helper:attempt-1"}
+
+    fresh_called = False
+
+    async def fresh_work(handle):
+        nonlocal fresh_called
+        assert handle.process_id == "helper:attempt-2"
+        fresh_called = True
+        return "fresh"
+
+    fresh_result = await run_with_agent_process(
+        event_store=_FakeEventStore(),
+        intent="helper",
+        work_fn=fresh_work,
+        checkpoint_store=store,
+        process_id="helper:attempt-2",
+        cancel_key=cancel_key,
+    )
+
+    assert fresh_result == "fresh"
+    assert fresh_called is True

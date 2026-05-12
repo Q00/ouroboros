@@ -640,10 +640,13 @@ class TestAsyncJobHandlers:
                 return None
 
         class FakeJobManager:
-            async def start_job(self, *, job_type, initial_message, runner, links):
+            async def allocate_job_id(self):
+                return "job_test"
+
+            async def start_job(self, *, job_type, initial_message, runner, links, job_id=None):
                 runner.close()
                 return SimpleNamespace(
-                    job_id="job_test",
+                    job_id=job_id or "job_test",
                     links=links,
                     status=SimpleNamespace(value="queued"),
                     cursor=1,

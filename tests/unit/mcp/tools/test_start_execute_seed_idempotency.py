@@ -41,9 +41,13 @@ def _make_job_manager_stub(start_calls: list[dict]) -> JobManager:
 
     counter = {"n": 0}
 
-    async def _start_job(*, job_type, initial_message, runner, links=None):  # noqa: ARG001
+    async def _allocate_job_id():
         counter["n"] += 1
         job_id = f"job_{counter['n']:012d}"
+        return job_id
+
+    async def _start_job(*, job_type, initial_message, runner, links=None, job_id=None):  # noqa: ARG001
+        job_id = job_id or await _allocate_job_id()
         start_calls.append(
             {
                 "job_type": job_type,
@@ -69,6 +73,7 @@ def _make_job_manager_stub(start_calls: list[dict]) -> JobManager:
         )
         return snapshot
 
+    job_manager.allocate_job_id = _allocate_job_id
     job_manager.start_job = _start_job
     return job_manager
 
@@ -248,9 +253,13 @@ async def test_concurrent_calls_with_same_key_dedupe(event_store, tmp_path) -> N
     job_manager = MagicMock()
     counter = {"n": 0}
 
-    async def _slow_start_job(*, job_type, initial_message, runner, links=None):  # noqa: ARG001
+    async def _allocate_job_id():
         counter["n"] += 1
         job_id = f"job_{counter['n']:012d}"
+        return job_id
+
+    async def _slow_start_job(*, job_type, initial_message, runner, links=None, job_id=None):  # noqa: ARG001
+        job_id = job_id or await _allocate_job_id()
         start_calls.append({"job_id": job_id})
         try:
             runner.close()
@@ -270,6 +279,7 @@ async def test_concurrent_calls_with_same_key_dedupe(event_store, tmp_path) -> N
             updated_at=now,
         )
 
+    job_manager.allocate_job_id = _allocate_job_id
     job_manager.start_job = _slow_start_job
 
     handler = StartExecuteSeedHandler(

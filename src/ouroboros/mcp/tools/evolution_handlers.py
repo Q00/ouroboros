@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import structlog
 import yaml
@@ -891,11 +892,26 @@ class StartEvolveStepHandler:
             )
 
         # Fall-through: real background job path.
-        async def _runner() -> MCPToolResult:
+        async def _runner(handle) -> MCPToolResult:
+            if handle.should_cancel():
+                return MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="evolve_step cancelled before restart work began.",
+                        ),
+                    ),
+                    is_error=True,
+                    meta={"status": "cancelled"},
+                )
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value
+
+        job_id = await self._job_manager.allocate_job_id()
+        agent_process_id = f"evolve_step:{lineage_id}:{uuid4().hex[:12]}"
+        agent_cancel_key = f"mcp_job:{job_id}"
 
         snapshot = await self._job_manager.start_job(
             job_type="evolve_step",
@@ -903,9 +919,12 @@ class StartEvolveStepHandler:
             runner=run_with_agent_process(
                 event_store=self._event_store,
                 intent="evolve_step",
-                work_fn=lambda _handle: _runner(),
+                work_fn=_runner,
+                process_id=agent_process_id,
+                cancel_key=agent_cancel_key,
             ),
             links=JobLinks(lineage_id=lineage_id),
+            job_id=job_id,
         )
 
         text = (
