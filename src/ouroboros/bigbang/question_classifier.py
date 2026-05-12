@@ -20,7 +20,7 @@ import re
 
 import structlog
 
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_classifier_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -210,7 +210,7 @@ class QuestionClassifier:
         """Resolve implicit default model while preserving explicit caller pins."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_clarification_model()
+            self.model = get_classifier_model()
 
     async def classify(
         self,

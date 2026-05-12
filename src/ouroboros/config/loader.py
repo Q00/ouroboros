@@ -1200,6 +1200,23 @@ def get_clarification_model(backend: str | None = None) -> str:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
 
+def get_classifier_model(backend: str | None = None) -> str:
+    """Get classifier model from environment variable or config, defaulting to Sonnet."""
+    env_model = os.environ.get("OUROBOROS_CLARIFICATION_MODEL", "").strip()
+    if env_model:
+        return env_model
+
+    try:
+        config = load_config()
+        return _normalize_configured_model_for_backend(
+            config.clarification.default_model,
+            default_model="claude-sonnet-4-6",
+            backend=backend,
+        )
+    except ConfigError:
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
+
+
 def get_qa_model(backend: str | None = None) -> str:
     """Get QA model from environment variable or config."""
     env_model = os.environ.get("OUROBOROS_QA_MODEL", "").strip()
@@ -1479,7 +1496,7 @@ def get_execution_model(backend: str | None = None) -> str:
     env_model = os.environ.get("OUROBOROS_EXECUTION_MODEL", "").strip()
     if env_model:
         return env_model
-    return get_clarification_model(backend)
+    return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_validation_model(backend: str | None = None) -> str:
@@ -1487,4 +1504,4 @@ def get_validation_model(backend: str | None = None) -> str:
     env_model = os.environ.get("OUROBOROS_VALIDATION_MODEL", "").strip()
     if env_model:
         return env_model
-    return get_clarification_model(backend)
+    return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
