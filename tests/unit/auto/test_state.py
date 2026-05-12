@@ -164,6 +164,41 @@ def test_store_load_wraps_malformed_container_and_counter_fields(tmp_path) -> No
             store.load(state.auto_session_id)
 
 
+def test_store_load_rejects_malformed_recovery_loop_fields(tmp_path) -> None:
+    """RFC #809 Phase 2.2b — the four durable recovery-loop fields
+    (``evaluate_round``, ``failure_fingerprints``, ``personas_invoked``,
+    ``recovery_guard_tripped``) must fail at load time when malformed,
+    not crash later inside ``_run_evaluate`` / ``_run_lateral``."""
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    path = store.path_for(state.auto_session_id)
+
+    malformed_cases = (
+        # evaluate_round must be a non-negative int (not a string, not bool,
+        # not negative)
+        ("evaluate_round", "3"),
+        ("evaluate_round", True),
+        ("evaluate_round", -1),
+        # failure_fingerprints must be a list of non-empty strings
+        ("failure_fingerprints", "abc"),
+        ("failure_fingerprints", [123]),
+        ("failure_fingerprints", [""]),
+        # personas_invoked entries must come from the ThinkingPersona allowlist
+        ("personas_invoked", "hacker"),  # not a list
+        ("personas_invoked", ["bogus_persona"]),
+        ("personas_invoked", [None]),
+        # recovery_guard_tripped must be one of the three tags or null
+        ("recovery_guard_tripped", "made_up_tag"),
+        ("recovery_guard_tripped", 42),
+    )
+    for field_name, value in malformed_cases:
+        data = state.to_dict()
+        data[field_name] = value
+        path.write_text(__import__("json").dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="Auto session state is invalid"):
+            store.load(state.auto_session_id)
+
+
 def test_store_load_rejects_malformed_nested_ledger(tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")

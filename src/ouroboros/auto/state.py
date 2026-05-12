@@ -94,6 +94,24 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
 # Seed (see the SEED_REGENERATE deferral comment on ``AutoPhase``).
 MAX_EVALUATE_ROUNDS: int = 3
 
+# RFC #809 Phase 2.2b — closed allowlists for the durable recovery-loop
+# fields. ``_validate_loaded`` rejects any state file whose persisted
+# values fall outside these sets so a hand-edited or corrupted
+# checkpoint surfaces a clean ValueError at load time instead of a
+# delayed runtime crash deep inside ``_run_evaluate`` /
+# ``_run_lateral``. ``_VALID_RECOVERY_PERSONAS`` mirrors
+# ``ouroboros.resilience.lateral.ThinkingPersona.value``; duplicated as
+# string literals to keep ``state.py`` independent of the resilience
+# module's import graph (state has no other dependency on resilience).
+# ``_VALID_RECOVERY_GUARD_TAGS`` mirrors the tags written by the three
+# guard sites in ``pipeline.py``.
+_VALID_RECOVERY_PERSONAS: frozenset[str] = frozenset(
+    {"hacker", "architect", "researcher", "simplifier", "contrarian"}
+)
+_VALID_RECOVERY_GUARD_TAGS: frozenset[str] = frozenset(
+    {"round_budget", "duplicate_fingerprint", "personas_exhausted"}
+)
+
 # Top-level pipeline deadline (Q00/ouroboros#779). Default of 7200s (2h) covers
 # a typical product-bootstrap chain — interview ≤ 120s × 12 rounds + seed gen
 # 120s + review/repair ≤ 90s × 5 + run kick-off + ralph 10 generations × 5–15
@@ -1032,6 +1050,42 @@ class AutoPipelineState:
             not isinstance(self.lateral_input_hash, str) or not self.lateral_input_hash.strip()
         ):
             msg = "lateral_input_hash must be a non-empty string or null"
+            raise ValueError(msg)
+        # RFC #809 Phase 2.2b — recovery-loop field validation. These four
+        # fields are durable state; once malformed they would crash deep
+        # inside ``_run_evaluate`` (``state.evaluate_round += 1`` on a
+        # string) or ``_run_lateral`` (``ThinkingPersona(value)`` on a
+        # bogus persona). Reject at load time instead.
+        if (
+            isinstance(self.evaluate_round, bool)
+            or not isinstance(self.evaluate_round, int)
+            or self.evaluate_round < 0
+        ):
+            msg = "evaluate_round must be a non-negative integer"
+            raise ValueError(msg)
+        if not isinstance(self.failure_fingerprints, list) or any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.failure_fingerprints
+        ):
+            msg = "failure_fingerprints must be a list of non-empty strings"
+            raise ValueError(msg)
+        if not isinstance(self.personas_invoked, list) or any(
+            not isinstance(item, str) or item not in _VALID_RECOVERY_PERSONAS
+            for item in self.personas_invoked
+        ):
+            msg = (
+                "personas_invoked entries must be ThinkingPersona values "
+                f"({sorted(_VALID_RECOVERY_PERSONAS)})"
+            )
+            raise ValueError(msg)
+        if self.recovery_guard_tripped is not None and (
+            not isinstance(self.recovery_guard_tripped, str)
+            or self.recovery_guard_tripped not in _VALID_RECOVERY_GUARD_TAGS
+        ):
+            msg = (
+                "recovery_guard_tripped must be one of "
+                f"{sorted(_VALID_RECOVERY_GUARD_TAGS)} or null"
+            )
             raise ValueError(msg)
         if self.provenance is not None:
             if not isinstance(self.provenance, dict):
