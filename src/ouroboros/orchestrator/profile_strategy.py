@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ouroboros.orchestrator.phase_wrappers import build_post_block
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.workflow_state import ActivityType
 
@@ -65,24 +66,46 @@ class ProfileBackedStrategy:
     def get_system_prompt_fragment(self) -> str:
         """Compose the harness-owned system prompt fragment.
 
-        Profile axis + min_unit anchor the leaf executor to the
-        decomposition contract; the verifier focus surfaces the
-        verifier's expectation up-front so the leaf can self-correct
-        before the verifier pass.
+        Combines the profile anchor (axis, min_unit, verifier_focus)
+        with the H3 [POST] block sourced from `phase_wrappers` so the
+        evidence_schema requirements and the "no DONE in prose" rule
+        flow through `runner.build_system_prompt` unmodified. Without
+        this composition, opting into ProfileBackedStrategy would
+        bypass H2/H1 entirely.
         """
-        return (
+        header = (
             f"You are executing an acceptance criterion under the "
             f"{self.profile.profile!r} profile.\n"
             f"Decomposition axis: {self.profile.axis}.\n"
             f"Smallest acceptable unit: {self.profile.min_unit}.\n"
             f"The verifier will focus on: {self.profile.verifier_focus.strip()}"
         )
+        # The POST block carries the evidence-field names and rejection
+        # rules verbatim; the leaf executor must see them or it cannot
+        # produce a record the H2 validator will accept.
+        return f"{header}\n\n{build_post_block(self.profile)}"
 
     def get_task_prompt_suffix(self) -> str:
+        """Compose the [PRE]-style restate / precondition gate.
+
+        The Strategy boundary has no per-AC context — the AC list is
+        rendered into the task prompt by `runner.build_task_prompt`
+        immediately above this suffix. We therefore phrase the H3 [PRE]
+        gate as "for each acceptance criterion above" so the executor
+        runs the restatement + precondition pass against the AC list it
+        just received.
+        """
         return (
-            "Execute the criterion in full. When you finish, emit a "
-            "single fenced JSON evidence record per the active profile "
-            "and stop — do not declare DONE in prose."
+            "[PRE — harness-injected; restate before any action]\n"
+            "For each acceptance criterion above, restate it in one "
+            "sentence and list every precondition you are assuming "
+            "(paths, commands, external services, access tokens). Do "
+            "not begin execution if any precondition is unverified — "
+            "surface the blocker instead.\n\n"
+            "When you finish the work for an AC, emit a single fenced "
+            "JSON evidence record per the active profile and stop. Do "
+            "not declare DONE in prose — the harness adjudicates via "
+            "the verifier loop."
         )
 
     def get_activity_map(self) -> dict[str, ActivityType]:

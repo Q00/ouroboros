@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.runner import build_system_prompt, build_task_prompt
 from ouroboros.orchestrator.workflow_state import ActivityType
 
 
@@ -52,7 +54,29 @@ class TestSystemPromptFragment:
         c = ProfileBackedStrategy(load_profile("code")).get_system_prompt_fragment()
         r = ProfileBackedStrategy(load_profile("research")).get_system_prompt_fragment()
         a = ProfileBackedStrategy(load_profile("analysis")).get_system_prompt_fragment()
-        assert c != r != a
+        # Pairwise distinct — `a != b != c` only proves the adjacent pairs.
+        assert c != r
+        assert r != a
+        assert c != a
+
+    def test_fragment_carries_post_block_with_evidence_fields(
+        self, profile: ExecutionProfile
+    ) -> None:
+        # The fragment must surface every required evidence field name
+        # verbatim so the leaf can emit a record the H2 validator
+        # accepts. Without this, opting into ProfileBackedStrategy
+        # would bypass H2/H1.
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        assert "[POST" in fragment
+        for required in profile.evidence_schema.required:
+            assert required in fragment, f"{required!r} missing from system prompt"
+
+    def test_suffix_demands_restatement_and_preconditions(self, profile: ExecutionProfile) -> None:
+        suffix = ProfileBackedStrategy(profile).get_task_prompt_suffix()
+        assert "[PRE" in suffix
+        assert "restate" in suffix.lower()
+        assert "precondition" in suffix.lower()
+        assert "blocker" in suffix.lower()
 
 
 class TestTaskPromptSuffix:
@@ -93,3 +117,48 @@ class TestActivityMap:
         )
         activity_map = ProfileBackedStrategy(custom).get_activity_map()
         assert activity_map["MysteryTool"] == ActivityType.EXPLORING
+
+
+class TestRunnerPromptIntegration:
+    """Strategy must wire H3 wrappers through runner.build_*_prompt.
+
+    Without this, opting into ProfileBackedStrategy would compose a
+    prompt that bypasses H2/H1 — the verifier loop would FAIL on every
+    attempt because the leaf never sees the evidence_schema field
+    names.
+    """
+
+    def _seed(self) -> Seed:
+        return Seed(
+            goal="Ship feature",
+            constraints=("Python 3.14+",),
+            acceptance_criteria=("Add caching layer", "Cover with tests"),
+            ontology_schema=OntologySchema(
+                name="Cache",
+                description="Caching layer ontology",
+                fields=(
+                    OntologyField(name="entries", field_type="array", description="cached items"),
+                ),
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.1),
+        )
+
+    def test_system_prompt_includes_post_block_required_fields(self) -> None:
+        profile = load_profile("code")
+        strategy = ProfileBackedStrategy(profile)
+        prompt = build_system_prompt(self._seed(), strategy=strategy)
+        # H3 POST block markers must reach the actual system prompt.
+        assert "[POST" in prompt
+        for required in profile.evidence_schema.required:
+            assert required in prompt, f"{required!r} missing from build_system_prompt output"
+        assert "tests_passed == []" in prompt
+
+    def test_task_prompt_includes_pre_gate(self) -> None:
+        prompt = build_task_prompt(
+            self._seed(), strategy=ProfileBackedStrategy(load_profile("code"))
+        )
+        assert "[PRE" in prompt
+        assert "restate" in prompt.lower()
+        assert "precondition" in prompt.lower()
+        assert "Add caching layer" in prompt
+        assert "Cover with tests" in prompt
