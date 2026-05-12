@@ -46,6 +46,15 @@ class ModelTier(StrEnum):
 
 _TIER_ORDER: tuple[ModelTier, ...] = (ModelTier.HAIKU, ModelTier.SONNET, ModelTier.OPUS)
 
+# Tools the verifier route MUST drop from the executor's profile tool
+# set. The H1 contract says the verifier is read-only with respect to
+# source files, so Edit/Write/NotebookEdit are filtered. Bash is *not*
+# in this set — code profile's verifier_focus says "Run the project's
+# test command", which requires Bash to be available. Whether a Bash
+# invocation is read-only is the verifier prompt's responsibility, not
+# the router's. (Bot finding on PR #889.)
+_VERIFIER_DENIED_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "NotebookEdit", "MultiEdit"})
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -133,14 +142,22 @@ def decide_route(
     if role is DispatchRole.VERIFIER:
         executor_tier = _executor_tier(profile, fabrication_retry=fabrication_retry)
         verifier_tier = _bump_tier(executor_tier)
+        # Derive verifier tools from the profile so domain-specific
+        # verifications work — e.g. the code profile's verifier_focus
+        # says "Run the project's test command", which needs Bash.
+        # Strip only the file-mutation tools; Bash and any read-only
+        # discovery tools (Read / Glob / Grep) pass through.
+        verifier_tools = tuple(
+            t for t in profile.suggested_tools if t not in _VERIFIER_DENIED_TOOLS
+        )
         return RouteDecision(
             tier=verifier_tier,
-            # Read-only: verifier must not mutate state. Tools intentionally
-            # exclude Write/Edit/Bash; PR 9 plumbs these through the adapter.
-            tools=("Read", "Glob", "Grep"),
+            tools=verifier_tools,
             rationale=(
-                "Verifier runs one tier above the executor; read-only "
-                "toolset keeps the pass non-destructive."
+                f"Verifier runs one tier above the executor on "
+                f"{profile.profile!r} profile; profile tools minus "
+                f"{sorted(_VERIFIER_DENIED_TOOLS)} stay read-only with "
+                "respect to source files."
             ),
         )
 
