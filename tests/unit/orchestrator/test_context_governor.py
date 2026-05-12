@@ -221,6 +221,31 @@ class TestRenderedSizeContract:
         assert len(result.parent_summary) > 0
         assert len(result.render()) <= 200
 
+    def test_short_parent_does_not_starve_siblings(self) -> None:
+        # Bot finding on #890 r4: when parent_summary is non-empty but
+        # SHORTER than parent_summary_reserve, the previous code still
+        # withheld the full reserve from the sibling ceiling, leaving
+        # usable budget idle and dropping siblings that would otherwise
+        # fit. Repro from the bot:
+        #   total=120, reserve=60, ac="ac", parent="p" (1 char), 7
+        #   siblings with 5-char headlines — previous code kept only 1
+        #   sibling line and rendered 59 chars (61 idle).
+        result = compose_context(
+            ac="ac",
+            parent_summary="p",
+            siblings=[SiblingStatus(str(i), accepted=True, headline="xxxxx") for i in range(7)],
+            budget=ContextBudget(total_chars=120, parent_summary_reserve=60),
+        )
+        # Parent's content is 1 char so the floor it actually needs is
+        # tiny; siblings should be able to consume the rest.
+        assert len(result.sibling_lines) >= 4, (
+            f"only {len(result.sibling_lines)} siblings placed; the "
+            f"reserve must collapse to the parent's actual size when "
+            f"the parent is shorter than the reserve"
+        )
+        assert result.parent_summary == "p"
+        assert len(result.render()) <= 120
+
     def test_parent_actual_content_meets_reserve_floor(self) -> None:
         # Bot finding on #890 r3: the reserve was applied to the
         # sibling ceiling without accounting for the parent section

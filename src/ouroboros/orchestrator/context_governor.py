@@ -170,19 +170,21 @@ def compose_context(
     sibling_lines: list[str] = []
     sibling_overhead = len(_SIBLING_HEADER) + len(_SECTION_JOINER)
     sibling_inner = 0  # bytes inside the section (lines + newline joins).
-    # The parent-summary reserve is a floor only when there's a parent
-    # summary to place. With no parent, withholding the reserve from
-    # siblings would silently discard sibling status that fits in the
-    # total budget (bot finding on #890 r2). When a parent IS present,
-    # the reserve must also account for the parent section's own
-    # render overhead ("## Parent context\n" + "\n\n"); otherwise
-    # siblings can eat into bytes meant for the parent header, and
-    # the actual parent_summary content lands below the reserved size
-    # (bot finding on #890 r3).
     parent_overhead = len(_PARENT_HEADER) + len(_SECTION_JOINER)
+    # The parent_summary_reserve is a *floor* for the parent's content,
+    # not a hard pre-allocation. Subtract from the sibling ceiling only
+    # what the parent will actually occupy:
+    #   - no parent: subtract 0 (bot finding on r2)
+    #   - parent shorter than reserve: subtract len(parent) + overhead
+    #     so the unused reserve goes to siblings (bot finding on r3 round 2)
+    #   - parent at-or-above reserve: subtract reserve + overhead
+    #     so the floor is honored (bot finding on r2 round 2)
+    # The parent can still grow beyond its reserve later if siblings
+    # under-consume the remaining budget.
     sibling_ceiling = budget.total_chars
     if parent_stripped:
-        sibling_ceiling -= budget.parent_summary_reserve + parent_overhead
+        parent_floor = min(len(parent_stripped), budget.parent_summary_reserve)
+        sibling_ceiling -= parent_floor + parent_overhead
     for sib in siblings:
         line = sib.to_line()
         # `\n` joiner between sibling lines, only after the first.
