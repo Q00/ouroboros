@@ -44,11 +44,30 @@ from ouroboros.auto.state import (
 from ouroboros.core.seed import Seed
 from ouroboros.resilience.lateral import ThinkingPersona
 
-# RFC #809 Phase 2.2b — operator-choice cue suffixed onto every recovery-loop
-# BLOCKED message so the operator sees their next move without having to
-# read the rest of the surface. Two explicit choices, intentionally avoiding
-# any "let the system rewrite the spec" option: keep the spec contract under
-# human control.
+# RFC #809 Phase 2.2b — Stack 1 of 2 scope and invariants.
+#
+# **Scope of this module's recovery wiring.** P2.2b lands in two stacked
+# PRs. This file is Stack 1: the deterministic *guards* and *multi-persona
+# advisory* path. There is intentionally no automated Ralph re-dispatch
+# here — when EVALUATE fails, ``_run_lateral`` records the persona's
+# advisory and the session ends in ``BLOCKED``. The four guards
+# (``MAX_EVALUATE_ROUNDS``, same-fingerprint twice, per-persona-once,
+# ``state.deadline_at``) bound the surface so a future Stack 2, which
+# wires the lateral advice into a fresh Ralph job and a new EVALUATE
+# round, cannot loop unboundedly or revisit a stale persona. Without
+# Stack 2 present, ``evaluate_round`` typically increments to 1 in a
+# single session and the fingerprint guard is exercised only on
+# ``--resume`` against the same artifact; both become load-bearing once
+# Stack 2 lands. Naming this PR a "closed loop" was a documentation
+# overstatement caught in code review; the loop *closes* when Stack 2
+# ships, and Stack 1 is the bounded-advisory step that makes Stack 2
+# safe to land.
+#
+# **Operator-choice cue.** Suffixed onto every recovery-loop BLOCKED
+# message so the operator sees their next move without having to read
+# the rest of the surface. Two explicit choices, intentionally avoiding
+# any "let the system rewrite the spec" option: keep the spec contract
+# under human control.
 #
 # Earlier drafts of this cue advertised a third path ("relax AC via --resume
 # + edited seed"). That guidance was wrong: ``AutoPipeline.run()`` resumes
@@ -1879,7 +1898,21 @@ class AutoPipeline:
         cache_suffix: str,
         from_cache: bool,
     ) -> AutoPipelineResult:
-        """Build the BLOCKED summary that surfaces the persona's reframing."""
+        """Build the BLOCKED summary that surfaces the persona's reframing.
+
+        RFC #809 Phase 2.2b — Stack 1 of 2 endpoint. This method is the
+        *final* step of the advisory path: the persona's advice is
+        persisted in ledger/state and the session transitions to
+        BLOCKED. There is no automated Ralph re-dispatch in this PR; the
+        operator inspects the persona reframing and decides their next
+        move (the two-choice cue suffixed below). Stack 2 will replace
+        this terminal block with a Ralph re-dispatch that injects the
+        persona advice into a fresh evolve job and re-enters EVALUATE,
+        at which point the round/fingerprint/persona-once guards land
+        in their load-bearing role. The behavior here is deliberately
+        bounded so Stack 2 can layer on top without rewriting the
+        endpoint semantics.
+        """
         lateral_suffix = " [lateral cached]" if from_cache else ""
         persona_name = state.last_lateral_persona or "unknown"
         approach = state.last_lateral_approach_summary or ""

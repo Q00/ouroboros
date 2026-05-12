@@ -36,8 +36,14 @@ class AutoPhase(StrEnum):
     # should be built before telling AI what to build" — keeps the spec
     # owned by the human. P2.2b instead exhausts the deterministic
     # recovery budget (rounds + fingerprint + persona-once + wall-clock)
-    # and surfaces a BLOCKED with the three explicit operator choices
-    # (relax AC, re-interview, or abandon) rather than mutating the Seed.
+    # and surfaces a BLOCKED with the two operator choices that are
+    # actually functional today (re-interview, abandon) rather than
+    # mutating the Seed. An earlier draft of this comment advertised a
+    # third "relax AC" path; that was dropped because late-phase resume
+    # reconstructs the Seed from ``state.seed_artifact`` and ignores
+    # edits to the on-disk seed file — the cue in ``pipeline.py``
+    # (``_RECOVERY_BLOCKED_CHOICES``) is the source of truth and lists
+    # only the two functional paths.
     COMPLETE = "complete"
     BLOCKED = "blocked"
     FAILED = "failed"
