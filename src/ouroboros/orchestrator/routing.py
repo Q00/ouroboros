@@ -3,7 +3,7 @@
 H5 moves model and tool selection out of skills and into the harness.
 The skill never picks a model. Each dispatch has a role (decomposer /
 executor / verifier), and the harness chooses an appropriate tier and
-tool set per role + profile + AC text.
+tool set per role + profile.
 
 Tiers are intentionally abstract strings rather than concrete model
 IDs — the integration PR (PR 9) maps `ModelTier.HAIKU / SONNET / OPUS`
@@ -11,13 +11,27 @@ onto the adapter's current model knobs. Decoupling lets profile
 authors think in cost/quality bands rather than vendor SKU drift.
 
 Routing rules at this PR:
-    decomposer  → HAIKU
+    decomposer  → HAIKU, no tools
     executor    → SONNET (default) or OPUS for FABRICATION_SUSPECTED
-                  retries (the H7 ESCALATE_MODEL hook)
-    verifier    → one tier above the executor (read-only, can afford it)
+                  retries (the H7 ESCALATE_MODEL hook).
+                  Tools come from profile.suggested_tools.
+    verifier    → one tier above the executor.
+                  Tools are hard-fixed to Read / Glob / Grep — these are
+                  the only operations the H1 read-only contract can
+                  guarantee at the routing layer. The router CANNOT
+                  authorize Bash on the verifier seam: Bash can mutate
+                  the workspace and the router can't inspect command
+                  text. Code-style profiles whose verifier_focus needs
+                  to execute the project's test command must route
+                  that through a dedicated read-only test runner (a
+                  separate follow-up PR), not via this generic
+                  verifier-tool envelope.
 
 This module is wiring-only. parallel_executor still uses its current
-hardcoded adapter call until PR 9.
+hardcoded adapter call until PR 9. The docstring previously claimed
+AC-aware routing — that is intentionally deferred; `decide_route()`
+takes role + profile + retry hint, no AC, until a profile actually
+demands per-AC routing logic (bot non-blocking suggestion on r2).
 """
 
 from __future__ import annotations
@@ -46,14 +60,14 @@ class ModelTier(StrEnum):
 
 _TIER_ORDER: tuple[ModelTier, ...] = (ModelTier.HAIKU, ModelTier.SONNET, ModelTier.OPUS)
 
-# Tools the verifier route MUST drop from the executor's profile tool
-# set. The H1 contract says the verifier is read-only with respect to
-# source files, so Edit/Write/NotebookEdit are filtered. Bash is *not*
-# in this set — code profile's verifier_focus says "Run the project's
-# test command", which requires Bash to be available. Whether a Bash
-# invocation is read-only is the verifier prompt's responsibility, not
-# the router's. (Bot finding on PR #889.)
-_VERIFIER_DENIED_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "NotebookEdit", "MultiEdit"})
+# Tools available to a verifier at the routing layer. Strictly read-only
+# discovery tools — the H1 contract is that a verifier cannot mutate the
+# workspace, and the router cannot inspect Bash command text to enforce
+# that, so Bash is excluded structurally rather than delegated to prompt
+# obedience (bot finding on PR #889 r3 reversed r2's keep-Bash position).
+# Profiles whose verifier_focus needs subprocess test execution must
+# route through a dedicated read-only test runner — see module docstring.
+_VERIFIER_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
 
 
 @dataclass(frozen=True)
@@ -142,22 +156,20 @@ def decide_route(
     if role is DispatchRole.VERIFIER:
         executor_tier = _executor_tier(profile, fabrication_retry=fabrication_retry)
         verifier_tier = _bump_tier(executor_tier)
-        # Derive verifier tools from the profile so domain-specific
-        # verifications work — e.g. the code profile's verifier_focus
-        # says "Run the project's test command", which needs Bash.
-        # Strip only the file-mutation tools; Bash and any read-only
-        # discovery tools (Read / Glob / Grep) pass through.
-        verifier_tools = tuple(
-            t for t in profile.suggested_tools if t not in _VERIFIER_DENIED_TOOLS
-        )
         return RouteDecision(
             tier=verifier_tier,
-            tools=verifier_tools,
+            # Hard-fixed read-only set. NOT derived from profile.
+            # Granting Bash here would let a verifier mutate the
+            # workspace via shell commands — the router cannot enforce
+            # read-only-ness on Bash invocations, so it must not
+            # authorize Bash at this seam. Subprocess-based verifier
+            # workflows route through a separate read-only test runner.
+            tools=_VERIFIER_TOOLS,
             rationale=(
                 f"Verifier runs one tier above the executor on "
-                f"{profile.profile!r} profile; profile tools minus "
-                f"{sorted(_VERIFIER_DENIED_TOOLS)} stay read-only with "
-                "respect to source files."
+                f"{profile.profile!r} profile; toolset hard-fixed to "
+                f"{list(_VERIFIER_TOOLS)} so the H1 read-only contract "
+                "is enforced structurally, not by prompt obedience."
             ),
         )
 

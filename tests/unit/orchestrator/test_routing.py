@@ -80,34 +80,34 @@ class TestVerifierRoute:
         )
         assert route.tier == ModelTier.OPUS
 
-    def test_excludes_file_mutation_tools(self, code_profile: ExecutionProfile) -> None:
-        # H1 read-only contract is about source files. Edit/Write must
-        # be filtered out of the verifier tool set.
+    def test_read_only_tool_set_enforced_structurally(self, code_profile: ExecutionProfile) -> None:
+        # Bot finding on #889 r3: H1 read-only contract is enforced at
+        # the routing layer, not delegated to prompt obedience. The
+        # verifier tool set is HARD-FIXED to read-only discovery tools
+        # regardless of what the profile lists. Bash is excluded
+        # structurally because the router cannot inspect Bash command
+        # text to verify a command is read-only.
         route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
+        assert set(route.tools) == {"Read", "Glob", "Grep"}
+        assert "Bash" not in route.tools
         assert "Edit" not in route.tools
         assert "Write" not in route.tools
 
-    def test_keeps_bash_for_code_profile(self, code_profile: ExecutionProfile) -> None:
-        # code profile's verifier_focus says "Run the project's test
-        # command". The verifier MUST be able to invoke Bash or the
-        # routing layer chooses a tool set that cannot satisfy its own
-        # verifier contract (bot finding on #889).
-        route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
-        assert "Bash" in route.tools
-
-    def test_verifier_tools_derived_from_profile(self) -> None:
-        # Research profile has no Bash; verifier tools should reflect
-        # that even though Bash is generally permitted for verifiers.
+    def test_verifier_tools_ignore_profile_extensions(self) -> None:
+        # Even if a profile lists extra tools, the verifier seam does
+        # not grant them. Subprocess-based verifier needs (e.g. code
+        # profile's "Run the project's test command") route through a
+        # separate read-only test runner (follow-up PR), not via the
+        # verifier-tool envelope.
         from ouroboros.orchestrator.profile_loader import EvidenceSchema
 
         custom = load_profile("research").model_copy(
             update={
-                "suggested_tools": ("Read", "Glob", "Grep"),
+                "suggested_tools": ("Read", "Glob", "Grep", "Bash", "Edit"),
                 "evidence_schema": EvidenceSchema(),
             }
         )
         route = decide_route(role=DispatchRole.VERIFIER, profile=custom)
-        assert "Bash" not in route.tools
         assert set(route.tools) == {"Read", "Glob", "Grep"}
 
 
