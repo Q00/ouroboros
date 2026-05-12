@@ -44,6 +44,20 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
 DEFAULT_MAX_RETRIES: int = 2
 
+# Exception types treated as *operational* failures (transient: network
+# blip, LLM timeout, subprocess crash). Anything outside this tuple is
+# treated as a deterministic programming bug and re-raised so production
+# diagnosis is not blocked by silent STALL retries. (Bot finding on
+# PR #884 r5: AttributeError / KeyError / AssertionError must not be
+# swallowed as transient failures.)
+_OPERATIONAL_VERIFIER_ERRORS: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    ConnectionError,  # parent of BrokenPipe/ConnectionRefused/etc.
+    # OSError catches transient FS/subprocess/sockets. ConnectionError
+    # subclasses OSError, but we list it explicitly above for clarity.
+    OSError,
+)
+
 
 class VerifierContractError(ValueError):
     """Raised when a VerifierVerdict is constructed in an invalid shape.
@@ -255,13 +269,17 @@ def run_with_verifier(
                     # STALL would burn the retry budget and ship a
                     # broken verifier to production.
                     raise
-                except Exception as exc:
-                    # Verifier impls run tests / query LLMs, so transient
-                    # operational failures (timeout, network, crashed
-                    # subprocess) are part of normal production. Treat
-                    # them as a FAIL with a surfaceable reason rather
-                    # than letting them abort the AC — the retry budget
-                    # exists precisely for this.
+                except _OPERATIONAL_VERIFIER_ERRORS as exc:
+                    # Operational failures (timeout, network blip,
+                    # subprocess crash) are part of normal production
+                    # for verifier impls that run tests or query LLMs.
+                    # Treat them as a FAIL with a surfaceable reason so
+                    # the retry budget can absorb the blip.
+                    #
+                    # Programming bugs (AttributeError, KeyError, etc.)
+                    # are NOT in the catch list — they propagate so the
+                    # operator can fix the broken verifier instead of
+                    # watching it silently exhaust retries.
                     verdict = VerifierVerdict(
                         passed=False,
                         reasons=(f"verifier raised {type(exc).__name__}: {exc}",),

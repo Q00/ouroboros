@@ -232,22 +232,24 @@ class TestVerifierExceptionWrapping:
                 ac="x",
             )
 
-    def test_verifier_exhausts_budget_when_always_raises(
+    def test_verifier_exhausts_budget_on_persistent_timeouts(
         self, code_profile: ExecutionProfile
     ) -> None:
-        def always_boom(
+        # TimeoutError is an operational failure — the retry loop must
+        # absorb it as STALL across the full budget.
+        def always_times_out(
             *,
             profile: ExecutionProfile,
             ac: str,
             leaf_output: str,
             record: EvidenceRecord,
         ) -> VerifierVerdict:
-            raise RuntimeError("verifier crashed")
+            raise TimeoutError("verifier timed out")
 
         executor = ScriptedExecutor(outputs=[_code_evidence()] * 3)
         result = run_with_verifier(
             executor=executor,
-            verifier=always_boom,
+            verifier=always_times_out,
             profile=code_profile,
             ac="x",
             max_retries=2,
@@ -257,6 +259,41 @@ class TestVerifierExceptionWrapping:
         for a in result.attempts:
             assert a.verdict is not None
             assert a.verdict.failure_class == "STALL"
+
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            lambda: AttributeError("verifier impl bug"),
+            lambda: KeyError("missing_field"),
+            lambda: AssertionError("invariant failed"),
+            lambda: RuntimeError("uncaught path"),
+            lambda: TypeError("wrong arg shape"),
+        ],
+    )
+    def test_programming_bug_exceptions_propagate(
+        self, code_profile: ExecutionProfile, exc_factory
+    ) -> None:
+        # Bot finding on #884 r5: programming bugs (AttributeError,
+        # KeyError, etc.) must NOT be silently retried as STALL — the
+        # operator needs the surfaced exception to fix the broken
+        # verifier instead of watching it exhaust retries.
+        def buggy(
+            *,
+            profile: ExecutionProfile,
+            ac: str,
+            leaf_output: str,
+            record: EvidenceRecord,
+        ) -> VerifierVerdict:
+            raise exc_factory()
+
+        executor = ScriptedExecutor(outputs=[_code_evidence()])
+        with pytest.raises(type(exc_factory())):
+            run_with_verifier(
+                executor=executor,
+                verifier=buggy,
+                profile=code_profile,
+                ac="x",
+            )
 
 
 class TestHappyPath:
