@@ -1141,8 +1141,10 @@ def create_ouroboros_server(
     from ouroboros.config import (
         get_assertion_extraction_model,
         get_clarification_model,
+        get_execution_model,
         get_runtime_controls_config,
         get_semantic_model,
+        get_validation_model,
     )
     from ouroboros.evaluation import (
         EvaluationContext,
@@ -1295,9 +1297,7 @@ def create_ouroboros_server(
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
     # Use Sonnet for execution (frugal) — Opus is overkill for code generation.
-    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-    if execution_model is None and resolved_runtime_backend == "claude":
-        execution_model = "claude-sonnet-4-6"
+    execution_model = get_execution_model(llm_backend)
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
     # Stage 1 (mechanical checks: lint/build/test) can be enabled via env var.
@@ -1551,9 +1551,7 @@ def create_ouroboros_server(
 
         max_attempts = 3
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
-        validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL")
-        if validation_model is None and resolved_runtime_backend == "claude":
-            validation_model = "claude-sonnet-4-6"
+        validation_model = get_validation_model(llm_backend)
         validation_adapter = create_agent_runtime(
             backend=resolved_runtime_backend,
             model=validation_model,

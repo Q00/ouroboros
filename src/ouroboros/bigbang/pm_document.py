@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ouroboros.bigbang.pm_seed import PMSeed
+from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -34,8 +35,6 @@ log = structlog.get_logger()
 
 _DEFAULT_PM_DIR = ".ouroboros"
 _PM_FILENAME = "pm.md"
-
-_FALLBACK_MODEL = "claude-opus-4-6"
 
 _PM_GENERATION_SYSTEM_PROMPT = """\
 You are a Product Requirements Document (PM) writer. Given a full interview \
@@ -256,7 +255,7 @@ class PMDocumentGenerator:
         """Resolve implicit default model while preserving explicit caller pins."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = _FALLBACK_MODEL
+            self.model = get_clarification_model()
 
     async def generate(
         self,

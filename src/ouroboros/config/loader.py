@@ -1472,3 +1472,19 @@ def get_consensus_judge_model(backend: str | None = None) -> str:
         )
     except ConfigError:
         return _default_model_for_backend(_DEFAULT_CONSENSUS_JUDGE_MODEL, backend=backend)
+
+
+def get_execution_model(backend: str | None = None) -> str:
+    """Get execution model from environment variable or clarification model fallback."""
+    env_model = os.environ.get("OUROBOROS_EXECUTION_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return get_clarification_model(backend)
+
+
+def get_validation_model(backend: str | None = None) -> str:
+    """Get validation model from environment variable or clarification model fallback."""
+    env_model = os.environ.get("OUROBOROS_VALIDATION_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return get_clarification_model(backend)
