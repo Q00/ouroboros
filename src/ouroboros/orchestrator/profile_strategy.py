@@ -72,19 +72,24 @@ _PROFILE_ACTIVITY_OVERRIDES: dict[str, dict[str, ActivityType]] = {
 # markdown files are kept for the deprecated `CodeStrategy` etc.; this
 # table is the canonical source for the profile-backed path
 # (bot finding on #891 r4).
+#
+# Each template contains a `{tools}` placeholder that gets filled in
+# with `profile.suggested_tools` at render time, so the prompt and the
+# tool envelope cannot drift when the YAML adds or removes a tool
+# (bot finding on #891 r6).
 _PROFILE_GUIDANCE: dict[str, str] = {
     "code": (
         "## Domain guidelines (code profile)\n"
-        "- Use the available tools (Read, Edit, Bash, Glob, Grep) to "
-        "accomplish each AC.\n"
+        "- Use the available tools ({tools}) to accomplish each AC.\n"
         "- Write clean, well-tested code that follows project conventions.\n"
         "- Surface blockers clearly instead of working around unverified "
         "preconditions."
     ),
     "research": (
         "## Domain guidelines (research profile)\n"
-        "- Gather information from available sources thoroughly and "
-        "cross-reference multiple sources for accuracy.\n"
+        "- Use the available tools ({tools}) to gather information from "
+        "available sources thoroughly and cross-reference multiple "
+        "sources for accuracy.\n"
         "- Synthesize findings into clear, structured markdown documents "
         "saved under docs/ or output/.\n"
         "- Cite sources and provide references where applicable.\n"
@@ -92,8 +97,8 @@ _PROFILE_GUIDANCE: dict[str, str] = {
     ),
     "analysis": (
         "## Domain guidelines (analysis profile)\n"
-        "- Read and understand the subject matter thoroughly before "
-        "concluding.\n"
+        "- Use the available tools ({tools}) to read and understand the "
+        "subject matter thoroughly before concluding.\n"
         "- Apply structured analytical frameworks; consider multiple "
         "perspectives and explicit tradeoffs.\n"
         "- Document the analytical process and present findings with "
@@ -101,6 +106,11 @@ _PROFILE_GUIDANCE: dict[str, str] = {
         "- Save analysis outputs as .md files."
     ),
 }
+_DEFAULT_GUIDANCE_TEMPLATE: str = (
+    "## Domain guidelines\n"
+    "- Use the available tools ({tools}) to execute each AC thoroughly "
+    "and surface blockers explicitly."
+)
 
 
 @dataclass(frozen=True)
@@ -157,12 +167,15 @@ class ProfileBackedStrategy:
         # Domain guidance preserves the behavior the legacy strategies
         # carried — e.g. research's "cite sources, save as markdown",
         # analysis's "structured tradeoff", code's "clean, well-tested".
-        # Profiles without a registered guidance block fall back to a
-        # minimal generic line so the prompt still reads coherently.
-        guidance = _PROFILE_GUIDANCE.get(
-            self.profile.profile,
-            "## Domain guidelines\n- Execute each AC thoroughly and surface blockers explicitly.",
+        # Tools list is interpolated from profile.suggested_tools so
+        # the prompt and the tool envelope cannot drift when the YAML
+        # adds or removes a tool. Profiles without a registered
+        # guidance block fall back to a minimal generic template.
+        tools_csv = (
+            ", ".join(self.profile.suggested_tools) if self.profile.suggested_tools else "(none)"
         )
+        guidance_template = _PROFILE_GUIDANCE.get(self.profile.profile, _DEFAULT_GUIDANCE_TEMPLATE)
+        guidance = guidance_template.format(tools=tools_csv)
         contract = (
             "[POST — harness-injected; per-AC evidence contract]\n"
             "For each acceptance criterion you complete, emit a single "
