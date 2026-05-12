@@ -6,8 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
+from typing import TYPE_CHECKING
 
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
+
+if TYPE_CHECKING:
+    from ouroboros.auto.domain_profile import DomainProfile
 
 
 class AutoAnswerSource(StrEnum):
@@ -114,7 +118,27 @@ class AutoAnswerer:
 
     This class is deterministic and performs no unbounded repository or network
     exploration.  Later integrations may pass bounded repo facts into it.
+
+    Parameters
+    ----------
+    active_profile:
+        Optional domain profile.  When supplied, intent classification,
+        vague-term detection, and verifiable-predicate lookup are delegated
+        to the profile.  When ``None`` (the default) the existing hardcoded
+        coding-domain logic runs verbatim — this is the **safety hatch** that
+        preserves backward compatibility for callers that do not activate a
+        profile.
     """
+
+    # -- DUAL-PATH MARKER (PR-4): the safety hatch lives in __init__ ---------
+    # With ``active_profile=None`` every method below falls through to the
+    # original hardcoded coding-domain paths.  With a profile the three hooks
+    # (intent classification, vague-term check, predicate repair) delegate to
+    # the profile's callbacks.  No hardcoded path is removed.
+    # -------------------------------------------------------------------------
+
+    def __init__(self, active_profile: DomainProfile | None = None) -> None:
+        self.active_profile = active_profile
 
     def answer(
         self,
@@ -125,7 +149,38 @@ class AutoAnswerer:
         """Answer ``question`` using a conservative policy and optional bounded facts."""
         context = context or AutoAnswerContext()
         lowered = _normalize_question(question)
-        intents = _classify_question_intents(question)
+
+        # -- DUAL-PATH HOOK 1: intent classification --------------------------
+        # When a domain profile is active, consult its classifier but keep the
+        # hardcoded classifier as the safety base.  Existing answerer routing is
+        # multi-signal (for example PRODUCT_BEHAVIOR + VERIFICATION protects
+        # user-facing "verify email" feature questions), while profile
+        # classifiers currently emit one canonical label.  Union a known profile
+        # label with the hardcoded intents so profiles can add domain signal
+        # without erasing legacy multi-intent safeguards.  Unknown profile labels
+        # fall back to the hardcoded intents instead of silently routing to the
+        # generic default answer.
+        if self.active_profile is not None:
+            intents = _classify_question_intents(question)
+            try:
+                profile_label = self.active_profile.intent_classifier.classify(question)
+            except Exception as exc:
+                return self._profile_callback_blocker(question, "intent_classifier.classify", exc)
+            if profile_label is not None:
+                intents = frozenset(intents | _intents_from_profile_label(profile_label))
+            # -- DUAL-PATH HOOK 2: vague-term detection -----------------------
+            # When a profile is active, whole vague terms from its
+            # ``vague_terms`` set signal that the AC is under-specified.  Use a
+            # boundary-aware check so common terms like ``clean`` or ``easy`` do
+            # not match unrelated words such as ``cleanup`` or ``easiest`` and
+            # accidentally override the normal routing priority.
+            if _contains_profile_vague_term(lowered, self.active_profile.vague_terms):
+                intents = frozenset(intents | {QuestionIntent.VERIFICATION})
+        else:
+            # Safety hatch: original hardcoded coding-domain classification.
+            intents = _classify_question_intents(question)
+        # ---------------------------------------------------------------------
+
         blocker = _blocker_for(question)
         if blocker is not None:
             return AutoAnswer(
@@ -352,7 +407,37 @@ class AutoAnswerer:
         )
 
     def _verification_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
-        value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
+        # -- DUAL-PATH HOOK 3: verifiable-predicate repair --------------------
+        # When a profile is active, iterate its ``verifiable_predicates`` in
+        # order and use the first one whose ``matches`` returns True against the
+        # question text.  The predicate's ``repair_template`` replaces the
+        # hardcoded "exit code 0 and stdout" AC text so domain-specific
+        # verification language appears in the Seed instead of the coding
+        # default.  When no predicate matches (or no profile is active), the
+        # original hardcoded coding-domain text is used verbatim — safety hatch.
+        fallback_ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
+        fallback_value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
+        if self.active_profile is not None:
+            try:
+                matched = self.active_profile.find_verifiable_predicate(question)
+            except Exception as exc:
+                return self._profile_callback_blocker(question, "find_verifiable_predicate", exc)
+            if matched is not None:
+                try:
+                    ac_value = matched.repair_template(question)
+                except Exception as exc:
+                    return self._profile_callback_blocker(
+                        question, f"{matched.code}.repair_template", exc
+                    )
+                value = ac_value
+            else:
+                ac_value = fallback_ac_value
+                value = fallback_value
+        else:
+            # Safety hatch: original hardcoded coding-domain text.
+            ac_value = fallback_ac_value
+            value = fallback_value
+        # ---------------------------------------------------------------------
         updates = [
             (
                 "verification_plan",
@@ -369,7 +454,7 @@ class AutoAnswerer:
                 "acceptance_criteria",
                 LedgerEntry(
                     key="acceptance.observable_behavior",
-                    value="A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion.",
+                    value=ac_value,
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.82,
                     status=LedgerStatus.DEFAULTED,
@@ -378,6 +463,16 @@ class AutoAnswerer:
             ),
         ]
         return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.84, updates)
+
+    @staticmethod
+    def _profile_callback_blocker(question: str, callback: str, exc: Exception) -> AutoAnswer:
+        reason = f"domain profile callback {callback} failed: {type(exc).__name__}: {exc}"
+        return AutoAnswer(
+            text=f"Cannot safely decide automatically: {reason}",
+            source=AutoAnswerSource.BLOCKER,
+            confidence=1.0,
+            blocker=AutoBlocker(reason=reason, question=question),
+        )
 
     def _feature_acceptance_answer(self, question: str) -> AutoAnswer:
         subject = _acceptance_subject(question)
@@ -776,6 +871,23 @@ def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", " ", question.casefold()).strip()
 
 
+def _contains_profile_vague_term(lowered_question: str, vague_terms: frozenset[str]) -> bool:
+    """Return True when a profile vague term appears as a whole term.
+
+    Profile terms are authored as human words/phrases. Treat them as lexical
+    units instead of raw substrings so ``clean`` does not match ``cleanup`` and
+    ``easy`` does not match ``easiest``.
+    """
+    for term in vague_terms:
+        normalized = _normalize_question(term)
+        if not normalized:
+            continue
+        pattern = rf"(?<!\w){re.escape(normalized)}(?!\w)"
+        if re.search(pattern, lowered_question):
+            return True
+    return False
+
+
 def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
     """Classify interview text by ledger intent, not only English phrasing.
 
@@ -806,6 +918,37 @@ def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
         intents.add(QuestionIntent.PRODUCT_BEHAVIOR)
 
     return frozenset(intents)
+
+
+# -- DUAL-PATH HELPER (PR-4): map profile label → QuestionIntent set ---------
+# Profile classifiers emit canonical string labels (e.g. ``"verification"``).
+# This helper translates a single label back into a frozenset so the existing
+# intent-routing table below works without modification.  Labels that do not
+# map to a known QuestionIntent return an empty frozenset; callers union this
+# with the hardcoded classifier output so unknown profile labels keep the
+# no-profile safety behavior instead of silently forcing ``_default_answer``.
+_PROFILE_LABEL_TO_INTENT: dict[str, QuestionIntent] = {
+    "non_goals": QuestionIntent.NON_GOALS,
+    "verification": QuestionIntent.VERIFICATION,
+    "acceptance_criteria": QuestionIntent.ACCEPTANCE_CRITERIA,
+    "actor_io": QuestionIntent.ACTOR_IO,
+    "runtime_context": QuestionIntent.RUNTIME_CONTEXT,
+    "product_behavior": QuestionIntent.PRODUCT_BEHAVIOR,
+}
+
+
+def _intents_from_profile_label(label: str) -> frozenset[QuestionIntent]:
+    """Convert a single profile-classifier label to a ``frozenset[QuestionIntent]``.
+
+    Returns an empty frozenset for unknown labels.  ``AutoAnswerer.answer``
+    unions this with the hardcoded classifier output, preserving the safety
+    hatch for typos or future labels not yet known to this mapper.
+    """
+    intent = _PROFILE_LABEL_TO_INTENT.get(label)
+    return frozenset({intent}) if intent is not None else frozenset()
+
+
+# ----------------------------------------------------------------------------
 
 
 # Regex for cues composed only of plain ASCII letters (a–z), spaces, hyphens,

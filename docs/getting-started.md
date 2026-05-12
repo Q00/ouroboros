@@ -138,6 +138,13 @@ uv sync --all-extras                  # or: include all optional extras
 uv run ouroboros --version            # verify CLI
 ```
 
+Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Ouroboros still supports Python 3.12+, so if your local 3.14 interpreter is a prerelease build or hits dependency compatibility issues before the CLI starts, pin a supported stable interpreter explicitly:
+
+```bash
+uv run --python 3.12 ouroboros --version
+uv run --python 3.12 pytest tests/unit/ -q
+```
+
 > See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contributor setup (linting, testing, pre-commit hooks).
 
 ### Prerequisites
@@ -369,10 +376,12 @@ claude plugin install ouroboros@ouroboros --force
 ### Python / CLI issues
 
 ```bash
-python --version            # Must be >= 3.12
+python --version            # Must be >= 3.12 and should be a stable release
 pip install --force-reinstall ouroboros-ai
 ouroboros --version
 ```
+
+For source checkouts, `uv run ...` follows `.python-version` and may choose Python 3.14. If that local interpreter is a beta/RC build or dependency-sensitive environment, retry with an explicit supported stable interpreter, for example `uv run --python 3.12 ouroboros --version`.
 
 ### API key not found
 

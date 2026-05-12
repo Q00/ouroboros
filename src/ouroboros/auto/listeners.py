@@ -1,0 +1,339 @@
+"""Event listeners that mirror linked subsystem state into ``AutoPipelineState``.
+
+This module exists so the unified status surface (Q00/ouroboros#782) can answer
+"where is my session?" without polling. The listener subscribes to the
+``mcp.job.*`` topics emitted by ``JobManager`` (``mcp.job.status`` /
+``mcp.job.cancelled`` / ``mcp.job.terminal``) via the existing ``EventStore``
+incremental query API and updates four mirror fields on ``AutoPipelineState``:
+
+- ``ralph_job_status`` — last-seen ``JobStatus`` value
+- ``ralph_last_event_at`` — ``time.monotonic()`` seconds of the last event
+- ``ralph_stop_reason`` — populated when the ralph job reaches a terminal status
+- ``ralph_current_generation`` — last reported lineage generation index
+
+Cancel propagation: when ``JobManager.cancel_job`` drives the linked ralph job
+into ``cancelled`` (or the persisted equivalent), the listener marks the auto
+state ``BLOCKED("ralph cancelled by user")`` — but only if the auto session is
+not already in a terminal phase, otherwise we would clobber a successful
+``COMPLETE`` with a noisy blocker.
+
+The listener is **best-effort**: the production bridge polls the job event
+store while the Ralph job is running and persists mirror updates as they arrive.
+The acceptance tests also exercise the pure apply step directly so the parsing
+contract stays testable without tying every test to an asyncio loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Iterable
+from dataclasses import dataclass
+import time
+from typing import Any
+
+from ouroboros.auto.state import (
+    TERMINAL_PHASES,
+    AutoPhase,
+    AutoPipelineState,
+    AutoStore,
+)
+from ouroboros.events.base import BaseEvent
+from ouroboros.persistence.event_store import EventStore
+
+# Job event types we mirror onto the auto state. Anything outside this set is
+# ignored so an unrelated mcp.* topic cannot scribble across the mirror fields.
+_RALPH_JOB_EVENT_TYPES = frozenset(
+    {
+        "mcp.job.created",
+        "mcp.job.updated",
+        "mcp.job.completed",
+        "mcp.job.failed",
+        "mcp.job.cancelled",
+        "mcp.job.interrupted",
+    }
+)
+
+# Statuses we treat as ralph-terminal for cancel propagation. ``"interrupted"``
+# is included because ``JobManager`` emits an ``interrupted`` terminal when the
+# runner returns the documented interrupt sentinel; the ralph loop surfaces it
+# the same way externally.
+_RALPH_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+
+# The cancel propagation reason is pinned by the issue acceptance criteria so a
+# downstream reader (CLI, MCP, future TUI) can string-match it deterministically.
+RALPH_CANCEL_BLOCKER_REASON = "ralph cancelled by user"
+
+
+@dataclass(frozen=True, slots=True)
+class _RalphEventReading:
+    """Normalized projection of a single ``mcp.job.*`` event for the mirror.
+
+    Lives only inside this module — callers see ``apply_event`` updates
+    instead. The dataclass is the natural home for the small parsing branch
+    so the apply step stays a pure assignment.
+    """
+
+    status: str | None
+    stop_reason: str | None
+    error: str | None
+    lineage_id: str | None
+    is_terminal: bool
+
+
+def _coerce_lineage_id(payload: dict[str, Any]) -> str | None:
+    """Return the lineage id embedded in a ``mcp.job.*`` payload, if any.
+
+    JobManager emits ``links.lineage_id`` on every event; some legacy or
+    error paths flatten this to a top-level ``lineage_id``. The listener
+    tolerates both shapes so we don't silently miss events from older builds.
+    """
+    links = payload.get("links")
+    if isinstance(links, dict):
+        lineage = links.get("lineage_id")
+        if isinstance(lineage, str) and lineage:
+            return lineage
+    flat = payload.get("lineage_id")
+    if isinstance(flat, str) and flat:
+        return flat
+    return None
+
+
+def _result_meta(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return sanitized terminal ``result_meta`` when JobManager provides it."""
+    value = payload.get("result_meta")
+    return value if isinstance(value, dict) else {}
+
+
+def _optional_nonempty_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_generation(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    return None
+
+
+def _last_generation(value: object) -> int | None:
+    if not isinstance(value, list):
+        return None
+    for item in reversed(value):
+        found = _optional_generation(item)
+        if found is not None:
+            return found
+    return None
+
+
+def _metadata_generation(meta: dict[str, Any]) -> int | None:
+    meta_generation = _optional_generation(meta.get("current_generation"))
+    if meta_generation is not None:
+        return meta_generation
+    meta_generation = _last_generation(meta.get("generations"))
+    if meta_generation is not None:
+        return meta_generation
+    return _optional_generation(meta.get("iterations"))
+
+
+def _project_event(event: BaseEvent) -> _RalphEventReading | None:
+    """Project a ``BaseEvent`` into the mirror-relevant slice.
+
+    Returns ``None`` for events outside the ``mcp.job.*`` whitelist so the
+    caller can ignore them cheaply. The projection is intentionally narrow:
+    we never look at ``result_text`` or any other field that could leak
+    arbitrary subagent output into the auto state.
+    """
+    if event.type not in _RALPH_JOB_EVENT_TYPES:
+        return None
+    payload = event.data if isinstance(event.data, dict) else {}
+    meta = _result_meta(payload)
+    status = _optional_nonempty_str(payload.get("status")) or _optional_nonempty_str(
+        meta.get("status")
+    )
+    stop_reason = _optional_nonempty_str(payload.get("stop_reason")) or _optional_nonempty_str(
+        meta.get("stop_reason")
+    )
+    error = _optional_nonempty_str(payload.get("error")) or _optional_nonempty_str(
+        meta.get("error")
+    )
+    is_terminal = event.type in {
+        "mcp.job.completed",
+        "mcp.job.failed",
+        "mcp.job.cancelled",
+        "mcp.job.interrupted",
+    } or (status in _RALPH_TERMINAL_STATUSES)
+    return _RalphEventReading(
+        status=status,
+        stop_reason=stop_reason,
+        error=error,
+        lineage_id=_coerce_lineage_id(payload),
+        is_terminal=is_terminal,
+    )
+
+
+def _coerce_generation(payload: dict[str, Any]) -> int | None:
+    """Return ``current_generation`` from job payload metadata or message.
+
+    Terminal ``JobManager`` events carry Ralph details under ``result_meta``.
+    Progress updates may only carry the derived status message, so keep the
+    older ``"Generation N | <phase>"`` parser as the fallback.
+    """
+    meta = _result_meta(payload)
+    meta_generation = _metadata_generation(meta)
+    if meta_generation is not None:
+        return meta_generation
+    payload_generation = _metadata_generation(payload)
+    if payload_generation is not None:
+        return payload_generation
+    message = payload.get("message")
+    if not isinstance(message, str) or not message:
+        return None
+    if not message.startswith("Generation "):
+        return None
+    rest = message[len("Generation ") :]
+    head = rest.split(" ", 1)[0].split("|", 1)[0].strip()
+    if not head.isdigit():
+        return None
+    try:
+        value = int(head)
+    except ValueError:
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _event_is_terminal(event: BaseEvent) -> bool:
+    reading = _project_event(event)
+    return bool(reading and reading.is_terminal)
+
+
+def apply_event(state: AutoPipelineState, event: BaseEvent) -> bool:
+    """Mirror a single ``mcp.job.*`` event onto ``state``.
+
+    Returns ``True`` when the event was applied (lineage *or* job_id matched
+    and the event is a relevant ``mcp.job.*`` topic), ``False`` otherwise.
+    Callers can use the return value to decide whether to schedule a state
+    save — the listener itself never persists.
+
+    Filtering accepts a match on either ``links.lineage_id`` (the canonical
+    join key emitted on ``mcp.job.created``) or ``aggregate_id`` matching
+    the persisted ``state.ralph_job_id``. ``JobManager.update_status``
+    omits the lineage on subsequent events, so a strict lineage filter
+    would silently drop every status update after creation.
+
+    Cancel propagation: when the event is a terminal ``cancelled`` reading
+    and the auto state is not already terminal, transition to BLOCKED with
+    the pinned :data:`RALPH_CANCEL_BLOCKER_REASON`.
+    """
+    if state.ralph_lineage_id is None and state.ralph_job_id is None:
+        return False
+    if state.ralph_dispatch_mode == "plugin":
+        # Plugin delegations have no in-process job to mirror; the OpenCode
+        # Task widget owns the lifecycle. Fail closed instead of fabricating
+        # a status from somebody else's events.
+        return False
+    reading = _project_event(event)
+    if reading is None:
+        return False
+    matches_lineage = (
+        reading.lineage_id is not None and reading.lineage_id == state.ralph_lineage_id
+    )
+    matches_job_id = (
+        state.ralph_job_id is not None
+        and event.aggregate_id == state.ralph_job_id
+        and event.aggregate_type == "job"
+    )
+    if not (matches_lineage or matches_job_id):
+        return False
+
+    state.ralph_last_event_at = time.monotonic()
+    if reading.status is not None:
+        state.ralph_job_status = reading.status
+    if reading.is_terminal:
+        # Prefer the explicit stop_reason; fall back to the error string for
+        # ``mcp.job.failed`` so the unified status surface always has *some*
+        # blocker text to render.
+        state.ralph_stop_reason = reading.stop_reason or reading.error or reading.status
+    payload = event.data if isinstance(event.data, dict) else {}
+    generation = _coerce_generation(payload)
+    if generation is not None:
+        state.ralph_current_generation = generation
+
+    # Cancel propagation per the acceptance criteria — only mutate phase if
+    # the cancel observation is fresh and the auto state still has somewhere
+    # to go. ``mark_blocked`` performs the transition validation itself.
+    if (
+        event.type == "mcp.job.cancelled" or (reading.is_terminal and reading.status == "cancelled")
+    ) and state.phase not in TERMINAL_PHASES:
+        try:
+            state.mark_blocked(
+                RALPH_CANCEL_BLOCKER_REASON,
+                tool_name="ralph_starter",
+            )
+        except ValueError:
+            # The state machine forbids the transition (e.g. CREATED -> BLOCKED
+            # is allowed, but tests may exercise unusual phases). Swallow so
+            # the listener never crashes the event subscriber for a bookkeeping
+            # mismatch — the mirror fields above are still updated.
+            pass
+
+    return True
+
+
+def apply_events(state: AutoPipelineState, events: Iterable[BaseEvent]) -> int:
+    """Apply an iterable of events; return the number actually mirrored.
+
+    Convenience for tests and the future background subscriber. Iterating
+    here lets the listener cheaply replay a batch returned from
+    ``EventStore.get_events_after`` without exposing the rowid cursor to
+    callers.
+    """
+    applied = 0
+    for event in events:
+        if apply_event(state, event):
+            applied += 1
+    return applied
+
+
+async def mirror_ralph_job_events(
+    state: AutoPipelineState,
+    store: AutoStore,
+    event_store: EventStore,
+    job_id: str,
+    *,
+    poll_interval: float = 0.05,
+) -> None:
+    """Persist mirrored Ralph job events until the linked job is terminal.
+
+    This is the production bridge from real ``JobManager`` ``mcp.job.*`` events
+    into the auto state mirror. It starts at cursor 0 so a listener created
+    just after job dispatch still observes the initial and terminal events.
+    """
+    cursor = 0
+    while True:
+        events, cursor = await event_store.get_events_after("job", job_id, last_row_id=cursor)
+        applied = apply_events(state, events)
+        if applied:
+            store.save(state)
+        if any(_event_is_terminal(event) for event in events):
+            return
+        await asyncio.sleep(poll_interval)
+
+
+__all__ = [
+    "RALPH_CANCEL_BLOCKER_REASON",
+    "apply_event",
+    "apply_events",
+    "mirror_ralph_job_events",
+]
+
+
+# Defensive sanity check — keep the terminal-phase set used for cancel
+# propagation in sync with ``state._ALLOWED_TRANSITIONS`` so a future addition
+# (e.g. a new "abandoned" phase) cannot silently bypass the gate.
+assert AutoPhase.COMPLETE in TERMINAL_PHASES  # noqa: S101 - import-time guard

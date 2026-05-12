@@ -122,7 +122,72 @@ WATCHDOG_TIMEOUT_KINDS: frozenset[str] = frozenset(
     }
 )
 
-# Watchdog timeout kinds are a classification alphabet only. Runtime-timeout
-# directives for watchdog failures must follow the same StepAction.FAILED
-# retry/resilience-budget mapping used by the evolution loop; timeout_kind is
-# audit metadata, not directive policy.
+# Watchdog-timeout → directive lookup. The mapping is conservative by
+# design (see #578 maintainer comment):
+#
+# - ``safety_timeout`` is the hard absolute upper bound. Once exceeded
+#   the runtime CANNOT continue regardless of whether work was
+#   happening; the only safe directive is the terminal ``CANCEL``.
+# - ``idle_timeout`` means the EventStore observed zero activity for
+#   the threshold window. With no live signal, neither ``RETRY``
+#   (re-run the same hung unit) nor ``UNSTUCK`` (lateral persona —
+#   itself depends on receiving activity) can recover the lineage.
+#   ``CANCEL`` is the defensive default; an operator can re-issue a
+#   fresh attempt out-of-band if desired.
+# - ``no_material_progress_timeout`` is the canonical "stuck doing
+#   busywork" signal: events keep arriving but no material progress
+#   accrues. That is exactly the precondition ``UNSTUCK`` exists for
+#   (invoke a lateral persona to change approach), so we route the
+#   directive accordingly.
+#
+# WAIT is intentionally absent: a watchdog firing means the runtime
+# already waited past its budget. Returning WAIT would ask the runtime
+# to wait longer, which is the failure mode the watchdog exists to
+# prevent. RETRY is also absent — the watchdog acts at the
+# *generation* boundary, not the *step* boundary; retry budgeting
+# lives one layer down (``step_action_to_directive``).
+_WATCHDOG_TIMEOUT_DIRECTIVES: dict[str, Directive] = {
+    "safety_timeout": Directive.CANCEL,
+    "idle_timeout": Directive.CANCEL,
+    "no_material_progress_timeout": Directive.UNSTUCK,
+}
+
+
+def watchdog_timeout_to_directive(timeout_kind: str) -> Directive | None:
+    """Translate a watchdog ``timeout_kind`` into a control ``Directive``.
+
+    Issue #578 — Directive mapping for the RuntimeControls watchdog.
+    Mirrors :func:`step_action_to_directive`: the loop already maps
+    ``StepAction`` outcomes onto the shared ``Directive`` vocabulary,
+    and the watchdog needs the same translation so its timeout
+    decisions land on the control plane alongside step-level
+    directives instead of as opaque local errors.
+
+    Args:
+        timeout_kind: The ``timeout_kind`` field carried on
+            :class:`GenerationWatchdogTimeout` and on the
+            ``lineage.generation.watchdog_decision`` event payload.
+            Canonical values come from
+            :data:`WATCHDOG_TIMEOUT_KINDS`.
+
+    Returns:
+        The :class:`Directive` to emit, or ``None`` when
+        ``timeout_kind`` is unrecognized. Forward-compatible: a future
+        watchdog threshold name that lands before this mapping is
+        updated will silently be treated as "do not emit a directive",
+        matching the no-op behaviour of
+        :func:`step_action_to_directive` for unknown
+        ``StepAction`` values.
+
+    Mapping table:
+
+    ====================================  =========================
+    ``timeout_kind``                      ``Directive``
+    ====================================  =========================
+    ``safety_timeout``                    ``CANCEL``
+    ``idle_timeout``                      ``CANCEL``
+    ``no_material_progress_timeout``      ``UNSTUCK``
+    *unknown*                             ``None`` (no emission)
+    ====================================  =========================
+    """
+    return _WATCHDOG_TIMEOUT_DIRECTIVES.get(timeout_kind)

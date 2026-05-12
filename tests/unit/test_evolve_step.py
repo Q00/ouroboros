@@ -176,6 +176,29 @@ def make_loop(
     return loop
 
 
+def make_watchdog_timeout(
+    timeout_kind: str,
+    lineage_id: str,
+    generation_number: int = 1,
+) -> GenerationWatchdogTimeout:
+    """Create a watchdog timeout with the fields emitted by the real watchdog."""
+    return GenerationWatchdogTimeout(
+        timeout_kind=timeout_kind,
+        reason=f"synthetic {timeout_kind}",
+        details={
+            "timeout_kind": timeout_kind,
+            "lineage_id": lineage_id,
+            "generation_number": generation_number,
+            "execution_id": f"evolve:{lineage_id}:generation:{generation_number}",
+            "elapsed_seconds": 10.0,
+            "idle_seconds": 7.0,
+            "no_material_progress_seconds": 5.0,
+            "activity_event_count": 2,
+            "material_event_count": 0,
+        },
+    )
+
+
 async def seed_events_for_gen1(
     event_store: EventStore,
     lineage_id: str,
@@ -873,6 +896,94 @@ class TestEvolveStepErrors:
 
         events = await store.replay_lineage("lin_watchdog_no_metadata")
         assert [event for event in events if event.type == "control.directive.emitted"] == []
+
+
+class TestWatchdogDirectiveEmission:
+    """Watchdog timeouts must land on the control-plane directive stream."""
+
+    @pytest.mark.asyncio
+    async def test_run_watchdog_no_material_progress_emits_unstuck_directive(self) -> None:
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_run_watchdog")
+        timeout = make_watchdog_timeout(
+            "no_material_progress_timeout",
+            "lin_run_watchdog",
+        )
+        loop = EvolutionaryLoop(event_store=store)
+        loop._run_generation_with_watchdog = AsyncMock(return_value=Result.err(timeout))
+
+        result = await loop.run(seed, lineage_id="lin_run_watchdog")
+
+        assert result.is_err
+        events = await store.replay_lineage("lin_run_watchdog")
+        directives = [event for event in events if event.type == "control.directive.emitted"]
+        assert len(directives) == 1
+        directive = directives[0]
+        assert directive.data["directive"] == Directive.UNSTUCK.value
+        assert directive.data["is_terminal"] is False
+        assert directive.data["emitted_by"] == "evolver.watchdog"
+        assert directive.data["reason"] == timeout.message
+        assert directive.data["execution_id"] == "evolve:lin_run_watchdog:generation:1"
+        assert directive.data["extra"]["timeout_kind"] == "no_material_progress_timeout"
+        assert directive.data["extra"]["is_terminal"] is False
+        assert directive.data["extra"]["step_action"] == StepAction.STAGNATED.value
+        assert directive.data["extra"]["watchdog_details"]["timeout_kind"] == (
+            "no_material_progress_timeout"
+        )
+
+    @pytest.mark.asyncio
+    async def test_evolve_step_watchdog_no_material_progress_returns_stagnated(self) -> None:
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_step_no_material")
+        timeout = make_watchdog_timeout(
+            "no_material_progress_timeout",
+            "lin_step_no_material",
+        )
+        loop = EvolutionaryLoop(event_store=store)
+        loop._run_generation_with_watchdog = AsyncMock(return_value=Result.err(timeout))
+
+        result = await loop.evolve_step("lin_step_no_material", initial_seed=seed)
+
+        assert result.is_ok
+        assert result.value.action is StepAction.STAGNATED
+        events = await store.replay_lineage("lin_step_no_material")
+        directives = [event for event in events if event.type == "control.directive.emitted"]
+        assert len(directives) == 1
+        directive = directives[0]
+        assert directive.data["directive"] == Directive.UNSTUCK.value
+        assert directive.data["is_terminal"] is False
+        assert directive.data["extra"]["timeout_kind"] == "no_material_progress_timeout"
+        assert directive.data["extra"]["step_action"] == StepAction.STAGNATED.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("timeout_kind", ["safety_timeout", "idle_timeout"])
+    async def test_evolve_step_watchdog_terminal_timeouts_emit_cancel_directive(
+        self,
+        timeout_kind: str,
+    ) -> None:
+        store = await create_event_store()
+        seed = make_seed(seed_id=f"seed_{timeout_kind}")
+        timeout = make_watchdog_timeout(timeout_kind, "lin_step_watchdog")
+        loop = EvolutionaryLoop(event_store=store)
+        loop._run_generation_with_watchdog = AsyncMock(return_value=Result.err(timeout))
+
+        result = await loop.evolve_step("lin_step_watchdog", initial_seed=seed)
+
+        assert result.is_ok
+        assert result.value.action is StepAction.EXHAUSTED
+        events = await store.replay_lineage("lin_step_watchdog")
+        directives = [event for event in events if event.type == "control.directive.emitted"]
+        assert len(directives) == 1
+        directive = directives[0]
+        assert directive.data["directive"] == Directive.CANCEL.value
+        assert directive.data["is_terminal"] is True
+        assert directive.data["emitted_by"] == "evolver.watchdog"
+        assert directive.data["reason"] == timeout.message
+        assert directive.data["execution_id"] == "evolve:lin_step_watchdog:generation:1"
+        assert directive.data["extra"]["timeout_kind"] == timeout_kind
+        assert directive.data["extra"]["is_terminal"] is True
+        assert directive.data["extra"]["step_action"] == StepAction.EXHAUSTED.value
+        assert directive.data["extra"]["watchdog_details"]["timeout_kind"] == timeout_kind
 
 
 class TestRunEmitsSeedJson:
