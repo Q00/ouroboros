@@ -1157,23 +1157,24 @@ async def test_recovery_round_budget_blocks_after_max(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_recovery_same_fingerprint_twice_blocks(tmp_path) -> None:
-    """Two consecutive EVALUATE rounds with the same QA-fail fingerprint
-    means lateral advice did not move the needle on the failure surface.
-    The pipeline blocks rather than spending another round."""
+async def test_recovery_same_fingerprint_with_stagnant_score_blocks(tmp_path) -> None:
+    """RFC #809 Phase 2.2b — when two consecutive EVALUATE rounds produce
+    the same textual fingerprint AND the numeric score does not advance,
+    the recovery loop has demonstrably stalled and the guard fires."""
     state = _state_at_run_phase(tmp_path)
     # Pre-seed a matching fingerprint as if a previous round had already
-    # recorded it. The next failing evaluator call computes the same
-    # fingerprint and trips the guard.
+    # recorded it, and pin the prior score so the guard's "no score
+    # progress" branch is reachable.
     fingerprint_input = "identical fail::"
     import hashlib
 
     pre_seeded = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
     state.failure_fingerprints = [pre_seeded]
+    state.last_qa_score = 0.30  # prior round's score
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
         return EvaluateResult(
-            passed=False, score=0.3, verdict="fail", differences=("identical fail",)
+            passed=False, score=0.30, verdict="fail", differences=("identical fail",)
         )
 
     pipeline = AutoPipeline(
@@ -1190,9 +1191,60 @@ async def test_recovery_same_fingerprint_twice_blocks(tmp_path) -> None:
 
     assert result.status == "blocked"
     assert "fingerprint" in (state.last_error or "").lower()
+    assert "no score progress" in (state.last_error or "").lower()
     assert "re-interview" in (state.last_error or "")
     # The pre-seeded fingerprint is still there; we did not double-record.
     assert state.failure_fingerprints == [pre_seeded]
+
+
+@pytest.mark.asyncio
+async def test_same_fingerprint_with_score_progress_does_not_block(tmp_path) -> None:
+    """RFC #809 Phase 2.2b (bot review #8 fix) — when two consecutive
+    EVALUATE rounds produce the same textual fingerprint but the numeric
+    score advances, the loop is genuinely converging and the guard must
+    NOT fire. A 0.30 → 0.79 jump with identical wording is exactly the
+    case that the textual-only guard would have wrongly blocked."""
+    state = _state_at_run_phase(tmp_path)
+    fingerprint_input = "identical fail::"
+    import hashlib
+
+    pre_seeded = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
+    state.failure_fingerprints = [pre_seeded]
+    state.last_qa_score = 0.30  # prior round's score
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        # Same textual feedback, but score materially improved.
+        return EvaluateResult(
+            passed=False, score=0.79, verdict="fail", differences=("identical fail",)
+        )
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001
+        return LateralResult(persona="hacker", approach_summary="X", text="Y")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(result_text="artifact"),
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    await pipeline.run(state)
+
+    # Guard did NOT trip. Either the session ends in BLOCKED via lateral
+    # (advisory layer in Stack 1 always ends BLOCKED) or COMPLETE later;
+    # what this test pins is the absence of the fingerprint guard's
+    # ``recovery_guard_tripped`` tag and the absence of the "no score
+    # progress" cue in the blocker text.
+    assert state.recovery_guard_tripped != "duplicate_fingerprint"
+    assert "no score progress" not in (state.last_error or "").lower()
+    # The new fingerprint was appended (genuine progress, recorded as a
+    # second observation of this textual shape).
+    assert state.failure_fingerprints[-1] == pre_seeded
+    assert len(state.failure_fingerprints) == 2
 
 
 @pytest.mark.asyncio
@@ -1473,6 +1525,10 @@ async def test_fingerprint_guard_sets_sticky_flag(tmp_path) -> None:
 
     fp = hashlib.sha256(b"frozen fail::").hexdigest()[:16]
     state.failure_fingerprints = [fp]
+    # Prior round's score; the new evaluator below returns the same
+    # value so the score-progress branch of the guard agrees "no
+    # progress" and the sticky tag fires.
+    state.last_qa_score = 0.3
 
     async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
         return EvaluateResult(

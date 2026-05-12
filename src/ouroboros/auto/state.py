@@ -89,9 +89,11 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
 # the SeedRepairer convention re-applied to the EVALUATE ⇄ UNSTUCK_LATERAL
 # retry cycle. Past three rounds the failure mode is structural rather
 # than a transient grading miss; the pipeline blocks for human review
-# (with the three operator choices: relax AC, re-interview, or abandon)
-# instead of burning more LLM budget or — worse — silently rewriting the
-# Seed (see the SEED_REGENERATE deferral comment on ``AutoPhase``).
+# (with the two functional operator choices documented at
+# ``_RECOVERY_BLOCKED_CHOICES`` in ``pipeline.py``: re-interview or
+# abandon) instead of burning more LLM budget or — worse — silently
+# rewriting the Seed (see the SEED_REGENERATE deferral comment on
+# ``AutoPhase``).
 MAX_EVALUATE_ROUNDS: int = 3
 
 # RFC #809 Phase 2.2b — closed allowlists for the durable recovery-loop

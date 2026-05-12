@@ -1417,6 +1417,16 @@ class AutoPipeline:
         """
         assert self.evaluator is not None  # noqa: S101 — guarded by caller
 
+        # Capture the prior round's score BEFORE any subsequent step
+        # mutates ``state.last_qa_score`` — specifically the cache
+        # invalidation below (``state.last_qa_score = None`` when the
+        # artifact hash changes). The duplicate-fingerprint guard later
+        # in this method needs the genuine previous score to decide
+        # whether "same wording" was accompanied by score progress
+        # (bot review #8 fix). First-ever round has ``None`` here,
+        # which the guard treats as "cannot judge progress" and skips.
+        previous_qa_score = state.last_qa_score
+
         # Resolve the artifact:
         # 1. Fresh call from the Ralph terminal path → use ``ralph_result_text``
         #    (``is not None`` so an empty-but-valid artifact still grades)
@@ -1647,21 +1657,39 @@ class AutoPipeline:
         state.last_qa_suggestions = list(eval_result.suggestions)
         state.evaluate_artifact_hash = artifact_hash
 
-        # RFC #809 Phase 2.2b — same-fingerprint-twice guard. When two
-        # consecutive EVALUATE rounds produce the same failure shape, the
-        # recovery loop is not making material progress on the AC surface
-        # (lateral advice did not move the needle on the run output that
-        # gets graded). Block rather than spend another round; the
-        # operator chooses how to break the symmetry.
+        # RFC #809 Phase 2.2b — progress-sensitive duplicate-fingerprint
+        # guard. When two consecutive EVALUATE rounds produce the same
+        # textual failure shape, that is *evidence* of stagnation but
+        # not proof: the QA judge can return identical
+        # differences/suggestions wording on two artifacts whose
+        # numeric score materially improved (e.g. 0.30 → 0.79 while
+        # still below pass threshold). The guard therefore checks
+        # BOTH the textual fingerprint AND whether the numeric score
+        # advanced; the loop only blocks when both signals agree the
+        # session is not making progress.
         if not bool(eval_result.passed):
             fingerprint_input = (
                 "|".join(eval_result.differences) + "::" + "|".join(eval_result.suggestions)
             )
             failure_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
-            if state.failure_fingerprints and state.failure_fingerprints[-1] == failure_fingerprint:
+            same_text = bool(
+                state.failure_fingerprints
+                and state.failure_fingerprints[-1] == failure_fingerprint
+            )
+            # ``previous_qa_score`` is the score from the PRIOR round
+            # captured before this round overwrote ``state.last_qa_score``.
+            # First-ever round has ``previous_qa_score is None`` and
+            # cannot trip the guard.
+            score_did_not_advance = (
+                previous_qa_score is not None
+                and float(eval_result.score) <= float(previous_qa_score)
+            )
+            if same_text and score_did_not_advance:
                 state.mark_blocked(
                     f"recovery loop: same QA-fail fingerprint twice "
-                    f"({failure_fingerprint}); {_RECOVERY_BLOCKED_CHOICES}",
+                    f"({failure_fingerprint}) with no score progress "
+                    f"({previous_qa_score:.2f} → {eval_result.score:.2f}); "
+                    f"{_RECOVERY_BLOCKED_CHOICES}",
                     tool_name="evaluator",
                 )
                 state.recovery_guard_tripped = "duplicate_fingerprint"
@@ -2015,8 +2043,9 @@ class AutoPipeline:
             summary_parts.append(f"suggestions: {sug_preview}")
         # RFC #809 Phase 2.2b — surface the operator-choice cue alongside
         # the persona's advisory so a session that BLOCKED here points the
-        # operator at the next move (relax AC / re-interview / abandon)
-        # rather than leaving them parsing the QA differences in isolation.
+        # operator at the next move (re-interview / abandon, as advertised
+        # by ``_RECOVERY_BLOCKED_CHOICES``) rather than leaving them
+        # parsing the QA differences in isolation.
         summary_parts.append(_RECOVERY_BLOCKED_CHOICES)
         state.mark_blocked("; ".join(summary_parts), tool_name="lateral_thinker")
         self._save(state)
