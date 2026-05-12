@@ -38,13 +38,24 @@ class TestPreBlock:
         block = build_pre_block(code_profile, "x")
         assert "blocker" in block.lower()
 
-    def test_strips_ac_whitespace(self, code_profile: ExecutionProfile) -> None:
-        block = build_pre_block(code_profile, "   spaced AC\n\n")
-        # Leading triple-space and trailing double-newline came from the
-        # caller; the wrapper must strip them so the AC text sits flush
-        # against the bullet indent.
-        assert "   spaced AC" not in block
-        assert "  spaced AC\n\nBefore" in block
+    def test_ac_passes_through_verbatim(self, code_profile: ExecutionProfile) -> None:
+        # Bot finding on #886 r3: ACs are free-form text and may
+        # carry intentional leading indentation (indented code blocks,
+        # nested bullets, YAML snippets). Stripping corrupts those
+        # before they reach the leaf executor.
+        ac = "   indented code:\n     pass\n"
+        block = build_pre_block(code_profile, ac)
+        # Every line is indented two more spaces; original indentation
+        # survives intact inside the AC body.
+        assert "     indented code:" in block  # 2 + 3 = 5 spaces
+        assert "       pass" in block  # 2 + 5 = 7 spaces
+
+    def test_trailing_whitespace_preserved(self, code_profile: ExecutionProfile) -> None:
+        # Trailing whitespace can be load-bearing (e.g. markdown line
+        # breaks via two trailing spaces). The wrapper must not eat it.
+        ac = "ac body  "  # two trailing spaces
+        block = build_pre_block(code_profile, ac)
+        assert "  ac body  \n" in block
 
     def test_multiline_ac_every_line_indented(self, code_profile: ExecutionProfile) -> None:
         # Bot finding on #886 r2: subsequent lines of a multiline AC

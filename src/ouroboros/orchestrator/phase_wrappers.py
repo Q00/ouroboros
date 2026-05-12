@@ -74,11 +74,17 @@ def build_pre_block(profile: ExecutionProfile, ac: str) -> str:
     assumed preconditions before touching any tool. This is the verifier
     hook for SCOPE_CREEP — if the restatement drifts from the AC, the
     verifier catches it on the first read.
+
+    The AC is passed through verbatim (no .strip()): seed ACs are free-
+    form text and may legitimately carry leading indentation (indented
+    code blocks, nested bullets, YAML snippets) or trailing whitespace.
+    Stripping would corrupt formatting-sensitive ACs before they reach
+    the leaf executor (bot finding on #886 r3).
     """
     return (
         f"{_DEFAULT_PRE_HEADER}\n"
         f"Active profile: {profile.profile!r} (axis: {profile.axis}).\n"
-        f"Acceptance criterion to satisfy:\n{_indent_ac(ac.strip())}\n\n"
+        f"Acceptance criterion to satisfy:\n{_indent_ac(ac)}\n\n"
         "Before touching any tool, restate this AC in one sentence and "
         "list every precondition you are assuming (paths, commands, "
         "external services). Do not begin execution if any precondition "
