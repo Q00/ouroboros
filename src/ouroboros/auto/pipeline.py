@@ -1833,28 +1833,31 @@ class AutoPipeline:
         )
         input_hash = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
 
-        cache_hit = (
-            state.lateral_input_hash == input_hash
-            and state.last_lateral_text is not None
-            and state.last_lateral_persona == persona.value
-        )
-        if cache_hit:
-            return self._finalize_lateral(
-                state,
-                ledger,
-                review=review,
-                run_subagent=run_subagent,
-                qa_score=qa_score,
-                qa_verdict=qa_verdict,
-                qa_differences=qa_differences,
-                qa_suggestions=qa_suggestions,
-                cache_suffix=cache_suffix,
-                from_cache=True,
-            )
-
-        # Persist hash + persona BEFORE the call so a timeout/error path
-        # leaves a recoverable trail. The actual persona text is filled in
-        # after the call returns.
+        # RFC #809 Phase 2.2b — the P2.2 lateral cache short-circuit
+        # (input_hash match → return cached advisory) was removed here as
+        # dead code in the multi-persona world. Two factors make the
+        # short-circuit unreachable on a real resume:
+        #
+        # 1. ``state.personas_invoked`` is appended *before* the next
+        #    resume can reach this point, so ``select_persona_for_qa_failure``
+        #    deterministically picks a *different* persona than the one
+        #    whose advice was cached. The cache key includes
+        #    ``persona.value``, so a different persona always produces a
+        #    different ``input_hash`` and the cache misses.
+        # 2. The sticky ``recovery_guard_tripped`` short-circuit at the
+        #    top of this method already handles the "session was
+        #    declared exhausted, do not spend another slot" case before
+        #    cache lookup. Combined with (1) the cache path was
+        #    architectural dead weight that confused both reviewers and
+        #    operators (it implied "--resume replays the same advice"
+        #    which is the opposite of P2.2b's intent).
+        #
+        # ``input_hash`` and the persisted ``last_lateral_*`` fields
+        # remain wired so a timeout / error mid-call still leaves a
+        # recoverable trail of *which* persona+QA-shape we were
+        # processing (used by the final BLOCKED summary and by Stack 2's
+        # future re-dispatch logging), even though that trail is no
+        # longer consulted for a cache hit on the happy path.
         state.lateral_input_hash = input_hash
         state.last_lateral_persona = persona.value
         state.last_lateral_approach_summary = None

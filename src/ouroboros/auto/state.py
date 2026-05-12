@@ -611,6 +611,16 @@ class AutoPipelineState:
         if self.phase == AutoPhase.COMPLETE:
             return AutoResumeCapability.NONE
 
+        # RFC #809 Phase 2.2b — a session whose recovery guard has tripped
+        # cannot make forward progress on --resume. ``_run_evaluate`` and
+        # ``_run_lateral`` both short-circuit to BLOCKED immediately when
+        # ``recovery_guard_tripped`` is set; advertising the session as
+        # resumable in this state would be a user-facing contract bug
+        # (CLI/MCP status surfaces would tell the operator "you can
+        # --resume" when --resume produces an identical blocker).
+        if self.recovery_guard_tripped is not None:
+            return AutoResumeCapability.NONE
+
         if self.phase not in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
             # CREATED, INTERVIEW, SEED_GENERATION, REVIEW, REPAIR, RUN.
             # Pipeline.run() will simply continue from the current phase.

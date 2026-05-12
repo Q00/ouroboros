@@ -577,12 +577,16 @@ async def test_run_resume_from_unstuck_lateral_reaches_handler(tmp_path) -> None
     )
 
     result = await pipeline.run(state)
-    # The handler ran (cache hit), so no Cannot-resume guard fired and the
-    # session lands at BLOCKED with the cached persona summary, NOT at
-    # "Cannot resume auto pipeline from unstuck_lateral".
+    # The resume path reached the lateral handler (no Cannot-resume guard
+    # fired), so the session lands at BLOCKED with a persona summary, NOT
+    # at "Cannot resume auto pipeline from unstuck_lateral".
+    # RFC #809 Phase 2.2b removed the lateral cache short-circuit, so
+    # the handler is invoked exactly once on this resume — what the test
+    # actually pins is "resume reached the handler", not "the handler
+    # was skipped via a cache hit".
     assert result.status == "blocked"
     assert state.last_tool_name == "lateral_thinker"
-    assert lateral_calls == 0  # cache hit
+    assert lateral_calls == 1  # cache removed; handler runs fresh
     assert "Cannot resume" not in (state.last_error or "")
 
 
@@ -686,21 +690,19 @@ async def test_run_resume_from_evaluate_reaches_handler(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_lateral_resume_cache_hit_skips_re_invocation(tmp_path) -> None:
-    """Re-entering UNSTUCK_LATERAL with the same input hash and a persisted
-    persona text must NOT re-invoke the lateral thinker — provided the same
-    persona would be picked again.
+async def test_pipeline_lateral_resume_with_same_persona_reinvokes_handler(tmp_path) -> None:
+    """RFC #809 Phase 2.2b removed the lateral cache-hit short-circuit
+    that previously replayed a cached advisory on --resume.
 
-    RFC #809 Phase 2.2b changed the persona-selection contract so the
-    router now skips ``state.personas_invoked``; a naive resume of a
-    completed lateral round would therefore pick a DIFFERENT persona on
-    the second call (HACKER → CONTRARIAN), produce a different cache
-    key, and re-invoke the handler. To exercise the cache-hit path
-    deliberately, the test clears ``personas_invoked`` before the resume
-    call so the router lands on the same primary persona and the cache
-    key matches. This is exactly the contract operators rely on when
-    --resume is meant to surface the previously-cached advisory rather
-    than spend another persona slot."""
+    The P2.2 cache was unreachable on real resumes (the persona-once
+    contract appends to ``state.personas_invoked`` so the next resume
+    deterministically picks a different persona and produces a
+    different cache key). Rather than leave dead code in the
+    happy-path branch, the cache was removed. This test pins the new
+    contract: re-entering UNSTUCK_LATERAL with the same QA shape AND
+    the same persona (operator manually clears ``personas_invoked``)
+    invokes the lateral handler a SECOND time — there is no cache hit
+    to short-circuit it."""
     state = _state_at_run_phase(tmp_path)
     call_count = 0
 
@@ -713,7 +715,9 @@ async def test_pipeline_lateral_resume_cache_hit_skips_re_invocation(tmp_path) -
         nonlocal call_count
         call_count += 1
         return LateralResult(
-            persona="hacker", approach_summary="Hacker: workarounds", text="advice text"
+            persona="hacker",
+            approach_summary="Hacker: workarounds",
+            text=f"advice text {call_count}",
         )
 
     pipeline = AutoPipeline(
@@ -729,16 +733,14 @@ async def test_pipeline_lateral_resume_cache_hit_skips_re_invocation(tmp_path) -
 
     await pipeline.run(state)
     assert call_count == 1
-    assert state.last_lateral_text == "advice text"
-    first_hash = state.lateral_input_hash
+    assert state.last_lateral_text == "advice text 1"
 
-    # Drop the persona-once exclusion so the resume call lands on the
-    # same HACKER primary and exercises the cache-hit path. Without
-    # this, P2.2b's multi-persona advisory would (correctly) pick a
-    # different persona and re-invoke the handler.
+    # Clear personas_invoked so the router picks the same HACKER primary
+    # again. With the P2.2 cache removed, the handler is invoked a
+    # second time even though the QA shape is identical — the cache
+    # short-circuit no longer exists.
     state.personas_invoked = []
 
-    # Simulate resume by re-entering UNSTUCK_LATERAL with the same QA shape.
     state.phase = AutoPhase.UNSTUCK_LATERAL
     result = await pipeline._run_lateral(
         state,
@@ -748,12 +750,12 @@ async def test_pipeline_lateral_resume_cache_hit_skips_re_invocation(tmp_path) -
         qa_verdict="fail",
         qa_differences=("Xcode unavailable",),
         qa_suggestions=(),
-        cache_suffix=" [cached]",
+        cache_suffix="",
         review=None,
         run_subagent=None,
     )
-    assert call_count == 1  # NOT incremented
-    assert state.lateral_input_hash == first_hash
+    assert call_count == 2  # cache removed; handler invoked again
+    assert state.last_lateral_text == "advice text 2"
     assert result.status == "blocked"
 
 
@@ -1490,6 +1492,26 @@ async def test_fingerprint_guard_sets_sticky_flag(tmp_path) -> None:
     await pipeline.run(state)
 
     assert state.recovery_guard_tripped == "duplicate_fingerprint"
+
+
+def test_resume_capability_is_none_when_recovery_guard_tripped(tmp_path) -> None:
+    """``resume_capability`` must return NONE when ``recovery_guard_tripped``
+    is set: a guarded BLOCKED session cannot make forward progress on
+    --resume (``_run_evaluate`` / ``_run_lateral`` short-circuit back to
+    BLOCKED), so advertising the session as resumable in CLI/MCP status
+    surfaces is a user-facing contract bug. This test pins the
+    contract for all three guard tags."""
+    for tag in ("round_budget", "duplicate_fingerprint", "personas_exhausted"):
+        state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+        state.phase = AutoPhase.BLOCKED
+        state.last_tool_name = "evaluator"
+        # Plant cache fields that would normally make the session
+        # advertise RESUME — the guard tag must override.
+        state.evaluate_artifact = "x"
+        state.evaluate_artifact_hash = "abc"
+        state.last_qa_passed = False
+        state.recovery_guard_tripped = tag
+        assert state.resume_capability() is AutoResumeCapability.NONE, tag
 
 
 @pytest.mark.asyncio
