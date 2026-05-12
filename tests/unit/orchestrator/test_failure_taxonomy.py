@@ -80,6 +80,11 @@ class TestClassify:
         attempt = _attempt(evidence_error="not json")
         assert classify(attempt) == FailureClass.EVIDENCE_MISSING
 
+    def test_evidence_validation_error_maps_to_evidence_missing(self) -> None:
+        attempt = _attempt()
+        object.__setattr__(attempt, "validation_error", "blocker.reason missing")
+        assert classify(attempt) == FailureClass.EVIDENCE_MISSING
+
     def test_validation_failure_maps_to_evidence_missing(self) -> None:
         attempt = _attempt(
             validation=ValidationResult(ok=False, missing_fields=("tests_passed",), rejected_by=()),

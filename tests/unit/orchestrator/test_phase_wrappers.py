@@ -37,6 +37,7 @@ class TestPreBlock:
     def test_blocker_path_named(self, code_profile: ExecutionProfile) -> None:
         block = build_pre_block(code_profile, "x")
         assert "blocker" in block.lower()
+        assert "typed blocked JSON" in block
 
     def test_ac_passes_through_verbatim(self, code_profile: ExecutionProfile) -> None:
         # Bot finding on #886 r3: ACs are free-form text and may
@@ -119,6 +120,15 @@ class TestPostBlock:
     def test_demands_fenced_json(self, code_profile: ExecutionProfile) -> None:
         block = build_post_block(code_profile)
         assert "fenced JSON" in block
+
+    def test_documents_typed_blocker_payload(self, code_profile: ExecutionProfile) -> None:
+        block = build_post_block(code_profile)
+        assert '"status":"blocked"' in block
+        assert '"blocker"' in block
+        assert '"code"' in block
+        assert "MISSING_TOOL" in block
+        assert '"reason"' in block
+        assert '"required_by"' in block
 
     def test_handles_empty_schema_gracefully(self) -> None:
         bare = ExecutionProfile(

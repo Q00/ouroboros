@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ouroboros.orchestrator.evidence_schema import BlockerCode
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile
 
 _DEFAULT_PRE_HEADER = "[PRE — harness-injected; restate before any action]"
@@ -52,6 +53,10 @@ def _format_rejected(schema: EvidenceSchema) -> str:
     if not schema.rejected_if:
         return "(profile declares no automatic rejection rules)"
     return "; ".join(schema.rejected_if)
+
+
+def _format_blocker_codes() -> str:
+    return ", ".join(code.value for code in BlockerCode)
 
 
 def _indent_ac(ac: str, indent: str = "  ") -> str:
@@ -94,7 +99,8 @@ def build_pre_block(profile: ExecutionProfile, ac: str) -> str:
         "Before touching any tool, restate this AC in one sentence and "
         "list every precondition you are assuming (paths, commands, "
         "external services). Do not begin execution if any precondition "
-        "is unverified — surface the blocker instead."
+        "is unverified — surface the blocker using the typed blocked JSON "
+        "contract in the POST block instead."
     )
 
 
@@ -112,6 +118,11 @@ def build_post_block(profile: ExecutionProfile) -> str:
         "line, then stop. Required fields for this profile: "
         f"{_format_required(schema)}.\n"
         f"Automatic rejection rules: {_format_rejected(schema)}.\n\n"
+        "If a required precondition is unavailable, emit this typed "
+        "terminal blocker shape instead of prose or partial evidence: "
+        '{"status":"blocked","blocker":{"code":"<one of: '
+        f'{_format_blocker_codes()}>","reason":"<non-empty reason>",'
+        '"required_by":"<AC/precondition/tool that requires it>"}}.\n\n'
         "Do not declare the task DONE in prose — the harness adjudicates "
         "via an external verifier pass. Your job ends when the evidence "
         "block is emitted."
