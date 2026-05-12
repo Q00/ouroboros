@@ -123,12 +123,14 @@ class TestComposeContext:
         assert "summary" in rendered
         assert "AC1" in rendered
 
-    def test_strips_whitespace_from_ac_and_summary(self) -> None:
-        result = compose_context(
-            ac="   ac body\n\n",
-            parent_summary="\n  summary\n",
-        )
-        assert result.ac == "ac body"
+    def test_ac_preserved_verbatim(self) -> None:
+        # The AC text carries prompt semantics (leading indentation,
+        # trailing newlines, whitespace-significant fenced blocks).
+        # The governor must NOT rewrite it (bot finding on #890 round 2).
+        raw_ac = "   ac body\n\n"
+        result = compose_context(ac=raw_ac, parent_summary="\n  summary\n")
+        assert result.ac == raw_ac
+        # The parent summary IS free prose and may be stripped.
         assert result.parent_summary == "summary"
 
     def test_empty_inputs(self) -> None:

@@ -144,17 +144,21 @@ def compose_context(
     if budget is None:
         budget = _DEFAULT_BUDGET
 
-    ac_stripped = ac.strip()
+    # The AC text is contract-bound to flow through verbatim — leading
+    # indentation, trailing newlines, and whitespace-significant
+    # fenced/code-block content carry prompt semantics the dispatch
+    # path must not rewrite. The summary is the only place where we
+    # apply .strip() (it's free prose).
     parent_stripped = parent_summary.strip()
 
     # The AC section is non-negotiable. Charge the header against the
     # budget here so the rendered output (which always carries the
     # "## AC\n" prefix) stays under total_chars.
-    ac_section_cost = len(_AC_HEADER) + len(ac_stripped)
+    ac_section_cost = len(_AC_HEADER) + len(ac)
     if ac_section_cost > budget.total_chars:
         msg = (
             f"AC alone exceeds context budget "
-            f"(ac={len(ac_stripped)} chars + header={len(_AC_HEADER)} "
+            f"(ac={len(ac)} chars + header={len(_AC_HEADER)} "
             f"> total={budget.total_chars}); decompose further before "
             "dispatching."
         )
@@ -197,7 +201,7 @@ def compose_context(
     return ComposedContext(
         parent_summary=summary,
         sibling_lines=tuple(sibling_lines),
-        ac=ac_stripped,
+        ac=ac,
         truncated=truncated,
     )
 
