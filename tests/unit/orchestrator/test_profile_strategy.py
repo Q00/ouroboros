@@ -71,6 +71,19 @@ class TestSystemPromptFragment:
         for required in profile.evidence_schema.required:
             assert required in fragment, f"{required!r} missing from system prompt"
 
+    def test_fragment_does_not_tell_executor_to_stop(self, profile: ExecutionProfile) -> None:
+        # Bot finding on #891 r3: reusing build_post_block (which says
+        # "emit one JSON block, then stop") in the system prompt
+        # contradicted the task suffix's "continue through every AC"
+        # cue. Because system prompt has higher precedence, the run
+        # would terminate after the first criterion. The fragment must
+        # use multi-AC-aware wording.
+        fragment = ProfileBackedStrategy(profile).get_system_prompt_fragment()
+        assert "then stop" not in fragment
+        assert "continue" in fragment.lower()
+        # Reinforce: the per-AC iteration cue is present.
+        assert "next criterion" in fragment or "next AC" in fragment
+
     def test_suffix_demands_restatement_and_preconditions(self, profile: ExecutionProfile) -> None:
         suffix = ProfileBackedStrategy(profile).get_task_prompt_suffix()
         assert "[PRE" in suffix

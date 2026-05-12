@@ -35,7 +35,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ouroboros.orchestrator.phase_wrappers import build_post_block
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.workflow_state import ActivityType
 
@@ -85,23 +84,46 @@ class ProfileBackedStrategy:
         """Compose the harness-owned system prompt fragment.
 
         Combines the profile anchor (axis, min_unit, verifier_focus)
-        with the H3 [POST] block sourced from `phase_wrappers` so the
-        evidence_schema requirements and the "no DONE in prose" rule
-        flow through `runner.build_system_prompt` unmodified. Without
-        this composition, opting into ProfileBackedStrategy would
-        bypass H2/H1 entirely.
+        with a multi-AC-aware evidence directive that names every
+        required field and rejection rule from `profile.evidence_schema`
+        so the leaf can produce records the H2 validator will accept.
+
+        We deliberately do NOT reuse `phase_wrappers.build_post_block`
+        here: that helper says "emit one JSON block, then stop", which
+        is correct for a single-dispatch leaf but contradicts the
+        per-AC iteration required by the runner's monolithic multi-AC
+        path. The stop instruction has system-prompt precedence over
+        the task suffix's "continue through every AC" cue, so the run
+        would terminate after the first criterion (bot finding on
+        #891 r3).
         """
-        header = (
-            f"You are executing an acceptance criterion under the "
+        schema = self.profile.evidence_schema
+        required = (
+            ", ".join(schema.required)
+            if schema.required
+            else "(profile declares no required evidence fields)"
+        )
+        rejected = (
+            "; ".join(schema.rejected_if)
+            if schema.rejected_if
+            else "(profile declares no automatic rejection rules)"
+        )
+        return (
+            f"You are executing acceptance criteria under the "
             f"{self.profile.profile!r} profile.\n"
             f"Decomposition axis: {self.profile.axis}.\n"
             f"Smallest acceptable unit: {self.profile.min_unit}.\n"
-            f"The verifier will focus on: {self.profile.verifier_focus.strip()}"
+            f"The verifier will focus on: {self.profile.verifier_focus.strip()}\n\n"
+            "[POST — harness-injected; per-AC evidence contract]\n"
+            "For each acceptance criterion you complete, emit a single "
+            "fenced JSON evidence record on its own line and continue "
+            f"to the next criterion. Required fields per record: "
+            f"{required}.\n"
+            f"Automatic rejection rules: {rejected}.\n"
+            "Do not declare DONE in prose — the harness adjudicates via "
+            "an external verifier pass. The run finishes when every "
+            "criterion above has its own evidence record."
         )
-        # The POST block carries the evidence-field names and rejection
-        # rules verbatim; the leaf executor must see them or it cannot
-        # produce a record the H2 validator will accept.
-        return f"{header}\n\n{build_post_block(self.profile)}"
 
     def get_task_prompt_suffix(self) -> str:
         """Compose the [PRE]-style restate / precondition gate.
