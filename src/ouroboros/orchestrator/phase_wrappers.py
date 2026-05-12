@@ -63,8 +63,14 @@ def _indent_ac(ac: str, indent: str = "  ") -> str:
     merging with the harness instructions that follow (bot finding on
     #886 r2). Apply the indent to every non-empty line so the AC's
     section boundary is preserved.
+
+    Uses ``str.split('\\n')`` (not ``splitlines()``) so terminal
+    newlines and trailing blank lines round-trip verbatim —
+    ``splitlines()`` drops the terminator, violating the
+    "passed through verbatim" contract for ACs that end with a
+    required newline or blank line (bot finding on #886 r4).
     """
-    return "\n".join(indent + line if line else line for line in ac.splitlines())
+    return "\n".join(indent + line if line else line for line in ac.split("\n"))
 
 
 def build_pre_block(profile: ExecutionProfile, ac: str) -> str:

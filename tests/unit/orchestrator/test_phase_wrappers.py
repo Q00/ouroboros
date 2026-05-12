@@ -57,6 +57,27 @@ class TestPreBlock:
         block = build_pre_block(code_profile, ac)
         assert "  ac body  \n" in block
 
+    def test_terminal_newline_preserved(self, code_profile: ExecutionProfile) -> None:
+        # Bot finding on #886 r4: splitlines() dropped terminal newlines
+        # and trailing blank lines, violating the verbatim contract for
+        # ACs whose grammar requires a closing newline.
+        ac = "line one\nline two\n"
+        block = build_pre_block(code_profile, ac)
+        # AC has two content lines + a trailing empty produced by the
+        # closing \n. Indented output must keep the empty so the
+        # section ends cleanly before the wrapper's joiner.
+        assert "  line one\n  line two\n\n\nBefore" in block
+
+    def test_trailing_blank_line_preserved(self, code_profile: ExecutionProfile) -> None:
+        # ACs that intentionally end with a blank line (e.g. to terminate
+        # a fenced code block) must round-trip verbatim.
+        ac = "content\n\n"
+        block = build_pre_block(code_profile, ac)
+        # "content\n\n".split("\n") = ["content", "", ""]; indent skips
+        # empty lines, so rejoined: "  content\n\n". The wrapper then
+        # adds its own "\n\n" before "Before".
+        assert "  content\n\n\n\nBefore" in block
+
     def test_multiline_ac_every_line_indented(self, code_profile: ExecutionProfile) -> None:
         # Bot finding on #886 r2: subsequent lines of a multiline AC
         # used to run flush-left and visually escape the AC section,
