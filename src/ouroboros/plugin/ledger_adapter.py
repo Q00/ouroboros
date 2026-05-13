@@ -38,7 +38,9 @@ import uuid
 
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
-# Audit event types the firewall may emit. Used by tests + by
+# Lifecycle audit event types currently emitted by the firewall.
+# Hook event names are reserved/forward-declared for the manifest/audit
+# vocabulary; no runtime producer emits them yet. Used by tests + by
 # downstream consumers that want to filter ledger queries.
 PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.discovered",
