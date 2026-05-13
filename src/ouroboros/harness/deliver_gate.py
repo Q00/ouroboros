@@ -50,17 +50,19 @@ async def load_ac_evidence_manifest(
 ) -> EvidenceManifest:
     """Load and normalize EventStore evidence for one AC deliver-gate check.
 
-    When both ``session_id`` and ``execution_id`` are available the loader
-    uses the session-related query with the execution correlation filter. That
-    includes session-aggregate I/O events as well as execution/runtime-scope
-    rows. ``execution_id``-only reads remain supported for callers that do not
-    know the session anchor.
+    ``execution_id`` is required so the deliver-gate input is bounded to one
+    execution. When ``session_id`` is also available the loader uses the
+    session-related query with the execution correlation filter; otherwise it
+    uses the execution-only query. Session-only reads are rejected because a
+    session can contain multiple executions/retries that must not be spliced
+    into one verifier input.
 
     Args:
         event_store: Read-capable EventStore or test double.
         ac_id: Acceptance-criterion identifier to normalize.
         execution_id: Optional execution aggregate anchor.
-        session_id: Optional session aggregate anchor.
+        session_id: Optional session aggregate anchor used as an additional
+            ownership filter.
         scope_id: Optional event-scope token to filter by when the public AC
             id differs from the runtime aggregate/phase token used by the
             recorder. Defaults to ``ac_id``.
@@ -82,8 +84,8 @@ async def load_ac_evidence_manifest(
     normalized_execution_id = _normalize_optional_anchor("execution_id", execution_id)
     normalized_session_id = _normalize_optional_anchor("session_id", session_id)
     normalized_scope_id = _normalize_optional_anchor("scope_id", scope_id) or normalized_ac_id
-    if normalized_execution_id is None and normalized_session_id is None:
-        msg = "load_ac_evidence_manifest requires execution_id or session_id"
+    if normalized_execution_id is None:
+        msg = "load_ac_evidence_manifest requires execution_id"
         raise ValueError(msg)
 
     if normalized_session_id is not None:

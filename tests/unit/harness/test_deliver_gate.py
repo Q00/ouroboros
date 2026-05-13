@@ -266,24 +266,14 @@ class TestLoadAcEvidenceManifest:
         )
 
     @pytest.mark.asyncio
-    async def test_session_fallback_query_is_supported_for_observe_only_wiring(self) -> None:
-        now = datetime.now(UTC)
-        store = _FakeEventStore([_tool_started(call_id="c1", aggregate_id="sess_1", when=now)])
+    async def test_rejects_session_only_query_to_avoid_mixed_execution_manifests(self) -> None:
+        store = _FakeEventStore([])
 
-        manifest = await load_ac_evidence_manifest(store, ac_id="ac_1", session_id="sess_1")
+        with pytest.raises(ValueError, match="requires execution_id"):
+            await load_ac_evidence_manifest(store, ac_id="ac_1", session_id="sess_1")
 
         assert store.execution_queries == []
-        assert store.session_queries == [
-            {
-                "session_id": "sess_1",
-                "execution_id": None,
-                "event_type": None,
-                "limit": None,
-                "offset": 0,
-            }
-        ]
-        assert manifest.ac_id == "ac_1"
-        assert manifest.entries[0].ok is None
+        assert store.session_queries == []
 
     @pytest.mark.asyncio
     async def test_events_from_other_ac_are_filtered_by_normalizer(self) -> None:
@@ -301,8 +291,8 @@ class TestLoadAcEvidenceManifest:
         assert manifest.entries[0].source_event_ids == ("evt_started_target",)
 
     @pytest.mark.asyncio
-    async def test_requires_scope_anchor(self) -> None:
-        with pytest.raises(ValueError, match="execution_id or session_id"):
+    async def test_requires_execution_anchor(self) -> None:
+        with pytest.raises(ValueError, match="requires execution_id"):
             await load_ac_evidence_manifest(_FakeEventStore([]), ac_id="ac_1")
 
     @pytest.mark.asyncio
@@ -325,7 +315,9 @@ class TestLoadAcEvidenceManifest:
         store = _FakeEventStore([])
 
         with pytest.raises(ValueError, match="blank session_id"):
-            await load_ac_evidence_manifest(store, ac_id="ac_1", session_id="  ")
+            await load_ac_evidence_manifest(
+                store, ac_id="ac_1", execution_id="exec_1", session_id="  "
+            )
 
         assert store.execution_queries == []
         assert store.session_queries == []
