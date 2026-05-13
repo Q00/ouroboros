@@ -131,6 +131,279 @@ class TestProfileAwareDecompositionAudit:
         assert event.data["decomposition_profile"] is None
 
 
+class TestProfileAwareContextGovernance:
+    @pytest.mark.asyncio
+    async def test_profile_backed_atomic_dispatch_uses_context_governor(self) -> None:
+        class _StubRuntime:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tools": tools,
+                        "system_prompt": system_prompt,
+                        "resume_handle": resume_handle,
+                        "resume_session_id": resume_session_id,
+                    }
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _StubRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+        )
+        level_context = LevelContext(
+            level_number=0,
+            completed_acs=(
+                ACContextSummary(
+                    ac_index=0,
+                    ac_content="Prepare helper",
+                    success=True,
+                    key_output="Helper is ready",
+                ),
+            ),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Implement governed leaf",
+            session_id="sess_context",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship context governance",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_context",
+            level_contexts=[level_context],
+            sibling_acs=["Implement governed leaf", "Update sibling docs"],
+        )
+
+        assert result.success is True
+        prompt = runtime.calls[0]["prompt"]
+        assert "## Governed Dispatch Context (AC 2)" in prompt
+        assert "## Parent context" in prompt
+        assert "Helper is ready" in prompt
+        assert "## Sibling status" in prompt
+        assert "… sibling-2: Update sibling docs" in prompt
+        assert "## AC\nImplement governed leaf" in prompt
+        assert "## Parallel Execution Notice" not in prompt
+
+        context_events = [
+            event for event in appended_events if event.type == "execution.ac.context_governed"
+        ]
+        assert len(context_events) == 1
+        assert context_events[0].data["context_governed"] is True
+        assert context_events[0].data["context_observe_only"] is True
+        assert context_events[0].data["context_enforced"] is False
+        assert context_events[0].data["profile"] == "code"
+        assert context_events[0].data["context_sibling_status_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_legacy_atomic_dispatch_keeps_existing_context_prompt_shape(self) -> None:
+        class _StubRuntime:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tools": tools,
+                        "system_prompt": system_prompt,
+                        "resume_handle": resume_handle,
+                        "resume_session_id": resume_session_id,
+                    }
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _StubRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        level_context = LevelContext(
+            level_number=0,
+            completed_acs=(
+                ACContextSummary(
+                    ac_index=0,
+                    ac_content="Prepare helper",
+                    success=True,
+                    key_output="Helper is ready",
+                ),
+            ),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Implement legacy leaf",
+            session_id="sess_legacy_context",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship legacy context",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_legacy_context",
+            level_contexts=[level_context],
+            sibling_acs=["Implement legacy leaf", "Update sibling docs"],
+        )
+
+        assert result.success is True
+        prompt = runtime.calls[0]["prompt"]
+        assert "## Your Task (AC 2)\nImplement legacy leaf" in prompt
+        assert "## Previous Work Context" in prompt
+        assert "## Parallel Execution Notice" in prompt
+        assert "## Governed Dispatch Context" not in prompt
+        assert not any(event.type == "execution.ac.context_governed" for event in appended_events)
+
+    @pytest.mark.asyncio
+    async def test_profile_context_governor_budget_error_falls_back_without_failing_ac(
+        self,
+    ) -> None:
+        class _StubRuntime:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tools": tools,
+                        "system_prompt": system_prompt,
+                        "resume_handle": resume_handle,
+                        "resume_session_id": resume_session_id,
+                    }
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _StubRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+        )
+        oversized_ac = "x" * 13_000
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content=oversized_ac,
+            session_id="sess_context_fallback",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship context governance fallback",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_context_fallback",
+        )
+
+        assert result.success is True
+        prompt = runtime.calls[0]["prompt"]
+        assert "## Your Task (AC 1)" in prompt
+        assert "## Governed Dispatch Context" not in prompt
+        context_events = [
+            event for event in appended_events if event.type == "execution.ac.context_governed"
+        ]
+        assert len(context_events) == 1
+        assert context_events[0].data["context_governed"] is False
+        assert context_events[0].data["context_fallback"] == "legacy_prompt"
+        assert (
+            "AC alone exceeds context budget" in context_events[0].data["context_governance_error"]
+        )
+
+
 class TestParallelACExecutor:
     """Tests for staged hybrid result handling."""
 

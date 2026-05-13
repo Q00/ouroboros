@@ -77,11 +77,16 @@ class SiblingStatus:
     """
 
     sibling_id: str
-    accepted: bool
+    accepted: bool | None
     headline: str = ""
 
     def to_line(self) -> str:
-        marker = "✓" if self.accepted else "✗"
+        if self.accepted is True:
+            marker = "✓"
+        elif self.accepted is False:
+            marker = "✗"
+        else:
+            marker = "…"
         head = f": {self.headline.strip()}" if self.headline else ""
         return f"{marker} {self.sibling_id}{head}"
 

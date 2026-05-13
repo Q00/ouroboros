@@ -51,6 +51,7 @@ from ouroboros.orchestrator.capabilities import (
     build_capability_graph,
     serialize_capability_graph,
 )
+from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
 from ouroboros.orchestrator.control_plane import (
     build_control_plane_state,
     serialize_control_plane_state,
@@ -217,6 +218,7 @@ _MIN_FREE_MEMORY_GB = 2.0
 _MEMORY_CHECK_INTERVAL_SECONDS = 5.0
 _MEMORY_WAIT_MAX_SECONDS = 120.0
 _MAX_LEAF_RESULT_CHARS = 1200
+_SIBLING_HEADLINE_CHARS = 80
 
 
 def _get_available_memory_gb() -> float | None:
@@ -2739,6 +2741,103 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             }
         }
 
+    def _build_atomic_dispatch_context(
+        self,
+        *,
+        ac_content: str,
+        label: str,
+        level_contexts: list[LevelContext] | None,
+        sibling_acs: list[str] | None,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Build the task section for an atomic leaf dispatch.
+
+        Legacy execution keeps its historical prompt shape.  When an
+        ExecutionProfile is active, route parent/sibling/AC context through
+        the #830 H6 context governor so profile-backed leaves receive bounded,
+        deterministic context without flipping any evidence/verifier default.
+        """
+        if self._execution_profile is None:
+            return f"## Your Task ({label})\n{ac_content}", None
+
+        sibling_statuses: list[SiblingStatus] = []
+        if sibling_acs and len(sibling_acs) > 1:
+            for idx, sibling_ac in enumerate(sibling_acs, start=1):
+                if sibling_ac == ac_content:
+                    continue
+                headline = " ".join(sibling_ac.split())
+                if len(headline) > _SIBLING_HEADLINE_CHARS:
+                    headline = headline[:_SIBLING_HEADLINE_CHARS]
+                sibling_statuses.append(
+                    SiblingStatus(
+                        sibling_id=f"sibling-{idx}",
+                        accepted=None,
+                        headline=headline,
+                    )
+                )
+
+        try:
+            composed = compose_context(
+                ac=ac_content,
+                parent_summary=build_context_prompt(level_contexts or []),
+                siblings=sibling_statuses,
+            )
+        except ValueError as exc:
+            # This C.3 slice wires the governor into profile-backed dispatch
+            # without making budget failures an acceptance/default gate yet.
+            # Preserve execution by falling back to the legacy prompt shape and
+            # emit auditable metadata so later enforcement work can quantify
+            # how often the hard governor would have rejected a leaf.
+            return f"## Your Task ({label})\n{ac_content}", {
+                "context_governed": False,
+                "context_observe_only": True,
+                "context_enforced": False,
+                "context_governance_error": str(exc),
+                "context_fallback": "legacy_prompt",
+            }
+        rendered = composed.render()
+        audit = {
+            "context_governed": True,
+            "context_observe_only": True,
+            "context_enforced": False,
+            "context_rendered_chars": len(rendered),
+            "context_truncated": composed.truncated,
+            "context_sibling_status_count": len(composed.sibling_lines),
+            "context_parent_summary_present": bool(composed.parent_summary),
+        }
+        return f"## Governed Dispatch Context ({label})\n{rendered}", audit
+
+    async def _emit_atomic_context_governed_event(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str,
+        session_id: str | None,
+        ac_content: str,
+        context_audit: dict[str, Any] | None,
+    ) -> None:
+        """Persist observe-only context-governor metadata for profile-backed leaves."""
+        if self._execution_profile is None or context_audit is None:
+            return
+
+        from ouroboros.events.base import BaseEvent
+
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.context_governed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    **self._decomposition_profile_metadata(),
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "acceptance_criterion": ac_content,
+                    "profile": self._execution_profile.profile,
+                    **context_audit,
+                },
+            )
+        )
+
     @staticmethod
     def _runtime_event_metadata(message: AgentMessage) -> dict[str, Any]:
         """Serialize shared runtime/tool metadata for execution-scoped events."""
@@ -3034,8 +3133,18 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             label = f"AC {ac_index + 1}"
             indent = "  "
 
-        # Build context section from previous levels
-        context_section = build_context_prompt(level_contexts or [])
+        task_section, context_governance_audit = self._build_atomic_dispatch_context(
+            ac_content=ac_content,
+            label=label,
+            level_contexts=level_contexts,
+            sibling_acs=sibling_acs,
+        )
+        legacy_context_section = (
+            ""
+            if context_governance_audit is not None
+            and context_governance_audit.get("context_governed") is True
+            else build_context_prompt(level_contexts or [])
+        )
 
         retry_section = ""
         if retry_attempt > 0:
@@ -3048,7 +3157,14 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         # Build parallel awareness section
         parallel_section = ""
-        if sibling_acs and len(sibling_acs) > 1:
+        if (
+            (
+                context_governance_audit is None
+                or context_governance_audit.get("context_governed") is not True
+            )
+            and sibling_acs
+            and len(sibling_acs) > 1
+        ):
             other_acs = [ac for ac in sibling_acs if ac != ac_content]
             if other_acs:
                 other_list = "\n".join(f"- {ac[:80]}" for ac in other_acs)
@@ -3085,9 +3201,8 @@ Files present:
 ## Goal Context
 {seed_goal}
 
-## Your Task ({label})
-{ac_content}
-{context_section}{retry_section}{parallel_section}
+{task_section}
+{legacy_context_section}{retry_section}{parallel_section}
 Use the available tools to accomplish this task. Report your progress clearly.
 When complete, explicitly state: [TASK_COMPLETE]
 """
@@ -3135,6 +3250,13 @@ When complete, explicitly state: [TASK_COMPLETE]
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             retry_attempt=retry_attempt,
+        )
+        await self._emit_atomic_context_governed_event(
+            runtime_identity=runtime_identity,
+            execution_id=execution_context_id,
+            session_id=session_id,
+            ac_content=ac_content,
+            context_audit=context_governance_audit,
         )
         lifecycle_event_type = (
             "execution.session.resumed"

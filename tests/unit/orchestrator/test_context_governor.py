@@ -44,6 +44,12 @@ class TestSiblingStatus:
         assert "✗" in line
         assert "AC2" in line
 
+    def test_in_progress_marker(self) -> None:
+        line = SiblingStatus("AC3", accepted=None, headline="running").to_line()
+        assert "…" in line
+        assert "AC3" in line
+        assert "running" in line
+
 
 class TestComposedContext:
     def test_render_sections(self) -> None:
