@@ -1411,3 +1411,71 @@ def test_auto_sub_interview_isolates_parent_hook_context(
     assert captured["effective_include_hook_events"] is False
     assert "Bash" in options_call_kwargs["disallowed_tools"]
     assert options_call_kwargs["extra_args"]["allowedTools"] == ""
+
+
+def test_auto_handler_does_not_leak_suppress_flag_into_shared_engine(
+    tmp_path: Path,
+) -> None:
+    """A shared ``InterviewEngine`` must keep its prior suppress-cues policy.
+
+    Regression for PR #979 review comment: if an auto-path
+    ``InterviewHandler`` mutates ``engine.suppress_tool_use_prompt_cues`` and
+    leaves it set, a later non-auto handler that reuses the same engine would
+    silently switch to the toolless prompt and lose the normal brownfield /
+    code-context instructions. The handler must restore the prior value once
+    its own request is finished.
+    """
+    from unittest.mock import AsyncMock
+
+    from ouroboros.bigbang.interview import InterviewEngine
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+
+    shared_engine = InterviewEngine.__new__(InterviewEngine)
+    shared_engine.suppress_tool_use_prompt_cues = False
+    shared_engine.start_interview = AsyncMock(
+        side_effect=RuntimeError("forced stop after engine flag is observed")
+    )
+    shared_engine.resume_interview = AsyncMock()
+    shared_engine.score_interview = AsyncMock()
+
+    observed: dict[str, bool] = {}
+
+    original_start = shared_engine.start_interview
+
+    async def _capture_start(*args: Any, **kwargs: Any) -> Any:
+        observed["during_call"] = shared_engine.suppress_tool_use_prompt_cues
+        return await original_start(*args, **kwargs)
+
+    shared_engine.start_interview.side_effect = _capture_start  # type: ignore[assignment]
+
+    handler = InterviewHandler(
+        interview_engine=shared_engine,
+        event_store=MagicMock(),
+        llm_adapter=MagicMock(),
+        llm_backend="claude_code",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+        data_dir=tmp_path,
+        suppress_tool_use_prompt_cues=True,
+    )
+    handler._owns_event_store = False
+    handler._initialized = True
+
+    async def _run() -> None:
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            return_value=MagicMock(),
+        ):
+            try:
+                await handler.handle({"initial_context": "Test goal"})
+            except Exception:
+                pass
+
+    asyncio.run(_run())
+
+    assert observed.get("during_call") is True, (
+        "expected the auto path to set suppress_tool_use_prompt_cues=True for the call"
+    )
+    assert shared_engine.suppress_tool_use_prompt_cues is False, (
+        "expected the prior engine.suppress_tool_use_prompt_cues value to be restored"
+    )

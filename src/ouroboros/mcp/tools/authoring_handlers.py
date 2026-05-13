@@ -1438,12 +1438,18 @@ class InterviewHandler:
             ),
             strict_mcp_config=True,
         )
-        if self.interview_engine is not None:
+        # Whether we are reusing a shared engine. If so, we must NOT mutate
+        # its suppress flag permanently — that would leak this handler's
+        # prompt-cue policy into unrelated sessions that share the same
+        # engine instance. We save the prior value and restore it in the
+        # outer finally block below.
+        _engine_was_shared = self.interview_engine is not None
+        _prev_engine_suppress: bool | None = None
+        if _engine_was_shared:
             engine = self.interview_engine
-            if self.suppress_tool_use_prompt_cues and hasattr(
-                engine, "suppress_tool_use_prompt_cues"
-            ):
-                engine.suppress_tool_use_prompt_cues = True
+            if hasattr(engine, "suppress_tool_use_prompt_cues"):
+                _prev_engine_suppress = engine.suppress_tool_use_prompt_cues
+                engine.suppress_tool_use_prompt_cues = self.suppress_tool_use_prompt_cues
         else:
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
@@ -2137,5 +2143,7 @@ class InterviewHandler:
                 )
             )
         finally:
+            if _engine_was_shared and _prev_engine_suppress is not None:
+                engine.suppress_tool_use_prompt_cues = _prev_engine_suppress
             if self._owns_event_store:
                 await self.close()
