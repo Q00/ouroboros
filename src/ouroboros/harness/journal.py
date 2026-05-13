@@ -1,0 +1,481 @@
+"""Journal → evidence-manifest normalization.
+
+The journal normalizer is the first slice of issue #978 (the AgentOS
+Evidence Gate spine). It walks an ordered sequence of ``EventStore``
+events for a single acceptance-criterion scope and produces a typed
+:class:`EvidenceManifest` that downstream verifiers — including the
+``TraceGuard`` deliver gate — can consult without re-mining raw logs.
+
+Design constraints:
+
+* The normalizer is a **pure read** function. It does not write to
+  ``EventStore`` and does not mutate the events it walks.
+* Each manifest entry carries a stable ``handle`` that the leaf agent
+  can cite in its evidence claim, and the ``source_event_ids`` that
+  produced it so verdicts remain replayable.
+* Manifest mappings are immutable
+  (:class:`types.MappingProxyType`) so cached projections cannot
+  silently drift when consumers stash a reference.
+* No EventStore wiring lives here yet. The downstream harness hook
+  that pulls events out of ``EventStore`` and feeds them to this
+  normalizer lands in the P2 deliver-gate PR.
+
+The set of event types the normalizer recognizes in this PR is small
+on purpose — it covers the canonical ``tool.call.started`` /
+``tool.call.returned`` pair and the conventional ``Bash`` / ``Write``
+/ ``Edit`` tool names that already drive the existing executor. Plugin
+-defined evidence types (#939) and additional kinds arrive in later
+slices.
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, datetime
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Annotated, Any
+from uuid import uuid4
+
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
+
+from ouroboros.events.base import BaseEvent
+
+JOURNAL_SCHEMA_VERSION = 1
+"""Initial schema version for the evidence manifest."""
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers — immutable mappings + identifier hygiene
+# ---------------------------------------------------------------------------
+
+
+def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
+    """Normalize mapping-shaped input into a fresh proxy view."""
+    if value is None:
+        return MappingProxyType({})
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(dict(value))
+    msg = f"mapping field must be a mapping, got {type(value).__name__}"
+    raise ValueError(msg)
+
+
+def _ensure_frozen_after(value: Any) -> Mapping[str, Any]:
+    """Final-stage wrapper guaranteeing ``MappingProxyType`` identity."""
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(dict(value))
+    msg = f"mapping field must be a mapping, got {type(value).__name__}"
+    raise ValueError(msg)
+
+
+def _empty_frozen_mapping() -> Mapping[str, Any]:
+    return MappingProxyType({})
+
+
+FrozenMapping = Annotated[
+    Mapping[str, Any],
+    BeforeValidator(_coerce_to_mapping),
+    AfterValidator(_ensure_frozen_after),
+    PlainSerializer(lambda value: dict(value), return_type=dict, when_used="always"),
+]
+
+
+def _normalize_id_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            msg = (
+                f"identifier at index {index} must be a string; "
+                f"got {type(value).__name__}"
+            )
+            raise TypeError(msg)
+        stripped = value.strip()
+        if not stripped:
+            msg = (
+                f"identifier at index {index} is empty or whitespace-only; "
+                "the journal normalizer requires usable provenance ids"
+            )
+            raise ValueError(msg)
+        normalized.append(stripped)
+    return tuple(normalized)
+
+
+IdentifierTuple = Annotated[tuple[str, ...], AfterValidator(_normalize_id_tuple)]
+
+
+# ---------------------------------------------------------------------------
+# Manifest models
+# ---------------------------------------------------------------------------
+
+
+class EvidenceKind(StrEnum):
+    """Manifest entry classification.
+
+    The set is intentionally small in PR-1; plugin-defined kinds are
+    added in #939's lifecycle work and are validated against the same
+    open-vocabulary pattern :class:`ouroboros.harness.projection.ArtifactRecord`
+    uses today.
+    """
+
+    TOOL_INVOCATION = "tool_invocation"
+    COMMAND_EXECUTED = "command_executed"
+    FILE_MODIFIED = "file_modified"
+    LLM_CALL = "llm_call"
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid4().hex[:12]}"
+
+
+class EvidenceEntry(BaseModel, frozen=True):
+    """A single piece of evidence in an :class:`EvidenceManifest`.
+
+    Attributes:
+        handle: Stable, manifest-scoped identifier that the leaf agent
+            can cite in its evidence claim (``ev_<hex12>`` by default).
+        kind: Discriminator from :class:`EvidenceKind`.
+        ok: Tri-valued success flag. ``True`` = succeeded, ``False`` =
+            failed, ``None`` = undetermined (e.g. only the start event
+            was observed).
+        started_at: When the underlying work began. Falls back to the
+            earliest source event's timestamp when no explicit start is
+            available.
+        ended_at: When the underlying work finished. ``None`` for
+            entries observed only via a start event.
+        payload: Structured details (tool name, command, file path,
+            etc.). Immutable at runtime.
+        source_event_ids: One or more event ids that produced this
+            entry. Empty tuples are rejected — every entry must be
+            traceable back to the journal.
+    """
+
+    schema_version: int = Field(default=JOURNAL_SCHEMA_VERSION, ge=1)
+    handle: str = Field(default_factory=lambda: _new_id("ev"), min_length=1)
+    kind: EvidenceKind
+    ok: bool | None = Field(default=None)
+    started_at: datetime
+    ended_at: datetime | None = Field(default=None)
+    payload: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
+    source_event_ids: IdentifierTuple
+
+    @field_validator("source_event_ids")
+    @classmethod
+    def _source_events_non_empty(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            msg = (
+                "EvidenceEntry.source_event_ids must reference at least "
+                "one journal event"
+            )
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_timestamps(self) -> EvidenceEntry:
+        if self.ended_at is not None and self.ended_at < self.started_at:
+            msg = "EvidenceEntry.ended_at cannot precede started_at"
+            raise ValueError(msg)
+        return self
+
+
+class EvidenceManifest(BaseModel, frozen=True):
+    """Per-AC evidence manifest derived from the journal.
+
+    Manifests are the ``evidence_manifest`` input to the TraceGuard
+    deliver gate. They are scoped to a single acceptance criterion so a
+    leaf agent's claim can be compared against the observable trace of
+    its own work.
+
+    Attributes:
+        manifest_id: Stable identifier.
+        ac_id: Acceptance-criterion identifier this manifest covers.
+        entries: Tuple of :class:`EvidenceEntry` records in observation
+            order.
+        normalized_at: When the manifest was produced.
+        metadata: Free-form metadata bag (immutable at runtime).
+    """
+
+    schema_version: int = Field(default=JOURNAL_SCHEMA_VERSION, ge=1)
+    manifest_id: str = Field(default_factory=lambda: _new_id("manifest"), min_length=1)
+    ac_id: str = Field(..., min_length=1)
+    entries: tuple[EvidenceEntry, ...] = Field(default_factory=tuple)
+    normalized_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
+
+    @field_validator("ac_id")
+    @classmethod
+    def _ac_id_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            msg = "EvidenceManifest.ac_id must be a non-blank identifier"
+            raise ValueError(msg)
+        return stripped
+
+
+# ---------------------------------------------------------------------------
+# Normalizer
+# ---------------------------------------------------------------------------
+
+
+_TOOL_STARTED = "tool.call.started"
+_TOOL_RETURNED = "tool.call.returned"
+_LLM_REQUESTED = "llm.call.requested"
+_LLM_RETURNED = "llm.call.returned"
+
+_FILE_MODIFY_TOOL_NAMES = frozenset({"Write", "Edit", "NotebookEdit"})
+_COMMAND_TOOL_NAMES = frozenset({"Bash"})
+
+
+def _event_ac_id(event: BaseEvent) -> str | None:
+    """Best-effort AC scope extraction from an event."""
+    raw_ac_id = event.data.get("ac_id") if isinstance(event.data, dict) else None
+    if isinstance(raw_ac_id, str) and raw_ac_id.strip():
+        return raw_ac_id.strip()
+    return None
+
+
+def _classify_tool_kind(tool_name: str) -> EvidenceKind:
+    if tool_name in _COMMAND_TOOL_NAMES:
+        return EvidenceKind.COMMAND_EXECUTED
+    if tool_name in _FILE_MODIFY_TOOL_NAMES:
+        return EvidenceKind.FILE_MODIFIED
+    return EvidenceKind.TOOL_INVOCATION
+
+
+def _tool_payload(
+    *,
+    tool_name: str,
+    args_preview: str | None,
+    result_preview: str | None,
+    duration_ms: int | None,
+    is_error: bool | None,
+    error_kind: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"tool_name": tool_name}
+    if args_preview is not None:
+        payload["args_preview"] = args_preview
+    if result_preview is not None:
+        payload["result_preview"] = result_preview
+    if duration_ms is not None:
+        payload["duration_ms"] = duration_ms
+    if is_error is not None:
+        payload["is_error"] = is_error
+    if error_kind is not None:
+        payload["error_kind"] = error_kind
+    return payload
+
+
+def normalize_events(
+    events: Iterable[BaseEvent],
+    ac_id: str,
+) -> EvidenceManifest:
+    """Walk an event sequence and produce an :class:`EvidenceManifest`.
+
+    The normalizer pairs ``tool.call.started`` and ``tool.call.returned``
+    events by ``call_id`` and emits a single entry per pair. Unpaired
+    start events are emitted with ``ok=None`` and ``ended_at=None`` so
+    long-running work that has not yet completed is still observable.
+    Returned events with no matching start are emitted as completion-only
+    entries; this matches the behaviour of legacy traces where the start
+    record was lost or never persisted.
+
+    Args:
+        events: Ordered iterable of :class:`BaseEvent` records, typically
+            already filtered to the AC scope by the caller.
+        ac_id: Acceptance-criterion identifier the manifest belongs to.
+            Used both to populate :attr:`EvidenceManifest.ac_id` and to
+            filter events whose payload explicitly references a
+            different ``ac_id``.
+
+    Returns:
+        An :class:`EvidenceManifest` containing the normalized entries
+        in observation order.
+    """
+    normalized_ac_id = ac_id.strip()
+    if not normalized_ac_id:
+        msg = "normalize_events requires a non-blank ac_id"
+        raise ValueError(msg)
+
+    started: OrderedDict[str, BaseEvent] = OrderedDict()
+    entries: list[EvidenceEntry] = []
+
+    for event in events:
+        # Discard events that explicitly belong to a different AC scope.
+        observed_ac = _event_ac_id(event)
+        if observed_ac is not None and observed_ac != normalized_ac_id:
+            continue
+
+        if event.type == _TOOL_STARTED:
+            call_id = event.data.get("call_id") if isinstance(event.data, dict) else None
+            if isinstance(call_id, str) and call_id.strip():
+                started[call_id.strip()] = event
+            continue
+
+        if event.type == _TOOL_RETURNED:
+            entry = _build_tool_entry_from_pair(started, event)
+            if entry is not None:
+                entries.append(entry)
+            continue
+
+        if event.type in (_LLM_REQUESTED, _LLM_RETURNED):
+            entry = _build_llm_entry(event)
+            if entry is not None:
+                entries.append(entry)
+            continue
+
+    # Surface unmatched start events as "still running" entries so the
+    # caller can detect dangling work.
+    for call_id, start_event in started.items():
+        entry = _build_tool_entry_from_start_only(call_id, start_event)
+        if entry is not None:
+            entries.append(entry)
+
+    return EvidenceManifest(
+        ac_id=normalized_ac_id,
+        entries=tuple(entries),
+    )
+
+
+def _build_tool_entry_from_pair(
+    started: OrderedDict[str, BaseEvent],
+    returned_event: BaseEvent,
+) -> EvidenceEntry | None:
+    if not isinstance(returned_event.data, dict):
+        return None
+    call_id = returned_event.data.get("call_id")
+    if not isinstance(call_id, str) or not call_id.strip():
+        return None
+    call_id = call_id.strip()
+    start_event = started.pop(call_id, None)
+
+    tool_name = returned_event.data.get("tool_name") or (
+        start_event.data.get("tool_name") if start_event else None
+    )
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        return None
+
+    started_at = start_event.timestamp if start_event else returned_event.timestamp
+    is_error = returned_event.data.get("is_error")
+    ok = (not bool(is_error)) if isinstance(is_error, bool) else None
+
+    payload = _tool_payload(
+        tool_name=tool_name.strip(),
+        args_preview=(
+            start_event.data.get("args_preview")
+            if start_event and isinstance(start_event.data, dict)
+            else None
+        ),
+        result_preview=returned_event.data.get("result_preview"),
+        duration_ms=returned_event.data.get("duration_ms"),
+        is_error=is_error if isinstance(is_error, bool) else None,
+        error_kind=returned_event.data.get("error_kind"),
+    )
+
+    source_event_ids: list[str] = []
+    if start_event is not None:
+        source_event_ids.append(start_event.id)
+    source_event_ids.append(returned_event.id)
+
+    return EvidenceEntry(
+        kind=_classify_tool_kind(tool_name.strip()),
+        ok=ok,
+        started_at=started_at,
+        ended_at=returned_event.timestamp,
+        payload=payload,
+        source_event_ids=tuple(source_event_ids),
+    )
+
+
+def _build_tool_entry_from_start_only(
+    call_id: str,
+    start_event: BaseEvent,
+) -> EvidenceEntry | None:
+    del call_id  # reserved for future correlation logging
+    if not isinstance(start_event.data, dict):
+        return None
+    tool_name = start_event.data.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        return None
+    payload = _tool_payload(
+        tool_name=tool_name.strip(),
+        args_preview=start_event.data.get("args_preview"),
+        result_preview=None,
+        duration_ms=None,
+        is_error=None,
+        error_kind=None,
+    )
+    return EvidenceEntry(
+        kind=_classify_tool_kind(tool_name.strip()),
+        ok=None,
+        started_at=start_event.timestamp,
+        ended_at=None,
+        payload=payload,
+        source_event_ids=(start_event.id,),
+    )
+
+
+def _build_llm_entry(event: BaseEvent) -> EvidenceEntry | None:
+    if not isinstance(event.data, dict):
+        return None
+    payload: dict[str, Any] = {}
+    model = event.data.get("model")
+    if isinstance(model, str) and model.strip():
+        payload["model"] = model.strip()
+    role = event.data.get("role")
+    if isinstance(role, str) and role.strip():
+        payload["role"] = role.strip()
+    is_error = event.data.get("is_error")
+    ok = (not bool(is_error)) if isinstance(is_error, bool) else None
+    if isinstance(is_error, bool):
+        payload["is_error"] = is_error
+
+    return EvidenceEntry(
+        kind=EvidenceKind.LLM_CALL,
+        ok=ok,
+        started_at=event.timestamp,
+        ended_at=event.timestamp if event.type == _LLM_RETURNED else None,
+        payload=payload,
+        source_event_ids=(event.id,),
+    )
+
+
+def filter_events_for_ac(
+    events: Sequence[BaseEvent],
+    ac_id: str,
+) -> tuple[BaseEvent, ...]:
+    """Return events whose payload references the given AC scope.
+
+    Convenience helper for callers that hold a flat list of events and
+    want the AC-scoped subset before calling :func:`normalize_events`.
+    Events without an explicit ``ac_id`` payload field are excluded so
+    only events the journal explicitly attributed to the AC flow through.
+    """
+    normalized = ac_id.strip()
+    if not normalized:
+        msg = "filter_events_for_ac requires a non-blank ac_id"
+        raise ValueError(msg)
+    return tuple(event for event in events if _event_ac_id(event) == normalized)
+
+
+__all__ = [
+    "JOURNAL_SCHEMA_VERSION",
+    "EvidenceEntry",
+    "EvidenceKind",
+    "EvidenceManifest",
+    "FrozenMapping",
+    "IdentifierTuple",
+    "filter_events_for_ac",
+    "normalize_events",
+]

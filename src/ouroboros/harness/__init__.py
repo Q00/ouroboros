@@ -1,12 +1,17 @@
-"""Harness projection vocabulary for Ouroboros.
+"""Harness projection and evidence-manifest vocabulary for Ouroboros.
 
-This module hosts the public Run / Stage / Step / Artifact / Verdict
-projection vocabulary derived from the canonical event store. The records
-are read-models, not a replacement for the underlying ``EventStore``.
-
-See ``ouroboros.harness.projection`` for the schema.
+This package hosts read-only projections over the canonical ``EventStore``:
+Run / Stage / Step / Artifact / Verdict records for #946 plus the
+journal-to-evidence-manifest normalizer for #978.
 """
 
+from ouroboros.harness.journal import (
+    EvidenceEntry,
+    EvidenceKind,
+    EvidenceManifest,
+    filter_events_for_ac,
+    normalize_events,
+)
 from ouroboros.harness.projection import (
     ArtifactRecord,
     RunRecord,
@@ -20,6 +25,9 @@ from ouroboros.harness.projection import (
 
 __all__ = [
     "ArtifactRecord",
+    "EvidenceEntry",
+    "EvidenceKind",
+    "EvidenceManifest",
     "RunRecord",
     "StageKind",
     "StageRecord",
@@ -27,4 +35,6 @@ __all__ = [
     "StepRecord",
     "VerdictOutcome",
     "VerdictRecord",
+    "filter_events_for_ac",
+    "normalize_events",
 ]
