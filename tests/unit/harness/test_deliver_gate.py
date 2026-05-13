@@ -216,13 +216,15 @@ def _manifest_entry(
     handle: str,
     ok: bool | None,
     source_event_ids: tuple[str, ...],
+    kind: EvidenceKind = EvidenceKind.COMMAND_EXECUTED,
+    payload: dict[str, Any] | None = None,
 ) -> EvidenceEntry:
     return EvidenceEntry(
         handle=handle,
-        kind=EvidenceKind.COMMAND_EXECUTED,
+        kind=kind,
         ok=ok,
         started_at=datetime.now(UTC),
-        payload={"tool_name": "Bash", "result_preview": f"result for {handle}"},
+        payload=payload or {"tool_name": "Bash", "result_preview": f"result for {handle}"},
         source_event_ids=source_event_ids,
     )
 
@@ -446,6 +448,146 @@ class TestLoadAcEvidenceManifest:
 
 
 class TestEvaluateDeliverClaim:
+    def test_q4_fixture_file_modified_claim_uses_whole_file_path_scope(self) -> None:
+        """#978 Q4 fixture: file_modified claims cite a path-scoped edit handle.
+
+        The starter claim shape represents the brownfield boundary as a
+        whole-file path plus expected change. Diff-level validation belongs to a
+        later semantic/harness-check layer; this fixture pins the TraceGuard
+        structural surface that must exist before any C.4 default-flip work.
+        """
+        manifest = EvidenceManifest(
+            ac_id="AC-Q4",
+            entries=(
+                _manifest_entry(
+                    handle="ev_file_auth_middleware",
+                    ok=True,
+                    kind=EvidenceKind.FILE_MODIFIED,
+                    payload={
+                        "tool_name": "Edit",
+                        "args_preview": "path=src/middleware/auth.ts; scope=whole_file",
+                        "result_preview": "role_matrix_added",
+                    },
+                    source_event_ids=("evt_edit_start", "evt_edit_return"),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-Q4",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="file_modified:src/middleware/auth.ts:role_matrix_added",
+                    evidence_handle="ev_file_auth_middleware",
+                    statement=(
+                        "file_modified path=src/middleware/auth.ts "
+                        "scope=whole_file expected_change=role_matrix_added"
+                    ),
+                ),
+            ),
+        )
+        validator = _RecordingTraceGuardValidator()
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=validator,
+        )
+
+        assert verdict.accepted is True
+        assert verdict.accepted_fact_ids == (
+            "file_modified:src/middleware/auth.ts:role_matrix_added",
+        )
+        assert verdict.evidence_event_ids == ("evt_edit_start", "evt_edit_return")
+        assert validator.calls[0]["parent_synthesis"]["result"]["observed_facts"] == [
+            {
+                "fact_id": "file_modified:src/middleware/auth.ts:role_matrix_added",
+                "chunk_id": "ev_file_auth_middleware",
+                "statement": (
+                    "file_modified path=src/middleware/auth.ts "
+                    "scope=whole_file expected_change=role_matrix_added"
+                ),
+            }
+        ]
+        assert validator.calls[0]["evidence_manifest"] == (
+            TraceGuardEvidenceInput(
+                fact_id="file_modified:src/middleware/auth.ts:role_matrix_added",
+                chunk_id="ev_file_auth_middleware",
+                text="role_matrix_added",
+                child_call_id="evt_edit_start,evt_edit_return",
+            ),
+        )
+
+    def test_q5_fixture_parent_synthesis_lifts_multiple_child_ac_facts(self) -> None:
+        """#978 Q5 fixture: parent synthesis can cite child AC evidence handles."""
+        manifest = EvidenceManifest(
+            ac_id="AC-PARENT",
+            metadata={"child_ac_ids": ("AC-1", "AC-2")},
+            entries=(
+                _manifest_entry(
+                    handle="ev_child_ac_1",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "result_preview": "AC-1 tests passed",
+                        "child_ac_id": "AC-1",
+                    },
+                    source_event_ids=("evt_ac1_test",),
+                ),
+                _manifest_entry(
+                    handle="ev_child_ac_2",
+                    ok=True,
+                    kind=EvidenceKind.FILE_MODIFIED,
+                    payload={
+                        "tool_name": "Edit",
+                        "result_preview": "AC-2 docs updated",
+                        "child_ac_id": "AC-2",
+                    },
+                    source_event_ids=("evt_ac2_edit",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-PARENT",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="child_ac:AC-1:test_passed",
+                    evidence_handle="ev_child_ac_1",
+                    statement="child_ac=AC-1 result=test_passed",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="child_ac:AC-2:file_modified",
+                    evidence_handle="ev_child_ac_2",
+                    statement="child_ac=AC-2 result=file_modified",
+                ),
+            ),
+        )
+        validator = _RecordingTraceGuardValidator()
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=validator,
+        )
+
+        assert verdict.accepted is True
+        assert verdict.accepted_fact_ids == (
+            "child_ac:AC-1:test_passed",
+            "child_ac:AC-2:file_modified",
+        )
+        assert verdict.evidence_event_ids == ("evt_ac1_test", "evt_ac2_edit")
+        assert validator.calls[0]["parent_synthesis"]["result"]["observed_facts"] == [
+            {
+                "fact_id": "child_ac:AC-1:test_passed",
+                "chunk_id": "ev_child_ac_1",
+                "statement": "child_ac=AC-1 result=test_passed",
+            },
+            {
+                "fact_id": "child_ac:AC-2:file_modified",
+                "chunk_id": "ev_child_ac_2",
+                "statement": "child_ac=AC-2 result=file_modified",
+            },
+        ]
+
     def test_builds_traceguard_envelope_and_returns_accepted_verdict(self) -> None:
         manifest = EvidenceManifest(
             ac_id="AC-1",
