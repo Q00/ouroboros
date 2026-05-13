@@ -6,7 +6,14 @@ journal-to-evidence-manifest normalizer for #978.
 """
 
 from ouroboros.harness.deliver_gate import (
+    DeliverEvidenceClaim,
+    DeliverEvidenceFact,
+    DeliverGateVerdict,
     EventStoreEvidenceReader,
+    TraceGuardEvidenceInput,
+    TraceGuardResultLike,
+    TraceGuardValidator,
+    evaluate_deliver_claim,
     load_ac_evidence_manifest,
 )
 from ouroboros.harness.journal import (
@@ -29,6 +36,9 @@ from ouroboros.harness.projection import (
 
 __all__ = [
     "ArtifactRecord",
+    "DeliverEvidenceClaim",
+    "DeliverEvidenceFact",
+    "DeliverGateVerdict",
     "EvidenceEntry",
     "EvidenceKind",
     "EventStoreEvidenceReader",
@@ -38,8 +48,12 @@ __all__ = [
     "StageRecord",
     "StepKind",
     "StepRecord",
+    "TraceGuardEvidenceInput",
+    "TraceGuardResultLike",
+    "TraceGuardValidator",
     "VerdictOutcome",
     "VerdictRecord",
+    "evaluate_deliver_claim",
     "filter_events_for_ac",
     "load_ac_evidence_manifest",
     "normalize_events",

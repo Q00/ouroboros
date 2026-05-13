@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.harness.deliver_gate import load_ac_evidence_manifest
-from ouroboros.harness.journal import EvidenceKind
+from ouroboros.harness.deliver_gate import (
+    DeliverEvidenceClaim,
+    DeliverEvidenceFact,
+    TraceGuardEvidenceInput,
+    evaluate_deliver_claim,
+    load_ac_evidence_manifest,
+)
+from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 
 
 def _tool_started(
@@ -112,6 +119,106 @@ class _FakeEventStore:
             }
         )
         return self.events
+
+
+class _TraceGuardClaim:
+    def __init__(self, *, fact_id: str | None, chunk_id: str | None) -> None:
+        self.fact_id = fact_id
+        self.chunk_id = chunk_id
+
+
+class _TraceGuardRejection:
+    def __init__(self, *, reason: str, claim: _TraceGuardClaim, detail: str) -> None:
+        self.reason = reason
+        self.claim = claim
+        self.detail = detail
+
+
+class _TraceGuardResult:
+    def __init__(
+        self,
+        *,
+        accepted: bool,
+        accepted_claims: tuple[_TraceGuardClaim, ...] = (),
+        rejected_claims: tuple[_TraceGuardRejection, ...] = (),
+    ) -> None:
+        self.accepted = accepted
+        self.accepted_claims = accepted_claims
+        self.rejected_claims = rejected_claims
+        self.allowed_fact_ids = tuple(claim.fact_id for claim in accepted_claims)
+        self.allowed_chunk_ids = tuple(claim.chunk_id for claim in accepted_claims)
+
+    @property
+    def unsupported_claim_rate(self) -> float:
+        total = len(self.accepted_claims) + len(self.rejected_claims)
+        if total == 0:
+            return 0.0
+        return len(self.rejected_claims) / total
+
+
+class _RecordingTraceGuardValidator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(
+        self,
+        *,
+        evidence_manifest: tuple[TraceGuardEvidenceInput, ...],
+        parent_synthesis: dict[str, Any],
+    ) -> _TraceGuardResult:
+        self.calls.append(
+            {
+                "evidence_manifest": evidence_manifest,
+                "parent_synthesis": parent_synthesis,
+            }
+        )
+        allowed = {entry.fact_id: entry for entry in evidence_manifest}
+        accepted: list[_TraceGuardClaim] = []
+        rejected: list[_TraceGuardRejection] = []
+        for item in parent_synthesis["result"]["observed_facts"]:
+            fact_id = item.get("fact_id")
+            chunk_id = item.get("chunk_id")
+            expected = allowed.get(fact_id)
+            if expected is None:
+                rejected.append(
+                    _TraceGuardRejection(
+                        reason="unsupported_fact_id",
+                        claim=_TraceGuardClaim(fact_id=fact_id, chunk_id=chunk_id),
+                        detail="fact is not present in manifest",
+                    )
+                )
+                continue
+            if chunk_id != expected.chunk_id:
+                rejected.append(
+                    _TraceGuardRejection(
+                        reason="evidence_handle_mismatch",
+                        claim=_TraceGuardClaim(fact_id=fact_id, chunk_id=chunk_id),
+                        detail="claim cited the wrong evidence handle",
+                    )
+                )
+                continue
+            accepted.append(_TraceGuardClaim(fact_id=fact_id, chunk_id=chunk_id))
+        return _TraceGuardResult(
+            accepted=not rejected,
+            accepted_claims=tuple(accepted),
+            rejected_claims=tuple(rejected),
+        )
+
+
+def _manifest_entry(
+    *,
+    handle: str,
+    ok: bool | None,
+    source_event_ids: tuple[str, ...],
+) -> EvidenceEntry:
+    return EvidenceEntry(
+        handle=handle,
+        kind=EvidenceKind.COMMAND_EXECUTED,
+        ok=ok,
+        started_at=datetime.now(UTC),
+        payload={"tool_name": "Bash", "result_preview": f"result for {handle}"},
+        source_event_ids=source_event_ids,
+    )
 
 
 class TestLoadAcEvidenceManifest:
@@ -330,3 +437,110 @@ class TestLoadAcEvidenceManifest:
             await load_ac_evidence_manifest(store, ac_id="  ", execution_id="exec_1")
 
         assert store.execution_queries == []
+
+
+class TestEvaluateDeliverClaim:
+    def test_builds_traceguard_envelope_and_returns_accepted_verdict(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(handle="ev_pass", ok=True, source_event_ids=("evt_1", "evt_2")),
+                _manifest_entry(handle="ev_failed", ok=False, source_event_ids=("evt_failed",)),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="ev_pass",
+                    evidence_handle="ev_pass",
+                    statement="The AC passed because the command succeeded.",
+                ),
+            ),
+        )
+        validator = _RecordingTraceGuardValidator()
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=validator,
+        )
+
+        assert verdict.accepted is True
+        assert verdict.accepted_fact_ids == ("ev_pass",)
+        assert verdict.rejected_fact_ids == ()
+        assert verdict.evidence_event_ids == ("evt_1", "evt_2")
+        assert validator.calls == [
+            {
+                "evidence_manifest": (
+                    TraceGuardEvidenceInput(
+                        fact_id="ev_pass",
+                        chunk_id="ev_pass",
+                        text="result for ev_pass",
+                        child_call_id="evt_1,evt_2",
+                    ),
+                ),
+                "parent_synthesis": {
+                    "result": {
+                        "observed_facts": [
+                            {
+                                "fact_id": "ev_pass",
+                                "chunk_id": "ev_pass",
+                                "statement": ("The AC passed because the command succeeded."),
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+
+    def test_rejected_traceguard_result_is_preserved_for_routing(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(_manifest_entry(handle="ev_actual", ok=True, source_event_ids=("evt_1",)),),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="ev_missing",
+                    evidence_handle="ev_missing",
+                    statement="Unsupported claim.",
+                ),
+            ),
+        )
+        validator = _RecordingTraceGuardValidator()
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=validator,
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 1.0
+        assert verdict.accepted_fact_ids == ()
+        assert verdict.rejected_fact_ids == ("ev_missing",)
+        assert verdict.rejected_reasons == ("unsupported_fact_id: fact is not present in manifest",)
+        assert verdict.evidence_event_ids == ()
+
+    def test_claim_ac_id_must_match_manifest_scope(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(_manifest_entry(handle="ev_pass", ok=True, source_event_ids=("evt_1",)),),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-2",
+            facts=(DeliverEvidenceFact(fact_id="ev_pass", evidence_handle="ev_pass"),),
+        )
+
+        with pytest.raises(ValueError, match="must match EvidenceManifest.ac_id"):
+            evaluate_deliver_claim(
+                manifest,
+                claim,
+                traceguard_validator=_RecordingTraceGuardValidator(),
+            )
+
+    def test_claim_requires_at_least_one_fact(self) -> None:
+        with pytest.raises(ValueError, match="requires at least one fact"):
+            DeliverEvidenceClaim(ac_id="AC-1", facts=())
