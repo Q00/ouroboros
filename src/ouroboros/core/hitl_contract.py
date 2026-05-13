@@ -76,8 +76,6 @@ def _contains_secret_marker(value: str) -> bool:
 
 def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
     if value is None or isinstance(value, str | int | bool):
-        if isinstance(value, str) and _contains_secret_marker(value):
-            raise ValueError(f"HumanInput {name} must not persist secret-like content")
         return value
     if isinstance(value, float):
         return value
@@ -264,6 +262,10 @@ class HumanInputResponse:
                 object.__setattr__(self, field_name, _require_non_empty(field_name, value))
         if any(not value.strip() for value in self.selected_values):
             raise ValueError("HumanInputResponse selected_values must be non-empty")
+        if self.run_id is None and self.invocation_id is None and self.session_id is None:
+            raise ValueError(
+                "HumanInputResponse requires session_id, run_id, or invocation_id for request correlation"
+            )
         object.__setattr__(self, "selected_values", tuple(self.selected_values))
         self._validate_response_content()
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))

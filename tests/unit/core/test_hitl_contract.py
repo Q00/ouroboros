@@ -78,6 +78,24 @@ def test_request_rejects_secret_like_persisted_payload() -> None:
         )
 
 
+def test_request_allows_secret_marker_words_in_plain_values() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        created_by="plugin-firewall",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLUGIN_FIREWALL,
+        risk_class=HumanInputRiskClass.CREDENTIAL_GATED,
+        question="Approve?",
+        resume_target="plugin:permission",
+        payload={"reason": "token budget exceeded; credential check required"},
+    )
+
+    assert request.to_event_data()["payload"] == {
+        "reason": "token budget exceeded; credential check required"
+    }
+
+
 def test_request_rejects_non_json_payload_values() -> None:
     with pytest.raises(TypeError, match="JSON serializable"):
         HumanInputRequest(
@@ -173,6 +191,7 @@ def test_response_is_frozen() -> None:
     response = HumanInputResponse(
         request_id="hitl-1",
         actor="local-user",
+        session_id="session-1",
         response_kind=HumanInputResponseKind.TEXT,
         text="continue",
     )
@@ -180,11 +199,22 @@ def test_response_is_frozen() -> None:
         response.actor = "other"  # type: ignore[misc]
 
 
+def test_response_requires_request_correlation_aggregate() -> None:
+    with pytest.raises(ValueError, match="request correlation"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.TEXT,
+            text="continue",
+        )
+
+
 def test_response_rejects_approval_decision_on_non_approval() -> None:
     with pytest.raises(ValueError, match="approval_decision"):
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.TEXT,
             text="yes",
             approval_decision=True,
@@ -196,12 +226,14 @@ def test_text_response_requires_text_and_forbids_other_answer_content() -> None:
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.TEXT,
         )
     with pytest.raises(ValueError, match="must not include selection"):
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.TEXT,
             text="yes",
             selected_values=("yes",),
@@ -213,12 +245,14 @@ def test_selection_response_requires_selected_values_and_forbids_other_answer_co
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.SELECTION,
         )
     with pytest.raises(ValueError, match="must not include text"):
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.SELECTION,
             selected_values=("yes",),
             text="yes",
@@ -230,12 +264,14 @@ def test_approval_response_requires_decision_and_forbids_other_answer_content() 
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.APPROVAL,
         )
     with pytest.raises(ValueError, match="must not include text"):
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.APPROVAL,
             approval_decision=True,
             text="yes",
@@ -247,6 +283,7 @@ def test_cancel_and_timeout_responses_forbid_answer_content() -> None:
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.CANCEL,
             text="never mind",
         )
@@ -254,6 +291,7 @@ def test_cancel_and_timeout_responses_forbid_answer_content() -> None:
         HumanInputResponse(
             request_id="hitl-1",
             actor="local-user",
+            session_id="session-1",
             response_kind=HumanInputResponseKind.TIMEOUT,
             selected_values=("late",),
         )
