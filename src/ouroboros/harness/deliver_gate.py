@@ -45,6 +45,7 @@ async def load_ac_evidence_manifest(
     ac_id: str,
     execution_id: str | None = None,
     session_id: str | None = None,
+    scope_id: str | None = None,
     limit: int | None = None,
 ) -> EvidenceManifest:
     """Load and normalize EventStore evidence for one AC deliver-gate check.
@@ -59,6 +60,9 @@ async def load_ac_evidence_manifest(
         ac_id: Acceptance-criterion identifier to normalize.
         execution_id: Optional execution aggregate anchor.
         session_id: Optional session aggregate anchor.
+        scope_id: Optional event-scope token to filter by when the public AC
+            id differs from the runtime aggregate/phase token used by the
+            recorder. Defaults to ``ac_id``.
         limit: Optional EventStore query cap. The default ``None`` reads the
             full related event set so the manifest is not silently truncated
             before TraceGuard sees it.
@@ -76,6 +80,7 @@ async def load_ac_evidence_manifest(
         raise ValueError(msg)
     normalized_execution_id = _normalize_optional_anchor("execution_id", execution_id)
     normalized_session_id = _normalize_optional_anchor("session_id", session_id)
+    normalized_scope_id = _normalize_optional_anchor("scope_id", scope_id) or normalized_ac_id
     if normalized_execution_id is None and normalized_session_id is None:
         msg = "load_ac_evidence_manifest requires execution_id or session_id"
         raise ValueError(msg)
@@ -93,7 +98,10 @@ async def load_ac_evidence_manifest(
             limit=limit,
         )
 
-    return normalize_events(_chronological_events(events), ac_id=normalized_ac_id)
+    manifest = normalize_events(_chronological_events(events), ac_id=normalized_scope_id)
+    if normalized_scope_id == normalized_ac_id:
+        return manifest
+    return manifest.model_copy(update={"ac_id": normalized_ac_id})
 
 
 def _normalize_optional_anchor(name: str, value: str | None) -> str | None:

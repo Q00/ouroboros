@@ -14,7 +14,8 @@ from ouroboros.harness.journal import EvidenceKind
 def _tool_started(
     *,
     call_id: str,
-    ac_id: str = "ac_1",
+    ac_id: str | None = "ac_1",
+    aggregate_id: str = "exec_1",
     when: datetime,
 ) -> BaseEvent:
     return BaseEvent(
@@ -22,15 +23,20 @@ def _tool_started(
         type="tool.call.started",
         timestamp=when,
         aggregate_type="execution",
-        aggregate_id="exec_1",
-        data={"call_id": call_id, "tool_name": "Bash", "ac_id": ac_id},
+        aggregate_id=aggregate_id,
+        data={
+            key: value
+            for key, value in {"call_id": call_id, "tool_name": "Bash", "ac_id": ac_id}.items()
+            if value is not None
+        },
     )
 
 
 def _tool_returned(
     *,
     call_id: str,
-    ac_id: str = "ac_1",
+    ac_id: str | None = "ac_1",
+    aggregate_id: str = "exec_1",
     when: datetime,
 ) -> BaseEvent:
     return BaseEvent(
@@ -38,13 +44,17 @@ def _tool_returned(
         type="tool.call.returned",
         timestamp=when,
         aggregate_type="execution",
-        aggregate_id="exec_1",
+        aggregate_id=aggregate_id,
         data={
-            "call_id": call_id,
-            "tool_name": "Bash",
-            "ac_id": ac_id,
-            "is_error": False,
-            "duration_ms": 7,
+            key: value
+            for key, value in {
+                "call_id": call_id,
+                "tool_name": "Bash",
+                "ac_id": ac_id,
+                "is_error": False,
+                "duration_ms": 7,
+            }.items()
+            if value is not None
         },
     )
 
@@ -128,6 +138,46 @@ class TestLoadAcEvidenceManifest:
         assert manifest.entries[0].source_event_ids == (
             "evt_started_same",
             "evt_returned_same",
+        )
+
+    @pytest.mark.asyncio
+    async def test_scope_id_filters_production_shaped_events_without_ac_payload(self) -> None:
+        now = datetime.now(UTC)
+        store = _FakeEventStore(
+            [
+                _tool_started(
+                    call_id="target",
+                    ac_id=None,
+                    aggregate_id="ac_runtime_scope",
+                    when=now,
+                ),
+                _tool_returned(
+                    call_id="target",
+                    ac_id=None,
+                    aggregate_id="ac_runtime_scope",
+                    when=now + timedelta(seconds=1),
+                ),
+                _tool_started(
+                    call_id="other",
+                    ac_id=None,
+                    aggregate_id="other_runtime_scope",
+                    when=now + timedelta(seconds=2),
+                ),
+            ]
+        )
+
+        manifest = await load_ac_evidence_manifest(
+            store,
+            ac_id="AC-1",
+            scope_id="ac_runtime_scope",
+            execution_id="exec_1",
+        )
+
+        assert manifest.ac_id == "AC-1"
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == (
+            "evt_started_target",
+            "evt_returned_target",
         )
 
     @pytest.mark.asyncio
