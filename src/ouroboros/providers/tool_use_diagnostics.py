@@ -54,6 +54,8 @@ def _block_type(block: Any) -> str | None:
     block_type = _get_field(block, "type")
     if isinstance(block_type, str):
         return block_type
+    if type(block).__name__ == "ToolUseBlock":
+        return "tool_use"
     return None
 
 
