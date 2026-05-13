@@ -1413,7 +1413,6 @@ def test_auto_sub_interview_isolates_parent_hook_context(
     assert options_call_kwargs["extra_args"]["allowedTools"] == ""
 
 
-
 def test_handle_does_not_mutate_shared_interview_engine(
     tmp_path: Path,
 ) -> None:
