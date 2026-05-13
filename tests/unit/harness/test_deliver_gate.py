@@ -631,9 +631,16 @@ class TestEvaluateDeliverClaim:
             manifest,
             claim,
             traceguard_validator=lambda **_: _TraceGuardResult(
-                accepted=True,
+                accepted=False,
                 allowed_fact_ids=("fact_actual",),
                 allowed_chunk_ids=("ev_actual",),
+                rejected_claims=(
+                    _TraceGuardRejection(
+                        reason="unsupported_fact_id",
+                        claim=_TraceGuardClaim(fact_id="fact_missing", chunk_id="ev_missing"),
+                        detail="fact is not present in manifest",
+                    ),
+                ),
             ),
         )
 
@@ -641,6 +648,10 @@ class TestEvaluateDeliverClaim:
         assert verdict.unsupported_claim_rate == 0.5
         assert verdict.accepted_fact_ids == ("fact_actual",)
         assert verdict.rejected_fact_ids == ("fact_missing",)
+        assert verdict.rejected_reasons == (
+            "missing_evidence_handle: ev_missing is not present in manifest",
+            "unsupported_fact_id: fact is not present in manifest",
+        )
 
     def test_claim_ac_id_must_match_manifest_scope(self) -> None:
         manifest = EvidenceManifest(

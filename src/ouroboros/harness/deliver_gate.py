@@ -464,8 +464,11 @@ def _unsupported_claim_rate(
 ) -> float:
     if total_claims <= 0:
         return raw_rate
-    local_rate = min(1.0, len(rejected) / total_claims)
-    return max(raw_rate, round(local_rate, 4))
+    rejected_fact_ids = {fact_id for fact_id, _, _ in rejected if fact_id is not None}
+    rejected_count = len(rejected_fact_ids) if rejected_fact_ids else len(rejected)
+    if rejected_count:
+        return round(min(1.0, rejected_count / total_claims), 4)
+    return raw_rate
 
 
 def _evidence_event_ids_for_handles(
