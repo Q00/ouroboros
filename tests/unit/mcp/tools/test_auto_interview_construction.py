@@ -1479,3 +1479,116 @@ def test_auto_handler_does_not_leak_suppress_flag_into_shared_engine(
     assert shared_engine.suppress_tool_use_prompt_cues is False, (
         "expected the prior engine.suppress_tool_use_prompt_cues value to be restored"
     )
+
+
+def test_auto_handler_swaps_shared_engine_adapter_to_isolated_one(
+    tmp_path: Path,
+) -> None:
+    """A shared ``InterviewEngine`` must use the isolated adapter for the call.
+
+    Regression for PR #979 review (commit cb2b7e7): if ``InterviewHandler``
+    only toggles ``engine.suppress_tool_use_prompt_cues`` but leaves the
+    engine's pre-existing ``llm_adapter`` in place, question generation goes
+    through the parent's tool-capable adapter and our envelope isolation is
+    bypassed in production. The handler must swap in the freshly-created
+    isolated adapter (``allowed_tools=[]``, ``strict_mcp_config=True``) for
+    the duration of its own call and restore the prior value afterwards.
+    """
+    from unittest.mock import AsyncMock, sentinel
+
+    from ouroboros.bigbang.interview import InterviewEngine
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+
+    parent_adapter = sentinel.parent_adapter
+    isolated_adapter = sentinel.isolated_adapter
+
+    shared_engine = InterviewEngine.__new__(InterviewEngine)
+    shared_engine.suppress_tool_use_prompt_cues = False
+    shared_engine.llm_adapter = parent_adapter
+
+    observed: dict[str, Any] = {}
+
+    async def _capture_start(*args: Any, **kwargs: Any) -> Any:
+        observed["adapter_during_call"] = shared_engine.llm_adapter
+        observed["suppress_during_call"] = shared_engine.suppress_tool_use_prompt_cues
+        raise RuntimeError("forced stop after engine state is observed")
+
+    shared_engine.start_interview = AsyncMock(side_effect=_capture_start)
+    shared_engine.resume_interview = AsyncMock()
+    shared_engine.score_interview = AsyncMock()
+
+    handler = InterviewHandler(
+        interview_engine=shared_engine,
+        event_store=MagicMock(),
+        llm_adapter=None,
+        llm_backend="claude_code",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+        data_dir=tmp_path,
+        suppress_tool_use_prompt_cues=True,
+    )
+    handler._owns_event_store = False
+    handler._initialized = True
+
+    async def _run() -> None:
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            return_value=isolated_adapter,
+        ):
+            try:
+                await handler.handle({"initial_context": "Test goal"})
+            except Exception:
+                pass
+
+    asyncio.run(_run())
+
+    assert observed.get("adapter_during_call") is isolated_adapter, (
+        "expected the auto path to swap engine.llm_adapter to the isolated adapter"
+    )
+    assert observed.get("suppress_during_call") is True
+    assert shared_engine.llm_adapter is parent_adapter, (
+        "expected the prior engine.llm_adapter to be restored after the call"
+    )
+    assert shared_engine.suppress_tool_use_prompt_cues is False
+
+
+def test_authoring_interview_handler_does_not_shortcut_when_backend_changes() -> None:
+    """The reuse short-circuit must respect explicit ``llm_backend`` overrides.
+
+    Regression for PR #979 review (commit cb2b7e7): previously, when an
+    existing handler already had ``suppress_tool_use_prompt_cues=True`` and
+    ``llm_adapter is None``, ``_authoring_interview_handler`` returned the
+    existing handler unchanged even if the caller supplied a different
+    ``llm_backend``. That silently kept the previous backend.
+    """
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+    from ouroboros.mcp.tools.auto_handler import _authoring_interview_handler
+
+    existing = InterviewHandler(
+        llm_backend="claude_code",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+        suppress_tool_use_prompt_cues=True,
+    )
+
+    same_backend = _authoring_interview_handler(
+        existing,
+        llm_backend="claude_code",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+    assert same_backend is existing, (
+        "matching backend should still allow the cheap direct-return short-circuit"
+    )
+
+    different_backend = _authoring_interview_handler(
+        existing,
+        llm_backend="codex_cli",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+    assert different_backend is not existing, (
+        "a different llm_backend must produce a fresh handler, not reuse the previous one"
+    )
+    assert different_backend.llm_backend == "codex_cli"
+    assert different_backend.suppress_tool_use_prompt_cues is True

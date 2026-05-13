@@ -1359,7 +1359,11 @@ def _authoring_interview_handler(
     if _handler_matches_runtime(handler, agent_runtime_backend, opencode_mode) and getattr(
         handler, "suppress_tool_use_prompt_cues", False
     ):
-        if handler.llm_adapter is None:
+        # Only short-circuit when llm_backend is also already aligned. Otherwise
+        # a reused handler would silently keep its previous backend/model
+        # provider on later sessions when the caller explicitly overrides it.
+        backend_matches = llm_backend is None or handler.llm_backend == llm_backend
+        if handler.llm_adapter is None and backend_matches:
             return handler
         return InterviewHandler(
             interview_engine=handler.interview_engine,

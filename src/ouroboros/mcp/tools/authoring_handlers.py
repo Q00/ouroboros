@@ -1439,17 +1439,29 @@ class InterviewHandler:
             strict_mcp_config=True,
         )
         # Whether we are reusing a shared engine. If so, we must NOT mutate
-        # its suppress flag permanently — that would leak this handler's
-        # prompt-cue policy into unrelated sessions that share the same
-        # engine instance. We save the prior value and restore it in the
+        # its suppress flag or llm_adapter permanently — that would leak this
+        # handler's prompt-cue policy and isolated-adapter into unrelated
+        # sessions that share the same engine instance. We also must override
+        # the engine's adapter for the duration of this call so the isolated
+        # llm_adapter built above (with allowed_tools=[] and
+        # strict_mcp_config=True) is what actually answers question generation;
+        # otherwise InterviewEngine.llm_adapter.complete(...) still goes
+        # through the parent's tool-capable adapter and our envelope isolation
+        # is bypassed in production. Save prior values and restore in the
         # outer finally block below.
         _engine_was_shared = self.interview_engine is not None
         _prev_engine_suppress: bool | None = None
+        _adapter_swapped = False
+        _prev_engine_adapter: Any = None
         if _engine_was_shared:
             engine = self.interview_engine
             if hasattr(engine, "suppress_tool_use_prompt_cues"):
                 _prev_engine_suppress = engine.suppress_tool_use_prompt_cues
                 engine.suppress_tool_use_prompt_cues = self.suppress_tool_use_prompt_cues
+            if hasattr(engine, "llm_adapter"):
+                _prev_engine_adapter = engine.llm_adapter
+                engine.llm_adapter = llm_adapter
+                _adapter_swapped = True
         else:
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
@@ -2145,5 +2157,7 @@ class InterviewHandler:
         finally:
             if _engine_was_shared and _prev_engine_suppress is not None:
                 engine.suppress_tool_use_prompt_cues = _prev_engine_suppress
+            if _engine_was_shared and _adapter_swapped:
+                engine.llm_adapter = _prev_engine_adapter
             if self._owns_event_store:
                 await self.close()
