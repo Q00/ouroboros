@@ -94,16 +94,11 @@ def _normalize_capability_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     normalized: list[str] = []
     for index, value in enumerate(values):
         if not isinstance(value, str):
-            msg = (
-                f"capability name at index {index} must be a string; "
-                f"got {type(value).__name__}"
-            )
+            msg = f"capability name at index {index} must be a string; got {type(value).__name__}"
             raise TypeError(msg)
         stripped = value.strip()
         if not stripped:
-            msg = (
-                f"capability name at index {index} is empty or whitespace-only"
-            )
+            msg = f"capability name at index {index} is empty or whitespace-only"
             raise ValueError(msg)
         normalized.append(stripped)
     return tuple(normalized)
@@ -416,8 +411,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                     WorkflowValidationError(
                         code="dangling_edge",
                         message=(
-                            f"Edge '{edge.edge_id}' references unknown {role} "
-                            f"node '{endpoint}'."
+                            f"Edge '{edge.edge_id}' references unknown {role} node '{endpoint}'."
                         ),
                         edge_id=edge.edge_id,
                         node_id=endpoint,
@@ -463,9 +457,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
             warnings.append(
                 WorkflowValidationError(
                     code="isolated_node",
-                    message=(
-                        f"Node '{node.node_id}' is isolated (no incident edges)."
-                    ),
+                    message=(f"Node '{node.node_id}' is isolated (no incident edges)."),
                     node_id=node.node_id,
                 )
             )

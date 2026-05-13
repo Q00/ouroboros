@@ -415,8 +415,8 @@ class TestNoExternalFrameworkDependency:
             "microsoft.agent",
         )
         for module_name in list(__import__("sys").modules):
-            assert not any(
-                module_name.startswith(prefix) for prefix in forbidden_prefixes
-            ), f"Forbidden dependency loaded transitively: {module_name}"
+            assert not any(module_name.startswith(prefix) for prefix in forbidden_prefixes), (
+                f"Forbidden dependency loaded transitively: {module_name}"
+            )
         # Tautological assertion to keep the import alive in the test body.
         assert wf_ir.WORKFLOW_IR_SCHEMA_VERSION == 1
