@@ -97,10 +97,7 @@ def _normalize_id_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     normalized: list[str] = []
     for index, value in enumerate(values):
         if not isinstance(value, str):
-            msg = (
-                f"identifier at index {index} must be a string; "
-                f"got {type(value).__name__}"
-            )
+            msg = f"identifier at index {index} must be a string; got {type(value).__name__}"
             raise TypeError(msg)
         stripped = value.strip()
         if not stripped:
@@ -175,10 +172,7 @@ class EvidenceEntry(BaseModel, frozen=True):
     @classmethod
     def _source_events_non_empty(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if not value:
-            msg = (
-                "EvidenceEntry.source_event_ids must reference at least "
-                "one journal event"
-            )
+            msg = "EvidenceEntry.source_event_ids must reference at least one journal event"
             raise ValueError(msg)
         return value
 
