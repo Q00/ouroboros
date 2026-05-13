@@ -1368,7 +1368,12 @@ def _authoring_interview_handler(
         return InterviewHandler(
             interview_engine=handler.interview_engine,
             event_store=handler.event_store,
-            llm_adapter=None,
+            # Preserve an explicit caller-supplied llm_adapter. When the auto
+            # path inherits a handler that has llm_adapter=None (production
+            # default), handle() will build the isolated default adapter
+            # itself; we only need to ensure we don't silently *replace* an
+            # explicitly injected non-default adapter here.
+            llm_adapter=handler.llm_adapter,
             llm_backend=llm_backend if llm_backend is not None else handler.llm_backend,
             agent_runtime_backend=agent_runtime_backend,
             opencode_mode=opencode_mode,

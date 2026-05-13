@@ -1631,3 +1631,51 @@ def test_authoring_interview_handler_does_not_shortcut_when_backend_changes() ->
     )
     assert different_backend.llm_backend == "codex_cli"
     assert different_backend.suppress_tool_use_prompt_cues is True
+
+
+def test_authoring_interview_handler_preserves_explicit_llm_adapter() -> None:
+    """An explicit ``llm_adapter`` on the handler must NOT be silently dropped.
+
+    Regression for PR #979 review (commit ffe4487): the isolation rewrite
+    set ``llm_adapter=None`` on every reuse / rebuild path, which silently
+    replaced any caller-injected non-default adapter with whatever
+    ``create_llm_adapter(resolve_llm_backend(...))`` would later pick inside
+    ``InterviewHandler.handle()``. The intent of this seed is to close the
+    parent's tool-capable Claude envelope, not to discard an explicitly
+    chosen adapter entirely.
+    """
+    from unittest.mock import sentinel
+
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+    from ouroboros.mcp.tools.auto_handler import _authoring_interview_handler
+
+    explicit_adapter = sentinel.explicit_adapter
+
+    existing = InterviewHandler(
+        llm_adapter=explicit_adapter,
+        llm_backend="claude_code",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+        suppress_tool_use_prompt_cues=True,
+    )
+
+    same_backend = _authoring_interview_handler(
+        existing,
+        llm_backend="claude_code",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+    assert same_backend.llm_adapter is explicit_adapter, (
+        "matching-backend reuse must preserve the caller-supplied llm_adapter"
+    )
+
+    different_backend = _authoring_interview_handler(
+        existing,
+        llm_backend="codex_cli",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+    assert different_backend.llm_adapter is explicit_adapter, (
+        "different-backend rebuild must still preserve the caller-supplied llm_adapter"
+    )
+    assert different_backend.suppress_tool_use_prompt_cues is True
