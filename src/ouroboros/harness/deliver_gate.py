@@ -265,11 +265,11 @@ def evaluate_deliver_claim(
     rejected = _rejected_claim_summaries(raw_result)
     accepted_claims = getattr(raw_result, "accepted_claims", ())
     accepted_fact_ids = _claim_fact_ids(accepted_claims)
-    if not accepted_fact_ids and bool(raw_result.accepted):
+    if not accepted_fact_ids:
         accepted_fact_ids = _string_tuple(getattr(raw_result, "allowed_fact_ids", ()))
     rejected_fact_ids = tuple(fact_id for fact_id, _, _ in rejected if fact_id is not None)
     accepted_handles = _claim_chunk_ids(accepted_claims)
-    if not accepted_handles and bool(raw_result.accepted):
+    if not accepted_handles:
         accepted_handles = _string_tuple(getattr(raw_result, "allowed_chunk_ids", ()))
 
     return DeliverGateVerdict(
@@ -448,6 +448,10 @@ def _iter_result_items(value: object) -> tuple[object, ...]:
     if isinstance(value, tuple):
         return value
     if isinstance(value, list):
+        return tuple(value)
+    if isinstance(value, str | bytes | Mapping):
+        return ()
+    if isinstance(value, Iterable):
         return tuple(value)
     return ()
 

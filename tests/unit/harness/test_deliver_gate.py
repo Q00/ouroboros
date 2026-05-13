@@ -141,8 +141,8 @@ class _TraceGuardResult:
         accepted: bool,
         accepted_claims: tuple[_TraceGuardClaim, ...] = (),
         rejected_claims: tuple[_TraceGuardRejection, ...] = (),
-        allowed_fact_ids: tuple[str, ...] | None = None,
-        allowed_chunk_ids: tuple[str, ...] | None = None,
+        allowed_fact_ids: object | None = None,
+        allowed_chunk_ids: object | None = None,
     ) -> None:
         self.accepted = accepted
         self.accepted_claims = accepted_claims
@@ -558,6 +558,49 @@ class TestEvaluateDeliverClaim:
 
         assert verdict.accepted is True
         assert verdict.accepted_fact_ids == ("fact_actual",)
+        assert verdict.evidence_event_ids == ("evt_1",)
+
+    def test_rejected_verdict_preserves_allowed_id_provenance_without_claim_objects(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(_manifest_entry(handle="ev_actual", ok=True, source_event_ids=("evt_1",)),),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="fact_actual",
+                    evidence_handle="ev_actual",
+                    statement="Supported claim.",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="fact_missing",
+                    evidence_handle="ev_missing",
+                    statement="Unsupported claim.",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=lambda **_: _TraceGuardResult(
+                accepted=False,
+                allowed_fact_ids=frozenset({"fact_actual"}),
+                allowed_chunk_ids=frozenset({"ev_actual"}),
+                rejected_claims=(
+                    _TraceGuardRejection(
+                        reason="unsupported_fact_id",
+                        claim=_TraceGuardClaim(fact_id="fact_missing", chunk_id="ev_missing"),
+                        detail="fact is not present in manifest",
+                    ),
+                ),
+            ),
+        )
+
+        assert verdict.accepted is False
+        assert verdict.accepted_fact_ids == ("fact_actual",)
+        assert verdict.rejected_fact_ids == ("fact_missing",)
         assert verdict.evidence_event_ids == ("evt_1",)
 
     def test_claim_ac_id_must_match_manifest_scope(self) -> None:
