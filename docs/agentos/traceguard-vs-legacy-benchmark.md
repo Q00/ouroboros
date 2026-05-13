@@ -55,4 +55,5 @@ Fat-harness baseline report — profile=traceguard_deliver_gate_fixture · acs=8
 
 - TraceGuard reduces fixture fabrication incidents to 0 per 100 ACs.
 - Semantic misses remain visible and must be handled by later harness/semantic checks.
+- One-shot pass rate drops because unsupported legacy self-reports are rejected instead of counted as accepted.
 - Median chars stay within the <= 1.5x C.4 budget guardrail.
