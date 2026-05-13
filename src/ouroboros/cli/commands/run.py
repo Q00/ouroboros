@@ -241,6 +241,25 @@ def _load_skip_completed_markers(
     return resolved
 
 
+def _resolve_fat_harness_mode(seed_data: dict[str, Any]) -> bool:
+    """Resolve the temporary #920 PR-4 fat-harness opt-in mode from seed config."""
+    orchestrator_config = seed_data.get("orchestrator")
+    if not isinstance(orchestrator_config, dict):
+        return False
+
+    execution_mode = orchestrator_config.get("execution_mode", "legacy")
+    if execution_mode in (None, "", "legacy"):
+        return False
+    if execution_mode == "fat_harness":
+        return True
+
+    print_error(
+        "seed.orchestrator.execution_mode must be 'legacy' or 'fat_harness' "
+        f"(got {execution_mode!r})"
+    )
+    raise typer.Exit(1)
+
+
 def _resolve_max_parallel_workers() -> int:
     """Resolve the parallel worker cap from environment, config, then default."""
     env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
@@ -362,6 +381,7 @@ async def _run_orchestrator(
         seed_data,
         max_decomposition_depth,
     )
+    resolved_fat_harness_mode = _resolve_fat_harness_mode(seed_data)
     resolved_max_parallel_workers = _resolve_max_parallel_workers()
     externally_satisfied_acs: dict[int, dict[str, Any]] | None = None
     if skip_completed:
@@ -378,6 +398,8 @@ async def _run_orchestrator(
         print_info(f"Acceptance criteria: {len(seed.acceptance_criteria)}")
         print_info(f"Max decomposition depth: {resolved_max_decomposition_depth}")
         print_info(f"Max parallel workers: {resolved_max_parallel_workers}")
+        if resolved_fat_harness_mode:
+            print_info("Execution mode: fat_harness (temporary opt-in)")
         if externally_satisfied_acs:
             print_info(f"Externally satisfied ACs: {len(externally_satisfied_acs)}")
 
@@ -442,6 +464,7 @@ async def _run_orchestrator(
         task_workspace=workspace,
         max_decomposition_depth=resolved_max_decomposition_depth,
         max_parallel_workers=resolved_max_parallel_workers,
+        fat_harness_mode=resolved_fat_harness_mode,
     )
 
     # Execute

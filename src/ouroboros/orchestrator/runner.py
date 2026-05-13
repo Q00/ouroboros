@@ -415,6 +415,7 @@ class OrchestratorRunner:
         checkpoint_store: CheckpointStore | None = None,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         max_parallel_workers: int = 3,
+        fat_harness_mode: bool = False,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -439,6 +440,9 @@ class OrchestratorRunner:
                         and recovery. When provided, enables per-level state snapshots.
             max_decomposition_depth: Maximum recursive AC decomposition depth.
             max_parallel_workers: Maximum concurrent AC workers for parallel execution.
+            fat_harness_mode: Temporary opt-in path that enforces profile
+                typed-evidence validation at atomic AC acceptance before the
+                #920 PR-5 default flip removes the opt-in selection.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -455,6 +459,7 @@ class OrchestratorRunner:
         self._task_workspace = task_workspace
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
+        self._fat_harness_mode = fat_harness_mode
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
 
@@ -1955,6 +1960,7 @@ class OrchestratorRunner:
         session_id: str | None = None,
         parallel: bool = True,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        force_sequential_levels: bool = False,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
 
@@ -1970,6 +1976,8 @@ class OrchestratorRunner:
                      run concurrently. Default: True (parallel execution).
             externally_satisfied_acs: Top-level ACs already satisfied by the
                 current working tree and therefore skipped for re-execution.
+            force_sequential_levels: Preserve --sequential ordering while still
+                using the AC executor, primarily for temporary fat-harness opt-in.
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -1985,6 +1993,8 @@ class OrchestratorRunner:
         }
         if externally_satisfied_acs:
             execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+        if force_sequential_levels:
+            execute_kwargs["force_sequential_levels"] = True
 
         return await self.execute_precreated_session(**execute_kwargs)
 
@@ -2038,6 +2048,7 @@ class OrchestratorRunner:
         tracker: SessionTracker,
         parallel: bool = True,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        force_sequential_levels: bool = False,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute a seed using an already-persisted orchestrator session."""
         exec_id = tracker.execution_id
@@ -2096,8 +2107,14 @@ class OrchestratorRunner:
                 activity_map=strategy.get_activity_map(),
             )
 
-            # Check for parallel execution mode
-            if parallel and len(seed.acceptance_criteria) > 1:
+            # Check for fat-harness / parallel execution mode. Fat-harness
+            # uses the AC executor even for single-AC or --sequential runs so
+            # the opt-in evidence gate is never silently bypassed.
+            if (
+                self._fat_harness_mode
+                or force_sequential_levels
+                or (parallel and len(seed.acceptance_criteria) > 1)
+            ):
                 parallel_kwargs: dict[str, Any] = {
                     "seed": seed,
                     "exec_id": exec_id,
@@ -2109,6 +2126,8 @@ class OrchestratorRunner:
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+                if force_sequential_levels or (self._fat_harness_mode and not parallel):
+                    parallel_kwargs["force_sequential_levels"] = True
 
                 return await self._execute_parallel(**parallel_kwargs)
         except asyncio.CancelledError:
@@ -2607,6 +2626,7 @@ class OrchestratorRunner:
         system_prompt: str,
         start_time: datetime,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        force_sequential_levels: bool = False,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
@@ -2622,11 +2642,13 @@ class OrchestratorRunner:
             start_time: Execution start time.
             externally_satisfied_acs: Top-level ACs already satisfied by the
                 current working tree and therefore skipped for re-execution.
+            force_sequential_levels: Preserve --sequential ordering while still
+                using the AC executor, primarily for temporary fat-harness opt-in.
 
         Returns:
             Result containing OrchestratorResult on success.
         """
-        from ouroboros.orchestrator.dependency_analyzer import ACNode
+        from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
         from ouroboros.orchestrator.parallel_executor import (
             ParallelACExecutor,
             render_parallel_completion_message,
@@ -2641,30 +2663,38 @@ class OrchestratorRunner:
         )
 
         # Analyze dependencies
-        self._console.print("\n[cyan]Analyzing AC dependencies...[/cyan]")
-
-        analyzer = self._build_dependency_analyzer()
-        dep_result = await analyzer.analyze(seed.acceptance_criteria)
-
-        if dep_result.is_err:
-            log.warning(
-                "orchestrator.runner.dependency_analysis_failed",
-                execution_id=exec_id,
-                error=str(dep_result.error),
-            )
-            # Fallback: run all ACs in a single parallel level
-            from ouroboros.orchestrator.dependency_analyzer import DependencyGraph
-
-            all_indices = tuple(range(len(seed.acceptance_criteria)))
+        if force_sequential_levels:
+            self._console.print("\n[cyan]Preparing sequential AC execution plan...[/cyan]")
             dependency_graph = DependencyGraph(
                 nodes=tuple(
-                    ACNode(index=i, content=ac, depends_on=())
+                    ACNode(index=i, content=ac, depends_on=tuple(range(i)))
                     for i, ac in enumerate(seed.acceptance_criteria)
                 ),
-                execution_levels=(all_indices,) if all_indices else (),
+                execution_levels=tuple((i,) for i in range(len(seed.acceptance_criteria))),
             )
         else:
-            dependency_graph = dep_result.value
+            self._console.print("\n[cyan]Analyzing AC dependencies...[/cyan]")
+
+            analyzer = self._build_dependency_analyzer()
+            dep_result = await analyzer.analyze(seed.acceptance_criteria)
+
+            if dep_result.is_err:
+                log.warning(
+                    "orchestrator.runner.dependency_analysis_failed",
+                    execution_id=exec_id,
+                    error=str(dep_result.error),
+                )
+                # Fallback: run all ACs in a single parallel level
+                all_indices = tuple(range(len(seed.acceptance_criteria)))
+                dependency_graph = DependencyGraph(
+                    nodes=tuple(
+                        ACNode(index=i, content=ac, depends_on=())
+                        for i, ac in enumerate(seed.acceptance_criteria)
+                    ),
+                    execution_levels=(all_indices,) if all_indices else (),
+                )
+            else:
+                dependency_graph = dep_result.value
 
         execution_plan = dependency_graph.to_execution_plan()
 
@@ -2700,6 +2730,7 @@ class OrchestratorRunner:
             task_cwd=self._effective_cwd(),
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
+            fat_harness_mode=self._fat_harness_mode,
         )
 
         # Check for cancellation before starting parallel execution

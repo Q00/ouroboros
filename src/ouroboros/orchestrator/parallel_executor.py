@@ -499,6 +499,7 @@ class ParallelACExecutor:
         inherited_runtime_handle: RuntimeHandle | None = None,
         task_cwd: str | None = None,
         execution_profile: ExecutionProfile | None = None,
+        fat_harness_mode: bool = False,
     ):
         """Initialize executor.
 
@@ -515,6 +516,8 @@ class ParallelACExecutor:
             task_cwd: Explicit working directory override for task execution metadata.
             execution_profile: Optional profile that makes decomposition split along
                 profile axis/min_unit instead of the legacy generic prompt.
+            fat_harness_mode: Temporary PR-4 opt-in mode that enforces
+                profile typed-evidence validation at atomic AC acceptance.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -524,6 +527,7 @@ class ParallelACExecutor:
         self._inherited_runtime_handle = inherited_runtime_handle
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
+        self._fat_harness_mode = fat_harness_mode
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=inherited_runtime_handle,
@@ -3513,6 +3517,20 @@ When complete, explicitly state: [TASK_COMPLETE]
                 final_message=final_message,
                 success=success,
             )
+            fat_harness_error = self._fat_harness_acceptance_error(
+                runtime_success=success,
+                typed_evidence=typed_evidence,
+                typed_validation=typed_validation,
+                typed_error=typed_error,
+            )
+            result_final_message = final_message
+            if fat_harness_error is not None:
+                success = False
+                result_final_message = (
+                    f"{fat_harness_error}\n\nRuntime final message:\n{final_message}"
+                    if final_message
+                    else fat_harness_error
+                )
             await self._emit_atomic_typed_evidence_event(
                 runtime_identity=runtime_identity,
                 execution_id=execution_context_id,
@@ -3521,6 +3539,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
                 typed_error=typed_error,
+                enforcement_error=fat_harness_error,
             )
             await self._emit_ac_runtime_event(
                 event_type=(
@@ -3531,9 +3550,13 @@ When complete, explicitly state: [TASK_COMPLETE]
                 runtime_handle=runtime_handle,
                 execution_id=execution_context_id,
                 session_id=ac_session_id,
-                result_summary=final_message or None,
+                result_summary=result_final_message or None,
                 success=success,
-                error=None if success else final_message or "Implementation session failed",
+                error=(
+                    None
+                    if success
+                    else fat_harness_error or final_message or "Implementation session failed"
+                ),
             )
             clear_cached_runtime_handle = True
 
@@ -3551,7 +3574,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 ac_content=ac_content,
                 success=success,
                 messages=tuple(messages),
-                final_message=final_message,
+                final_message=result_final_message,
                 duration_seconds=duration,
                 session_id=ac_session_id,
                 retry_attempt=retry_attempt,
@@ -3560,6 +3583,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 typed_evidence=typed_evidence,
                 typed_evidence_validation=typed_validation,
                 typed_evidence_error=typed_error,
+                error=fat_harness_error,
             )
 
         except Exception as e:
@@ -3647,6 +3671,36 @@ When complete, explicitly state: [TASK_COMPLETE]
             return None, None, str(exc)
         return record, validation, None
 
+    def _fat_harness_acceptance_error(
+        self,
+        *,
+        runtime_success: bool,
+        typed_evidence: EvidenceRecord | None,
+        typed_validation: ValidationResult | None,
+        typed_error: str | None,
+    ) -> str | None:
+        """Return the opt-in fat-harness rejection reason for an atomic leaf."""
+        if not self._fat_harness_mode or not runtime_success:
+            return None
+        if self._execution_profile is None:
+            return "Fat-harness mode requires a loaded execution profile."
+        if typed_evidence is None:
+            return typed_error or "Fat-harness mode requires typed evidence."
+        if typed_validation is None:
+            return "Fat-harness mode could not validate typed evidence."
+        if typed_validation.ok:
+            return None
+
+        reasons: list[str] = []
+        if typed_validation.missing_fields:
+            reasons.append("missing fields: " + ", ".join(typed_validation.missing_fields))
+        if typed_validation.rejected_by:
+            reasons.append("rejected by: " + ", ".join(typed_validation.rejected_by))
+        if typed_validation.blocker is not None:
+            reasons.append("blocker: " + typed_validation.blocker.summary())
+        detail = "; ".join(reasons) if reasons else "profile evidence validation failed"
+        return f"Fat-harness typed evidence validation failed ({detail})."
+
     async def _emit_atomic_typed_evidence_event(
         self,
         *,
@@ -3657,8 +3711,9 @@ When complete, explicitly state: [TASK_COMPLETE]
         typed_evidence: EvidenceRecord | None,
         typed_validation: ValidationResult | None,
         typed_error: str | None,
+        enforcement_error: str | None = None,
     ) -> None:
-        """Persist observe-only typed-evidence metadata for atomic AC completion."""
+        """Persist typed-evidence metadata for atomic AC completion."""
         if self._execution_profile is None:
             return
 
@@ -3672,8 +3727,10 @@ When complete, explicitly state: [TASK_COMPLETE]
             "acceptance_criterion": ac_content,
             "profile": self._execution_profile.profile,
             "required_fields": list(self._execution_profile.evidence_schema.required),
-            "observe_only": True,
-            "enforced": False,
+            "observe_only": not self._fat_harness_mode,
+            "enforced": self._fat_harness_mode,
+            "fat_harness_mode": self._fat_harness_mode,
+            "enforcement_error": enforcement_error,
             "typed_evidence_present": typed_evidence is not None,
             "typed_evidence_valid": typed_validation.ok if typed_validation is not None else False,
             "typed_evidence_error": typed_error,

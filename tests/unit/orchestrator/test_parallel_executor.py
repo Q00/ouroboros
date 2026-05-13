@@ -83,6 +83,52 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
     return event_store, appended_events
 
 
+class _FinalMessageRuntime:
+    """Minimal runtime that returns one successful final message with a handle."""
+
+    _runtime_handle_backend = "opencode"
+    _cwd = "/tmp/project"
+    _permission_mode = "acceptEdits"
+
+    def __init__(self, final_message: str, *, native_session_id: str) -> None:
+        self._final_message = final_message
+        self._native_session_id = native_session_id
+
+    @property
+    def runtime_backend(self) -> str:
+        return self._runtime_handle_backend
+
+    @property
+    def working_directory(self) -> str | None:
+        return self._cwd
+
+    @property
+    def permission_mode(self) -> str | None:
+        return self._permission_mode
+
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+    ):
+        del prompt, tools, system_prompt, resume_session_id
+        yield AgentMessage(
+            type="result",
+            content=self._final_message,
+            data={"subtype": "success"},
+            resume_handle=RuntimeHandle(
+                backend=resume_handle.backend if resume_handle is not None else "opencode",
+                kind=resume_handle.kind if resume_handle is not None else "implementation_session",
+                native_session_id=self._native_session_id,
+                cwd=resume_handle.cwd if resume_handle is not None else "/tmp/project",
+                metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+            ),
+        )
+
+
 class TestProfileAwareDecompositionAudit:
     @pytest.mark.asyncio
     async def test_level_started_event_records_active_decomposition_profile(self) -> None:
@@ -1056,6 +1102,8 @@ class TestParallelACExecutor:
         )
         assert evidence_event.data["observe_only"] is True
         assert evidence_event.data["enforced"] is False
+        assert evidence_event.data["fat_harness_mode"] is False
+        assert evidence_event.data["enforcement_error"] is None
         assert evidence_event.data["typed_evidence_present"] is True
         assert evidence_event.data["typed_evidence_valid"] is True
         assert evidence_event.data["required_fields"] == [
@@ -1150,6 +1198,113 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_present"] is False
         assert evidence_event.data["typed_evidence_valid"] is False
         assert "Evidence is not valid JSON" in evidence_event.data["typed_evidence_error"]
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_mode_rejects_missing_typed_evidence(self) -> None:
+        """Temporary opt-in mode gates atomic success on profile evidence."""
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "[TASK_COMPLETE] no JSON evidence yet",
+                native_session_id="opencode-session-no-evidence",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Evidence is not valid JSON" in result.error
+        assert result.final_message.startswith("Evidence is not valid JSON")
+
+        report = render_parallel_verification_report(
+            ParallelExecutionResult(
+                results=(result,),
+                success_count=0,
+                failure_count=1,
+                total_messages=len(result.messages),
+            ),
+            total_acceptance_criteria=1,
+        )
+        assert "[FAILED]" in report
+        assert "Evidence is not valid JSON" in report
+        assert "Runtime final message:" in report
+
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["observe_only"] is False
+        assert evidence_event.data["enforced"] is True
+        assert evidence_event.data["fat_harness_mode"] is True
+        assert "Evidence is not valid JSON" in evidence_event.data["enforcement_error"]
+
+        terminal_event = next(
+            event for event in appended_events if event.type == "execution.session.failed"
+        )
+        assert "Evidence is not valid JSON" in terminal_event.data["error"]
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_mode_accepts_valid_typed_evidence(self) -> None:
+        """Valid profile evidence keeps the opt-in fat-harness leaf accepted."""
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/app.py"],'
+                '"commands_run":["pytest"],'
+                '"tests_passed":["tests/test_app.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["observe_only"] is False
+        assert evidence_event.data["enforced"] is True
+        assert evidence_event.data["fat_harness_mode"] is True
+        assert evidence_event.data["enforcement_error"] is None
+        assert evidence_event.data["typed_evidence_valid"] is True
 
     @pytest.mark.asyncio
     async def test_atomic_ac_typed_evidence_event_failure_does_not_fail_success(self) -> None:
