@@ -3374,6 +3374,19 @@ When complete, explicitly state: [TASK_COMPLETE]
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
+            typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
+                final_message=final_message,
+                success=success,
+            )
+            await self._emit_atomic_typed_evidence_event(
+                runtime_identity=runtime_identity,
+                execution_id=execution_context_id,
+                session_id=ac_session_id,
+                ac_content=ac_content,
+                typed_evidence=typed_evidence,
+                typed_validation=typed_validation,
+                typed_error=typed_error,
+            )
             await self._emit_ac_runtime_event(
                 event_type=(
                     "execution.session.completed" if success else "execution.session.failed"
@@ -3388,19 +3401,6 @@ When complete, explicitly state: [TASK_COMPLETE]
                 error=None if success else final_message or "Implementation session failed",
             )
             clear_cached_runtime_handle = True
-            typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
-                final_message=final_message,
-                success=success,
-            )
-            await self._emit_atomic_typed_evidence_event(
-                runtime_identity=runtime_identity,
-                execution_id=execution_context_id,
-                session_id=ac_session_id,
-                ac_content=ac_content,
-                typed_evidence=typed_evidence,
-                typed_validation=typed_validation,
-                typed_error=typed_error,
-            )
 
             log.info(
                 "parallel_executor.ac.completed",

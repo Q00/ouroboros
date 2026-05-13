@@ -669,7 +669,7 @@ class TestParallelACExecutor:
                     ).bind_controls(terminate_callback=_terminate),
                 )
 
-        event_store, _ = _make_replaying_event_store()
+        event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=_StubImplementationRuntime(),
             event_store=event_store,
@@ -1023,7 +1023,7 @@ class TestParallelACExecutor:
                 )
             }
         )
-        event_store, _ = _make_replaying_event_store()
+        event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=_StubImplementationRuntime(),
             event_store=event_store,
@@ -1047,6 +1047,8 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error is not None
         assert "Unsupported rejected_if expression" in result.error
+        assert "execution.session.completed" not in {event.type for event in appended_events}
+        assert "execution.session.failed" in {event.type for event in appended_events}
 
     @pytest.mark.asyncio
     async def test_remembered_runtime_handle_preserves_live_controls(self) -> None:
