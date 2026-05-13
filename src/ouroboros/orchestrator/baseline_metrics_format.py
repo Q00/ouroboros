@@ -81,14 +81,18 @@ def _render_gate_lines(gates: Iterable[FatHarnessGateResult]) -> list[str]:
 
 
 def _render_metric_summary(report: FatHarnessMetricsReport) -> list[str]:
-    return [
-        f"  one_shot_pass_rate                  : {_format_value(report.one_shot_pass_rate)}",
-        f"  k_recovery_rate                     : {_format_value(report.k_recovery_rate)}",
-        f"  fabrication_incidents_per_100_acs             : {_format_value(report.fabrication_incidents_per_100_acs)}",
-        f"  median_chars_per_ac                 : {_format_value(report.median_chars_per_ac)}",
-        f"  new_domain_loc_delta                : {report.new_domain_loc_delta}",
-        f"  new_domain_yaml_delta               : {report.new_domain_yaml_delta}",
-    ]
+    metrics: tuple[tuple[str, str], ...] = (
+        ("one_shot_pass_rate", _format_value(report.one_shot_pass_rate)),
+        ("k_recovery_rate", _format_value(report.k_recovery_rate)),
+        (
+            "fabrication_incidents_per_100_acs",
+            _format_value(report.fabrication_incidents_per_100_acs),
+        ),
+        ("median_chars_per_ac", _format_value(report.median_chars_per_ac)),
+        ("new_domain_loc_delta", str(report.new_domain_loc_delta)),
+        ("new_domain_yaml_delta", str(report.new_domain_yaml_delta)),
+    )
+    return [f"  {label:<39}: {value}" for label, value in metrics]
 
 
 def _format_value(value: float | int | None) -> str:
