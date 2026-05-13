@@ -3549,7 +3549,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 typed_validation.blocker.summary() if typed_validation.blocker is not None else None
             )
 
-        await self._event_store.append(
+        await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.typed_evidence.observed",
                 aggregate_type=runtime_identity.runtime_scope.aggregate_type,
