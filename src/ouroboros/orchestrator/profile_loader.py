@@ -26,14 +26,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 import yaml
 
 _PROFILES_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "profiles"
-_REQUIRED_YAML_PROFILE_KNOBS: Final[frozenset[str]] = frozenset(
-    {
-        "schema_version",
-        "max_branching",
-        "must_produce",
-        "suggested_model_tier",
-    }
-)
 
 
 class VerifierCapability(StrEnum):
@@ -203,14 +195,14 @@ def load_profile(name: str, *, profiles_dir: Path | None = None) -> ExecutionPro
         msg = f"Profile {name!r} must be a YAML mapping at the top level, got {type(raw).__name__}"
         raise ProfileError(msg)
 
-    missing_knobs = sorted(_REQUIRED_YAML_PROFILE_KNOBS - raw.keys())
-    if missing_knobs:
-        msg = (
-            f"Profile {name!r} is missing required structured profile knob(s): "
-            f"{', '.join(missing_knobs)}"
-        )
-        raise ProfileError(msg)
-
+    # RFC v2 structured knobs (schema_version, max_branching, must_produce,
+    # suggested_model_tier) intentionally fall through to schema defaults when
+    # a YAML profile omits them. Hard-failing on absence would break existing
+    # out-of-tree custom profiles for no runtime safety gain at this layer —
+    # the Literal[1] schema_version still rejects unsupported versions, and
+    # `max_branching` keeps its ge=2 floor via Pydantic. Built-in profiles
+    # declare every knob explicitly so the RFC v2 example shape stays
+    # representable in-tree.
     try:
         profile = ExecutionProfile.model_validate(raw)
     except ValidationError as exc:

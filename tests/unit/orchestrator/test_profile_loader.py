@@ -102,21 +102,34 @@ suggested_model_tier: medium
             load_profile("broken", profiles_dir=tmp_path)
 
     @pytest.mark.parametrize(
-        "knob",
-        ("schema_version", "max_branching", "must_produce", "suggested_model_tier"),
+        ("knob", "expected_default"),
+        (
+            ("schema_version", 1),
+            ("max_branching", 5),
+            ("must_produce", ()),
+            ("suggested_model_tier", "medium"),
+        ),
     )
-    def test_structured_profile_knobs_are_required_for_yaml_loading(
-        self, tmp_path: Path, knob: str
+    def test_structured_profile_knobs_fall_back_to_schema_defaults(
+        self, tmp_path: Path, knob: str, expected_default: object
     ) -> None:
-        lines = [
-            line
-            for line in self._valid_body("missing_knob").splitlines()
-            if not line.startswith(f"{knob}:")
-        ]
+        """Legacy/out-of-tree YAML cards that omit RFC v2 knobs still load.
+
+        Hard-failing on a missing optional knob would be a backwards-incompatible
+        loader regression — the schema already supplies sensible defaults, and
+        the Literal[1] schema_version still rejects unsupported versions. Built-in
+        cards declare every knob explicitly (covered by
+        ``test_builtin_profiles_declare_rfc_v2_structured_knobs``).
+        """
+        # must_produce defaults to (), so when removed we must also drop the
+        # paired evidence_schema row that exists only to satisfy the subset
+        # invariant; otherwise the profile is unchanged.
+        body = self._valid_body("missing_knob")
+        lines = [line for line in body.splitlines() if not line.startswith(f"{knob}:")]
         self._write(tmp_path, "missing_knob", "\n".join(lines))
 
-        with pytest.raises(ProfileError, match=rf"required structured profile knob.*{knob}"):
-            load_profile("missing_knob", profiles_dir=tmp_path)
+        profile = load_profile("missing_knob", profiles_dir=tmp_path)
+        assert getattr(profile, knob) == expected_default
 
     def test_verifier_capability_is_required(self, tmp_path: Path) -> None:
         self._write(
