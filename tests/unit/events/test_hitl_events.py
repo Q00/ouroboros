@@ -34,12 +34,12 @@ def _request() -> HumanInputRequest:
     )
 
 
-def test_requested_event_uses_hitl_event_type_and_run_aggregate() -> None:
+def test_requested_event_uses_hitl_event_type_and_request_aggregate() -> None:
     event = create_hitl_requested_event(_request())
 
     assert event.type == "hitl.requested"
     assert event.aggregate_type == "hitl"
-    assert event.aggregate_id == "run-1"
+    assert event.aggregate_id == "hitl-1"
     assert event.data["request_id"] == "hitl-1"
     assert event.data["resume_target"] == "ralplan:approval"
 
@@ -77,9 +77,31 @@ def test_answered_event_preserves_request_correlation() -> None:
     event = create_hitl_answered_event(response)
 
     assert event.type == "hitl.answered"
-    assert event.aggregate_id == "run-1"
+    assert event.aggregate_id == "hitl-1"
     assert event.data["request_id"] == "hitl-1"
     assert event.data["approval_decision"] is True
+
+
+def test_same_run_hitl_requests_use_distinct_request_aggregates() -> None:
+    first = _request()
+    second = HumanInputRequest(
+        request_id="hitl-2",
+        session_id=first.session_id,
+        run_id=first.run_id,
+        created_by=first.created_by,
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve the alternate plan?",
+        resume_target="ralplan:approval-2",
+    )
+
+    first_event = create_hitl_requested_event(first)
+    second_event = create_hitl_requested_event(second)
+
+    assert first_event.data["run_id"] == second_event.data["run_id"] == "run-1"
+    assert first_event.aggregate_id == "hitl-1"
+    assert second_event.aggregate_id == "hitl-2"
 
 
 def test_timeout_and_cancel_events_reuse_request_payload() -> None:

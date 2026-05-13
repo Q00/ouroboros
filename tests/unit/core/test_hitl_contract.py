@@ -41,7 +41,7 @@ def test_human_input_request_serializes_wait_contract() -> None:
 
     data = request.to_event_data()
 
-    assert request.aggregate_id == "run-1"
+    assert request.aggregate_id == "hitl-1"
     assert data["kind"] == "single_select"
     assert data["source"] == "interview"
     assert data["risk_class"] == "material_branch"
@@ -263,7 +263,7 @@ def test_human_input_response_serializes_matching_answer() -> None:
 
     data = response.to_event_data()
 
-    assert response.aggregate_id == "run-1"
+    assert response.aggregate_id == "hitl-1"
     assert data["request_id"] == "hitl-1"
     assert data["actor"] == "local-user"
     assert data["response_kind"] == "approval"
@@ -282,14 +282,19 @@ def test_response_is_frozen() -> None:
         response.actor = "other"  # type: ignore[misc]
 
 
-def test_response_requires_request_correlation_aggregate() -> None:
-    with pytest.raises(ValueError, match="request correlation"):
-        HumanInputResponse(
-            request_id="hitl-1",
-            actor="local-user",
-            response_kind=HumanInputResponseKind.TEXT,
-            text="continue",
-        )
+def test_response_allows_request_id_only_correlation() -> None:
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.TEXT,
+        text="continue",
+    )
+
+    assert response.aggregate_id == "hitl-1"
+    assert response.to_event_data()["request_id"] == "hitl-1"
+    assert "session_id" not in response.to_event_data()
+    assert "run_id" not in response.to_event_data()
+    assert "invocation_id" not in response.to_event_data()
 
 
 def test_response_rejects_approval_decision_on_non_approval() -> None:

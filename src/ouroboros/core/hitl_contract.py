@@ -217,7 +217,7 @@ class HumanInputRequest:
 
     @property
     def aggregate_id(self) -> str:
-        return self.run_id or self.invocation_id or self.session_id
+        return self.request_id
 
     def to_event_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -288,10 +288,6 @@ class HumanInputResponse:
             "selected_values",
             _normalize_string_tuple("selected_values", self.selected_values),
         )
-        if self.run_id is None and self.invocation_id is None and self.session_id is None:
-            raise ValueError(
-                "HumanInputResponse requires session_id, run_id, or invocation_id for request correlation"
-            )
         self._validate_response_content()
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
         object.__setattr__(
@@ -332,7 +328,7 @@ class HumanInputResponse:
 
     @property
     def aggregate_id(self) -> str:
-        return self.run_id or self.invocation_id or self.session_id or self.request_id
+        return self.request_id
 
     def to_event_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
