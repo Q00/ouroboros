@@ -1413,86 +1413,17 @@ def test_auto_sub_interview_isolates_parent_hook_context(
     assert options_call_kwargs["extra_args"]["allowedTools"] == ""
 
 
-def test_auto_handler_does_not_leak_suppress_flag_into_shared_engine(
+
+def test_handle_does_not_mutate_shared_interview_engine(
     tmp_path: Path,
 ) -> None:
-    """A shared ``InterviewEngine`` must keep its prior suppress-cues policy.
+    """A shared ``InterviewEngine`` must not be mutated by ``handle()``.
 
-    Regression for PR #979 review comment: if an auto-path
-    ``InterviewHandler`` mutates ``engine.suppress_tool_use_prompt_cues`` and
-    leaves it set, a later non-auto handler that reuses the same engine would
-    silently switch to the toolless prompt and lose the normal brownfield /
-    code-context instructions. The handler must restore the prior value once
-    its own request is finished.
-    """
-    from unittest.mock import AsyncMock
-
-    from ouroboros.bigbang.interview import InterviewEngine
-    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
-
-    shared_engine = InterviewEngine.__new__(InterviewEngine)
-    shared_engine.suppress_tool_use_prompt_cues = False
-    shared_engine.start_interview = AsyncMock(
-        side_effect=RuntimeError("forced stop after engine flag is observed")
-    )
-    shared_engine.resume_interview = AsyncMock()
-    shared_engine.score_interview = AsyncMock()
-
-    observed: dict[str, bool] = {}
-
-    original_start = shared_engine.start_interview
-
-    async def _capture_start(*args: Any, **kwargs: Any) -> Any:
-        observed["during_call"] = shared_engine.suppress_tool_use_prompt_cues
-        return await original_start(*args, **kwargs)
-
-    shared_engine.start_interview.side_effect = _capture_start  # type: ignore[assignment]
-
-    handler = InterviewHandler(
-        interview_engine=shared_engine,
-        event_store=MagicMock(),
-        llm_adapter=MagicMock(),
-        llm_backend="claude_code",
-        agent_runtime_backend="claude_code",
-        opencode_mode=None,
-        data_dir=tmp_path,
-        suppress_tool_use_prompt_cues=True,
-    )
-    handler._owns_event_store = False
-    handler._initialized = True
-
-    async def _run() -> None:
-        with patch(
-            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
-            return_value=MagicMock(),
-        ):
-            try:
-                await handler.handle({"initial_context": "Test goal"})
-            except Exception:
-                pass
-
-    asyncio.run(_run())
-
-    assert observed.get("during_call") is True, (
-        "expected the auto path to set suppress_tool_use_prompt_cues=True for the call"
-    )
-    assert shared_engine.suppress_tool_use_prompt_cues is False, (
-        "expected the prior engine.suppress_tool_use_prompt_cues value to be restored"
-    )
-
-
-def test_auto_handler_swaps_shared_engine_adapter_to_isolated_one(
-    tmp_path: Path,
-) -> None:
-    """A shared ``InterviewEngine`` must use the isolated adapter for the call.
-
-    Regression for PR #979 review (commit cb2b7e7): if ``InterviewHandler``
-    only toggles ``engine.suppress_tool_use_prompt_cues`` but leaves the
-    engine's pre-existing ``llm_adapter`` in place, question generation goes
-    through the parent's tool-capable adapter and our envelope isolation is
-    bypassed in production. The handler must swap in the freshly-created
-    isolated adapter (``allowed_tools=[]``, ``strict_mcp_config=True``) for
-    the duration of its own call and restore the prior value afterwards.
+    Regression for PR #979 review (commit 0399211): the previous fix saved
+    and restored ``engine.llm_adapter`` and ``engine.suppress_tool_use_prompt_cues``
+    in-place, which is race-prone under concurrent MCP requests. The correct
+    behavior is to never touch the shared engine: build a per-call replica
+    that carries the isolated adapter and suppress flag.
     """
     from unittest.mock import AsyncMock, sentinel
 
@@ -1505,17 +1436,28 @@ def test_auto_handler_swaps_shared_engine_adapter_to_isolated_one(
     shared_engine = InterviewEngine.__new__(InterviewEngine)
     shared_engine.suppress_tool_use_prompt_cues = False
     shared_engine.llm_adapter = parent_adapter
+    shared_engine.state_dir = tmp_path
+    shared_engine.model = "shared-model"
 
-    observed: dict[str, Any] = {}
+    # The shared engine's start_interview must NEVER be called — the handler
+    # should build its own per-call engine instead.
+    shared_engine.start_interview = AsyncMock(
+        side_effect=AssertionError("shared engine.start_interview must not be called")
+    )
 
-    async def _capture_start(*args: Any, **kwargs: Any) -> Any:
-        observed["adapter_during_call"] = shared_engine.llm_adapter
-        observed["suppress_during_call"] = shared_engine.suppress_tool_use_prompt_cues
-        raise RuntimeError("forced stop after engine state is observed")
+    captured: dict[str, Any] = {}
 
-    shared_engine.start_interview = AsyncMock(side_effect=_capture_start)
-    shared_engine.resume_interview = AsyncMock()
-    shared_engine.score_interview = AsyncMock()
+    real_engine_init = InterviewEngine.__init__
+
+    def _capture_init(self, *args: Any, **kwargs: Any) -> None:
+        real_engine_init(self, *args, **kwargs)
+        captured["new_engine_adapter"] = self.llm_adapter
+        captured["new_engine_suppress"] = self.suppress_tool_use_prompt_cues
+
+        async def _stop(*a: Any, **kw: Any) -> Any:
+            raise RuntimeError("forced stop after engine construction is observed")
+
+        self.start_interview = _stop  # type: ignore[assignment]
 
     handler = InterviewHandler(
         interview_engine=shared_engine,
@@ -1531,25 +1473,123 @@ def test_auto_handler_swaps_shared_engine_adapter_to_isolated_one(
     handler._initialized = True
 
     async def _run() -> None:
-        with patch(
+        try:
+            await handler.handle({"initial_context": "Test goal"})
+        except Exception:
+            pass
+
+    with (
+        patch(
             "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
             return_value=isolated_adapter,
-        ):
-            try:
-                await handler.handle({"initial_context": "Test goal"})
-            except Exception:
-                pass
+        ),
+        patch.object(InterviewEngine, "__init__", _capture_init),
+    ):
+        asyncio.run(_run())
 
-    asyncio.run(_run())
-
-    assert observed.get("adapter_during_call") is isolated_adapter, (
-        "expected the auto path to swap engine.llm_adapter to the isolated adapter"
+    assert captured.get("new_engine_adapter") is isolated_adapter, (
+        "expected the per-call engine to be constructed with the isolated adapter"
     )
-    assert observed.get("suppress_during_call") is True
+    assert captured.get("new_engine_suppress") is True
     assert shared_engine.llm_adapter is parent_adapter, (
-        "expected the prior engine.llm_adapter to be restored after the call"
+        "shared engine.llm_adapter must not be mutated"
     )
-    assert shared_engine.suppress_tool_use_prompt_cues is False
+    assert shared_engine.suppress_tool_use_prompt_cues is False, (
+        "shared engine.suppress_tool_use_prompt_cues must not be mutated"
+    )
+
+
+def test_concurrent_handle_calls_do_not_corrupt_shared_engine(
+    tmp_path: Path,
+) -> None:
+    """Two concurrent ``handle()`` calls must not race on the shared engine.
+
+    Regression for PR #979 review (commit 0399211): under save/restore
+    mutation, two concurrent requests could clobber each other's adapter or
+    leave the shared engine permanently pointed at an isolated adapter. With
+    per-call cloning, the shared engine is never mutated, so the race
+    disappears by construction. This test asserts that even when many
+    concurrent handlers run, the shared engine's fields are pristine and each
+    handler saw its own isolated adapter.
+    """
+    from unittest.mock import AsyncMock, sentinel
+
+    from ouroboros.bigbang.interview import InterviewEngine
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+
+    parent_adapter = sentinel.parent_adapter
+
+    shared_engine = InterviewEngine.__new__(InterviewEngine)
+    shared_engine.suppress_tool_use_prompt_cues = False
+    shared_engine.llm_adapter = parent_adapter
+    shared_engine.state_dir = tmp_path
+    shared_engine.model = "shared-model"
+    shared_engine.start_interview = AsyncMock(
+        side_effect=AssertionError("shared engine.start_interview must not be called")
+    )
+
+    seen_adapters: list[Any] = []
+    real_engine_init = InterviewEngine.__init__
+
+    def _capture_init(self, *args: Any, **kwargs: Any) -> None:
+        real_engine_init(self, *args, **kwargs)
+        seen_adapters.append(self.llm_adapter)
+
+        async def _stop(*a: Any, **kw: Any) -> Any:
+            await asyncio.sleep(0)
+            raise RuntimeError("forced stop after engine construction is observed")
+
+        self.start_interview = _stop  # type: ignore[assignment]
+
+    def _make_handler() -> InterviewHandler:
+        handler = InterviewHandler(
+            interview_engine=shared_engine,
+            event_store=MagicMock(),
+            llm_adapter=None,
+            llm_backend="claude_code",
+            agent_runtime_backend="claude_code",
+            opencode_mode=None,
+            data_dir=tmp_path,
+            suppress_tool_use_prompt_cues=True,
+        )
+        handler._owns_event_store = False
+        handler._initialized = True
+        return handler
+
+    async def _run_one(idx: int) -> None:
+        try:
+            await _make_handler().handle({"initial_context": f"goal-{idx}"})
+        except Exception:
+            pass
+
+    async def _run_all() -> None:
+        await asyncio.gather(*(_run_one(i) for i in range(8)))
+
+    isolated_adapters = [MagicMock(name=f"isolated-{i}") for i in range(8)]
+    adapter_iter = iter(isolated_adapters)
+    # Patch once outside the gather so concurrent tasks share a single patch
+    # lifetime — overlapping `with patch.object(InterviewEngine, "__init__")`
+    # contexts from inside each task would leak between gather members and
+    # into other tests.
+    with (
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            side_effect=lambda *_a, **_kw: next(adapter_iter),
+        ),
+        patch.object(InterviewEngine, "__init__", _capture_init),
+    ):
+        asyncio.run(_run_all())
+
+    assert len(seen_adapters) == 8
+    assert all(a is not parent_adapter for a in seen_adapters), (
+        "every per-call engine must use its own isolated adapter, never the parent"
+    )
+    assert shared_engine.llm_adapter is parent_adapter, (
+        "shared engine.llm_adapter must remain untouched after concurrent calls"
+    )
+    assert shared_engine.suppress_tool_use_prompt_cues is False, (
+        "shared engine.suppress_tool_use_prompt_cues must remain untouched"
+    )
 
 
 def test_authoring_interview_handler_does_not_shortcut_when_backend_changes() -> None:

@@ -1438,30 +1438,32 @@ class InterviewHandler:
             ),
             strict_mcp_config=True,
         )
-        # Whether we are reusing a shared engine. If so, we must NOT mutate
-        # its suppress flag or llm_adapter permanently — that would leak this
-        # handler's prompt-cue policy and isolated-adapter into unrelated
-        # sessions that share the same engine instance. We also must override
-        # the engine's adapter for the duration of this call so the isolated
-        # llm_adapter built above (with allowed_tools=[] and
-        # strict_mcp_config=True) is what actually answers question generation;
-        # otherwise InterviewEngine.llm_adapter.complete(...) still goes
-        # through the parent's tool-capable adapter and our envelope isolation
-        # is bypassed in production. Save prior values and restore in the
-        # outer finally block below.
-        _engine_was_shared = self.interview_engine is not None
-        _prev_engine_suppress: bool | None = None
-        _adapter_swapped = False
-        _prev_engine_adapter: Any = None
-        if _engine_was_shared:
+        # Build a per-call InterviewEngine when a real engine is supplied, to
+        # avoid mutating shared engine state in place. Mutating a shared
+        # engine's llm_adapter and suppress_tool_use_prompt_cues is race-prone:
+        # under concurrent MCP requests, request A's `finally` restoration can
+        # clobber request B's in-flight adapter and leave the shared engine
+        # pointing at the wrong adapter or stale prompt mode. InterviewEngine
+        # itself is config-only (state lives on disk via state_dir), so
+        # cloning the config fields into a fresh per-call engine is both
+        # correct and concurrency-safe.
+        #
+        # Test fakes that do NOT subclass InterviewEngine are passed through
+        # unchanged: they cannot leak under concurrency because they are not
+        # shared across production requests, and tests inject them to observe
+        # the question-generation flow.
+        if isinstance(self.interview_engine, InterviewEngine):
+            template = self.interview_engine
+            engine = InterviewEngine(
+                llm_adapter=llm_adapter,
+                state_dir=template.state_dir,
+                model=template.model or get_clarification_model(self.llm_backend),
+                suppress_tool_use_prompt_cues=self.suppress_tool_use_prompt_cues,
+            )
+            engine.temperature = template.temperature
+            engine.max_tokens = template.max_tokens
+        elif self.interview_engine is not None:
             engine = self.interview_engine
-            if hasattr(engine, "suppress_tool_use_prompt_cues"):
-                _prev_engine_suppress = engine.suppress_tool_use_prompt_cues
-                engine.suppress_tool_use_prompt_cues = self.suppress_tool_use_prompt_cues
-            if hasattr(engine, "llm_adapter"):
-                _prev_engine_adapter = engine.llm_adapter
-                engine.llm_adapter = llm_adapter
-                _adapter_swapped = True
         else:
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
@@ -2155,9 +2157,5 @@ class InterviewHandler:
                 )
             )
         finally:
-            if _engine_was_shared and _prev_engine_suppress is not None:
-                engine.suppress_tool_use_prompt_cues = _prev_engine_suppress
-            if _engine_was_shared and _adapter_swapped:
-                engine.llm_adapter = _prev_engine_adapter
             if self._owns_event_store:
                 await self.close()
