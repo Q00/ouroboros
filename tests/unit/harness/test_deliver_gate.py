@@ -113,6 +113,24 @@ class TestLoadAcEvidenceManifest:
         assert entry.source_event_ids == ("evt_started_c1", "evt_returned_c1")
 
     @pytest.mark.asyncio
+    async def test_identical_timestamps_keep_started_before_returned(self) -> None:
+        when = datetime.now(UTC)
+        started = _tool_started(call_id="same", when=when)
+        returned = _tool_returned(call_id="same", when=when)
+        # EventStore query APIs return newest-first, and UUID/string ids do not
+        # encode causality. The loader must still feed start before return.
+        store = _FakeEventStore([returned, started])
+
+        manifest = await load_ac_evidence_manifest(store, ac_id="ac_1", execution_id="exec_1")
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].ok is True
+        assert manifest.entries[0].source_event_ids == (
+            "evt_started_same",
+            "evt_returned_same",
+        )
+
+    @pytest.mark.asyncio
     async def test_session_fallback_query_is_supported_for_observe_only_wiring(self) -> None:
         now = datetime.now(UTC)
         store = _FakeEventStore([_tool_started(call_id="c1", when=now)])

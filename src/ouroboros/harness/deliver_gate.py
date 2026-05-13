@@ -95,8 +95,25 @@ async def load_ac_evidence_manifest(
 
 
 def _chronological_events(events: Iterable[BaseEvent]) -> tuple[BaseEvent, ...]:
-    """Return events oldest-first regardless of EventStore query ordering."""
-    return tuple(sorted(events, key=lambda event: (event.timestamp, event.id)))
+    """Return events oldest-first regardless of EventStore query ordering.
+
+    Timestamp ties must preserve causal start-before-return ordering for
+    journal pairs. ``BaseEvent.id`` is a UUID-like string, not a monotonic
+    sequence, so it must never be used as a causality tie-breaker.
+    """
+    return tuple(sorted(events, key=_event_chronology_key))
+
+
+def _event_chronology_key(event: BaseEvent) -> tuple[object, int]:
+    return (event.timestamp, _event_phase_order(event.type))
+
+
+def _event_phase_order(event_type: str) -> int:
+    if event_type in {"tool.call.started", "llm.call.requested"}:
+        return 0
+    if event_type in {"tool.call.returned", "llm.call.returned"}:
+        return 1
+    return 2
 
 
 __all__ = [
