@@ -203,6 +203,13 @@ async def _load_projection_events(
             limit=None,
         )
         if execution_id is None:
+            declared_execution_ids = _session_execution_ids(events, session_id)
+            if len(declared_execution_ids) > 1:
+                msg = (
+                    f"session_id {session_id!r} declares multiple executions; "
+                    "provide execution_id for an unambiguous projection"
+                )
+                raise ValueError(msg)
             return events
         if not _session_declares_execution(events, session_id, execution_id):
             msg = f"execution_id {execution_id!r} does not belong to session_id {session_id!r}"
@@ -291,6 +298,17 @@ def _session_declares_execution(
         if _is_session_metadata_event(event, session_id, execution_id=execution_id):
             return True
     return False
+
+
+def _session_execution_ids(events: Sequence[BaseEvent], session_id: str) -> frozenset[str]:
+    execution_ids: set[str] = set()
+    for event in events:
+        if not _is_session_metadata_event(event, session_id):
+            continue
+        value = event.data.get("execution_id") if isinstance(event.data, dict) else None
+        if isinstance(value, str) and value.strip():
+            execution_ids.add(value.strip())
+    return frozenset(execution_ids)
 
 
 def _is_session_metadata_event(

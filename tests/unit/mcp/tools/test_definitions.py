@@ -814,6 +814,38 @@ class TestProjectionQueryHandler:
         assert result.value.meta["event_count"] == 3
         assert [step["name"] for step in result.value.meta["steps"]] == ["Bash", "Read"]
 
+    async def test_handle_rejects_session_only_reused_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Session-only queries must fail when a session declares multiple executions."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_reused_session_a",
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch_projection_reused",
+                data={"execution_id": "exec_reused_a", "seed_id": "seed_reused_a"},
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_reused_session_b",
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch_projection_reused",
+                data={"execution_id": "exec_reused_b", "seed_id": "seed_reused_b"},
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "orch_projection_reused"})
+
+        assert result.is_err
+        assert "declares multiple executions" in str(result.error)
+
     async def test_handle_limit_is_fail_closed_safety_cap(
         self,
         memory_event_store: EventStore,
