@@ -148,6 +148,22 @@ SchemaRef = Annotated[str, AfterValidator(_normalize_schema_ref)]
 """Schema-reference field type that rejects blank/whitespace-only refs."""
 
 
+def _normalize_identifier(value: str) -> str:
+    """Trim and reject blank workflow identifiers."""
+    if not isinstance(value, str):
+        msg = f"identifier must be a string; got {type(value).__name__}"
+        raise TypeError(msg)
+    stripped = value.strip()
+    if not stripped:
+        msg = "identifier must be non-blank"
+        raise ValueError(msg)
+    return stripped
+
+
+Identifier = Annotated[str, AfterValidator(_normalize_identifier)]
+"""Workflow identifier field type that trims and rejects blank values."""
+
+
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
@@ -232,7 +248,7 @@ class WorkflowNode(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=WORKFLOW_IR_SCHEMA_VERSION, ge=1)
-    node_id: str = Field(default_factory=lambda: _new_id("node"), min_length=1)
+    node_id: Identifier = Field(default_factory=lambda: _new_id("node"))
     kind: NodeKind
     owner: NodeOwner
     name: str = Field(default="", description="Short human-readable label")
@@ -287,9 +303,9 @@ class WorkflowEdge(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=WORKFLOW_IR_SCHEMA_VERSION, ge=1)
-    edge_id: str = Field(default_factory=lambda: _new_id("edge"), min_length=1)
-    source: str = Field(..., min_length=1)
-    target: str = Field(..., min_length=1)
+    edge_id: Identifier = Field(default_factory=lambda: _new_id("edge"))
+    source: Identifier
+    target: Identifier
     kind: EdgeKind = Field(default=EdgeKind.DIRECT)
     condition: FrozenMapping | None = Field(default=None)
     metadata: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
@@ -304,13 +320,16 @@ class WorkflowEdge(BaseModel, frozen=True):
         return normalized
 
     @model_validator(mode="after")
-    def _no_self_loop(self) -> WorkflowEdge:
+    def _validate_edge_contract(self) -> WorkflowEdge:
         if self.source == self.target:
             msg = (
                 f"WorkflowEdge {self.edge_id} forms a self-loop "
                 f"({self.source} -> {self.target}); use a barrier or "
                 "explicit cycle structure instead."
             )
+            raise ValueError(msg)
+        if self.kind is EdgeKind.CONDITIONAL and not self.condition:
+            msg = "WorkflowEdge(kind=conditional) must include a condition payload"
             raise ValueError(msg)
         return self
 
@@ -330,7 +349,7 @@ class WorkflowSpec(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=WORKFLOW_IR_SCHEMA_VERSION, ge=1)
-    spec_id: str = Field(default_factory=lambda: _new_id("wfspec"), min_length=1)
+    spec_id: Identifier = Field(default_factory=lambda: _new_id("wfspec"))
     source: SourceKind
     source_ref: str | None = Field(default=None)
     nodes: tuple[WorkflowNode, ...] = Field(default_factory=tuple)
@@ -365,6 +384,7 @@ class WorkflowValidationError(BaseModel, frozen=True):
         "no_terminal_node",
         "missing_evidence_schema",
         "missing_input_schema",
+        "missing_condition",
         "isolated_node",
     ]
     message: str
@@ -472,6 +492,16 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
             )
         else:
             seen_edge_ids.add(edge.edge_id)
+        if edge.kind is EdgeKind.CONDITIONAL and not edge.condition:
+            errors.append(
+                WorkflowValidationError(
+                    code="missing_condition",
+                    message=(
+                        f"Conditional edge '{edge.edge_id}' must include a condition payload."
+                    ),
+                    edge_id=edge.edge_id,
+                )
+            )
         for endpoint, role in ((edge.source, "source"), (edge.target, "target")):
             if endpoint not in seen_node_ids:
                 errors.append(
@@ -533,7 +563,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
         if node.kind is NodeKind.TERMINAL:
             continue
         if len(spec.nodes) == 1:
-            # A single non-terminal node is degenerate but valid as a stub.
+            # no_terminal_node is already emitted for this degenerate stub.
             continue
         if node.node_id not in incident_nodes:
             warnings.append(
@@ -610,6 +640,7 @@ __all__ = [
     "CapabilityTuple",
     "EdgeKind",
     "FrozenMapping",
+    "Identifier",
     "NodeKind",
     "NodeOwner",
     "SchemaRef",

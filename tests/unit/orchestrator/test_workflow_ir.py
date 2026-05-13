@@ -77,6 +77,14 @@ class TestWorkflowNode:
         assert node.node_id == "node_a"
         assert default_node.node_id.startswith("node_")
 
+    def test_node_id_trims_whitespace(self) -> None:
+        node = _make_task("  node_a  ")
+        assert node.node_id == "node_a"
+
+    def test_blank_node_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_task("   ")
+
     def test_is_frozen(self) -> None:
         node = _make_task("node_a")
         with pytest.raises(ValidationError):
@@ -214,6 +222,26 @@ class TestWorkflowEdge:
         assert edge.source == "node_a"
         assert edge.target == "node_b"
 
+    def test_conditional_edge_requires_condition(self) -> None:
+        with pytest.raises(ValidationError):
+            WorkflowEdge(
+                edge_id="edge_x",
+                source="node_a",
+                target="node_b",
+                kind=EdgeKind.CONDITIONAL,
+            )
+
+    def test_conditional_edge_accepts_condition(self) -> None:
+        edge = WorkflowEdge(
+            edge_id="edge_x",
+            source="node_a",
+            target="node_b",
+            kind=EdgeKind.CONDITIONAL,
+            condition={"field": "status", "equals": "pass"},
+        )
+        assert edge.kind is EdgeKind.CONDITIONAL
+        assert edge.condition is not None
+
 
 class TestValidateWorkflow:
     def test_minimal_valid_spec(self) -> None:
@@ -298,6 +326,29 @@ class TestValidateWorkflow:
             e.code == "unreachable_terminal" and e.node_id == "orphan" for e in result.errors
         )
         assert any(w.code == "isolated_node" for w in result.warnings)
+
+    def test_missing_condition_detected_by_validator(self) -> None:
+        bad_edge = WorkflowEdge.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            edge_id="edge_cond",
+            source="a",
+            target="end",
+            kind=EdgeKind.CONDITIONAL,
+            condition=None,
+            metadata={},
+        )
+        spec = WorkflowSpec.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            spec_id="wfspec_test",
+            source=SourceKind.SYNTHETIC,
+            source_ref=None,
+            nodes=(_make_task("a"), _make_terminal("end")),
+            edges=(bad_edge,),
+            metadata={},
+        )
+        result = validate_workflow(spec)
+        assert result.ok is False
+        assert any(e.code == "missing_condition" for e in result.errors)
 
     def test_missing_terminal_path_for_non_terminal_branch(self) -> None:
         spec = WorkflowSpec(
