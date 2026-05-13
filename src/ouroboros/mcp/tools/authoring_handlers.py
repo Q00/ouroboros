@@ -1452,8 +1452,14 @@ class InterviewHandler:
         # unchanged: they cannot leak under concurrency because they are not
         # shared across production requests, and tests inject them to observe
         # the question-generation flow.
-        if isinstance(self.interview_engine, InterviewEngine):
-            template = self.interview_engine
+        # NOTE: `isinstance(..., InterviewEngine)` must NOT be reached when
+        # ``InterviewEngine`` has been monkey-patched in tests to a non-type
+        # (e.g. ``patch("authoring_handlers.InterviewEngine", return_value=...)``
+        # replaces the name with a MagicMock instance). Guard with an explicit
+        # ``is not None`` short-circuit so the isinstance arm only runs when a
+        # caller actually supplied an engine template.
+        template = self.interview_engine
+        if template is not None and isinstance(template, InterviewEngine):
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
                 state_dir=template.state_dir,
@@ -1462,8 +1468,8 @@ class InterviewHandler:
             )
             engine.temperature = template.temperature
             engine.max_tokens = template.max_tokens
-        elif self.interview_engine is not None:
-            engine = self.interview_engine
+        elif template is not None:
+            engine = template
         else:
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
