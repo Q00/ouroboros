@@ -29,6 +29,7 @@ def _sample(
     accepted: bool,
     attempt_count: int = 1,
     fabrication_incidents: int = 0,
+    semantic_miss_incidents: int = 0,
     prompt_chars: int = 1000,
     completion_chars: int = 500,
 ) -> FatHarnessMetricSample:
@@ -37,6 +38,7 @@ def _sample(
         accepted=accepted,
         attempt_count=attempt_count,
         fabrication_incidents=fabrication_incidents,
+        semantic_miss_incidents=semantic_miss_incidents,
         prompt_chars=prompt_chars,
         completion_chars=completion_chars,
     )
@@ -92,6 +94,7 @@ class TestRenderBaselineReport:
             "one_shot_pass_rate",
             "k_recovery_rate",
             "fabrication_incidents_per_100_acs",
+            "semantic_miss_incidents_per_100_acs",
             "median_chars_per_ac",
             "new_domain_loc_delta",
             "new_domain_yaml_delta",

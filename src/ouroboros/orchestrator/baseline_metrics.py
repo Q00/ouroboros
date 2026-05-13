@@ -2,8 +2,8 @@
 
 The AgentOS SSOT (#961) requires five baseline metrics before the
 `ooo run` fat-harness path can be treated as stronger by default:
-1-shot AC pass rate, K=2 recovery rate, fabrication incidents, char
-budget per AC, and new-domain cost. This module defines the deterministic
+1-shot AC pass rate, K=2 recovery rate, fabrication incidents,
+semantic-miss incidents, char budget per AC, and new-domain cost. This module defines the deterministic
 report shape and gate evaluation only; it does not invoke LLMs, run live
 executions, or wire into `parallel_executor` yet.
 """
@@ -46,6 +46,7 @@ class FatHarnessMetricSample:
     accepted: bool
     attempt_count: int
     fabrication_incidents: int = 0
+    semantic_miss_incidents: int = 0
     prompt_chars: int = 0
     completion_chars: int = 0
 
@@ -56,7 +57,12 @@ class FatHarnessMetricSample:
         if self.attempt_count < 1:
             msg = "attempt_count must be >= 1"
             raise ValueError(msg)
-        for field_name in ("fabrication_incidents", "prompt_chars", "completion_chars"):
+        for field_name in (
+            "fabrication_incidents",
+            "semantic_miss_incidents",
+            "prompt_chars",
+            "completion_chars",
+        ):
             if getattr(self, field_name) < 0:
                 msg = f"{field_name} must be non-negative"
                 raise ValueError(msg)
@@ -106,6 +112,7 @@ class FatHarnessMetricsReport:
     one_shot_pass_rate: float
     k_recovery_rate: float | None
     fabrication_incidents_per_100_acs: float
+    semantic_miss_incidents_per_100_acs: float
     median_chars_per_ac: float
     new_domain_loc_delta: int
     new_domain_yaml_delta: int
@@ -121,6 +128,7 @@ class FatHarnessMetricsReport:
                 "one_shot_pass_rate": self.one_shot_pass_rate,
                 "k_recovery_rate": self.k_recovery_rate,
                 "fabrication_incidents_per_100_acs": self.fabrication_incidents_per_100_acs,
+                "semantic_miss_incidents_per_100_acs": self.semantic_miss_incidents_per_100_acs,
                 "median_chars_per_ac": self.median_chars_per_ac,
                 "new_domain_loc_delta": self.new_domain_loc_delta,
                 "new_domain_yaml_delta": self.new_domain_yaml_delta,
@@ -183,6 +191,8 @@ def build_fat_harness_metrics_report(
 
     fabrication_incidents = sum(sample.fabrication_incidents for sample in sample_tuple)
     fabrication_incidents_per_100_acs = fabrication_incidents * 100 / total_acs
+    semantic_miss_incidents = sum(sample.semantic_miss_incidents for sample in sample_tuple)
+    semantic_miss_incidents_per_100_acs = semantic_miss_incidents * 100 / total_acs
     median_chars_per_ac = float(median(sample.total_chars for sample in sample_tuple))
 
     recovery_status = (
@@ -237,6 +247,16 @@ def build_fat_harness_metrics_report(
             rationale="Counts verifier-detected non-existent paths/symbols/sources.",
         ),
         FatHarnessGateResult(
+            name="semantic_miss_incidents_per_100_acs",
+            status=FatHarnessGateStatus.CAPTURED,
+            value=semantic_miss_incidents_per_100_acs,
+            target="sample and report evidence-backed-but-semantically-wrong incidents per 100 ACs",
+            rationale=(
+                "Counts claims backed by evidence handles where the evidence does not actually "
+                "satisfy the AC semantics."
+            ),
+        ),
+        FatHarnessGateResult(
             name="median_chars_per_ac",
             status=char_status,
             value=median_chars_per_ac,
@@ -266,6 +286,7 @@ def build_fat_harness_metrics_report(
         one_shot_pass_rate=one_shot_pass_rate,
         k_recovery_rate=k_recovery_rate,
         fabrication_incidents_per_100_acs=fabrication_incidents_per_100_acs,
+        semantic_miss_incidents_per_100_acs=semantic_miss_incidents_per_100_acs,
         median_chars_per_ac=median_chars_per_ac,
         new_domain_loc_delta=new_domain_loc_delta,
         new_domain_yaml_delta=new_domain_yaml_delta,

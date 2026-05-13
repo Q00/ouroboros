@@ -37,6 +37,7 @@ class BaselineMetricFixtureRow:
     prompt_chars: int
     completion_chars: int
     fabrication_incidents: int = 0
+    semantic_miss_incidents: int = 0
     note: str = ""
 
     def to_sample(self) -> FatHarnessMetricSample:
@@ -46,6 +47,7 @@ class BaselineMetricFixtureRow:
             accepted=self.accepted,
             attempt_count=self.attempt_count,
             fabrication_incidents=self.fabrication_incidents,
+            semantic_miss_incidents=self.semantic_miss_incidents,
             prompt_chars=self.prompt_chars,
             completion_chars=self.completion_chars,
         )
@@ -58,6 +60,7 @@ class BaselineMetricFixtureRow:
             "accepted": self.accepted,
             "attempt_count": self.attempt_count,
             "fabrication_incidents": self.fabrication_incidents,
+            "semantic_miss_incidents": self.semantic_miss_incidents,
             "prompt_chars": self.prompt_chars,
             "completion_chars": self.completion_chars,
             "total_chars": self.prompt_chars + self.completion_chars,
@@ -159,7 +162,11 @@ RECORDED_BASELINE_ROWS: tuple[BaselineMetricFixtureRow, ...] = (
         attempt_count=3,
         prompt_chars=1600,
         completion_chars=600,
-        note="Retry budget exhausted; counted in recovery denominator only.",
+        semantic_miss_incidents=1,
+        note=(
+            "Retry budget exhausted; sampled as evidence-backed but semantically wrong "
+            "for the semantic-miss baseline."
+        ),
     ),
 )
 
@@ -188,7 +195,7 @@ def render_captured_baseline_markdown(captured: CapturedBaselineMetrics | None =
         "# #961 fat-harness baseline metrics capture",
         "",
         "This is the recorded fixture baseline for the `agentos-substrate-wiring` gate.",
-        "It captures the five #830/#961 hard-gate metrics without live model calls,",
+        "It captures the #830/#961 hard-gate metrics without live model calls,",
         "without `parallel_executor` wiring, and without changing `ooo run` defaults.",
         "",
         "```text",
@@ -197,17 +204,18 @@ def render_captured_baseline_markdown(captured: CapturedBaselineMetrics | None =
         "",
         "## Source sample rows",
         "",
-        "| AC | source | accepted | attempts | fabrication | chars | note |",
-        "|---|---|---:|---:|---:|---:|---|",
+        "| AC | source | accepted | attempts | fabrication | semantic miss | chars | note |",
+        "|---|---|---:|---:|---:|---:|---:|---|",
     ]
     lines.extend(
         "| {ac_id} | `{source_ref}` | {accepted} | {attempt_count} | "
-        "{fabrication_incidents} | {chars} | {note} |".format(
+        "{fabrication_incidents} | {semantic_miss_incidents} | {chars} | {note} |".format(
             ac_id=row.ac_id,
             source_ref=row.source_ref,
             accepted="yes" if row.accepted else "no",
             attempt_count=row.attempt_count,
             fabrication_incidents=row.fabrication_incidents,
+            semantic_miss_incidents=row.semantic_miss_incidents,
             chars=row.prompt_chars + row.completion_chars,
             note=row.note,
         )
@@ -227,6 +235,7 @@ def render_captured_baseline_markdown(captured: CapturedBaselineMetrics | None =
             "- 1-shot AC pass rate is captured as the baseline for later post-change comparison.",
             "- K=2 recovery rate is measured against the >= 70% gate.",
             "- Fabrication incidents are measured as verifier-detected incidents per 100 ACs.",
+            "- Semantic-miss incidents are sampled as evidence-backed-but-semantically-wrong incidents per 100 ACs.",
             "- Median chars per AC is captured as the token-budget proxy baseline.",
             "- New-domain cost is measured against <= 50 LOC + <= 1 YAML.",
         ]
