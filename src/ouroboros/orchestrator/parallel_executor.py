@@ -3158,23 +3158,28 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         # Build parallel awareness section
         parallel_section = ""
-        if (
-            (
-                context_governance_audit is None
-                or context_governance_audit.get("context_governed") is not True
-            )
-            and sibling_acs
-            and len(sibling_acs) > 1
-        ):
+        if sibling_acs and len(sibling_acs) > 1:
             other_acs = [ac for ac in sibling_acs if ac != ac_content]
             if other_acs:
-                other_list = "\n".join(f"- {ac[:80]}" for ac in other_acs)
+                context_is_governed = (
+                    context_governance_audit is not None
+                    and context_governance_audit.get("context_governed") is True
+                )
+                if context_is_governed:
+                    other_list = (
+                        "Sibling tasks in progress are summarized in the governed "
+                        "sibling-status section above."
+                    )
+                else:
+                    other_list = "Sibling tasks in progress:\n" + "\n".join(
+                        f"- {ac[:80]}" for ac in other_acs
+                    )
                 parallel_section = (
                     "\n## Parallel Execution Notice\n"
                     "Other agents are working on sibling tasks concurrently. "
                     "Avoid modifying files that other agents are likely editing. "
                     "Focus on files directly related to YOUR task.\n\n"
-                    f"Sibling tasks in progress:\n{other_list}\n"
+                    f"{other_list}\n"
                 )
 
         # Scan the requested runtime workspace so prompts stay aligned with the actual task cwd.

@@ -220,7 +220,9 @@ class TestProfileAwareContextGovernance:
         assert "## Sibling status" in prompt
         assert "… sibling-1: Update sibling docs" in prompt
         assert "## AC\nImplement governed leaf" in prompt
-        assert "## Parallel Execution Notice" not in prompt
+        assert "## Parallel Execution Notice" in prompt
+        assert "Avoid modifying files that other agents are likely editing." in prompt
+        assert "summarized in the governed sibling-status section above" in prompt
 
         context_events = [
             event for event in appended_events if event.type == "execution.ac.context_governed"
