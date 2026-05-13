@@ -70,10 +70,18 @@ class HookKind(StrEnum):
 class DeferredHookKind(StrEnum):
     """Hook names deferred to follow-up RFC slices.
 
-    Listing them as a separate enum makes scope-creep auditable:
-    manifest validators MUST reject ``hooks[].name`` values from this
-    set in v1, and any future PR that promotes one of these must do so
-    explicitly by adding it to :class:`HookKind`.
+    Listing these as a separate enum makes scope-creep auditable.
+    This module exposes the routing helper :func:`is_deferred_hook_kind`
+    so manifest validators and downstream consumers can detect the
+    intent; this PR (the types-only slice) **does not** itself reject
+    these names at manifest load — the live rejection wiring lands in
+    the follow-up manifest-validator slice and the JSON-schema enum
+    tightening slice. Until those land, the existing v0.2 JSON Schema
+    still accepts deferred names as plain strings.
+
+    Any future PR that promotes one of these names into v1 must do so
+    by moving the value into :class:`HookKind`, which is a visible
+    diff in review.
     """
 
     BEFORE_TOOL_CALL = "before_tool_call"
@@ -88,11 +96,13 @@ class ExcludedHookKind(StrEnum):
     """Candidate hook names explicitly excluded from the v1 vocabulary.
 
     The RFC enumerates these to prevent ``ouroboros-plugins`` authors
-    from inferring that ``HookKind`` will be extended toward an
-    open-ended interception bus. They MUST NOT be accepted in v1
-    manifests; promotion requires substrate work tracked under other
-    canonical issues (#920 runtime adapters, #946 state/replay,
-    eventing surfaces).
+    from inferring that :class:`HookKind` will be extended toward an
+    open-ended interception bus. Like :class:`DeferredHookKind`, this
+    PR exposes them as a routing surface only; the live manifest /
+    schema-level rejection of these names lands in the follow-up
+    validator and schema-enum slices. Promoting any of these
+    requires substrate work tracked under other canonical issues
+    (#920 runtime adapters, #946 state/replay, eventing surfaces).
     """
 
     BEFORE_RUNTIME_START = "before_runtime_start"
