@@ -160,6 +160,21 @@ def _normalize_identifier(value: str) -> str:
     return stripped
 
 
+def _enum_value(value: Any) -> Any:
+    if isinstance(value, StrEnum):
+        return value.value
+    return value
+
+
+def _enum_is(value: Any, member: StrEnum) -> bool:
+    return _enum_value(value) == member.value
+
+
+def _enum_in(value: Any, members: set[StrEnum]) -> bool:
+    raw = _enum_value(value)
+    return raw in {member.value for member in members}
+
+
 def _canonical_identifier(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -475,23 +490,23 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
     evidence_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN, NodeOwner.VERIFIER}
     input_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN}
     for node in spec.nodes:
-        if node.owner in evidence_owners and not _has_schema_ref(node.evidence_schema_ref):
+        if _enum_in(node.owner, evidence_owners) and not _has_schema_ref(node.evidence_schema_ref):
             errors.append(
                 WorkflowValidationError(
                     code="missing_evidence_schema",
                     message=(
-                        f"Node '{node.node_id}' (owner={node.owner.value}) is "
+                        f"Node '{node.node_id}' (owner={_enum_value(node.owner)}) is "
                         "missing evidence_schema_ref."
                     ),
                     node_id=node.node_id,
                 )
             )
-        if node.owner in input_owners and not _has_schema_ref(node.input_schema_ref):
+        if _enum_in(node.owner, input_owners) and not _has_schema_ref(node.input_schema_ref):
             errors.append(
                 WorkflowValidationError(
                     code="missing_input_schema",
                     message=(
-                        f"Node '{node.node_id}' (owner={node.owner.value}) is "
+                        f"Node '{node.node_id}' (owner={_enum_value(node.owner)}) is "
                         "missing input_schema_ref; agent/plugin nodes must "
                         "declare the payload contract before dispatch."
                     ),
@@ -542,7 +557,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                     node_id=source,
                 )
             )
-        if edge.kind is EdgeKind.CONDITIONAL and not edge.condition:
+        if _enum_is(edge.kind, EdgeKind.CONDITIONAL) and not edge.condition:
             errors.append(
                 WorkflowValidationError(
                     code="missing_condition",
@@ -566,7 +581,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                 )
 
     # 4. Terminal coverage and reachability.
-    terminal_nodes = tuple(n for n in spec.nodes if n.kind is NodeKind.TERMINAL)
+    terminal_nodes = tuple(n for n in spec.nodes if _enum_is(n.kind, NodeKind.TERMINAL))
     if not terminal_nodes:
         errors.append(
             WorkflowValidationError(
@@ -591,7 +606,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                 )
         terminal_reachable_from = _compute_nodes_that_can_reach_terminal(spec)
         for node in spec.nodes:
-            if node.kind is NodeKind.TERMINAL:
+            if _enum_is(node.kind, NodeKind.TERMINAL):
                 continue
             node_id = _canonical_identifier(node.node_id)
             if node_id is not None and node_id not in terminal_reachable_from:
@@ -616,7 +631,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
         if target is not None:
             incident_nodes.add(target)
     for node in spec.nodes:
-        if node.kind is NodeKind.TERMINAL:
+        if _enum_is(node.kind, NodeKind.TERMINAL):
             continue
         if len(spec.nodes) == 1:
             # no_terminal_node is already emitted for this degenerate stub.
@@ -650,14 +665,14 @@ def _compute_reachable(spec: WorkflowSpec) -> set[str]:
     non_terminal_starts = {
         node_id
         for node in spec.nodes
-        if node.kind is not NodeKind.TERMINAL
+        if not _enum_is(node.kind, NodeKind.TERMINAL)
         for node_id in (_canonical_identifier(node.node_id),)
         if node_id is not None
     }
     if not non_terminal_starts:
         # Only a single terminal-only stub is considered reachable. Multiple
         # isolated terminals are invalid because there is no execution path.
-        if len(spec.nodes) == 1 and spec.nodes[0].kind is NodeKind.TERMINAL:
+        if len(spec.nodes) == 1 and _enum_is(spec.nodes[0].kind, NodeKind.TERMINAL):
             node_id = _canonical_identifier(spec.nodes[0].node_id)
             return {node_id} if node_id is not None else set()
         return set()

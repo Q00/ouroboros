@@ -467,6 +467,55 @@ class TestValidateWorkflow:
         assert result.ok is False
         assert any(e.code == "missing_input_schema" for e in result.errors)
 
+    def test_model_construct_raw_enum_strings_are_validated(self) -> None:
+        bad_node = WorkflowNode.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            node_id="agent_raw",
+            kind="task",
+            owner="agent",
+            evidence_schema_ref="   ",
+            input_schema_ref="   ",
+            capability_envelope=(),
+            runtime_hints={},
+            metadata={},
+            name="",
+        )
+        terminal = WorkflowNode.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            node_id="end",
+            kind="terminal",
+            owner="harness",
+            input_schema_ref=None,
+            evidence_schema_ref=None,
+            capability_envelope=(),
+            runtime_hints={},
+            metadata={},
+            name="",
+        )
+        bad_edge = WorkflowEdge.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            edge_id="edge_cond",
+            source="agent_raw",
+            target="end",
+            kind="conditional",
+            condition=None,
+            metadata={},
+        )
+        spec = WorkflowSpec.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            spec_id="wfspec_test",
+            source=SourceKind.SYNTHETIC,
+            source_ref=None,
+            nodes=(bad_node, terminal),
+            edges=(bad_edge,),
+            metadata={},
+        )
+        result = validate_workflow(spec)
+        codes = [e.code for e in result.errors]
+        assert "missing_evidence_schema" in codes
+        assert "missing_input_schema" in codes
+        assert "missing_condition" in codes
+
     def test_blank_schema_refs_detected_by_validator(self) -> None:
         bad_node = WorkflowNode.model_construct(
             schema_version=WORKFLOW_IR_SCHEMA_VERSION,
