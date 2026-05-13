@@ -103,7 +103,8 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
 
 
 class _CapturingDecompositionRuntime:
-    def __init__(self) -> None:
+    def __init__(self, content: str = "ATOMIC") -> None:
+        self.content = content
         self.prompt: str | None = None
         self.system_prompt: str | None = None
 
@@ -118,7 +119,7 @@ class _CapturingDecompositionRuntime:
         del tools, resume_handle, resume_session_id
         self.prompt = prompt
         self.system_prompt = system_prompt
-        yield AgentMessage(type="result", content="ATOMIC")
+        yield AgentMessage(type="result", content=self.content)
 
 
 @pytest.mark.asyncio
@@ -149,3 +150,51 @@ async def test_try_decompose_ac_uses_profile_axis_when_profile_is_configured() -
     assert "single question answerable from independently cited sources" in runtime.prompt
     assert runtime.system_prompt is not None
     assert "'research' domain" in runtime.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_try_decompose_ac_uses_profile_max_branching_from_loaded_yaml(tmp_path) -> None:
+    """Loaded profile max_branching should drive the live decomposer prompt and bounds."""
+    from ouroboros.orchestrator.profile_loader import load_profile
+
+    (tmp_path / "custom.yaml").write_text(
+        """
+profile: custom
+schema_version: 1
+axis: source
+min_unit: "single sourced claim"
+cut_signal: "claim has citations"
+max_branching: 3
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claim support."
+suggested_tools: [Read, Grep]
+suggested_model_tier: medium
+""",
+        encoding="utf-8",
+    )
+    runtime = _CapturingDecompositionRuntime(
+        content='["Sub-AC 1: a", "Sub-AC 2: b", "Sub-AC 3: c"]'
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+        execution_profile=load_profile("custom", profiles_dir=tmp_path),
+    )
+
+    result = await executor._try_decompose_ac(
+        ac_content="Split a research task into sourced claims.",
+        ac_index=0,
+        seed_goal="Produce a sourced memo",
+        tools=["Read"],
+        system_prompt="legacy system prompt",
+    )
+
+    assert result == ["Sub-AC 1: a", "Sub-AC 2: b", "Sub-AC 3: c"]
+    assert runtime.prompt is not None
+    assert "2-3 sub-ACs" in runtime.prompt
+    assert "2-5 sub-ACs" not in runtime.prompt

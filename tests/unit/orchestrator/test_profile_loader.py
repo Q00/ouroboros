@@ -76,20 +76,55 @@ class TestSchemaValidation:
         path.write_text(body, encoding="utf-8")
         return path
 
+    def _valid_body(self, name: str, *, extra: str = "") -> str:
+        return f"""
+profile: {name}
+schema_version: 1
+axis: source
+min_unit: claim
+max_branching: 3
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+{extra}
+"""
+
     def test_missing_required_field(self, tmp_path: Path) -> None:
         self._write(
             tmp_path,
             "broken",
-            "profile: broken\naxis: x\nmin_unit: y\n",  # no verifier_focus
+            self._valid_body("broken").replace('verifier_focus: "Check claims."\n', ""),
         )
         with pytest.raises(ProfileError, match="schema validation"):
             load_profile("broken", profiles_dir=tmp_path)
+
+    @pytest.mark.parametrize(
+        "knob",
+        ("schema_version", "max_branching", "must_produce", "suggested_model_tier"),
+    )
+    def test_structured_profile_knobs_are_required_for_yaml_loading(
+        self, tmp_path: Path, knob: str
+    ) -> None:
+        lines = [
+            line
+            for line in self._valid_body("missing_knob").splitlines()
+            if not line.startswith(f"{knob}:")
+        ]
+        self._write(tmp_path, "missing_knob", "\n".join(lines))
+
+        with pytest.raises(ProfileError, match=rf"required structured profile knob.*{knob}"):
+            load_profile("missing_knob", profiles_dir=tmp_path)
 
     def test_verifier_capability_is_required(self, tmp_path: Path) -> None:
         self._write(
             tmp_path,
             "missing_capability",
-            "profile: missing_capability\naxis: x\nmin_unit: y\nverifier_focus: z\n",
+            self._valid_body("missing_capability").replace(
+                "verifier_capability: read_only_discovery\n", ""
+            ),
         )
         with pytest.raises(ProfileError, match="verifier_capability"):
             load_profile("missing_capability", profiles_dir=tmp_path)
@@ -98,9 +133,7 @@ class TestSchemaValidation:
         self._write(
             tmp_path,
             "extra",
-            (
-                "profile: extra\naxis: x\nmin_unit: y\nverifier_capability: read_only_discovery\nverifier_focus: z\nunknown_field: oops\n"
-            ),
+            self._valid_body("extra", extra="unknown_field: oops\n"),
         )
         with pytest.raises(ProfileError, match="schema validation"):
             load_profile("extra", profiles_dir=tmp_path)
@@ -204,7 +237,7 @@ suggested_model_tier: medium
         self._write(
             tmp_path,
             "alpha",
-            "profile: beta\naxis: x\nmin_unit: y\nverifier_capability: read_only_discovery\nverifier_focus: z\n",
+            self._valid_body("beta"),
         )
         with pytest.raises(ProfileError, match="name mismatch"):
             load_profile("alpha", profiles_dir=tmp_path)

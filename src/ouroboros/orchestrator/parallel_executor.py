@@ -2559,12 +2559,15 @@ class ParallelACExecutor:
         decomposition_system_prompt = (
             "You are a task decomposition expert. Analyze tasks and break them down if needed."
         )
+        min_sub_acs = MIN_SUB_ACS
+        max_sub_acs = MAX_SUB_ACS
         if self._execution_profile is not None:
             params = params_from_profile(
                 self._execution_profile,
                 min_branching=MIN_SUB_ACS,
-                max_branching=MAX_SUB_ACS,
             )
+            min_sub_acs = params.min_branching
+            max_sub_acs = params.max_branching
             decomposition_system_prompt = build_decomposition_system_prompt(params)
             decompose_prompt = build_decomposition_user_prompt(
                 params,
@@ -2631,7 +2634,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             if json_match:
                 sub_acs = json.loads(json_match.group())
                 if isinstance(sub_acs, list) and all(isinstance(s, str) for s in sub_acs):
-                    if MIN_SUB_ACS <= len(sub_acs) <= MAX_SUB_ACS:
+                    if min_sub_acs <= len(sub_acs) <= max_sub_acs:
                         log.info(
                             "parallel_executor.decomposition.success",
                             ac_index=ac_index,

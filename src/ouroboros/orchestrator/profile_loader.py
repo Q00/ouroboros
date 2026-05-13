@@ -26,6 +26,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 import yaml
 
 _PROFILES_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "profiles"
+_REQUIRED_YAML_PROFILE_KNOBS: Final[frozenset[str]] = frozenset(
+    {
+        "schema_version",
+        "max_branching",
+        "must_produce",
+        "suggested_model_tier",
+    }
+)
 
 
 class VerifierCapability(StrEnum):
@@ -193,6 +201,14 @@ def load_profile(name: str, *, profiles_dir: Path | None = None) -> ExecutionPro
 
     if not isinstance(raw, dict):
         msg = f"Profile {name!r} must be a YAML mapping at the top level, got {type(raw).__name__}"
+        raise ProfileError(msg)
+
+    missing_knobs = sorted(_REQUIRED_YAML_PROFILE_KNOBS - raw.keys())
+    if missing_knobs:
+        msg = (
+            f"Profile {name!r} is missing required structured profile knob(s): "
+            f"{', '.join(missing_knobs)}"
+        )
         raise ProfileError(msg)
 
     try:
