@@ -156,3 +156,11 @@ class TestV02Compatibility:
         with pytest.raises(PluginManifestError) as exc_info:
             load_manifest(_write(tmp_path, payload))
         assert exc_info.value.json_pointer == "/hooks/0/name"
+
+
+class TestV03HookAuditEvents:
+    def test_manifest_audit_events_accept_hook_wrapper_events(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload["audit"] = {"events": ["plugin.hook.blocked", "plugin.hook.failed"]}
+        manifest = load_manifest(_write(tmp_path, payload))
+        assert manifest.audit.events == ("plugin.hook.blocked", "plugin.hook.failed")

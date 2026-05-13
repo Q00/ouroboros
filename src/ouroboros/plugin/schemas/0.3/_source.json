@@ -8,7 +8,7 @@
       "Narrowed hooks[].name enum to the v1 HookKind set: 'before_invocation' and 'after_invocation'. Deferred candidates (before_tool_call, after_tool_call, before_artifact_write, after_artifact_write, on_error, on_cancel) and excluded candidates (before_runtime_start, after_runtime_start, before_state_commit, after_state_commit, on_event, on_rewind) are no longer accepted at the schema layer; refer to src/ouroboros/plugin/hooks.py for the routing helpers and follow-up RFC slices."
     ],
     "audit-event.schema.json": [
-      "Vendored audit-event.schema.json with local 0.3 $id/title/schema_version alignment; audit event shape remains otherwise unchanged from 0.2."
+      "Vendored audit-event.schema.json with local 0.3 $id/title/schema_version alignment and added plugin.hook.blocked / plugin.hook.failed to match the v1 hook wrapper event constants."
     ]
   }
 }
