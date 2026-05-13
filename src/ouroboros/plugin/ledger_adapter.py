@@ -40,7 +40,7 @@ PLUGIN_AGGREGATE_TYPE = "plugin"
 
 # Audit event types the firewall may emit. Used by tests + by
 # downstream consumers that want to filter ledger queries.
-AUDIT_EVENT_TYPES: tuple[str, ...] = (
+PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.discovered",
     "plugin.installed",
     "plugin.trusted",
@@ -48,6 +48,18 @@ AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.permission_used",
     "plugin.completed",
     "plugin.failed",
+)
+
+PLUGIN_HOOK_AUDIT_EVENT_TYPES: tuple[str, ...] = (
+    "plugin.hook_started",
+    "plugin.hook_completed",
+    "plugin.hook_failed",
+    "plugin.permission_denied",
+)
+
+AUDIT_EVENT_TYPES: tuple[str, ...] = (
+    *PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES,
+    *PLUGIN_HOOK_AUDIT_EVENT_TYPES,
 )
 
 
@@ -167,6 +179,8 @@ def make_event_sink(
 __all__ = [
     "AUDIT_EVENT_TYPES",
     "PLUGIN_AGGREGATE_TYPE",
+    "PLUGIN_HOOK_AUDIT_EVENT_TYPES",
+    "PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES",
     "make_event_sink",
     "unwrap_plugin_event",
     "wrap_plugin_event",
