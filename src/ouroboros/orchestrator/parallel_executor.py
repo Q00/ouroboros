@@ -2761,15 +2761,16 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         sibling_statuses: list[SiblingStatus] = []
         if sibling_acs and len(sibling_acs) > 1:
-            for idx, sibling_ac in enumerate(sibling_acs, start=1):
+            for sibling_ac in sibling_acs:
                 if sibling_ac == ac_content:
                     continue
+                sibling_id = f"sibling-{len(sibling_statuses) + 1}"
                 headline = " ".join(sibling_ac.split())
                 if len(headline) > _SIBLING_HEADLINE_CHARS:
                     headline = headline[:_SIBLING_HEADLINE_CHARS]
                 sibling_statuses.append(
                     SiblingStatus(
-                        sibling_id=f"sibling-{idx}",
+                        sibling_id=sibling_id,
                         accepted=None,
                         headline=headline,
                     )

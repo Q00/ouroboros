@@ -218,7 +218,7 @@ class TestProfileAwareContextGovernance:
         assert "## Parent context" in prompt
         assert "Helper is ready" in prompt
         assert "## Sibling status" in prompt
-        assert "… sibling-2: Update sibling docs" in prompt
+        assert "… sibling-1: Update sibling docs" in prompt
         assert "## AC\nImplement governed leaf" in prompt
         assert "## Parallel Execution Notice" not in prompt
 
