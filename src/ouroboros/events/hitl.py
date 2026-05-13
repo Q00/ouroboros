@@ -33,6 +33,16 @@ def _validate_response_matches_request(
     if response.request_id != request.request_id:
         raise ValueError("HITL response request_id must match the originating request")
 
+    for field_name in ("session_id", "run_id", "invocation_id"):
+        response_value = getattr(response, field_name)
+        if response_value is None:
+            continue
+        request_value = getattr(request, field_name)
+        if request_value is not None and response_value != request_value:
+            raise ValueError(
+                f"HITL response {field_name} must match the originating request when provided"
+            )
+
     if response.response_kind is HumanInputResponseKind.CANCEL:
         return
 

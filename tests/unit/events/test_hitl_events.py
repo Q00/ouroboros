@@ -298,3 +298,45 @@ def test_cancel_event_rejects_empty_reason() -> None:
 def test_cancel_event_rejects_empty_actor() -> None:
     with pytest.raises(ValueError, match="actor"):
         create_hitl_cancelled_event(_request(), reason="user aborted", actor="   ")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "request_value", "response_value"),
+    (
+        ("session_id", "session-1", "session-2"),
+        ("run_id", "run-1", "run-2"),
+        ("invocation_id", "inv-1", "inv-2"),
+    ),
+)
+def test_answered_event_rejects_correlation_mismatch(
+    field_name: str, request_value: str, response_value: str
+) -> None:
+    request_kwargs: dict[str, object] = {
+        "request_id": "hitl-1",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "invocation_id": "inv-1",
+        "created_by": "plan",
+        "kind": HumanInputKind.APPROVAL,
+        "source": HumanInputSource.PLAN_APPROVAL,
+        "risk_class": HumanInputRiskClass.MATERIAL_BRANCH,
+        "question": "Approve the plan?",
+        "resume_target": "ralplan:approval",
+        "timeout_seconds": 60,
+    }
+    request = HumanInputRequest(**request_kwargs)  # type: ignore[arg-type]
+
+    response_kwargs: dict[str, object] = {
+        "request_id": "hitl-1",
+        "actor": "local-user",
+        "response_kind": HumanInputResponseKind.APPROVAL,
+        "approval_decision": True,
+        "session_id": request.session_id,
+        "run_id": request.run_id,
+        "invocation_id": request.invocation_id,
+    }
+    response_kwargs[field_name] = response_value
+    response = HumanInputResponse(**response_kwargs)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match=field_name):
+        create_hitl_answered_event(request, response)

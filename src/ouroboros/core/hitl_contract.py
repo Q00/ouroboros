@@ -244,6 +244,11 @@ class HumanInputRequest:
                 raise TypeError("HumanInputRequest timeout_seconds must be an int")
             if self.timeout_seconds < 1:
                 raise ValueError("HumanInputRequest timeout_seconds must be >= 1 when provided")
+        elif self.timeout_action is not HumanInputTimeoutAction.STAY_WAITING:
+            raise ValueError(
+                "HumanInputRequest timeout_action requires a timeout_seconds value "
+                "(only STAY_WAITING is valid when timeout_seconds is None)"
+            )
         if (
             self.kind in {HumanInputKind.SINGLE_SELECT, HumanInputKind.MULTI_SELECT}
             and not self.options

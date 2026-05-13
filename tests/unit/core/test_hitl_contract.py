@@ -140,6 +140,42 @@ def test_request_rejects_non_integer_timeout_seconds() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    "timeout_action",
+    (HumanInputTimeoutAction.CANCEL, HumanInputTimeoutAction.EXPIRE_BLOCKED),
+)
+def test_request_rejects_timeout_action_without_timeout_seconds(
+    timeout_action: HumanInputTimeoutAction,
+) -> None:
+    with pytest.raises(ValueError, match="timeout_action"):
+        HumanInputRequest(
+            request_id="hitl-1",
+            session_id="session-1",
+            created_by="plan",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLAN_APPROVAL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Approve?",
+            resume_target="plan:approval",
+            timeout_action=timeout_action,
+        )
+
+
+def test_request_allows_default_timeout_action_without_timeout_seconds() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve?",
+        resume_target="plan:approval",
+    )
+    assert request.timeout_seconds is None
+    assert request.timeout_action is HumanInputTimeoutAction.STAY_WAITING
+
+
 def test_request_rejects_secret_like_persisted_payload() -> None:
     with pytest.raises(ValueError, match="secret-like"):
         HumanInputRequest(
