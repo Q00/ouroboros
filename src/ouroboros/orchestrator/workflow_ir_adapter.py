@@ -41,9 +41,10 @@ def workflow_spec_from_seed(
 
     The adapter intentionally does not mutate or migrate ``Seed``. Each
     non-blank acceptance criterion becomes one agent-owned task node with
-    schema refs required by the Workflow IR validator. All task nodes point
-    to a shared terminal node so every branch has an explicit termination
-    path while preserving the current string-AC execution vocabulary.
+    schema refs required by the Workflow IR validator. All task nodes flow
+    into an explicit fan-in barrier before the shared terminal node so the
+    graph preserves all-acceptance-criteria completion semantics while
+    keeping the current string-AC execution vocabulary.
 
     Args:
         seed: Immutable Seed to project.
@@ -71,11 +72,18 @@ def workflow_spec_from_seed(
         msg = "Seed must contain at least one acceptance criterion to project Workflow IR"
         raise ValueError(msg)
 
+    join_node = WorkflowNode(
+        node_id="seed_ac_join",
+        kind=NodeKind.FAN_IN,
+        owner=NodeOwner.HARNESS,
+        name="All seed acceptance criteria complete",
+        metadata={"seed_id": seed_id, "barrier": "all_acceptance_criteria"},
+    )
     terminal_node = WorkflowNode(
         node_id="seed_terminal",
         kind=NodeKind.TERMINAL,
         owner=NodeOwner.HARNESS,
-        name="Seed acceptance criteria complete",
+        name="Seed workflow complete",
         metadata={"seed_id": seed_id},
     )
     nodes: list[WorkflowNode] = []
@@ -109,10 +117,10 @@ def workflow_spec_from_seed(
         )
         edges.append(
             WorkflowEdge(
-                edge_id=f"edge_{node_id}_terminal",
+                edge_id=f"edge_{node_id}_join",
                 source=node_id,
-                target=terminal_node.node_id,
-                kind=EdgeKind.TERMINAL,
+                target=join_node.node_id,
+                kind=EdgeKind.FAN_IN,
                 metadata={"acceptance_criterion_index": ac_index, "seed_id": seed_id},
             )
         )
@@ -135,8 +143,17 @@ def workflow_spec_from_seed(
         spec_id=f"wfspec_{seed_id}",
         source=SourceKind.SEED,
         source_ref=seed_id,
-        nodes=(*nodes, terminal_node),
-        edges=tuple(edges),
+        nodes=(*nodes, join_node, terminal_node),
+        edges=(
+            *edges,
+            WorkflowEdge(
+                edge_id="edge_seed_ac_join_terminal",
+                source=join_node.node_id,
+                target=terminal_node.node_id,
+                kind=EdgeKind.TERMINAL,
+                metadata={"seed_id": seed_id, "barrier": "all_acceptance_criteria"},
+            ),
+        ),
         metadata=spec_metadata,
     )
     validation = validate_workflow(spec)

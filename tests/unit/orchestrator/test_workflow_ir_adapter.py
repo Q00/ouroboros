@@ -81,8 +81,8 @@ class TestWorkflowSpecFromSeed:
         assert spec.metadata["seed_id"] == "seed_test_001"
         assert spec.metadata["interview_id"] == "interview_123"
         assert spec.metadata["profile_ref"] == "profile://default"
-        assert len(spec.nodes) == 3
-        assert len(spec.edges) == 2
+        assert len(spec.nodes) == 4
+        assert len(spec.edges) == 3
 
     def test_each_acceptance_criterion_becomes_agent_task_with_schema_refs(self) -> None:
         spec = workflow_spec_from_seed(_seed("  Criterion with padding  "))
@@ -97,15 +97,26 @@ class TestWorkflowSpecFromSeed:
         assert task.metadata["acceptance_criterion"] == "Criterion with padding"
         assert task.metadata["task_type"] == "code"
 
-    def test_terminal_edges_preserve_independent_ac_branches(self) -> None:
+    def test_fan_in_barrier_preserves_all_ac_completion_semantics(self) -> None:
         spec = workflow_spec_from_seed(_seed("A", "B", "C"))
 
+        join = spec.nodes[-2]
         terminal = spec.nodes[-1]
+        assert join.node_id == "seed_ac_join"
+        assert join.kind is NodeKind.FAN_IN
+        assert join.metadata["barrier"] == "all_acceptance_criteria"
         assert terminal.node_id == "seed_terminal"
         assert terminal.kind is NodeKind.TERMINAL
-        assert all(edge.target == "seed_terminal" for edge in spec.edges)
-        assert {edge.kind for edge in spec.edges} == {EdgeKind.TERMINAL}
-        assert [edge.source for edge in spec.edges] == ["seed_ac_001", "seed_ac_002", "seed_ac_003"]
+        assert [edge.source for edge in spec.edges[:3]] == [
+            "seed_ac_001",
+            "seed_ac_002",
+            "seed_ac_003",
+        ]
+        assert all(edge.target == "seed_ac_join" for edge in spec.edges[:3])
+        assert {edge.kind for edge in spec.edges[:3]} == {EdgeKind.FAN_IN}
+        assert spec.edges[-1].source == "seed_ac_join"
+        assert spec.edges[-1].target == "seed_terminal"
+        assert spec.edges[-1].kind is EdgeKind.TERMINAL
 
     def test_custom_schema_refs_and_metadata_are_additive(self) -> None:
         spec = workflow_spec_from_seed(
