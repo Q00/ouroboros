@@ -825,7 +825,7 @@ class ClaudeCodeAdapter:
             _ISOLATION_OVERRIDES: tuple[tuple[str, object], ...] = (
                 ("setting_sources", []),
                 ("skills", []),
-                ("agents", []),
+                ("agents", {}),
                 ("plugins", []),
                 ("hooks", {}),
                 ("include_hook_events", False),

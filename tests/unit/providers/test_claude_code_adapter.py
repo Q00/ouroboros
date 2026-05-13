@@ -691,6 +691,7 @@ class TestJsonSchemaHandling:
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert options_call_kwargs["allowed_tools"] == []
         assert options_call_kwargs["tools"] == []
+        assert options_call_kwargs["extra_args"]["allowedTools"] == ""
         assert "Read" in options_call_kwargs["disallowed_tools"]
 
     @pytest.mark.asyncio
@@ -1031,7 +1032,7 @@ class TestJsonSchemaHandling:
         assert options_call_kwargs.get("strict_mcp_config") is True
         assert options_call_kwargs.get("setting_sources") == []
         assert options_call_kwargs.get("skills") == []
-        assert options_call_kwargs.get("agents") == []
+        assert options_call_kwargs.get("agents") == {}
         assert options_call_kwargs.get("plugins") == []
         assert options_call_kwargs.get("hooks") == {}
         assert options_call_kwargs.get("include_hook_events") is False
