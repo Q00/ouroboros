@@ -312,7 +312,7 @@ the contract and keeps review scope small.
 
 | Hook | Phase | Side-effect class | Default failure policy | Required permission class | v1 status |
 |---|---|---|---|---|---|
-| `before_invocation` | After trust/confirmation, before `plugin.invoked` or immediately before the command subprocess starts (final placement decided by the implementation PR) | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin.lifecycle.read` for read-only, stronger scope for policy decisions | **Included** |
+| `before_invocation` | After trust/confirmation, before `plugin.invoked` | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin.lifecycle.read` for read-only, stronger scope for policy decisions | **Included** |
 | `after_invocation` | After `plugin.completed` / `plugin.failed` is known, before the wrapper returns to the caller | Observability / summary emission | `fail_open` | `plugin.lifecycle.read` | **Included** |
 | `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin.tool.intercept` | Deferred |
 | `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin.tool.observe` | Deferred |
@@ -356,10 +356,15 @@ declared `required: true` permission. Hook-specific permission emission is a
 future extension; v1 hook PRs MUST NOT silently change the coarse permission
 emission model.
 
-If the final implementation places `before_invocation` immediately after
-`plugin.invoked` instead, the implementation PR must document why and update
-the table above. The safety invariant is unchanged: the hook cannot run before
-the pre-invocation trust check succeeds.
+The placement of `before_invocation` is deterministic: it runs only after the
+pre-invocation trust check and any command confirmation have succeeded, and it
+runs before `plugin.invoked` is emitted. If a required permission is not trusted
+or the confirmation gate is rejected, `before_invocation` MUST NOT run. If a
+`fail_closed` `before_invocation` hook blocks the call, the wrapper emits the
+hook audit event(s) and the blocked invocation result; it MUST NOT emit
+`plugin.invoked`, `plugin.permission_used`, `plugin.completed`, or
+`plugin.failed` for the command entrypoint because the plugin command never
+started.
 
 ### Failure and timeout policy
 
@@ -413,7 +418,8 @@ events:
 
 - include plugin identity, command name when applicable, hook name,
   invocation/session correlation, failure policy, timeout, and status;
-- store stdout/stderr as hashes or bounded previews only;
+- store stdout/stderr only as sha256 hashes; raw stdout/stderr and bounded
+  previews MUST NOT be copied into the ledger;
 - apply the argv/secret redaction rules above;
 - do not add fields outside the vendored audit schema until the schema is
   updated in `ouroboros-plugins` and re-vendored into core.
