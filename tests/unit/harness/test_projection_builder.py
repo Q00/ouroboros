@@ -301,3 +301,69 @@ class TestIncrementalIngestion:
         # Step content matches (run id stable across rebuilds).
         assert first.run.run_id == second.run.run_id
         assert first.steps[0].step_id == second.steps[0].step_id
+
+    def test_in_flight_step_id_stays_stable_across_builds_and_completion(self) -> None:
+        t0 = datetime.now(UTC)
+        builder = ProjectionBuilder(seed_id="seed_abc")
+        builder.add_event(
+            _tool_started(
+                call_id="stable",
+                tool_name="Bash",
+                when=t0,
+                event_id="evt_start_stable",
+            )
+        )
+
+        first = builder.build()
+        second = builder.build()
+        assert len(first.steps) == len(second.steps) == 1
+        assert first.steps[0].step_id == second.steps[0].step_id
+        assert first.steps[0].ended_at is None
+
+        builder.add_event(
+            _tool_returned(
+                call_id="stable",
+                tool_name="Bash",
+                when=t0 + timedelta(milliseconds=10),
+                event_id="evt_ret_stable",
+            )
+        )
+        completed = builder.build()
+        assert completed.steps[0].step_id == first.steps[0].step_id
+        assert completed.steps[0].source_event_ids == (
+            "evt_start_stable",
+            "evt_ret_stable",
+        )
+        assert completed.steps[0].ended_at == t0 + timedelta(milliseconds=10)
+
+    def test_steps_remain_in_execution_start_order_not_completion_order(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            _tool_started(call_id="slow", tool_name="Edit", when=t0, event_id="evt_slow_start"),
+            _tool_started(
+                call_id="fast",
+                tool_name="Bash",
+                when=t0 + timedelta(milliseconds=1),
+                event_id="evt_fast_start",
+            ),
+            _tool_returned(
+                call_id="fast",
+                tool_name="Bash",
+                when=t0 + timedelta(milliseconds=2),
+                event_id="evt_fast_ret",
+            ),
+            _tool_returned(
+                call_id="slow",
+                tool_name="Edit",
+                when=t0 + timedelta(milliseconds=3),
+                event_id="evt_slow_ret",
+            ),
+        ]
+
+        result = build_projection(events, seed_id="seed_abc")
+
+        assert [step.name for step in result.steps] == ["Edit", "Bash"]
+        assert [step.source_event_ids for step in result.steps] == [
+            ("evt_slow_start", "evt_slow_ret"),
+            ("evt_fast_start", "evt_fast_ret"),
+        ]

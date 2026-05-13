@@ -32,6 +32,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.projection import (
@@ -96,7 +97,7 @@ class ProjectionBuilder:
         self._stage_id = stage_id
         self._tool_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
-        self._steps: list[StepRecord] = []
+        self._steps: OrderedDict[str, StepRecord] = OrderedDict()
         self._first_event_at: datetime | None = None
         self._last_event_at: datetime | None = None
 
@@ -116,6 +117,15 @@ class ProjectionBuilder:
             call_id = _extract_call_id(event)
             if call_id is not None:
                 self._tool_started[call_id] = event
+                key = _slot_key("tool", call_id)
+                self._steps[key] = _step_from_start_only(
+                    call_id=call_id,
+                    start_event=event,
+                    run_id="run_placeholder",
+                    stage_id="stage_placeholder",
+                    kind=_tool_kind(event),
+                    family="tool",
+                )
             return self
 
         if event.type == _TOOL_RETURNED:
@@ -126,6 +136,15 @@ class ProjectionBuilder:
             call_id = _extract_call_id(event)
             if call_id is not None:
                 self._llm_started[call_id] = event
+                key = _slot_key("llm", call_id)
+                self._steps[key] = _step_from_start_only(
+                    call_id=call_id,
+                    start_event=event,
+                    run_id="run_placeholder",
+                    stage_id="stage_placeholder",
+                    kind=StepKind.MODEL_CALL,
+                    family="llm",
+                )
             return self
 
         if event.type == _LLM_RETURNED:
@@ -153,49 +172,9 @@ class ProjectionBuilder:
         ended_at = self._last_event_at
 
         steps_for_stage = tuple(
-            StepRecord(
-                schema_version=step.schema_version,
-                step_id=step.step_id,
-                run_id=run_id,
-                stage_id=stage_id,
-                kind=step.kind,
-                name=step.name,
-                ac_id=step.ac_id,
-                started_at=step.started_at,
-                ended_at=step.ended_at,
-                ok=step.ok,
-                source_event_ids=step.source_event_ids,
-                legacy_inferred=step.legacy_inferred,
-                artifact_ids=step.artifact_ids,
-                metadata=step.metadata,
-            )
-            for step in self._steps
+            _rewrite_step_run_stage(step, run_id=run_id, stage_id=stage_id)
+            for step in self._steps.values()
         )
-
-        # Emit unpaired starts as in-flight steps so callers can detect
-        # dangling work.
-        for call_id, start_event in self._tool_started.items():
-            steps_for_stage = (
-                *steps_for_stage,
-                _step_from_start_only(
-                    call_id=call_id,
-                    start_event=start_event,
-                    run_id=run_id,
-                    stage_id=stage_id,
-                    kind=_tool_kind(start_event),
-                ),
-            )
-        for call_id, start_event in self._llm_started.items():
-            steps_for_stage = (
-                *steps_for_stage,
-                _step_from_start_only(
-                    call_id=call_id,
-                    start_event=start_event,
-                    run_id=run_id,
-                    stage_id=stage_id,
-                    kind=StepKind.MODEL_CALL,
-                ),
-            )
 
         stage = StageRecord(
             schema_version=PROJECTION_SCHEMA_VERSION,
@@ -250,8 +229,11 @@ class ProjectionBuilder:
         is_error = _safe_bool(returned_event.data.get("is_error"))
         ok = (not is_error) if is_error is not None else None
 
+        key = _slot_key("tool", call_id)
+        previous = self._steps.get(key)
         step = StepRecord(
             schema_version=PROJECTION_SCHEMA_VERSION,
+            step_id=previous.step_id if previous is not None else _stable_step_id("tool", call_id),
             run_id="run_placeholder",  # rewritten in build()
             stage_id="stage_placeholder",
             kind=kind,
@@ -263,7 +245,7 @@ class ProjectionBuilder:
             source_event_ids=source_event_ids,
             metadata=_tool_step_metadata(start_event, returned_event),
         )
-        self._steps.append(step)
+        self._steps[key] = step
 
     def _handle_llm_returned(self, returned_event: BaseEvent) -> None:
         call_id = _extract_call_id(returned_event)
@@ -283,8 +265,11 @@ class ProjectionBuilder:
         is_error = _safe_bool(returned_event.data.get("is_error"))
         ok = (not is_error) if is_error is not None else None
 
+        key = _slot_key("llm", call_id)
+        previous = self._steps.get(key)
         step = StepRecord(
             schema_version=PROJECTION_SCHEMA_VERSION,
+            step_id=previous.step_id if previous is not None else _stable_step_id("llm", call_id),
             run_id="run_placeholder",  # rewritten in build()
             stage_id="stage_placeholder",
             kind=StepKind.MODEL_CALL,
@@ -296,7 +281,7 @@ class ProjectionBuilder:
             source_event_ids=source_event_ids,
             metadata=_llm_step_metadata(start_event, returned_event),
         )
-        self._steps.append(step)
+        self._steps[key] = step
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +389,34 @@ def _llm_step_metadata(
     return metadata
 
 
+def _slot_key(family: str, call_id: str) -> str:
+    return f"{family}:{call_id}"
+
+
+def _stable_step_id(family: str, call_id: str) -> str:
+    digest = uuid5(NAMESPACE_URL, f"ouroboros:harness:{family}:{call_id}").hex[:12]
+    return f"step_{family}_{digest}"
+
+
+def _rewrite_step_run_stage(step: StepRecord, *, run_id: str, stage_id: str) -> StepRecord:
+    return StepRecord(
+        schema_version=step.schema_version,
+        step_id=step.step_id,
+        run_id=run_id,
+        stage_id=stage_id,
+        kind=step.kind,
+        name=step.name,
+        ac_id=step.ac_id,
+        started_at=step.started_at,
+        ended_at=step.ended_at,
+        ok=step.ok,
+        source_event_ids=step.source_event_ids,
+        legacy_inferred=step.legacy_inferred,
+        artifact_ids=step.artifact_ids,
+        metadata=step.metadata,
+    )
+
+
 def _step_from_start_only(
     *,
     call_id: str,
@@ -411,8 +424,8 @@ def _step_from_start_only(
     run_id: str,
     stage_id: str,
     kind: StepKind,
+    family: str,
 ) -> StepRecord:
-    del call_id  # reserved for future correlation logging
     name = (
         _extract_tool_name(start_event)
         if kind in (StepKind.TOOL_CALL, StepKind.SHELL_COMMAND)
@@ -425,6 +438,7 @@ def _step_from_start_only(
             metadata["args_preview"] = preview
     return StepRecord(
         schema_version=PROJECTION_SCHEMA_VERSION,
+        step_id=_stable_step_id(family, call_id),
         run_id=run_id,
         stage_id=stage_id,
         kind=kind,
