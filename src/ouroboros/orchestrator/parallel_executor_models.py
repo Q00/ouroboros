@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
     from ouroboros.orchestrator.coordinator import CoordinatorReview
+    from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
     from ouroboros.orchestrator.level_context import LevelContext
 
 
@@ -52,6 +53,12 @@ class ACExecutionResult:
             the soft depth safety net forced atomic execution.
         outcome: Normalized result classification for aggregation.
         runtime_handle: Backend-neutral runtime handle for same-attempt resume.
+        typed_evidence: Parsed leaf evidence record observed at atomic
+            completion. Observe-only until the sequenced verifier/default gates.
+        typed_evidence_validation: Profile-schema validation result for
+            typed_evidence, if parsing succeeded.
+        typed_evidence_error: Parse/validation error observed at atomic
+            completion, if any. Does not change success semantics yet.
     """
 
     ac_index: int
@@ -69,6 +76,9 @@ class ACExecutionResult:
     decomposition_depth_warning: bool = False
     outcome: ACExecutionOutcome | None = None
     runtime_handle: RuntimeHandle | None = None
+    typed_evidence: EvidenceRecord | None = None
+    typed_evidence_validation: ValidationResult | None = None
+    typed_evidence_error: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""

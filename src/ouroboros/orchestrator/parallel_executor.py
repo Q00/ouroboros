@@ -65,6 +65,13 @@ from ouroboros.orchestrator.events import (
     create_ac_stall_detected_event,
     create_heartbeat_event,
 )
+from ouroboros.orchestrator.evidence_schema import (
+    EvidenceError,
+    EvidenceRecord,
+    ValidationResult,
+    extract_evidence,
+    validate_evidence,
+)
 from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
     ExecutionNodeIdentity,
@@ -3380,6 +3387,19 @@ When complete, explicitly state: [TASK_COMPLETE]
                 error=None if success else final_message or "Implementation session failed",
             )
             clear_cached_runtime_handle = True
+            typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
+                final_message=final_message,
+                success=success,
+            )
+            await self._emit_atomic_typed_evidence_event(
+                runtime_identity=runtime_identity,
+                execution_id=execution_context_id,
+                session_id=ac_session_id,
+                ac_content=ac_content,
+                typed_evidence=typed_evidence,
+                typed_validation=typed_validation,
+                typed_error=typed_error,
+            )
 
             log.info(
                 "parallel_executor.ac.completed",
@@ -3401,6 +3421,9 @@ When complete, explicitly state: [TASK_COMPLETE]
                 retry_attempt=retry_attempt,
                 depth=depth,
                 runtime_handle=runtime_handle,
+                typed_evidence=typed_evidence,
+                typed_evidence_validation=typed_validation,
+                typed_evidence_error=typed_error,
             )
 
         except Exception as e:
@@ -3462,6 +3485,78 @@ When complete, explicitly state: [TASK_COMPLETE]
                     node_identity=node_identity,
                     retry_attempt=retry_attempt,
                 )
+
+    def _observe_atomic_typed_evidence(
+        self,
+        *,
+        final_message: str,
+        success: bool,
+    ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
+        """Parse and validate typed evidence at the atomic AC acceptance boundary.
+
+        This is observe-only for #920 PR-2: it records whether a successful
+        atomic leaf emitted profile-shaped evidence, but it does not change the
+        legacy success value returned by the runtime. Enforcement belongs to a
+        later sequenced evidence-loop/default-gate PR.
+        """
+        if not success or self._execution_profile is None:
+            return None, None, None
+
+        try:
+            record = extract_evidence(final_message)
+            validation = validate_evidence(self._execution_profile, record)
+        except EvidenceError as exc:
+            return None, None, str(exc)
+        return record, validation, None
+
+    async def _emit_atomic_typed_evidence_event(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str,
+        session_id: str | None,
+        ac_content: str,
+        typed_evidence: EvidenceRecord | None,
+        typed_validation: ValidationResult | None,
+        typed_error: str | None,
+    ) -> None:
+        """Persist observe-only typed-evidence metadata for atomic AC completion."""
+        if self._execution_profile is None:
+            return
+
+        from ouroboros.events.base import BaseEvent
+
+        data: dict[str, Any] = {
+            **runtime_identity.to_metadata(),
+            **self._decomposition_profile_metadata(),
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "acceptance_criterion": ac_content,
+            "profile": self._execution_profile.profile,
+            "required_fields": list(self._execution_profile.evidence_schema.required),
+            "observe_only": True,
+            "enforced": False,
+            "typed_evidence_present": typed_evidence is not None,
+            "typed_evidence_valid": typed_validation.ok if typed_validation is not None else False,
+            "typed_evidence_error": typed_error,
+        }
+        if typed_evidence is not None:
+            data["typed_evidence_fields"] = sorted(typed_evidence.data)
+        if typed_validation is not None:
+            data["missing_fields"] = list(typed_validation.missing_fields)
+            data["rejected_by"] = list(typed_validation.rejected_by)
+            data["blocker"] = (
+                typed_validation.blocker.summary() if typed_validation.blocker is not None else None
+            )
+
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.typed_evidence.observed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data=data,
+            )
+        )
 
     async def _emit_subtask_event(
         self,

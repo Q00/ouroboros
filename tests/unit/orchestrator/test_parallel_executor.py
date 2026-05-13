@@ -695,6 +695,188 @@ class TestParallelACExecutor:
         assert terminate_calls == 1
 
     @pytest.mark.asyncio
+    async def test_atomic_ac_observes_profile_typed_evidence_without_changing_success(self) -> None:
+        """Profile-backed atomic completion records typed evidence observe-only."""
+
+        class _StubImplementationRuntime:
+            _runtime_handle_backend = "opencode"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                del prompt, tools, system_prompt, resume_session_id
+                yield AgentMessage(
+                    type="result",
+                    content=(
+                        "Done.\n"
+                        "```json\n"
+                        '{"files_touched":["src/app.py"],'
+                        '"commands_run":["pytest"],'
+                        '"tests_passed":["tests/test_app.py"]}\n'
+                        "```"
+                    ),
+                    data={"subtype": "success"},
+                    resume_handle=RuntimeHandle(
+                        backend=resume_handle.backend if resume_handle is not None else "opencode",
+                        kind=resume_handle.kind
+                        if resume_handle is not None
+                        else "implementation_session",
+                        native_session_id="opencode-session-evidence",
+                        cwd=resume_handle.cwd if resume_handle is not None else "/tmp/project",
+                        metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+                    ),
+                )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_StubImplementationRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.typed_evidence is not None
+        assert result.typed_evidence.data["files_touched"] == ["src/app.py"]
+        assert result.typed_evidence_validation is not None
+        assert result.typed_evidence_validation.ok is True
+        assert result.typed_evidence_error is None
+
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["observe_only"] is True
+        assert evidence_event.data["enforced"] is False
+        assert evidence_event.data["typed_evidence_present"] is True
+        assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["required_fields"] == [
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        ]
+        assert evidence_event.data["typed_evidence_fields"] == [
+            "commands_run",
+            "files_touched",
+            "tests_passed",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_records_typed_evidence_error_without_default_flip(self) -> None:
+        """Malformed typed evidence is observed but does not change legacy success."""
+
+        class _StubImplementationRuntime:
+            _runtime_handle_backend = "opencode"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                del prompt, tools, system_prompt, resume_session_id
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE] no JSON evidence yet",
+                    data={"subtype": "success"},
+                    resume_handle=RuntimeHandle(
+                        backend=resume_handle.backend if resume_handle is not None else "opencode",
+                        kind=resume_handle.kind
+                        if resume_handle is not None
+                        else "implementation_session",
+                        native_session_id="opencode-session-no-evidence",
+                        cwd=resume_handle.cwd if resume_handle is not None else "/tmp/project",
+                        metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+                    ),
+                )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_StubImplementationRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.typed_evidence is None
+        assert result.typed_evidence_validation is None
+        assert result.typed_evidence_error is not None
+
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["observe_only"] is True
+        assert evidence_event.data["enforced"] is False
+        assert evidence_event.data["typed_evidence_present"] is False
+        assert evidence_event.data["typed_evidence_valid"] is False
+        assert "Evidence is not valid JSON" in evidence_event.data["typed_evidence_error"]
+
+    @pytest.mark.asyncio
     async def test_remembered_runtime_handle_preserves_live_controls(self) -> None:
         """AC-scope rebinding should preserve live observe/terminate callbacks."""
         executor = _make_executor()
