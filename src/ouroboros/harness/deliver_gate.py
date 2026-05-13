@@ -99,10 +99,65 @@ async def load_ac_evidence_manifest(
             limit=limit,
         )
 
-    manifest = normalize_events(_chronological_events(events), ac_id=normalized_scope_id)
+    filtered_events = _filter_events_by_anchors(
+        events,
+        execution_id=normalized_execution_id,
+        session_id=normalized_session_id,
+    )
+    manifest = normalize_events(_chronological_events(filtered_events), ac_id=normalized_scope_id)
     if normalized_scope_id == normalized_ac_id:
         return manifest
     return manifest.model_copy(update={"ac_id": normalized_ac_id})
+
+
+def _filter_events_by_anchors(
+    events: Iterable[BaseEvent],
+    *,
+    execution_id: str | None,
+    session_id: str | None,
+) -> tuple[BaseEvent, ...]:
+    return tuple(
+        event
+        for event in events
+        if _event_matches_required_anchors(
+            event,
+            execution_id=execution_id,
+            session_id=session_id,
+        )
+    )
+
+
+def _event_matches_required_anchors(
+    event: BaseEvent,
+    *,
+    execution_id: str | None,
+    session_id: str | None,
+) -> bool:
+    if execution_id is not None and not _event_matches_anchor(
+        event,
+        execution_id,
+        keys=("execution_id", "parent_execution_id"),
+    ):
+        return False
+    return not (
+        session_id is not None
+        and not _event_matches_anchor(
+            event,
+            session_id,
+            keys=("session_id",),
+        )
+    )
+
+
+def _event_matches_anchor(event: BaseEvent, anchor: str, *, keys: tuple[str, ...]) -> bool:
+    if event.aggregate_id == anchor:
+        return True
+    if isinstance(event.data, dict):
+        for key in keys:
+            value = event.data.get(key)
+            if isinstance(value, str) and value.strip() == anchor:
+                return True
+    return False
 
 
 def _normalize_optional_anchor(name: str, value: str | None) -> str | None:
