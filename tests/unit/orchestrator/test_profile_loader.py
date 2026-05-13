@@ -41,6 +41,22 @@ class TestBuiltinProfiles:
         assert "Read" in profile.suggested_tools
         assert profile.verifier_capability is VerifierCapability.SUBPROCESS_TEST_RUNNER
 
+    @pytest.mark.parametrize("name", BUILTIN_PROFILES)
+    def test_builtin_profiles_declare_rfc_v2_structured_knobs(self, name: str) -> None:
+        """The thin YAML card must carry every knob the harness consumes.
+
+        Issue #830's accepted v2 contract names these as structured profile
+        fields, not prose. Keeping them on the schema makes the RFC example
+        representable even while downstream PRs wire individual consumers.
+        """
+        profile = load_profile(name)
+
+        assert profile.schema_version == 1
+        assert profile.max_branching >= 2
+        assert profile.must_produce
+        assert set(profile.must_produce).issubset(profile.evidence_schema.required)
+        assert profile.suggested_model_tier == "medium"
+
     def test_research_profile_requires_triangulation(self) -> None:
         profile = load_profile("research")
         assert "triangulated_sources" in profile.evidence_schema.required
@@ -88,6 +104,101 @@ class TestSchemaValidation:
         )
         with pytest.raises(ProfileError, match="schema validation"):
             load_profile("extra", profiles_dir=tmp_path)
+
+    def test_rfc_v2_example_profile_shape_loads(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "code",
+            """
+profile: code
+schema_version: 1
+axis: testable_unit
+min_unit: "single function with at least one test"
+cut_signal: "sub-AC produces an independently runnable test"
+max_branching: 4
+must_produce:
+  - tests_passed
+  - files_touched
+evidence_schema:
+  required: [files_touched, commands_run, tests_passed]
+  rejected_if:
+    - "tests_passed == []"
+verifier_capability: subprocess_test_runner
+verifier_focus: "Run the project's test command."
+suggested_tools: [Read, Edit, Write, Bash, Glob, Grep]
+suggested_model_tier: medium
+""",
+        )
+
+        profile = load_profile("code", profiles_dir=tmp_path)
+
+        assert profile.schema_version == 1
+        assert profile.max_branching == 4
+        assert profile.must_produce == ("tests_passed", "files_touched")
+        assert profile.suggested_model_tier == "medium"
+
+    def test_unsupported_schema_version_rejected(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "future",
+            """
+profile: future
+schema_version: 2
+axis: source
+min_unit: claim
+max_branching: 3
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+""",
+        )
+        with pytest.raises(ProfileError, match="schema_version"):
+            load_profile("future", profiles_dir=tmp_path)
+
+    def test_max_branching_must_leave_room_to_split(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "too_narrow",
+            """
+profile: too_narrow
+schema_version: 1
+axis: source
+min_unit: claim
+max_branching: 1
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+""",
+        )
+        with pytest.raises(ProfileError, match="max_branching"):
+            load_profile("too_narrow", profiles_dir=tmp_path)
+
+    def test_must_produce_must_be_required_evidence(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "mismatch",
+            """
+profile: mismatch
+schema_version: 1
+axis: source
+min_unit: claim
+max_branching: 3
+must_produce: [citations]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+""",
+        )
+        with pytest.raises(ProfileError, match="must_produce"):
+            load_profile("mismatch", profiles_dir=tmp_path)
 
     def test_filename_must_match_profile_field(self, tmp_path: Path) -> None:
         self._write(

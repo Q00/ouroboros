@@ -1,7 +1,12 @@
 profile: analysis
+schema_version: 1
 axis: perspective
 min_unit: "single perspective compared against at least one contrasting view"
 cut_signal: "sub-AC produces a standalone comparison with explicit tradeoffs"
+max_branching: 5
+must_produce:
+  - claims
+  - perspectives_compared
 evidence_schema:
   required:
     - claims
@@ -19,3 +24,4 @@ suggested_tools:
   - Bash
   - Glob
   - Grep
+suggested_model_tier: medium

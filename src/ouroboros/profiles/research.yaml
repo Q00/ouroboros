@@ -1,7 +1,12 @@
 profile: research
+schema_version: 1
 axis: subtopic
 min_unit: "single question answerable from independently cited sources"
 cut_signal: "sub-AC produces a standalone markdown section with citations"
+max_branching: 5
+must_produce:
+  - triangulated_sources
+  - claims
 evidence_schema:
   required:
     - external_sources
@@ -21,3 +26,4 @@ suggested_tools:
   - Bash
   - Glob
   - Grep
+suggested_model_tier: medium

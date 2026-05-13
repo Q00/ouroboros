@@ -1,7 +1,12 @@
 profile: code
+schema_version: 1
 axis: testable_unit
 min_unit: "single function or module with at least one runnable test"
 cut_signal: "sub-AC produces an independently runnable test"
+max_branching: 5
+must_produce:
+  - tests_passed
+  - files_touched
 evidence_schema:
   required:
     - files_touched
@@ -20,3 +25,4 @@ suggested_tools:
   - Bash
   - Glob
   - Grep
+suggested_model_tier: medium

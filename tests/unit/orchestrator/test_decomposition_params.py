@@ -33,6 +33,28 @@ class TestParamsFromProfile:
         assert params.min_branching == 3
         assert params.max_branching == 4
 
+    def test_profile_max_branching_drives_decomposer(self, tmp_path) -> None:
+        (tmp_path / "custom.yaml").write_text(
+            """
+profile: custom
+schema_version: 1
+axis: source
+min_unit: "single sourced claim"
+cut_signal: "claim has citations"
+max_branching: 3
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claim support."
+suggested_tools: [Read, Grep]
+suggested_model_tier: medium
+""",
+            encoding="utf-8",
+        )
+        params = params_from_profile(load_profile("custom", profiles_dir=tmp_path))
+        assert params.max_branching == 3
+
 
 class TestInvariants:
     def test_min_branching_must_be_positive(self) -> None:

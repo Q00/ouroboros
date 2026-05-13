@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 import yaml
 
 _PROFILES_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "profiles"
@@ -33,6 +33,14 @@ class VerifierCapability(StrEnum):
 
     READ_ONLY_DISCOVERY = "read_only_discovery"
     SUBPROCESS_TEST_RUNNER = "subprocess_test_runner"
+
+
+class SuggestedModelTier(StrEnum):
+    """Profile-declared model cost/quality hint consumed by routing H5."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class EvidenceSchema(BaseModel):
@@ -72,6 +80,10 @@ class ExecutionProfile(BaseModel):
         min_length=1,
         description="Profile identifier (e.g. 'code'). Must match filename stem.",
     )
+    schema_version: Literal[1] = Field(
+        default=1,
+        description="Profile schema version. v1 is the RFC #830 YAML profile shape.",
+    )
     axis: str = Field(
         ...,
         min_length=1,
@@ -85,6 +97,15 @@ class ExecutionProfile(BaseModel):
     cut_signal: str = Field(
         default="",
         description="Heuristic signal that a sub-AC is small enough to stop splitting.",
+    )
+    max_branching: int = Field(
+        default=5,
+        ge=2,
+        description="Maximum number of sub-ACs the H4 decomposer should emit.",
+    )
+    must_produce: tuple[str, ...] = Field(
+        default=(),
+        description="Evidence fields the leaf executor should explicitly produce.",
     )
     evidence_schema: EvidenceSchema = Field(default_factory=EvidenceSchema)
     verifier_focus: str = Field(
@@ -105,6 +126,21 @@ class ExecutionProfile(BaseModel):
         default=(),
         description="Tool names the leaf executor may use; harness still gates.",
     )
+    suggested_model_tier: SuggestedModelTier = Field(
+        default=SuggestedModelTier.MEDIUM,
+        description="Profile-declared cost/quality hint for H5 adaptive routing.",
+    )
+
+    @model_validator(mode="after")
+    def _must_produce_subset_of_required_evidence(self) -> ExecutionProfile:
+        unknown = sorted(set(self.must_produce) - set(self.evidence_schema.required))
+        if unknown:
+            msg = (
+                "must_produce entries must also appear in "
+                f"evidence_schema.required: {', '.join(unknown)}"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class ProfileError(ValueError):
@@ -184,6 +220,7 @@ __all__ = [
     "EvidenceSchema",
     "ExecutionProfile",
     "ProfileError",
+    "SuggestedModelTier",
     "VerifierCapability",
     "available_profiles",
     "load_profile",

@@ -61,7 +61,7 @@ def params_from_profile(
     profile: ExecutionProfile,
     *,
     min_branching: int = DEFAULT_MIN_BRANCHING,
-    max_branching: int = DEFAULT_MAX_BRANCHING,
+    max_branching: int | None = None,
 ) -> DecompositionParams:
     """Project an ExecutionProfile into the decomposer's parameter shape."""
     return DecompositionParams(
@@ -70,7 +70,7 @@ def params_from_profile(
         min_unit=profile.min_unit,
         cut_signal=profile.cut_signal,
         min_branching=min_branching,
-        max_branching=max_branching,
+        max_branching=profile.max_branching if max_branching is None else max_branching,
     )
 
 
