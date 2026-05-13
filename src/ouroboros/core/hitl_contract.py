@@ -17,7 +17,34 @@ from typing import Any, ClassVar, cast
 
 HITL_CONTRACT_SCHEMA_VERSION = 1
 MAX_HITL_PAYLOAD_BYTES = 8192
-_SECRET_MARKERS = ("password", "passwd", "secret", "token", "api_key", "apikey", "credential")
+_SECRET_KEY_NAMES = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth_token",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "credentials",
+        "id_token",
+        "passwd",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+_SECRET_KEY_SUFFIXES = (
+    "_api_key",
+    "_credential",
+    "_credentials",
+    "_passwd",
+    "_password",
+    "_secret",
+    "_token",
+)
 
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | dict[str, JsonValue] | list[JsonValue]
@@ -93,9 +120,9 @@ def _normalize_utc_datetime(name: str, value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _contains_secret_marker(value: str) -> bool:
-    lowered = value.lower()
-    return any(marker in lowered for marker in _SECRET_MARKERS)
+def _is_secret_like_key(value: str) -> bool:
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in _SECRET_KEY_NAMES or normalized.endswith(_SECRET_KEY_SUFFIXES)
 
 
 def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
@@ -108,7 +135,7 @@ def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError(f"HumanInput {name} key at {path} must be a string")
-            if _contains_secret_marker(key):
+            if _is_secret_like_key(key):
                 raise ValueError(f"HumanInput {name} must not persist secret-like content")
             normalized[key] = _normalize_json_value(name, item, f"{path}.{key}")
         return normalized

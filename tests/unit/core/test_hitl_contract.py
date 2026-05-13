@@ -173,6 +173,22 @@ def test_request_allows_secret_marker_words_in_plain_values() -> None:
     }
 
 
+def test_request_allows_benign_token_metadata_keys() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        created_by="plugin-firewall",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLUGIN_FIREWALL,
+        risk_class=HumanInputRiskClass.LOW,
+        question="Approve?",
+        resume_target="plugin:permission",
+        payload={"token_count": 1024, "token_limit": 4096},
+    )
+
+    assert request.to_event_data()["payload"] == {"token_count": 1024, "token_limit": 4096}
+
+
 def test_request_accepts_mapping_payloads_and_freezes_normalized_copy() -> None:
     source: dict[str, object] = {"items": ["alpha", {"count": 1}]}
     request = HumanInputRequest(
