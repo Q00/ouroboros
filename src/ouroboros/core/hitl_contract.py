@@ -73,10 +73,15 @@ def _normalize_string_tuple(name: str, value: Any) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, tuple | list):
         raise TypeError(f"HumanInput {name} must be a tuple or list of strings")
     normalized: list[str] = []
+    seen: set[str] = set()
     for item in value:
         if not isinstance(item, str):
             raise TypeError(f"HumanInput {name} entries must be strings")
-        normalized.append(_require_non_empty(name, item))
+        normalized_item = _require_non_empty(name, item)
+        if normalized_item in seen:
+            raise ValueError(f"HumanInput {name} entries must be unique after trimming")
+        seen.add(normalized_item)
+        normalized.append(normalized_item)
     return tuple(normalized)
 
 

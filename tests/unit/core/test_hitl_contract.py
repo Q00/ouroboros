@@ -109,6 +109,21 @@ def test_select_request_rejects_string_options_iterable() -> None:
         )
 
 
+def test_select_request_rejects_duplicate_options_after_trimming() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        HumanInputRequest(
+            request_id="hitl-1",
+            session_id="session-1",
+            created_by="plan",
+            kind=HumanInputKind.SINGLE_SELECT,
+            source=HumanInputSource.PLAN_APPROVAL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Pick one",
+            resume_target="plan:approval",
+            options=("Approve", "Approve "),
+        )
+
+
 def test_request_rejects_non_integer_timeout_seconds() -> None:
     for timeout_seconds in (1.5, True):
         with pytest.raises(TypeError, match="timeout_seconds"):
@@ -355,6 +370,16 @@ def test_selection_response_rejects_string_selected_values_iterable() -> None:
             session_id="session-1",
             response_kind=HumanInputResponseKind.SELECTION,
             selected_values="approve",  # type: ignore[arg-type]
+        )
+
+
+def test_selection_response_rejects_duplicate_selected_values_after_trimming() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.SELECTION,
+            selected_values=("approve", "approve "),
         )
 
 
