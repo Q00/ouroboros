@@ -277,11 +277,16 @@ def evaluate_deliver_claim(
     accepted_handles = _claim_chunk_ids(accepted_claims)
     if not accepted_handles:
         accepted_handles = _string_tuple(getattr(raw_result, "allowed_chunk_ids", ()))
+    unsupported_claim_rate = _unsupported_claim_rate(
+        raw_rate=float(raw_result.unsupported_claim_rate),
+        rejected=rejected,
+        total_claims=len(claim.facts),
+    )
 
     return DeliverGateVerdict(
         ac_id=manifest.ac_id,
         accepted=bool(raw_result.accepted) and not missing_evidence,
-        unsupported_claim_rate=float(raw_result.unsupported_claim_rate),
+        unsupported_claim_rate=unsupported_claim_rate,
         accepted_fact_ids=accepted_fact_ids,
         rejected_fact_ids=rejected_fact_ids,
         rejected_reasons=_dedupe_strings(reason for _, _, reason in rejected),
@@ -449,6 +454,18 @@ def _missing_evidence_summaries(
         for fact in claim.facts
         if fact.evidence_handle not in available_handles
     )
+
+
+def _unsupported_claim_rate(
+    *,
+    raw_rate: float,
+    rejected: tuple[tuple[str | None, str | None, str], ...],
+    total_claims: int,
+) -> float:
+    if total_claims <= 0:
+        return raw_rate
+    local_rate = min(1.0, len(rejected) / total_claims)
+    return max(raw_rate, round(local_rate, 4))
 
 
 def _evidence_event_ids_for_handles(

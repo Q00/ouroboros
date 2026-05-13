@@ -606,6 +606,42 @@ class TestEvaluateDeliverClaim:
         assert verdict.rejected_fact_ids == ("fact_missing",)
         assert verdict.evidence_event_ids == ("evt_1",)
 
+    def test_missing_evidence_recomputes_unsupported_claim_rate(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(_manifest_entry(handle="ev_actual", ok=True, source_event_ids=("evt_1",)),),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="fact_actual",
+                    evidence_handle="ev_actual",
+                    statement="Supported claim.",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="fact_missing",
+                    evidence_handle="ev_missing",
+                    statement="Missing claim.",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=lambda **_: _TraceGuardResult(
+                accepted=True,
+                allowed_fact_ids=("fact_actual",),
+                allowed_chunk_ids=("ev_actual",),
+            ),
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 0.5
+        assert verdict.accepted_fact_ids == ("fact_actual",)
+        assert verdict.rejected_fact_ids == ("fact_missing",)
+
     def test_claim_ac_id_must_match_manifest_scope(self) -> None:
         manifest = EvidenceManifest(
             ac_id="AC-1",
