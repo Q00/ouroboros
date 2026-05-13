@@ -124,7 +124,7 @@ class ProjectionQueryHandler:
             if store is None:
                 store = EventStore(read_only=True)
                 owns_event_store = True
-            await store.initialize(create_schema=False if owns_event_store else None)
+            await store.initialize(create_schema=False)
 
             events = await _load_projection_events(
                 store,

@@ -537,6 +537,45 @@ class TestProjectionQueryHandler:
         assert result.is_err
         assert "No events found" in str(result.error)
 
+    async def test_handle_never_initializes_injected_store_with_schema_creation(self) -> None:
+        """Read-only projection queries must not create schema on shared stores."""
+        from datetime import UTC, datetime
+
+        from ouroboros.events.base import BaseEvent
+
+        class FakeEventStore:
+            create_schema_values: list[bool | None]
+
+            def __init__(self) -> None:
+                self.create_schema_values = []
+
+            async def initialize(self, *, create_schema: bool | None = None) -> None:
+                self.create_schema_values.append(create_schema)
+
+            async def query_execution_related_events(
+                self,
+                *,
+                execution_id: str,
+                limit: int | None = None,
+            ) -> list[BaseEvent]:
+                return [
+                    BaseEvent(
+                        id="evt_read_only_init",
+                        type="tool.call.started",
+                        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+                        aggregate_type="execution",
+                        aggregate_id=execution_id,
+                        data={"call_id": "read_only", "tool_name": "Bash"},
+                    )
+                ]
+
+        store = FakeEventStore()
+        handler = ProjectionQueryHandler(event_store=store)  # type: ignore[arg-type]
+        result = await handler.handle({"execution_id": "exec_read_only_init"})
+
+        assert result.is_ok
+        assert store.create_schema_values == [False]
+
     async def test_handle_projects_execution_events(
         self,
         memory_event_store: EventStore,
