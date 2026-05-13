@@ -291,6 +291,150 @@ Audit events conform to
 The compatibility surface between this schema and the existing core ledger
 writer is tracked in #737.
 
+## Lifecycle Hook Contract
+
+This section is the locked design target for #939 PR 1. It defines the
+vocabulary and safety policy for plugin lifecycle hooks, but it does **not**
+make hook execution part of the v0.1 manifest/runtime contract yet. Until a
+later PR updates the manifest schema and firewall implementation, conforming
+core releases MUST continue to treat plugin entrypoints exactly as described
+in the Invocation Contract above.
+
+The intent is to keep the plugin layer extensible without letting plugins
+reach around the harness. Hooks are harness callbacks, not a second runtime:
+they run only when the firewall/orchestrator invokes them, with bounded input,
+bounded output, explicit permissions, and audit events.
+
+### v1 hook vocabulary
+
+The first implementation should start with the smallest hook set that proves
+the contract and keeps review scope small.
+
+| Hook | Phase | Side-effect class | Default failure policy | Required permission class | v1 status |
+|---|---|---|---|---|---|
+| `before_invocation` | After trust/confirmation, before `plugin.invoked` or immediately before the command subprocess starts (final placement decided by the implementation PR) | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin.lifecycle.read` for read-only, stronger scope for policy decisions | **Included** |
+| `after_invocation` | After `plugin.completed` / `plugin.failed` is known, before the wrapper returns to the caller | Observability / summary emission | `fail_open` | `plugin.lifecycle.read` | **Included** |
+| `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin.tool.intercept` | Deferred |
+| `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin.tool.observe` | Deferred |
+| `before_artifact_write` | Before artifact service writes plugin-provided output | Policy / mutation gate | `fail_closed` | artifact-specific write permission | Deferred |
+| `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin.artifact.observe` | Deferred |
+| `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin.lifecycle.read` | Deferred |
+| `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin.lifecycle.read` or cleanup-specific scope | Deferred |
+
+The following candidate hooks are intentionally **not** in the v1 hook
+vocabulary:
+
+- `before_runtime_start` / `after_runtime_start`: runtime adapters and
+  capability policy are still Track C Tier 2 work; plugins MUST NOT receive a
+  runtime-start interception point before that substrate is stable.
+- `before_state_commit` / `after_state_commit`: state/replay projections are
+  owned by #946; adding state hooks first would create a second state mutation
+  path.
+- `on_event`: too broad for v1. It risks turning the audit/event stream into a
+  plugin message bus.
+- `on_rewind`: rewind semantics depend on replay/projection contracts that are
+  not yet stable.
+
+### Hook ordering
+
+For the included v1 hooks, the intended happy-path order is:
+
+```text
+trust check
+confirmation gate
+before_invocation hook(s)
+plugin.invoked
+plugin.permission_used*
+entrypoint subprocess
+plugin.completed | plugin.failed
+after_invocation hook(s)
+return InvocationResult
+```
+
+`plugin.permission_used*` keeps the current v0 behavior: one event for each
+declared `required: true` permission. Hook-specific permission emission is a
+future extension; v1 hook PRs MUST NOT silently change the coarse permission
+emission model.
+
+If the final implementation places `before_invocation` immediately after
+`plugin.invoked` instead, the implementation PR must document why and update
+the table above. The safety invariant is unchanged: the hook cannot run before
+the pre-invocation trust check succeeds.
+
+### Failure and timeout policy
+
+Every hook declaration must resolve to one of these failure policies:
+
+| Policy | Meaning | Allowed for |
+|---|---|---|
+| `fail_open` | Record hook failure and continue the original invocation. | Observability-only hooks whose output cannot authorize or mutate work. |
+| `fail_closed` | Stop the original invocation and emit a failed/blocked audit result. | Policy, security, mutating, or authority-bearing hooks. |
+
+Timeouts are failures for policy purposes. A hook that times out under
+`fail_open` produces an audit event and the original invocation continues. A
+hook that times out under `fail_closed` blocks the original invocation. The
+default timeout is intentionally short and implementation-defined in v1; the
+manifest/schema PR must document the exact default and any maximum override.
+
+Hooks MUST NOT retry indefinitely. Any retry policy must be bounded and must
+preserve the original invocation's idempotency and audit ordering.
+
+### Permission and mutation boundaries
+
+Hooks inherit the same trust model as commands: a required permission that is
+not trusted blocks before plugin-controlled code runs. Additional rules:
+
+1. Read-only lifecycle hooks require at least a read lifecycle scope such as
+   `plugin.lifecycle.read`.
+2. Hooks that can block, authorize, rewrite, or mutate work require an explicit
+   policy/mutation permission and default to `fail_closed`.
+3. Hooks MUST NOT directly edit `.omx`, EventStore rows, artifacts, or user
+   files. Mutations must go through the same harness service boundary that the
+   underlying command would use.
+4. Hook output is advisory unless the hook is declared as a policy hook and the
+   caller explicitly consumes the decision.
+5. Plugin permission approval is not implemented here. Required permission
+   denial remains fail-closed at the firewall; future HITL approval must route
+   through #960 rather than adding a hook-local prompt.
+
+### Hook audit events
+
+Hook execution must be observable without storing unbounded output. Future hook
+implementation PRs should use these event names unless the vendored
+`audit-event.schema.json` evolves first:
+
+- `plugin.hook.invoked`
+- `plugin.hook.completed`
+- `plugin.hook.failed`
+- `plugin.hook.blocked`
+
+Hook event payloads follow the same bounded-payload rules as command audit
+events:
+
+- include plugin identity, command name when applicable, hook name,
+  invocation/session correlation, failure policy, timeout, and status;
+- store stdout/stderr as hashes or bounded previews only;
+- apply the argv/secret redaction rules above;
+- do not add fields outside the vendored audit schema until the schema is
+  updated in `ouroboros-plugins` and re-vendored into core.
+
+### Review boundary for follow-up PRs
+
+The hook rollout should remain reviewable:
+
+1. **Contract/docs PR** (this section): vocabulary and policy only.
+2. **Manifest/schema PR**: optional hook declarations with backward
+   compatibility for existing v0.1 manifests.
+3. **Policy validator PR**: hook permission, timeout, and failure-policy
+   validation without executing hooks.
+4. **Minimal invocation PR**: `before_invocation` / `after_invocation` only,
+   with fixture tests.
+5. **Deferred hook PRs**: tool, artifact, state, or rewind hooks only after the
+   corresponding harness substrate is stable.
+
+This sequencing is intentional: it prevents hook support from becoming a
+second unreviewable plugin runtime.
+
 ### Audit-event compatibility (resolves #737)
 
 The audit-event schema is the canonical shape for plugin-emitted events. The
