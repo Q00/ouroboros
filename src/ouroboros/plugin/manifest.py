@@ -130,6 +130,16 @@ class Entrypoint:
 
 
 @dataclass(frozen=True)
+class HookSpec:
+    name: str
+    entrypoint: Entrypoint
+    failure_policy: str
+    timeout_seconds: int | None = None
+    permissions: tuple[str, ...] = ()
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class AuditSpec:
     events: tuple[str, ...]
 
@@ -168,6 +178,7 @@ class PluginManifest:
     entrypoint: Entrypoint
     description: str = ""
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
+    hooks: tuple[HookSpec, ...] = ()
 
 
 def _load_schema(schema_version: str, *, manifest_path: str | Path) -> dict[str, Any]:
@@ -332,6 +343,21 @@ def _build_command(raw: dict[str, Any]) -> CommandSpec:
     )
 
 
+def _build_hook(raw: dict[str, Any]) -> HookSpec:
+    entrypoint_raw = raw["entrypoint"]
+    return HookSpec(
+        name=raw["name"],
+        entrypoint=Entrypoint(
+            type=entrypoint_raw["type"],
+            command=entrypoint_raw["command"],
+        ),
+        failure_policy=raw["failure_policy"],
+        timeout_seconds=raw.get("timeout_seconds"),
+        permissions=tuple(raw.get("permissions", ())),
+        description=raw.get("description", ""),
+    )
+
+
 def load_manifest(path: str | Path) -> PluginManifest:
     """Load and validate a plugin manifest from `path`.
 
@@ -469,6 +495,8 @@ def load_manifest(path: str | Path) -> PluginManifest:
     else:
         audit = AuditSpec(events=tuple(audit_raw["events"]))
 
+    hooks = tuple(_build_hook(h) for h in raw.get("hooks", ()))
+
     return PluginManifest(
         schema_version=schema_version,
         name=raw["name"],
@@ -480,6 +508,7 @@ def load_manifest(path: str | Path) -> PluginManifest:
         entrypoint=entrypoint,
         description=raw.get("description", ""),
         audit=audit,
+        hooks=hooks,
     )
 
 
@@ -488,6 +517,7 @@ __all__ = [
     "CommandArgument",
     "CommandSpec",
     "Entrypoint",
+    "HookSpec",
     "Permission",
     "PluginManifest",
     "PluginManifestError",

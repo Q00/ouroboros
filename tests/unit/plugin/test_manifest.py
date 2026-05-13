@@ -82,6 +82,85 @@ def test_load_reference_manifest(tmp_path: Path) -> None:
     assert manifest.source.type == "local_path"
 
 
+def test_hook_declarations_load_as_frozen_specs(tmp_path: Path) -> None:
+    """Lifecycle hooks are optional manifest declarations, not executable side effects."""
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["hooks"] = [
+        {
+            "name": "before_invocation",
+            "description": "Inspect invocation metadata before execution.",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks before"},
+            "permissions": ["ledger:read"],
+            "timeout_seconds": 5,
+            "failure_policy": "fail_closed",
+        },
+        {
+            "name": "after_invocation",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks after"},
+            "failure_policy": "fail_open",
+        },
+    ]
+
+    manifest = load_manifest(_write(tmp_path, payload))
+
+    assert len(manifest.hooks) == 2
+    assert manifest.hooks[0].name == "before_invocation"
+    assert manifest.hooks[0].entrypoint.command == "python -m plugin_hooks before"
+    assert manifest.hooks[0].permissions == ("ledger:read",)
+    assert manifest.hooks[0].timeout_seconds == 5
+    assert manifest.hooks[0].failure_policy == "fail_closed"
+    assert manifest.hooks[1].timeout_seconds is None
+    assert manifest.hooks[1].permissions == ()
+
+
+def test_optional_hooks_default_to_empty_tuple(tmp_path: Path) -> None:
+    manifest = load_manifest(_write(tmp_path, REFERENCE_MANIFEST))
+    assert manifest.hooks == ()
+
+
+def test_unknown_hook_name_rejected(tmp_path: Path) -> None:
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["hooks"] = [
+        {
+            "name": "around_everything",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks"},
+            "failure_policy": "fail_open",
+        }
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/hooks/0/name"
+
+
+def test_hook_failure_policy_rejected_outside_enum(tmp_path: Path) -> None:
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["hooks"] = [
+        {
+            "name": "before_invocation",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks"},
+            "failure_policy": "retry_forever",
+        }
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/hooks/0/failure_policy"
+
+
+def test_hook_timeout_has_bounded_positive_integer(tmp_path: Path) -> None:
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["hooks"] = [
+        {
+            "name": "before_invocation",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks"},
+            "timeout_seconds": 0,
+            "failure_policy": "fail_open",
+        }
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/hooks/0/timeout_seconds"
+
+
 def test_missing_required_top_level_field(tmp_path: Path) -> None:
     """Test 2: missing `name` raises with empty json_pointer (root-level)."""
     bad = {**REFERENCE_MANIFEST}
@@ -154,6 +233,7 @@ def test_optional_fields_omitted(tmp_path: Path) -> None:
     assert "plugin.invoked" in manifest.audit.events
     assert "plugin.completed" in manifest.audit.events
     assert "plugin.failed" in manifest.audit.events
+    assert manifest.hooks == ()
 
 
 def test_first_party_source_branch(tmp_path: Path) -> None:

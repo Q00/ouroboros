@@ -231,6 +231,67 @@
           "uniqueItems": true
         }
       }
+
+    },
+    "hooks": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["name", "entrypoint", "failure_policy"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "before_invocation",
+              "after_invocation",
+              "before_tool_call",
+              "after_tool_call",
+              "before_artifact_write",
+              "after_artifact_write",
+              "on_error",
+              "on_cancel"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "entrypoint": {
+            "type": "object",
+            "required": ["type", "command"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "command"
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*){0,3}$"
+            },
+            "uniqueItems": true,
+            "default": []
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "failure_policy": {
+            "type": "string",
+            "enum": ["fail_open", "fail_closed"]
+          }
+        }
+      }
     }
   }
 }
