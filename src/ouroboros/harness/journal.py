@@ -232,12 +232,50 @@ _FILE_MODIFY_TOOL_NAMES = frozenset({"Write", "Edit", "NotebookEdit"})
 _COMMAND_TOOL_NAMES = frozenset({"Bash"})
 
 
-def _event_ac_id(event: BaseEvent) -> str | None:
-    """Best-effort AC scope extraction from an event."""
-    raw_ac_id = event.data.get("ac_id") if isinstance(event.data, dict) else None
-    if isinstance(raw_ac_id, str) and raw_ac_id.strip():
-        return raw_ac_id.strip()
-    return None
+def _event_scope_tokens(event: BaseEvent) -> tuple[str, ...]:
+    """Return all scope tokens an event can be attributed to.
+
+    The Ouroboros I/O recorders (``src/ouroboros/events/io.py``) emit
+    tool / LLM events using ``aggregate_type`` / ``aggregate_id`` for
+    the target plus correlation fields (``session_id``,
+    ``execution_id``, ``phase``, ``lineage_id``). They do not currently
+    emit a dedicated ``ac_id`` payload. This helper returns every
+    channel an event could plausibly belong to so the normalizer can
+    accept matches against any of them.
+
+    Channels considered, in priority order:
+    1. ``event.data["ac_id"]`` — explicit attribution if the producer
+       chose to embed it.
+    2. ``event.aggregate_id`` — the recorder's configured target id.
+    3. ``event.data["execution_id"]`` — correlation field; an AC's
+       execution typically owns a single execution id.
+    4. ``event.data["phase"]`` — correlation field; used by some
+       executors to carry the AC identifier.
+    """
+    tokens: list[str] = []
+    if isinstance(event.data, dict):
+        for key in ("ac_id", "execution_id", "phase"):
+            value = event.data.get(key)
+            if isinstance(value, str) and value.strip():
+                tokens.append(value.strip())
+    if isinstance(event.aggregate_id, str) and event.aggregate_id.strip():
+        tokens.append(event.aggregate_id.strip())
+    return tuple(tokens)
+
+
+def _event_matches_ac(event: BaseEvent, ac_id: str) -> bool:
+    """Return True when any scope channel on the event matches ``ac_id``.
+
+    Used both for filtering inside :func:`normalize_events` and by the
+    :func:`filter_events_for_ac` helper. Returns ``False`` when no
+    channel on the event references the AC at all — pre-filtered event
+    iterables should therefore be acceptable inputs to
+    :func:`normalize_events`.
+    """
+    target = ac_id.strip()
+    if not target:
+        return False
+    return target in _event_scope_tokens(event)
 
 
 def _classify_tool_kind(tool_name: str) -> EvidenceKind:
@@ -302,37 +340,50 @@ def normalize_events(
         msg = "normalize_events requires a non-blank ac_id"
         raise ValueError(msg)
 
-    started: OrderedDict[str, BaseEvent] = OrderedDict()
+    tool_started: OrderedDict[str, BaseEvent] = OrderedDict()
+    llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
     entries: list[EvidenceEntry] = []
 
     for event in events:
-        # Discard events that explicitly belong to a different AC scope.
-        observed_ac = _event_ac_id(event)
-        if observed_ac is not None and observed_ac != normalized_ac_id:
+        # Skip events that carry explicit scope tokens but none of them
+        # references this AC. Events without any scope token are allowed
+        # through so pre-filtered iterables remain valid inputs.
+        scope_tokens = _event_scope_tokens(event)
+        if scope_tokens and normalized_ac_id not in scope_tokens:
             continue
 
         if event.type == _TOOL_STARTED:
             call_id = event.data.get("call_id") if isinstance(event.data, dict) else None
             if isinstance(call_id, str) and call_id.strip():
-                started[call_id.strip()] = event
+                tool_started[call_id.strip()] = event
             continue
 
         if event.type == _TOOL_RETURNED:
-            entry = _build_tool_entry_from_pair(started, event)
+            entry = _build_tool_entry_from_pair(tool_started, event)
             if entry is not None:
                 entries.append(entry)
             continue
 
-        if event.type in (_LLM_REQUESTED, _LLM_RETURNED):
-            entry = _build_llm_entry(event)
+        if event.type == _LLM_REQUESTED:
+            call_id = event.data.get("call_id") if isinstance(event.data, dict) else None
+            if isinstance(call_id, str) and call_id.strip():
+                llm_started[call_id.strip()] = event
+            continue
+
+        if event.type == _LLM_RETURNED:
+            entry = _build_llm_entry_from_pair(llm_started, event)
             if entry is not None:
                 entries.append(entry)
             continue
 
     # Surface unmatched start events as "still running" entries so the
     # caller can detect dangling work.
-    for call_id, start_event in started.items():
+    for call_id, start_event in tool_started.items():
         entry = _build_tool_entry_from_start_only(call_id, start_event)
+        if entry is not None:
+            entries.append(entry)
+    for call_id, start_event in llm_started.items():
+        entry = _build_llm_entry_from_start_only(call_id, start_event)
         if entry is not None:
             entries.append(entry)
 
@@ -420,28 +471,113 @@ def _build_tool_entry_from_start_only(
     )
 
 
-def _build_llm_entry(event: BaseEvent) -> EvidenceEntry | None:
-    if not isinstance(event.data, dict):
-        return None
+def _llm_payload(
+    *,
+    model_id: str | None,
+    caller: str | None,
+    duration_ms: int | None,
+    is_error: bool | None,
+    error_kind: str | None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {}
-    model = event.data.get("model")
-    if isinstance(model, str) and model.strip():
-        payload["model"] = model.strip()
-    role = event.data.get("role")
-    if isinstance(role, str) and role.strip():
-        payload["role"] = role.strip()
-    is_error = event.data.get("is_error")
-    ok = (not bool(is_error)) if isinstance(is_error, bool) else None
-    if isinstance(is_error, bool):
+    if model_id is not None:
+        payload["model_id"] = model_id
+    if caller is not None:
+        payload["caller"] = caller
+    if duration_ms is not None:
+        payload["duration_ms"] = duration_ms
+    if is_error is not None:
         payload["is_error"] = is_error
+    if error_kind is not None:
+        payload["error_kind"] = error_kind
+    return payload
+
+
+def _build_llm_entry_from_pair(
+    started: OrderedDict[str, BaseEvent],
+    returned_event: BaseEvent,
+) -> EvidenceEntry | None:
+    if not isinstance(returned_event.data, dict):
+        return None
+    call_id = returned_event.data.get("call_id")
+    if not isinstance(call_id, str) or not call_id.strip():
+        return None
+    call_id = call_id.strip()
+    start_event = started.pop(call_id, None)
+
+    model_id = returned_event.data.get("model_id") or (
+        start_event.data.get("model_id") if start_event else None
+    )
+    if isinstance(model_id, str):
+        model_id = model_id.strip() or None
+
+    caller = (
+        start_event.data.get("caller")
+        if start_event and isinstance(start_event.data, dict)
+        else None
+    )
+    if isinstance(caller, str):
+        caller = caller.strip() or None
+
+    is_error = returned_event.data.get("is_error")
+    ok = (not bool(is_error)) if isinstance(is_error, bool) else None
+    duration_ms = returned_event.data.get("duration_ms")
+    error_kind = returned_event.data.get("error_kind")
+    if isinstance(error_kind, str):
+        error_kind = error_kind.strip() or None
+
+    payload = _llm_payload(
+        model_id=model_id if isinstance(model_id, str) else None,
+        caller=caller if isinstance(caller, str) else None,
+        duration_ms=duration_ms if isinstance(duration_ms, int) else None,
+        is_error=is_error if isinstance(is_error, bool) else None,
+        error_kind=error_kind if isinstance(error_kind, str) else None,
+    )
+
+    source_event_ids: list[str] = []
+    if start_event is not None:
+        source_event_ids.append(start_event.id)
+    source_event_ids.append(returned_event.id)
+
+    started_at = start_event.timestamp if start_event else returned_event.timestamp
 
     return EvidenceEntry(
         kind=EvidenceKind.LLM_CALL,
         ok=ok,
-        started_at=event.timestamp,
-        ended_at=event.timestamp if event.type == _LLM_RETURNED else None,
+        started_at=started_at,
+        ended_at=returned_event.timestamp,
         payload=payload,
-        source_event_ids=(event.id,),
+        source_event_ids=tuple(source_event_ids),
+    )
+
+
+def _build_llm_entry_from_start_only(
+    call_id: str,
+    start_event: BaseEvent,
+) -> EvidenceEntry | None:
+    del call_id  # reserved for future correlation logging
+    if not isinstance(start_event.data, dict):
+        return None
+    model_id = start_event.data.get("model_id")
+    if isinstance(model_id, str):
+        model_id = model_id.strip() or None
+    caller = start_event.data.get("caller")
+    if isinstance(caller, str):
+        caller = caller.strip() or None
+    payload = _llm_payload(
+        model_id=model_id if isinstance(model_id, str) else None,
+        caller=caller if isinstance(caller, str) else None,
+        duration_ms=None,
+        is_error=None,
+        error_kind=None,
+    )
+    return EvidenceEntry(
+        kind=EvidenceKind.LLM_CALL,
+        ok=None,
+        started_at=start_event.timestamp,
+        ended_at=None,
+        payload=payload,
+        source_event_ids=(start_event.id,),
     )
 
 
@@ -449,18 +585,26 @@ def filter_events_for_ac(
     events: Sequence[BaseEvent],
     ac_id: str,
 ) -> tuple[BaseEvent, ...]:
-    """Return events whose payload references the given AC scope.
+    """Return events whose scope channels reference the given AC.
 
     Convenience helper for callers that hold a flat list of events and
     want the AC-scoped subset before calling :func:`normalize_events`.
-    Events without an explicit ``ac_id`` payload field are excluded so
-    only events the journal explicitly attributed to the AC flow through.
+    The match is multi-channel and considers, in priority order:
+
+    1. ``event.data["ac_id"]``
+    2. ``event.aggregate_id``
+    3. ``event.data["execution_id"]``
+    4. ``event.data["phase"]``
+
+    Events with no scope tokens that match the target ``ac_id`` are
+    excluded. See :func:`_event_scope_tokens` for the precise set of
+    channels considered.
     """
     normalized = ac_id.strip()
     if not normalized:
         msg = "filter_events_for_ac requires a non-blank ac_id"
         raise ValueError(msg)
-    return tuple(event for event in events if _event_ac_id(event) == normalized)
+    return tuple(event for event in events if _event_matches_ac(event, normalized))
 
 
 __all__ = [

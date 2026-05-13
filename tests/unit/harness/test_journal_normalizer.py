@@ -291,28 +291,200 @@ class TestFilterEventsForAC:
             filter_events_for_ac([], ac_id="   ")
 
 
-class TestLLMEntries:
-    def test_llm_returned_emits_entry(self) -> None:
-        event = BaseEvent(
-            id="evt_llm_1",
-            type="llm.call.returned",
-            timestamp=datetime.now(UTC),
-            aggregate_type="session",
-            aggregate_id="session_test",
-            data={
-                "model": "claude-sonnet-4.6",
-                "role": "deliver",
-                "is_error": False,
-                "ac_id": "ac_1",
-            },
-        )
-        manifest = normalize_events([event], ac_id="ac_1")
+def _llm_requested(
+    *,
+    call_id: str,
+    model_id: str,
+    caller: str | None = None,
+    when: datetime | None = None,
+    event_id: str | None = None,
+    ac_scope_field: str = "execution_id",
+    ac_scope_value: str = "ac_1",
+) -> BaseEvent:
+    """Build an ``llm.call.requested`` event matching the recorder shape.
+
+    The recorder populates ``model_id`` (not ``model``), pairs by
+    ``call_id``, and uses correlation fields like ``execution_id`` /
+    ``phase`` rather than an ``ac_id`` payload field.
+    """
+    return BaseEvent(
+        id=event_id or f"evt_llm_req_{call_id}",
+        type="llm.call.requested",
+        timestamp=when or datetime.now(UTC),
+        aggregate_type="execution",
+        aggregate_id=ac_scope_value if ac_scope_field == "aggregate_id" else "execution_x",
+        data={
+            "call_id": call_id,
+            "model_id": model_id,
+            "caller": caller,
+            ac_scope_field: ac_scope_value,
+        },
+    )
+
+
+def _llm_returned(
+    *,
+    call_id: str,
+    model_id: str,
+    duration_ms: int = 1200,
+    is_error: bool = False,
+    when: datetime | None = None,
+    event_id: str | None = None,
+    ac_scope_field: str = "execution_id",
+    ac_scope_value: str = "ac_1",
+) -> BaseEvent:
+    return BaseEvent(
+        id=event_id or f"evt_llm_ret_{call_id}",
+        type="llm.call.returned",
+        timestamp=when or datetime.now(UTC),
+        aggregate_type="execution",
+        aggregate_id=ac_scope_value if ac_scope_field == "aggregate_id" else "execution_x",
+        data={
+            "call_id": call_id,
+            "model_id": model_id,
+            "duration_ms": duration_ms,
+            "is_error": is_error,
+            ac_scope_field: ac_scope_value,
+        },
+    )
+
+
+class TestLLMPairing:
+    """LLM calls must be paired by ``call_id`` and use ``model_id``
+    (not ``model``) — matches the canonical recorder factories in
+    ``src/ouroboros/events/io.py``.
+    """
+
+    def test_paired_llm_emits_single_entry(self) -> None:
+        start_time = datetime.now(UTC)
+        events = [
+            _llm_requested(
+                call_id="llm1",
+                model_id="claude-sonnet-4.6",
+                caller="executor:deliver",
+                when=start_time,
+                event_id="evt_req_llm1",
+            ),
+            _llm_returned(
+                call_id="llm1",
+                model_id="claude-sonnet-4.6",
+                duration_ms=900,
+                is_error=False,
+                when=start_time + timedelta(milliseconds=900),
+                event_id="evt_ret_llm1",
+            ),
+        ]
+        manifest = normalize_events(events, ac_id="ac_1")
         assert len(manifest.entries) == 1
         entry = manifest.entries[0]
         assert entry.kind is EvidenceKind.LLM_CALL
         assert entry.ok is True
-        assert entry.payload["model"] == "claude-sonnet-4.6"
-        assert entry.payload["role"] == "deliver"
+        assert entry.payload["model_id"] == "claude-sonnet-4.6"
+        assert entry.payload["caller"] == "executor:deliver"
+        assert entry.payload["duration_ms"] == 900
+        assert entry.source_event_ids == ("evt_req_llm1", "evt_ret_llm1")
+
+    def test_unpaired_request_surfaces_as_running(self) -> None:
+        events = [
+            _llm_requested(
+                call_id="llm2",
+                model_id="claude-haiku-4.5",
+                event_id="evt_req_llm2",
+            ),
+        ]
+        manifest = normalize_events(events, ac_id="ac_1")
+        assert len(manifest.entries) == 1
+        entry = manifest.entries[0]
+        assert entry.kind is EvidenceKind.LLM_CALL
+        assert entry.ok is None
+        assert entry.ended_at is None
+        assert entry.source_event_ids == ("evt_req_llm2",)
+
+    def test_completion_only_pair_still_emitted(self) -> None:
+        events = [
+            _llm_returned(
+                call_id="llm_orphan",
+                model_id="claude-sonnet-4.6",
+                event_id="evt_ret_orphan",
+            ),
+        ]
+        manifest = normalize_events(events, ac_id="ac_1")
+        assert len(manifest.entries) == 1
+        entry = manifest.entries[0]
+        assert entry.kind is EvidenceKind.LLM_CALL
+        assert entry.source_event_ids == ("evt_ret_orphan",)
+
+
+class TestACScopingMultiChannel:
+    """AC scoping must accept every channel a recorder populates
+    (``aggregate_id``, correlation ``execution_id`` / ``phase``, and the
+    explicit ``ac_id`` payload when present)."""
+
+    def test_match_via_aggregate_id(self) -> None:
+        events = [
+            _llm_requested(
+                call_id="llm_a",
+                model_id="claude-sonnet-4.6",
+                ac_scope_field="aggregate_id",
+                ac_scope_value="ac_target",
+            ),
+            _llm_returned(
+                call_id="llm_a",
+                model_id="claude-sonnet-4.6",
+                ac_scope_field="aggregate_id",
+                ac_scope_value="ac_target",
+            ),
+        ]
+        manifest = normalize_events(events, ac_id="ac_target")
+        assert len(manifest.entries) == 1
+
+    def test_match_via_execution_id_correlation(self) -> None:
+        events = [
+            _llm_requested(
+                call_id="llm_a",
+                model_id="claude-sonnet-4.6",
+                ac_scope_field="execution_id",
+                ac_scope_value="ac_target",
+            ),
+            _llm_returned(
+                call_id="llm_a",
+                model_id="claude-sonnet-4.6",
+                ac_scope_field="execution_id",
+                ac_scope_value="ac_target",
+            ),
+        ]
+        manifest = normalize_events(events, ac_id="ac_target")
+        assert len(manifest.entries) == 1
+
+    def test_match_via_phase_correlation(self) -> None:
+        events = [
+            _llm_requested(
+                call_id="llm_a",
+                model_id="claude-sonnet-4.6",
+                ac_scope_field="phase",
+                ac_scope_value="ac_target",
+            ),
+            _llm_returned(
+                call_id="llm_a",
+                model_id="claude-sonnet-4.6",
+                ac_scope_field="phase",
+                ac_scope_value="ac_target",
+            ),
+        ]
+        manifest = normalize_events(events, ac_id="ac_target")
+        assert len(manifest.entries) == 1
+
+    def test_no_matching_channel_excludes_event(self) -> None:
+        events = [
+            _llm_requested(
+                call_id="llm_a",
+                model_id="claude-sonnet-4.6",
+                ac_scope_field="execution_id",
+                ac_scope_value="other_ac",
+            ),
+        ]
+        manifest = normalize_events(events, ac_id="ac_target")
+        assert manifest.entries == ()
 
 
 class TestEnumerations:
