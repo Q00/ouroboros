@@ -80,6 +80,14 @@ def _normalize_string_tuple(name: str, value: Any) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _normalize_utc_datetime(name: str, value: datetime) -> datetime:
+    if not isinstance(value, datetime):
+        raise TypeError(f"HumanInput {name} must be a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"HumanInput {name} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
 def _contains_secret_marker(value: str) -> bool:
     lowered = value.lower()
     return any(marker in lowered for marker in _SECRET_MARKERS)
@@ -123,9 +131,9 @@ def _thaw_json_value(value: FrozenJsonValue) -> JsonValue:
     return value
 
 
-def _ensure_json_safe_payload(name: str, value: dict[str, Any]) -> Mapping[str, FrozenJsonValue]:
-    if not isinstance(value, dict):
-        raise TypeError(f"HumanInput {name} must be a dict")
+def _ensure_json_safe_payload(name: str, value: Mapping[str, Any]) -> Mapping[str, FrozenJsonValue]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"HumanInput {name} must be a mapping")
     normalized = _normalize_json_value(name, value, name)
     encoded = json.dumps(normalized, allow_nan=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAX_HITL_PAYLOAD_BYTES:
@@ -203,6 +211,9 @@ class HumanInputRequest:
             raise ValueError("select HumanInputRequest requires at least one option")
         object.__setattr__(self, "options", _normalize_string_tuple("options", self.options))
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
+        object.__setattr__(
+            self, "created_at", _normalize_utc_datetime("created_at", self.created_at)
+        )
 
     @property
     def aggregate_id(self) -> str:
@@ -283,6 +294,9 @@ class HumanInputResponse:
             )
         self._validate_response_content()
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
+        object.__setattr__(
+            self, "received_at", _normalize_utc_datetime("received_at", self.received_at)
+        )
 
     def _validate_response_content(self) -> None:
         has_text = self.text is not None

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 import json
+from types import MappingProxyType
 
 import pytest
 
@@ -47,6 +48,36 @@ def test_human_input_request_serializes_wait_contract() -> None:
     assert data["timeout_action"] == "expire_blocked"
     assert data["required_permission"] == "plugin:execute"
     assert data["options"] == ["plugin", "runtime"]
+    assert data["created_at"].endswith("+00:00")
+
+
+def test_request_normalizes_aware_datetimes_to_utc_and_rejects_naive_datetimes() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve?",
+        resume_target="plan:approval",
+        created_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=9))),
+    )
+
+    assert request.to_event_data()["created_at"] == "2026-01-01T03:00:00+00:00"
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        HumanInputRequest(
+            request_id="hitl-1",
+            session_id="session-1",
+            created_by="plan",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLAN_APPROVAL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Approve?",
+            resume_target="plan:approval",
+            created_at=datetime(2026, 1, 1, 12, 0),
+        )
 
 
 def test_select_request_requires_options() -> None:
@@ -125,6 +156,27 @@ def test_request_allows_secret_marker_words_in_plain_values() -> None:
     assert request.to_event_data()["payload"] == {
         "reason": "token budget exceeded; credential check required"
     }
+
+
+def test_request_accepts_mapping_payloads_and_freezes_normalized_copy() -> None:
+    source: dict[str, object] = {"items": ["alpha", {"count": 1}]}
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        created_by="plugin-firewall",
+        kind=HumanInputKind.FREE_TEXT,
+        source=HumanInputSource.PLUGIN_FIREWALL,
+        risk_class=HumanInputRiskClass.LOW,
+        question="Explain remediation?",
+        resume_target="runtime:resume",
+        payload=MappingProxyType(source),
+    )
+
+    items = source["items"]
+    assert isinstance(items, list)
+    items.append("mutated")
+
+    assert request.to_event_data()["payload"] == {"items": ["alpha", {"count": 1}]}
 
 
 def test_request_rejects_non_json_payload_values() -> None:

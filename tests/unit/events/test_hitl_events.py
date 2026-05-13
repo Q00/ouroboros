@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ouroboros.core.hitl_contract import (
     HumanInputKind,
     HumanInputRequest,
@@ -90,3 +92,18 @@ def test_timeout_and_cancel_events_reuse_request_payload() -> None:
     assert timed_out.data["reason"] == "deadline elapsed"
     assert cancelled.type == "hitl.cancelled"
     assert cancelled.data["actor"] == "local-user"
+
+
+def test_timeout_event_rejects_empty_reason() -> None:
+    with pytest.raises(ValueError, match="reason"):
+        create_hitl_timed_out_event(_request(), reason="   ")
+
+
+def test_cancel_event_rejects_empty_reason() -> None:
+    with pytest.raises(ValueError, match="reason"):
+        create_hitl_cancelled_event(_request(), reason="   ")
+
+
+def test_cancel_event_rejects_empty_actor() -> None:
+    with pytest.raises(ValueError, match="actor"):
+        create_hitl_cancelled_event(_request(), reason="user aborted", actor="   ")
