@@ -452,7 +452,7 @@ class TestEvaluateDeliverClaim:
             ac_id="AC-1",
             facts=(
                 DeliverEvidenceFact(
-                    fact_id="ev_pass",
+                    fact_id="fact_admin_check",
                     evidence_handle="ev_pass",
                     statement="The AC passed because the command succeeded.",
                 ),
@@ -467,14 +467,14 @@ class TestEvaluateDeliverClaim:
         )
 
         assert verdict.accepted is True
-        assert verdict.accepted_fact_ids == ("ev_pass",)
+        assert verdict.accepted_fact_ids == ("fact_admin_check",)
         assert verdict.rejected_fact_ids == ()
         assert verdict.evidence_event_ids == ("evt_1", "evt_2")
         assert validator.calls == [
             {
                 "evidence_manifest": (
                     TraceGuardEvidenceInput(
-                        fact_id="ev_pass",
+                        fact_id="fact_admin_check",
                         chunk_id="ev_pass",
                         text="result for ev_pass",
                         child_call_id="evt_1,evt_2",
@@ -484,7 +484,7 @@ class TestEvaluateDeliverClaim:
                     "result": {
                         "observed_facts": [
                             {
-                                "fact_id": "ev_pass",
+                                "fact_id": "fact_admin_check",
                                 "chunk_id": "ev_pass",
                                 "statement": ("The AC passed because the command succeeded."),
                             }

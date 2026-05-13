@@ -123,6 +123,12 @@ class DeliverEvidenceClaim(BaseModel, frozen=True):
         if not value:
             msg = "DeliverEvidenceClaim requires at least one fact"
             raise ValueError(msg)
+        seen: set[str] = set()
+        for fact in value:
+            if fact.fact_id in seen:
+                msg = f"DeliverEvidenceClaim fact_id {fact.fact_id!r} is duplicated"
+                raise ValueError(msg)
+            seen.add(fact.fact_id)
         return value
 
 
@@ -250,7 +256,7 @@ def evaluate_deliver_claim(
         )
         raise ValueError(msg)
 
-    traceguard_manifest, source_events_by_handle = _traceguard_manifest(manifest)
+    traceguard_manifest, source_events_by_handle = _traceguard_manifest(manifest, claim)
     parent_synthesis = _parent_synthesis_from_claim(claim)
     raw_result = traceguard_validator(
         evidence_manifest=traceguard_manifest,
@@ -337,17 +343,20 @@ def _normalize_optional_anchor(name: str, value: str | None) -> str | None:
 
 def _traceguard_manifest(
     manifest: EvidenceManifest,
+    claim: DeliverEvidenceClaim,
 ) -> tuple[tuple[TraceGuardEvidenceInput, ...], dict[str, tuple[str, ...]]]:
+    entries_by_handle = {entry.handle: entry for entry in manifest.entries if entry.ok is True}
     entries: list[TraceGuardEvidenceInput] = []
     source_events_by_handle: dict[str, tuple[str, ...]] = {}
-    for entry in manifest.entries:
-        if entry.ok is not True:
+    for fact in claim.facts:
+        entry = entries_by_handle.get(fact.evidence_handle)
+        if entry is None:
             continue
         text = _evidence_text(entry.payload)
         entries.append(
             TraceGuardEvidenceInput(
-                fact_id=entry.handle,
-                chunk_id=entry.handle,
+                fact_id=fact.fact_id,
+                chunk_id=fact.evidence_handle,
                 text=text,
                 child_call_id=",".join(entry.source_event_ids),
             )
