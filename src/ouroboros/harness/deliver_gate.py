@@ -384,10 +384,28 @@ def _traceguard_manifest(
 def _evidence_text(payload: object) -> str:
     if not isinstance(payload, Mapping):
         return str(payload)
+    context_parts: list[str] = []
+    child_ac_id = payload.get("child_ac_id")
+    if isinstance(child_ac_id, str) and child_ac_id.strip():
+        context_parts.append(f"child_ac_id={child_ac_id.strip()}")
+
+    tool_name = payload.get("tool_name")
+    if isinstance(tool_name, str) and tool_name in {"Edit", "Write", "NotebookEdit"}:
+        for key in ("args_preview", "result_preview"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                context_parts.append(value.strip())
+        if context_parts:
+            return "; ".join(context_parts)
+
     for key in ("result_preview", "args_preview", "tool_name"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
+            if context_parts:
+                return "; ".join([*context_parts, value.strip()])
             return value.strip()
+    if context_parts:
+        return "; ".join(context_parts)
     return str(dict(payload))
 
 

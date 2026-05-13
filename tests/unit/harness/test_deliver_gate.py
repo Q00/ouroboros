@@ -512,7 +512,7 @@ class TestEvaluateDeliverClaim:
             TraceGuardEvidenceInput(
                 fact_id="file_modified:src/middleware/auth.ts:role_matrix_added",
                 chunk_id="ev_file_auth_middleware",
-                text="role_matrix_added",
+                text="path=src/middleware/auth.ts; scope=whole_file; role_matrix_added",
                 child_call_id="evt_edit_start,evt_edit_return",
             ),
         )
@@ -528,7 +528,7 @@ class TestEvaluateDeliverClaim:
                     ok=True,
                     payload={
                         "tool_name": "Bash",
-                        "result_preview": "AC-1 tests passed",
+                        "result_preview": "tests passed",
                         "child_ac_id": "AC-1",
                     },
                     source_event_ids=("evt_ac1_test",),
@@ -539,7 +539,8 @@ class TestEvaluateDeliverClaim:
                     kind=EvidenceKind.FILE_MODIFIED,
                     payload={
                         "tool_name": "Edit",
-                        "result_preview": "AC-2 docs updated",
+                        "args_preview": "path=docs/ac2.md; scope=whole_file",
+                        "result_preview": "docs updated",
                         "child_ac_id": "AC-2",
                     },
                     source_event_ids=("evt_ac2_edit",),
@@ -587,6 +588,20 @@ class TestEvaluateDeliverClaim:
                 "statement": "child_ac=AC-2 result=file_modified",
             },
         ]
+        assert validator.calls[0]["evidence_manifest"] == (
+            TraceGuardEvidenceInput(
+                fact_id="child_ac:AC-1:test_passed",
+                chunk_id="ev_child_ac_1",
+                text="child_ac_id=AC-1; tests passed",
+                child_call_id="evt_ac1_test",
+            ),
+            TraceGuardEvidenceInput(
+                fact_id="child_ac:AC-2:file_modified",
+                chunk_id="ev_child_ac_2",
+                text="child_ac_id=AC-2; path=docs/ac2.md; scope=whole_file; docs updated",
+                child_call_id="evt_ac2_edit",
+            ),
+        )
 
     def test_builds_traceguard_envelope_and_returns_accepted_verdict(self) -> None:
         manifest = EvidenceManifest(
