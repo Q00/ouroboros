@@ -9,6 +9,7 @@ import pytest
 from ouroboros.orchestrator.baseline_metrics import (
     FatHarnessGateStatus,
     FatHarnessMetricSample,
+    FatHarnessMetricsReport,
     build_fat_harness_metrics_report,
 )
 
@@ -91,6 +92,25 @@ def test_report_accepts_public_positional_arguments_and_passes_thresholds() -> N
     assert gates["fabrication_incidents_per_100_acs"].status == FatHarnessGateStatus.PASS
     assert gates["median_chars_per_ac"].status == FatHarnessGateStatus.PASS
     assert gates["new_domain_cost"].status == FatHarnessGateStatus.PASS
+
+
+def test_sample_positional_constructor_preserves_legacy_char_argument_order() -> None:
+    sample = FatHarnessMetricSample("AC-1", True, 1, 0, 123, 456)
+
+    assert sample.fabrication_incidents == 0
+    assert sample.prompt_chars == 123
+    assert sample.completion_chars == 456
+    assert sample.semantic_miss_incidents == 0
+
+
+def test_report_positional_constructor_preserves_legacy_gate_argument_order() -> None:
+    report = FatHarnessMetricsReport("code", 2, 1, 1.0, None, 0.0, 100.0, 42, 1, ())
+
+    assert report.median_chars_per_ac == 100.0
+    assert report.new_domain_loc_delta == 42
+    assert report.new_domain_yaml_delta == 1
+    assert report.gates == ()
+    assert report.semantic_miss_incidents_per_100_acs == 0.0
 
 
 def test_report_marks_char_budget_and_new_domain_cost_failures() -> None:

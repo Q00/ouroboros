@@ -2,8 +2,8 @@
 
 The AgentOS SSOT (#961) requires five baseline metrics before the
 `ooo run` fat-harness path can be treated as stronger by default:
-1-shot AC pass rate, K=2 recovery rate, fabrication incidents,
-semantic-miss incidents, char budget per AC, and new-domain cost. This module defines the deterministic
+1-shot AC pass rate, K=2 recovery rate, fabrication incidents, semantic-miss incidents, char budget per AC, and
+new-domain cost. This module defines the deterministic
 report shape and gate evaluation only; it does not invoke LLMs, run live
 executions, or wire into `parallel_executor` yet.
 """
@@ -46,9 +46,9 @@ class FatHarnessMetricSample:
     accepted: bool
     attempt_count: int
     fabrication_incidents: int = 0
-    semantic_miss_incidents: int = 0
     prompt_chars: int = 0
     completion_chars: int = 0
+    semantic_miss_incidents: int = 0
 
     def __post_init__(self) -> None:
         if not self.ac_id:
@@ -112,11 +112,11 @@ class FatHarnessMetricsReport:
     one_shot_pass_rate: float
     k_recovery_rate: float | None
     fabrication_incidents_per_100_acs: float
-    semantic_miss_incidents_per_100_acs: float
     median_chars_per_ac: float
     new_domain_loc_delta: int
     new_domain_yaml_delta: int
     gates: tuple[FatHarnessGateResult, ...]
+    semantic_miss_incidents_per_100_acs: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Return a stable JSON-serializable report shape."""
