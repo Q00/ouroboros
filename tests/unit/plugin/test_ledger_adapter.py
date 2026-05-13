@@ -11,8 +11,6 @@ import pytest
 from ouroboros.plugin.ledger_adapter import (
     AUDIT_EVENT_TYPES,
     PLUGIN_AGGREGATE_TYPE,
-    PLUGIN_HOOK_AUDIT_EVENT_TYPES,
-    PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES,
     make_event_sink,
     unwrap_plugin_event,
     wrap_plugin_event,
@@ -139,8 +137,8 @@ def test_unwrap_returns_audit_event() -> None:
     assert unwrapped == ev
 
 
-def test_hook_audit_event_types_extend_lifecycle_types() -> None:
-    assert PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES == (
+def test_audit_event_types_match_current_v0_runtime_vocabulary() -> None:
+    assert AUDIT_EVENT_TYPES == (
         "plugin.discovered",
         "plugin.installed",
         "plugin.trusted",
@@ -149,15 +147,7 @@ def test_hook_audit_event_types_extend_lifecycle_types() -> None:
         "plugin.completed",
         "plugin.failed",
     )
-    assert PLUGIN_HOOK_AUDIT_EVENT_TYPES == (
-        "plugin.hook_started",
-        "plugin.hook_completed",
-        "plugin.hook_failed",
-        "plugin.permission_denied",
-    )
-    for event_type in PLUGIN_HOOK_AUDIT_EVENT_TYPES:
-        assert event_type in AUDIT_EVENT_TYPES
-        assert event_type in AUDIT_SCHEMA["properties"]["event_type"]["enum"]
+    assert tuple(AUDIT_SCHEMA["properties"]["event_type"]["enum"]) == AUDIT_EVENT_TYPES
 
 
 def test_round_trip_for_all_audit_event_types() -> None:

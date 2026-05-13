@@ -374,13 +374,13 @@ def test_no_token_shaped_strings_in_any_envelope(tmp_path: Path) -> None:
         assert forbidden.lower() not in serialized, f"{forbidden!r} found in envelope"
 
 
-def test_envelopes_carry_all_emitted_event_types() -> None:
-    """The audit-event type tuple covers lifecycle and hook events.
+def test_envelopes_carry_all_current_v0_emitted_event_types() -> None:
+    """The audit-event type tuple covers the current emitted v0.1 events.
 
     Path 1 exercises invoked, permission_used, completed; Path 2
     exercises failed; discovered/installed/trusted are emitted by the
-    manager (#731). Hook-specific names are part of the closed audit
-    vocabulary even though this E2E fixture does not execute hooks.
+    manager (#731). Hook-specific and permission-denial-specific names
+    are not in the vocabulary until the runtime emits them.
     """
     expected = {
         "plugin.discovered",
@@ -390,9 +390,5 @@ def test_envelopes_carry_all_emitted_event_types() -> None:
         "plugin.permission_used",
         "plugin.completed",
         "plugin.failed",
-        "plugin.hook_started",
-        "plugin.hook_completed",
-        "plugin.hook_failed",
-        "plugin.permission_denied",
     }
     assert set(AUDIT_EVENT_TYPES) == expected

@@ -38,11 +38,12 @@ import uuid
 
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
-# Lifecycle audit event types currently emitted by the firewall.
-# Hook event names are reserved/forward-declared for the manifest/audit
-# vocabulary; no runtime producer emits them yet. Used by tests + by
-# downstream consumers that want to filter ledger queries.
-PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES: tuple[str, ...] = (
+# Plugin audit event types currently emitted by the v0.1 runtime.
+# Hook and permission-denial-specific event names are intentionally not
+# part of this manifest/audit vocabulary until the runtime emits them;
+# permission denials are represented as plugin.failed with
+# result.status == "blocked".
+AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.discovered",
     "plugin.installed",
     "plugin.trusted",
@@ -50,18 +51,6 @@ PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.permission_used",
     "plugin.completed",
     "plugin.failed",
-)
-
-PLUGIN_HOOK_AUDIT_EVENT_TYPES: tuple[str, ...] = (
-    "plugin.hook_started",
-    "plugin.hook_completed",
-    "plugin.hook_failed",
-    "plugin.permission_denied",
-)
-
-AUDIT_EVENT_TYPES: tuple[str, ...] = (
-    *PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES,
-    *PLUGIN_HOOK_AUDIT_EVENT_TYPES,
 )
 
 
@@ -181,8 +170,6 @@ def make_event_sink(
 __all__ = [
     "AUDIT_EVENT_TYPES",
     "PLUGIN_AGGREGATE_TYPE",
-    "PLUGIN_HOOK_AUDIT_EVENT_TYPES",
-    "PLUGIN_LIFECYCLE_AUDIT_EVENT_TYPES",
     "make_event_sink",
     "unwrap_plugin_event",
     "wrap_plugin_event",

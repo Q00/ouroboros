@@ -175,7 +175,7 @@ def test_audit_events_reject_unknown_names(tmp_path: Path) -> None:
     with pytest.raises(PluginManifestError) as excinfo:
         load_manifest(_write(tmp_path, raw))
 
-    assert excinfo.value.json_pointer == "/audit/events/1"
+    assert excinfo.value.json_pointer == "/audit/events/0"
 
 
 def test_first_party_source_branch(tmp_path: Path) -> None:
