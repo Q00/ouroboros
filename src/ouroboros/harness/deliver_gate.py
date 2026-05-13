@@ -60,7 +60,7 @@ async def load_ac_evidence_manifest(
     Args:
         event_store: Read-capable EventStore or test double.
         ac_id: Acceptance-criterion identifier to normalize.
-        execution_id: Optional execution aggregate anchor.
+        execution_id: Required execution aggregate anchor.
         session_id: Optional session aggregate anchor used as an additional
             ownership filter.
         scope_id: Optional event-scope token to filter by when the public AC
@@ -71,8 +71,8 @@ async def load_ac_evidence_manifest(
             before TraceGuard sees it.
 
     Raises:
-        ValueError: If ``ac_id`` is blank or neither execution nor session
-            anchor is provided.
+        ValueError: If ``ac_id`` is blank, if ``execution_id`` is missing
+            or blank, or if optional anchors are whitespace-only.
 
     Returns:
         A per-AC :class:`EvidenceManifest` in chronological event order.
