@@ -421,3 +421,82 @@ class TestIdentifierTupleRejectsBlanks:
                 source_event_ids=("evt_1",),
                 ac_id="   ",
             )
+
+
+class TestScalarIdentifiersRejectBlanks:
+    """Required scalar IDs must follow the same hygiene as identifier tuples."""
+
+    def test_artifact_record_rejects_blank_step_id(self) -> None:
+        with pytest.raises(ValidationError):
+            ArtifactRecord(step_id="   ", kind="file")
+
+    def test_artifact_record_rejects_blank_overridden_artifact_id(self) -> None:
+        with pytest.raises(ValidationError):
+            ArtifactRecord(artifact_id="   ", step_id="step_1", kind="file")
+
+    def test_step_record_rejects_blank_run_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                run_id="   ",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("evt_1",),
+            )
+
+    def test_step_record_rejects_blank_stage_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                run_id="run_1",
+                stage_id="   ",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("evt_1",),
+            )
+
+    def test_step_record_rejects_blank_overridden_step_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                step_id="   ",
+                run_id="run_1",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("evt_1",),
+            )
+
+    def test_stage_record_rejects_blank_run_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StageRecord(run_id="   ", kind=StageKind.EXECUTE)
+
+    def test_stage_record_rejects_blank_overridden_stage_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StageRecord(stage_id="   ", run_id="run_1", kind=StageKind.EXECUTE)
+
+    def test_verdict_record_rejects_blank_run_id(self) -> None:
+        with pytest.raises(ValidationError):
+            VerdictRecord(run_id="   ", scope="run", outcome=VerdictOutcome.PASS)
+
+    def test_verdict_record_rejects_blank_overridden_verdict_id(self) -> None:
+        with pytest.raises(ValidationError):
+            VerdictRecord(
+                verdict_id="   ",
+                run_id="run_1",
+                scope="run",
+                outcome=VerdictOutcome.PASS,
+            )
+
+    def test_run_record_rejects_blank_seed_id(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(seed_id="   ")
+
+    def test_run_record_rejects_blank_overridden_run_id(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(run_id="   ", seed_id="seed_abc")
+
+    def test_scalar_identifiers_are_trimmed(self) -> None:
+        record = StepRecord(
+            run_id="  run_1  ",
+            stage_id="  stage_1  ",
+            kind=StepKind.TOOL_CALL,
+            source_event_ids=("evt_1",),
+        )
+        assert record.run_id == "run_1"
+        assert record.stage_id == "stage_1"

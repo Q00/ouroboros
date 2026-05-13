@@ -146,6 +146,22 @@ IdentifierTuple = Annotated[tuple[str, ...], AfterValidator(_normalize_id_tuple)
 """Tuple-of-identifier field type that rejects blank or whitespace entries."""
 
 
+def _normalize_identifier(value: str) -> str:
+    """Trim and reject blank scalar identifiers used for cross-record links."""
+    if not isinstance(value, str):
+        msg = f"identifier must be a string; got {type(value).__name__}"
+        raise TypeError(msg)
+    stripped = value.strip()
+    if not stripped:
+        msg = "identifier is empty or whitespace-only; projections require usable IDs"
+        raise ValueError(msg)
+    return stripped
+
+
+Identifier = Annotated[str, AfterValidator(_normalize_identifier)]
+"""Scalar identifier type that trims whitespace and rejects blank values."""
+
+
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
@@ -230,8 +246,8 @@ class ArtifactRecord(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
-    artifact_id: str = Field(default_factory=lambda: _new_id("artifact"), min_length=1)
-    step_id: str = Field(..., min_length=1)
+    artifact_id: Identifier = Field(default_factory=lambda: _new_id("artifact"))
+    step_id: Identifier
     kind: str = Field(..., min_length=1)
     path: str | None = Field(default=None)
     media_type: str | None = Field(default=None)
@@ -285,12 +301,12 @@ class StepRecord(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
-    step_id: str = Field(default_factory=lambda: _new_id("step"), min_length=1)
-    run_id: str = Field(..., min_length=1)
-    stage_id: str = Field(..., min_length=1)
+    step_id: Identifier = Field(default_factory=lambda: _new_id("step"))
+    run_id: Identifier
+    stage_id: Identifier
     kind: StepKind
     name: str = Field(default="", description="Short human-readable label")
-    ac_id: str | None = Field(default=None)
+    ac_id: Identifier | None = Field(default=None)
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = Field(default=None)
     ok: bool | None = Field(default=None)
@@ -348,8 +364,8 @@ class StageRecord(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
-    stage_id: str = Field(default_factory=lambda: _new_id("stage"), min_length=1)
-    run_id: str = Field(..., min_length=1)
+    stage_id: Identifier = Field(default_factory=lambda: _new_id("stage"))
+    run_id: Identifier
     kind: StageKind
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = Field(default=None)
@@ -391,10 +407,10 @@ class VerdictRecord(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
-    verdict_id: str = Field(default_factory=lambda: _new_id("verdict"), min_length=1)
-    run_id: str = Field(..., min_length=1)
+    verdict_id: Identifier = Field(default_factory=lambda: _new_id("verdict"))
+    run_id: Identifier
     scope: Literal["run", "ac"]
-    ac_id: str | None = Field(default=None)
+    ac_id: Identifier | None = Field(default=None)
     outcome: VerdictOutcome
     rationale: str = Field(default="")
     evidence_event_ids: IdentifierTuple = Field(default_factory=tuple)
@@ -446,13 +462,13 @@ class RunRecord(BaseModel, frozen=True):
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
-    run_id: str = Field(default_factory=lambda: _new_id("run"), min_length=1)
-    seed_id: str = Field(..., min_length=1)
+    run_id: Identifier = Field(default_factory=lambda: _new_id("run"))
+    seed_id: Identifier
     goal: str = Field(default="")
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = Field(default=None)
     stage_ids: IdentifierTuple = Field(default_factory=tuple)
-    verdict_id: str | None = Field(default=None)
+    verdict_id: Identifier | None = Field(default=None)
     metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
 
     @field_validator("verdict_id")
@@ -478,6 +494,7 @@ __all__ = [
     "PROJECTION_SCHEMA_VERSION",
     "ArtifactRecord",
     "FrozenMetadata",
+    "Identifier",
     "IdentifierTuple",
     "RunRecord",
     "StageKind",
