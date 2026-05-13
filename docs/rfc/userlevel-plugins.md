@@ -366,6 +366,14 @@ hook audit event(s) and the blocked invocation result; it MUST NOT emit
 `plugin.failed` for the command entrypoint because the plugin command never
 started.
 
+`after_invocation` is scoped to started command entrypoint invocations only:
+it runs only after that entrypoint reaches `plugin.completed` or
+`plugin.failed`. It MUST NOT run for pre-start terminal outcomes such as trust
+denial, confirmation rejection, or a `fail_closed` `before_invocation` block.
+Those outcomes are represented by `plugin.failed` for trust/confirmation
+denials or by `plugin.hook.blocked` / `plugin.hook.failed` for hook failures,
+as applicable.
+
 ### Failure and timeout policy
 
 Every hook declaration must resolve to one of these failure policies:
@@ -424,6 +432,9 @@ events:
 - do not add fields outside the vendored audit schema until the schema is
   updated in `ouroboros-plugins` and re-vendored into core.
 
+Core MUST NOT emit `plugin.hook.*` events until the upstream audit-event
+schema and vendored core copy both include those event names.
+
 ### Review boundary for follow-up PRs
 
 The hook rollout should remain reviewable:
@@ -433,9 +444,11 @@ The hook rollout should remain reviewable:
    compatibility for existing v0.1 manifests.
 3. **Policy validator PR**: hook permission, timeout, and failure-policy
    validation without executing hooks.
-4. **Minimal invocation PR**: `before_invocation` / `after_invocation` only,
+4. **Audit-event schema/vendoring PR**: add `plugin.hook.*` event support
+   upstream and re-vendor it into core before any runtime emits hook events.
+5. **Minimal invocation PR**: `before_invocation` / `after_invocation` only,
    with fixture tests.
-5. **Deferred hook PRs**: tool, artifact, state, or rewind hooks only after the
+6. **Deferred hook PRs**: tool, artifact, state, or rewind hooks only after the
    corresponding harness substrate is stable.
 
 This sequencing is intentional: it prevents hook support from becoming a
