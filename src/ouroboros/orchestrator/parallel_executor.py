@@ -68,6 +68,7 @@ from ouroboros.orchestrator.events import (
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
     EvidenceRecord,
+    ProfileEvidenceConfigError,
     ValidationResult,
     extract_evidence,
     validate_evidence,
@@ -3505,6 +3506,8 @@ When complete, explicitly state: [TASK_COMPLETE]
         try:
             record = extract_evidence(final_message)
             validation = validate_evidence(self._execution_profile, record)
+        except ProfileEvidenceConfigError:
+            raise
         except EvidenceError as exc:
             return None, None, str(exc)
         return record, validation, None

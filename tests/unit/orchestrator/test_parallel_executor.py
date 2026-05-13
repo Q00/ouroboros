@@ -30,7 +30,7 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
-from ouroboros.orchestrator.profile_loader import load_profile
+from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 
 
 def _make_seed(*acceptance_criteria: str) -> Seed:
@@ -962,6 +962,91 @@ class TestParallelACExecutor:
         assert all(
             event.type != "execution.ac.typed_evidence.observed" for event in appended_events
         )
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_profile_evidence_config_error_remains_loud(self) -> None:
+        """Profile-authored evidence-schema bugs must not be downgraded to telemetry."""
+
+        class _StubImplementationRuntime:
+            _runtime_handle_backend = "opencode"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                del prompt, tools, system_prompt, resume_session_id
+                yield AgentMessage(
+                    type="result",
+                    content=(
+                        "Done.\n"
+                        "```json\n"
+                        '{"files_touched":["src/app.py"],'
+                        '"commands_run":["pytest"],'
+                        '"tests_passed":["tests/test_app.py"]}\n'
+                        "```"
+                    ),
+                    data={"subtype": "success"},
+                    resume_handle=RuntimeHandle(
+                        backend=resume_handle.backend if resume_handle is not None else "opencode",
+                        kind=resume_handle.kind
+                        if resume_handle is not None
+                        else "implementation_session",
+                        native_session_id="opencode-session-evidence",
+                        cwd=resume_handle.cwd if resume_handle is not None else "/tmp/project",
+                        metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+                    ),
+                )
+
+        profile = load_profile("code").model_copy(
+            update={
+                "evidence_schema": EvidenceSchema(
+                    required=("files_touched", "commands_run", "tests_passed"),
+                    rejected_if=("tests_passed != []",),
+                )
+            }
+        )
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_StubImplementationRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=profile,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Unsupported rejected_if expression" in result.error
 
     @pytest.mark.asyncio
     async def test_remembered_runtime_handle_preserves_live_controls(self) -> None:
