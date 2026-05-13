@@ -37,8 +37,8 @@ class BaselineMetricFixtureRow:
     prompt_chars: int
     completion_chars: int
     fabrication_incidents: int = 0
-    semantic_miss_incidents: int = 0
     note: str = ""
+    semantic_miss_incidents: int = 0
 
     def to_sample(self) -> FatHarnessMetricSample:
         """Convert this recorded row into the metric builder's sample type."""

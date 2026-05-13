@@ -12,6 +12,7 @@ from ouroboros.orchestrator.baseline_metrics_capture import (
     BASELINE_NEW_DOMAIN_LOC_DELTA,
     BASELINE_NEW_DOMAIN_YAML_DELTA,
     RECORDED_BASELINE_ROWS,
+    BaselineMetricFixtureRow,
     build_captured_baseline_metrics,
     render_captured_baseline_markdown,
 )
@@ -55,6 +56,17 @@ def test_captured_baseline_keeps_source_rows_with_report() -> None:
     assert payload["sources"]["sample_rows"][0]["source_ref"].startswith("fixture:")
     assert payload["sources"]["new_domain_cost"]["loc_delta"] == 42
     json.dumps(payload)
+
+
+def test_fixture_row_positional_constructor_preserves_legacy_note_argument_order() -> None:
+    row = BaselineMetricFixtureRow("AC-1", "fixture:legacy", True, 1, 10, 20, 0, "legacy note")
+
+    assert row.note == "legacy note"
+    assert row.semantic_miss_incidents == 0
+    sample = row.to_sample()
+    assert sample.prompt_chars == 10
+    assert sample.completion_chars == 20
+    assert sample.semantic_miss_incidents == 0
 
 
 def test_markdown_artifact_matches_renderer_output() -> None:

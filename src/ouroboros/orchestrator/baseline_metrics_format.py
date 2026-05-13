@@ -11,7 +11,7 @@ report and returns a string. No I/O, no LLM, no live execution. It
 is safe to call from CLI handlers, CI summaries, or test assertions.
 
 This module addresses a small but practical gap on the path to
-closing the ``agentos-substrate-wiring`` milestone — the 5 hard-gate
+closing the ``agentos-substrate-wiring`` milestone — the hard-gate
 baseline metrics must be reported in a human-checkable form so a
 maintainer can compare the values against the gate criteria without
 parsing JSON by hand. The report content itself (sample collection,

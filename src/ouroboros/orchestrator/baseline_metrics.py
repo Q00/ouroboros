@@ -1,6 +1,6 @@
 """Fixture-only fat-harness baseline metrics report (#961 / #830).
 
-The AgentOS SSOT (#961) requires five baseline metrics before the
+The AgentOS SSOT (#961) requires baseline metrics before the
 `ooo run` fat-harness path can be treated as stronger by default:
 1-shot AC pass rate, K=2 recovery rate, fabrication incidents, semantic-miss incidents, char budget per AC, and
 new-domain cost. This module defines the deterministic
@@ -155,7 +155,7 @@ def build_fat_harness_metrics_report(
     max_retries: int = DEFAULT_MAX_RETRIES,
     baseline_median_chars_per_ac: float | None = None,
 ) -> FatHarnessMetricsReport:
-    """Build a deterministic report for the five #961 fat-harness gates.
+    """Build a deterministic report for the #961 fat-harness gates.
 
     Args:
         profile: Execution profile name the samples came from.
