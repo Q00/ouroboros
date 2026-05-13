@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
-from ouroboros.harness.deliver_gate import DeliverGateVerdict
+from ouroboros.harness.deliver_gate import (
+    DeliverEvidenceClaim,
+    DeliverEvidenceFact,
+    DeliverGateVerdict,
+    evaluate_deliver_claim,
+)
 from ouroboros.harness.deliver_routing import route_deliver_gate_verdict
+from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.orchestrator.failure_taxonomy import RecoveryAction
 
 
@@ -34,6 +42,54 @@ def test_missing_evidence_routes_to_retry() -> None:
 
     assert route.action is RecoveryAction.RETRY
     assert route.reason == "deliver_gate_retryable_evidence_gap"
+
+
+def test_missing_claim_handle_from_real_verdict_producer_routes_to_retry() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            EvidenceEntry(
+                handle="ev_actual",
+                kind=EvidenceKind.COMMAND_EXECUTED,
+                ok=True,
+                started_at=datetime.now(UTC),
+                source_event_ids=("evt_1",),
+            ),
+        ),
+    )
+    claim = DeliverEvidenceClaim(
+        ac_id="AC-1",
+        facts=(
+            DeliverEvidenceFact(
+                fact_id="fact_missing",
+                evidence_handle="ev_missing",
+                statement="Missing evidence claim.",
+            ),
+        ),
+    )
+    verdict = evaluate_deliver_claim(
+        manifest,
+        claim,
+        traceguard_validator=lambda **_: type(
+            "TraceGuardResult",
+            (),
+            {
+                "accepted": False,
+                "unsupported_claim_rate": 1.0,
+                "accepted_claims": (),
+                "rejected_claims": (),
+                "allowed_fact_ids": (),
+                "allowed_chunk_ids": (),
+            },
+        )(),
+    )
+
+    route = route_deliver_gate_verdict(verdict)
+
+    assert verdict.rejected_reasons == (
+        "missing_evidence_handle: ev_missing is not present in manifest",
+    )
+    assert route.action is RecoveryAction.RETRY
 
 
 def test_unsupported_fact_routes_to_redispatch_before_escalation_threshold() -> None:

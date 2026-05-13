@@ -527,7 +527,10 @@ class TestEvaluateDeliverClaim:
         assert verdict.unsupported_claim_rate == 1.0
         assert verdict.accepted_fact_ids == ()
         assert verdict.rejected_fact_ids == ("ev_missing",)
-        assert verdict.rejected_reasons == ("unsupported_fact_id: fact is not present in manifest",)
+        assert verdict.rejected_reasons == (
+            "missing_evidence_handle: ev_missing is not present in manifest",
+            "unsupported_fact_id: fact is not present in manifest",
+        )
         assert verdict.evidence_event_ids == ()
 
     def test_accepted_verdict_can_use_allowed_ids_without_claim_objects(self) -> None:
