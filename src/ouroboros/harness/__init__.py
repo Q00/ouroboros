@@ -5,6 +5,10 @@ Run / Stage / Step / Artifact / Verdict records for #946 plus the
 journal-to-evidence-manifest normalizer for #978.
 """
 
+from ouroboros.harness.deliver_gate import (
+    EventStoreEvidenceReader,
+    load_ac_evidence_manifest,
+)
 from ouroboros.harness.journal import (
     EvidenceEntry,
     EvidenceKind,
@@ -27,6 +31,7 @@ __all__ = [
     "ArtifactRecord",
     "EvidenceEntry",
     "EvidenceKind",
+    "EventStoreEvidenceReader",
     "EvidenceManifest",
     "RunRecord",
     "StageKind",
@@ -36,5 +41,6 @@ __all__ = [
     "VerdictOutcome",
     "VerdictRecord",
     "filter_events_for_ac",
+    "load_ac_evidence_manifest",
     "normalize_events",
 ]
