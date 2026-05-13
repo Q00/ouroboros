@@ -104,7 +104,9 @@ class _FakeEventStore:
 
 class TestLoadAcEvidenceManifest:
     @pytest.mark.asyncio
-    async def test_execution_id_query_is_full_read_and_normalizes_chronologically(self) -> None:
+    async def test_execution_id_only_query_is_full_read_and_normalizes_chronologically(
+        self,
+    ) -> None:
         now = datetime.now(UTC)
         returned = _tool_returned(call_id="c1", when=now + timedelta(seconds=1))
         started = _tool_started(call_id="c1", when=now)
@@ -121,6 +123,30 @@ class TestLoadAcEvidenceManifest:
         assert entry.kind is EvidenceKind.COMMAND_EXECUTED
         assert entry.ok is True
         assert entry.source_event_ids == ("evt_started_c1", "evt_returned_c1")
+
+    @pytest.mark.asyncio
+    async def test_session_query_is_preferred_when_both_scope_anchors_exist(self) -> None:
+        now = datetime.now(UTC)
+        store = _FakeEventStore([_tool_started(call_id="c1", when=now)])
+
+        manifest = await load_ac_evidence_manifest(
+            store,
+            ac_id="ac_1",
+            session_id="sess_1",
+            execution_id="exec_1",
+        )
+
+        assert store.execution_queries == []
+        assert store.session_queries == [
+            {
+                "session_id": "sess_1",
+                "execution_id": "exec_1",
+                "event_type": None,
+                "limit": None,
+                "offset": 0,
+            }
+        ]
+        assert manifest.entries[0].source_event_ids == ("evt_started_c1",)
 
     @pytest.mark.asyncio
     async def test_identical_timestamps_keep_started_before_returned(self) -> None:

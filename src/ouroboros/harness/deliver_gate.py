@@ -50,10 +50,11 @@ async def load_ac_evidence_manifest(
 ) -> EvidenceManifest:
     """Load and normalize EventStore evidence for one AC deliver-gate check.
 
-    ``execution_id`` is preferred because it avoids accidentally splicing a
-    reused session's unrelated runs. ``session_id`` is retained for consumers
-    that only know the top-level session while the deliver gate is still in
-    observe-only/A-B wiring.
+    When both ``session_id`` and ``execution_id`` are available the loader
+    uses the session-related query with the execution correlation filter. That
+    includes session-aggregate I/O events as well as execution/runtime-scope
+    rows. ``execution_id``-only reads remain supported for callers that do not
+    know the session anchor.
 
     Args:
         event_store: Read-capable EventStore or test double.
@@ -85,16 +86,16 @@ async def load_ac_evidence_manifest(
         msg = "load_ac_evidence_manifest requires execution_id or session_id"
         raise ValueError(msg)
 
-    if normalized_execution_id is not None:
-        events = await event_store.query_execution_related_events(
-            normalized_execution_id,
-            limit=limit,
-        )
-    else:
-        assert normalized_session_id is not None
+    if normalized_session_id is not None:
         events = await event_store.query_session_related_events(
             normalized_session_id,
             execution_id=normalized_execution_id,
+            limit=limit,
+        )
+    else:
+        assert normalized_execution_id is not None
+        events = await event_store.query_execution_related_events(
+            normalized_execution_id,
             limit=limit,
         )
 
