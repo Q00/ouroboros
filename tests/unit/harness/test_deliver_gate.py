@@ -48,7 +48,7 @@ def _tool_started(
                 "tool_name": tool_name,
                 "ac_id": ac_id,
                 "args_preview": args_preview,
-                "child_ac_id": child_ac_id,
+                "extra": {"child_ac_id": child_ac_id} if child_ac_id is not None else None,
                 "session_id": session_id,
                 "execution_id": execution_id,
             }.items()
@@ -85,7 +85,7 @@ def _tool_returned(
                 "is_error": False,
                 "duration_ms": 7,
                 "result_preview": result_preview,
-                "child_ac_id": child_ac_id,
+                "extra": {"child_ac_id": child_ac_id} if child_ac_id is not None else None,
                 "session_id": session_id,
                 "execution_id": execution_id,
             }.items()

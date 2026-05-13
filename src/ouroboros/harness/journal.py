@@ -475,6 +475,11 @@ def _event_child_ac_id(*events: BaseEvent | None) -> str | None:
         value = event.data.get("child_ac_id")
         if isinstance(value, str) and value.strip():
             return value.strip()
+        extra = event.data.get("extra")
+        if isinstance(extra, Mapping):
+            value = extra.get("child_ac_id")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return None
 
 
