@@ -219,6 +219,7 @@ _MEMORY_CHECK_INTERVAL_SECONDS = 5.0
 _MEMORY_WAIT_MAX_SECONDS = 120.0
 _MAX_LEAF_RESULT_CHARS = 1200
 _SIBLING_HEADLINE_CHARS = 80
+_SiblingACRef = tuple[int | None, str]
 
 
 def _get_available_memory_gb() -> float | None:
@@ -1560,8 +1561,10 @@ class ParallelACExecutor:
     ) -> list[ACExecutionResult | BaseException]:
         """Execute one batch of stage-ready ACs using the shared worker pool."""
         batch_results: list[ACExecutionResult | BaseException] = [None] * len(batch_indices)
-        sibling_acs = (
-            [seed.acceptance_criteria[i] for i in batch_indices] if len(batch_indices) > 1 else []
+        sibling_acs: list[_SiblingACRef] = (
+            [(i, seed.acceptance_criteria[i]) for i in batch_indices]
+            if len(batch_indices) > 1
+            else []
         )
 
         async def _run_ac(idx: int, ac_idx: int) -> None:
@@ -2266,7 +2269,7 @@ class ParallelACExecutor:
         depth: int = 0,
         execution_id: str = "",
         level_contexts: list[LevelContext] | None = None,
-        sibling_acs: list[str] | None = None,
+        sibling_acs: list[_SiblingACRef] | None = None,
         retry_attempt: int = 0,
         execution_counters: dict[str, int] | None = None,
         is_sub_ac: bool = False,
@@ -2744,10 +2747,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
     def _build_atomic_dispatch_context(
         self,
         *,
+        ac_index: int,
         ac_content: str,
         label: str,
         level_contexts: list[LevelContext] | None,
-        sibling_acs: list[str] | None,
+        sibling_acs: list[_SiblingACRef] | None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Build the task section for an atomic leaf dispatch.
 
@@ -2761,8 +2765,8 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         sibling_statuses: list[SiblingStatus] = []
         if sibling_acs and len(sibling_acs) > 1:
-            for sibling_ac in sibling_acs:
-                if sibling_ac == ac_content:
+            for sibling_index, sibling_ac in sibling_acs:
+                if sibling_index == ac_index:
                     continue
                 sibling_id = f"sibling-{len(sibling_statuses) + 1}"
                 headline = " ".join(sibling_ac.split())
@@ -3107,7 +3111,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
         level_contexts: list[LevelContext] | None = None,
-        sibling_acs: list[str] | None = None,
+        sibling_acs: list[_SiblingACRef] | None = None,
         retry_attempt: int = 0,
         tool_catalog: tuple[MCPToolDefinition, ...] | None = None,
         execution_counters: dict[str, int] | None = None,
@@ -3135,6 +3139,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             indent = "  "
 
         task_section, context_governance_audit = self._build_atomic_dispatch_context(
+            ac_index=ac_index,
             ac_content=ac_content,
             label=label,
             level_contexts=level_contexts,
@@ -3159,7 +3164,9 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         # Build parallel awareness section
         parallel_section = ""
         if sibling_acs and len(sibling_acs) > 1:
-            other_acs = [ac for ac in sibling_acs if ac != ac_content]
+            other_acs = [
+                content for sibling_index, content in sibling_acs if sibling_index != ac_index
+            ]
             if other_acs:
                 context_is_governed = (
                     context_governance_audit is not None

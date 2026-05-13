@@ -200,7 +200,7 @@ class TestProfileAwareContextGovernance:
 
         result = await executor._execute_atomic_ac(
             ac_index=1,
-            ac_content="Implement governed leaf",
+            ac_content="Implement duplicate leaf",
             session_id="sess_context",
             tools=["Read"],
             system_prompt="system",
@@ -209,7 +209,7 @@ class TestProfileAwareContextGovernance:
             start_time=datetime.now(UTC),
             execution_id="exec_context",
             level_contexts=[level_context],
-            sibling_acs=["Implement governed leaf", "Update sibling docs"],
+            sibling_acs=[(1, "Implement duplicate leaf"), (2, "Implement duplicate leaf")],
         )
 
         assert result.success is True
@@ -218,8 +218,8 @@ class TestProfileAwareContextGovernance:
         assert "## Parent context" in prompt
         assert "Helper is ready" in prompt
         assert "## Sibling status" in prompt
-        assert "… sibling-1: Update sibling docs" in prompt
-        assert "## AC\nImplement governed leaf" in prompt
+        assert "… sibling-1: Implement duplicate leaf" in prompt
+        assert "## AC\nImplement duplicate leaf" in prompt
         assert "## Parallel Execution Notice" in prompt
         assert "Avoid modifying files that other agents are likely editing." in prompt
         assert "summarized in the governed sibling-status section above" in prompt
@@ -310,7 +310,7 @@ class TestProfileAwareContextGovernance:
             start_time=datetime.now(UTC),
             execution_id="exec_legacy_context",
             level_contexts=[level_context],
-            sibling_acs=["Implement legacy leaf", "Update sibling docs"],
+            sibling_acs=[(1, "Implement legacy leaf"), (2, "Update sibling docs")],
         )
 
         assert result.success is True
