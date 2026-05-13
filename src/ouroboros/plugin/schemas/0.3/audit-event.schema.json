@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Q00/ouroboros/schemas/local/0.3/audit-event.schema.json",
+  "title": "Ouroboros Plugin Audit Event (v0.3)",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_type",
+    "occurred_at",
+    "plugin",
+    "command",
+    "trust_state",
+    "capabilities_used",
+    "permissions_used",
+    "result"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.3"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "plugin.discovered",
+        "plugin.installed",
+        "plugin.trusted",
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.completed",
+        "plugin.failed"
+      ]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "plugin": {
+      "type": "object",
+      "required": ["name", "version", "source_type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "source_type": {
+          "type": "string",
+          "enum": ["local_path", "plugin_home", "first_party"]
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "required": ["namespace", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": { "type": "string" },
+        "name": { "type": "string" },
+        "argv": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "argv_summary": {
+          "type": "object",
+          "description": "Bounded fingerprint of argv added in step 1 of the audit-fidelity plan. Lets operators size the actual distribution before any cap is chosen and lets consumers correlate identical invocations by sha without dragging the full payload through the index. The argv field itself is unchanged in this step.",
+          "required": ["argc", "byte_length", "sha256"],
+          "additionalProperties": false,
+          "properties": {
+            "argc": { "type": "integer", "minimum": 0 },
+            "byte_length": { "type": "integer", "minimum": 0 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      }
+    },
+    "trust_state": {
+      "type": "string",
+      "enum": ["discovered", "installed", "trusted", "disabled", "blocked", "first_party"]
+    },
+    "capabilities_used": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "permissions_used": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "result": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["success", "blocked", "failed", "trust_subject_changed"]
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Q00/ouroboros/schemas/local/0.3/plugin.schema.json",
+  "title": "Ouroboros Plugin Manifest (v0.3)",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "name",
+    "version",
+    "source",
+    "commands",
+    "capabilities",
+    "permissions",
+    "entrypoint"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.3"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "description": {
+      "type": "string",
+      "default": ""
+    },
+    "source": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["local_path", "plugin_home", "first_party"]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"type": {"const": "local_path"}},
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["type", "path"]
+          }
+        },
+        {
+          "if": {
+            "properties": {"type": {"const": "plugin_home"}},
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["type", "path"]
+          }
+        }
+      ]
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["namespace", "name", "summary", "usage", "risk"],
+        "additionalProperties": false,
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "usage": {
+            "type": "string",
+            "minLength": 1
+          },
+          "risk": {
+            "type": "string",
+            "enum": ["read_only", "write", "destructive"]
+          },
+          "requires_confirmation": {
+            "type": "boolean",
+            "default": false
+          },
+          "arguments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type", "required"],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_-]*$"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": ["string", "boolean", "integer", "path", "url"]
+                },
+                "required": {
+                  "type": "boolean"
+                },
+                "description": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "access"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "seed",
+              "ledger",
+              "state",
+              "provenance",
+              "runtime",
+              "mcp",
+              "handoff",
+              "progress"
+            ]
+          },
+          "access": {
+            "type": "string",
+            "enum": ["read", "write", "execute", "attach"]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "uniqueItems": true
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scope", "risk", "required"],
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*){0,3}$"
+          },
+          "risk": {
+            "type": "string",
+            "enum": ["read_only", "write", "destructive"]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "uniqueItems": true
+    },
+    "entrypoint": {
+      "type": "object",
+      "required": ["type", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "command"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "required": ["events"],
+      "additionalProperties": false,
+      "default": {
+        "events": [
+          "plugin.invoked",
+          "plugin.permission_used",
+          "plugin.completed",
+          "plugin.failed"
+        ]
+      },
+      "properties": {
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "plugin.discovered",
+              "plugin.installed",
+              "plugin.trusted",
+              "plugin.invoked",
+              "plugin.permission_used",
+              "plugin.completed",
+              "plugin.failed"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+
+    },
+    "hooks": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["name", "entrypoint", "failure_policy"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "before_invocation",
+              "after_invocation"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "entrypoint": {
+            "type": "object",
+            "required": ["type", "command"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "command"
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*){0,3}$"
+            },
+            "uniqueItems": true,
+            "default": []
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "failure_policy": {
+            "type": "string",
+            "enum": ["fail_open", "fail_closed"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -47,8 +47,9 @@ except ImportError as exc:  # pragma: no cover
 
 # Support window per Q00/ouroboros-plugins#11 lock: current MAJOR + previous MAJOR.
 # v0.1 is the archived base manifest contract; v0.2 is the local extension
-# that adds optional hook declarations.
-SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2")
+# that adds optional hook declarations; v0.3 narrows hooks[].name to the
+# v1 ``HookKind`` vocabulary at the JSON Schema layer.
+SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2", "0.3")
 
 # Source types whose `path` must be a sandboxed relative slug — no absolute
 # paths and no parent-directory traversal. `local_path` resolves relative to

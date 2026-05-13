@@ -1,0 +1,14 @@
+{
+  "source": "Q00/ouroboros",
+  "purpose": "Local plugin manifest schema v0.3: tightens hook lifecycle vocabulary to v1 names only.",
+  "note": "Iterates on local 0.2 by narrowing hooks[].name to the v1 HookKind set ('before_invocation', 'after_invocation'). Deferred and excluded hook names are no longer accepted at the JSON Schema layer; rejection messages now distinguish between deferred / excluded / unknown in the Python validator. Hook execution/dispatch remains intentionally out of scope.",
+  "local_extensions": {
+    "plugin.schema.json": [
+      "Bumped $id/title/schema_version const from 0.2 to 0.3.",
+      "Narrowed hooks[].name enum to the v1 HookKind set: 'before_invocation' and 'after_invocation'. Deferred candidates (before_tool_call, after_tool_call, before_artifact_write, after_artifact_write, on_error, on_cancel) and excluded candidates (before_runtime_start, after_runtime_start, before_state_commit, after_state_commit, on_event, on_rewind) are no longer accepted at the schema layer; refer to src/ouroboros/plugin/hooks.py for the routing helpers and follow-up RFC slices."
+    ],
+    "audit-event.schema.json": [
+      "Vendored audit-event.schema.json with local 0.3 $id/title/schema_version alignment; audit event shape remains otherwise unchanged from 0.2."
+    ]
+  }
+}
