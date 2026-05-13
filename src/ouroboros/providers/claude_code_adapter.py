@@ -618,8 +618,20 @@ class ClaudeCodeAdapter:
 
         # If allowed_tools is explicitly set (even empty []), compute disallowed
         # from it (strict mode). None = permissive (only block dangerous).
+        #
+        # NOTE — this static enumerate is a defense-in-depth layer that pairs
+        # with the ``extra_args["allowedTools"] = ""`` override below.  It
+        # does NOT, on its own, give a tight envelope: every name the CLI
+        # exposes but ouroboros does not list here would slip through as
+        # "not in allowed, not in disallowed" → CLI default-allowed.  The
+        # real closure lives in the ``extra_args`` override; this list is
+        # kept so a stale SDK that ignores the extra_args path still has
+        # the dangerous built-ins blocked.  See follow-up to
+        # https://github.com/Q00/ouroboros/issues/869.
         if self._allowed_tools is not None:
             all_tools = [
+                # Built-ins enumerated in claude-agent-sdk (subprocess_cli.py)
+                # and observed in Claude Code 2.x deferred-tool catalogs.
                 "Read",
                 "Write",
                 "Edit",
@@ -633,6 +645,20 @@ class ClaudeCodeAdapter:
                 "TodoRead",
                 "TodoWrite",
                 "LS",
+                # The names below were missing from the original enumerate
+                # and made up the leak surface that consumed ``max_turns=1``
+                # in the nested interview envelope.  ``Skill`` is referenced
+                # by name inside the SDK itself (subprocess_cli.py
+                # ``_apply_skills_defaults``).  The rest are documented
+                # built-ins surfaced by the Claude Code CLI.
+                "Skill",
+                "AskUserQuestion",
+                "ExitPlanMode",
+                "EnterPlanMode",
+                "BashOutput",
+                "KillShell",
+                "SlashCommand",
+                "ToolSearch",
             ]
             disallowed = [t for t in all_tools if t not in self._allowed_tools]
         else:
@@ -680,6 +706,50 @@ class ClaudeCodeAdapter:
             # default built-ins like AskUserQuestion/ToolSearch.
             options_kwargs["allowed_tools"] = list(self._allowed_tools)
             options_kwargs["tools"] = list(self._allowed_tools)
+
+            # ---------------------------------------------------------------
+            # KNOWN STRUCTURAL DEBT — read before editing.
+            #
+            # ``claude-agent-sdk`` collapses ``allowed_tools=[]`` to a falsy
+            # check before forwarding it as a CLI flag (subprocess_cli.py
+            # ``if effective_allowed_tools: cmd.extend(["--allowedTools", ...])``).
+            # An empty list therefore *omits* ``--allowedTools`` entirely
+            # instead of forwarding ``--allowedTools ""``, which causes the
+            # spawned CLI to fall back to its default allow-list (every
+            # built-in tool).  Combined with the static disallowed_tools
+            # enumerate above — which inevitably rots as the CLI grows new
+            # built-ins (``Skill``, ``AskUserQuestion``, ``ExitPlanMode``,
+            # MCP tools, …) — even a strict envelope leaks tool descriptors
+            # into the sub-CLI's system prompt and tempts the model into a
+            # ``ToolUseBlock`` on its only ``max_turns=1`` turn.  That was
+            # the residual leak left over after #869 closed the
+            # skills/agents/plugins/hooks/setting_sources paths.
+            #
+            # The closure below is intentionally a *workaround*, not a fix.
+            # It depends on the SDK's ``extra_args`` passthrough surface
+            # (verified present at every supported pin) to send the literal
+            # ``--allowedTools ""`` flag the SDK refuses to emit on our
+            # behalf, regardless of how its own falsy short-circuit
+            # evolves.  An ``[]`` envelope at this layer means "no tools,
+            # period"; we honor that contract here instead of relying on
+            # SDK semantics that have already proven brittle.
+            #
+            # The fragility of this code is structural, not local: ouroboros
+            # routes a *pure question-generation* workload through an
+            # *agentic CLI subprocess* and then turns every agent surface
+            # off one by one.  That mismatch is the underlying cause; this
+            # override is the cheapest patch that keeps it from biting
+            # production while the CLI/SDK pin is in motion.  If a future
+            # SDK release honors ``allowed_tools=[]`` natively, drop this
+            # override and the static enumerate above can shrink back to
+            # the dangerous-only safety net.
+            #
+            # Follow-up to: https://github.com/Q00/ouroboros/issues/869
+            # ---------------------------------------------------------------
+            if not self._allowed_tools:
+                extra_args = dict(options_kwargs.get("extra_args") or {})
+                extra_args.setdefault("allowedTools", "")
+                options_kwargs["extra_args"] = extra_args
 
         if self._strict_mcp_config:
             # Opt-in MCP isolation: prevents the spawned subprocess from
