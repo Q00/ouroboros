@@ -74,24 +74,36 @@ async def load_ac_evidence_manifest(
     if not normalized_ac_id:
         msg = "load_ac_evidence_manifest requires a non-blank ac_id"
         raise ValueError(msg)
-    if execution_id is None and session_id is None:
+    normalized_execution_id = _normalize_optional_anchor("execution_id", execution_id)
+    normalized_session_id = _normalize_optional_anchor("session_id", session_id)
+    if normalized_execution_id is None and normalized_session_id is None:
         msg = "load_ac_evidence_manifest requires execution_id or session_id"
         raise ValueError(msg)
 
-    if execution_id is not None:
+    if normalized_execution_id is not None:
         events = await event_store.query_execution_related_events(
-            execution_id,
+            normalized_execution_id,
             limit=limit,
         )
     else:
-        assert session_id is not None
+        assert normalized_session_id is not None
         events = await event_store.query_session_related_events(
-            session_id,
-            execution_id=execution_id,
+            normalized_session_id,
+            execution_id=normalized_execution_id,
             limit=limit,
         )
 
     return normalize_events(_chronological_events(events), ac_id=normalized_ac_id)
+
+
+def _normalize_optional_anchor(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        msg = f"load_ac_evidence_manifest received blank {name}"
+        raise ValueError(msg)
+    return stripped
 
 
 def _chronological_events(events: Iterable[BaseEvent]) -> tuple[BaseEvent, ...]:

@@ -171,6 +171,31 @@ class TestLoadAcEvidenceManifest:
             await load_ac_evidence_manifest(_FakeEventStore([]), ac_id="ac_1")
 
     @pytest.mark.asyncio
+    async def test_rejects_blank_execution_id_instead_of_session_fallback(self) -> None:
+        store = _FakeEventStore([])
+
+        with pytest.raises(ValueError, match="blank execution_id"):
+            await load_ac_evidence_manifest(
+                store,
+                ac_id="ac_1",
+                execution_id="  ",
+                session_id="sess_1",
+            )
+
+        assert store.execution_queries == []
+        assert store.session_queries == []
+
+    @pytest.mark.asyncio
+    async def test_rejects_blank_session_id(self) -> None:
+        store = _FakeEventStore([])
+
+        with pytest.raises(ValueError, match="blank session_id"):
+            await load_ac_evidence_manifest(store, ac_id="ac_1", session_id="  ")
+
+        assert store.execution_queries == []
+        assert store.session_queries == []
+
+    @pytest.mark.asyncio
     async def test_rejects_blank_ac_id_before_query(self) -> None:
         store = _FakeEventStore([])
 
