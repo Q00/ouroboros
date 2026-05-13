@@ -2561,6 +2561,7 @@ class ParallelACExecutor:
         )
         min_sub_acs = MIN_SUB_ACS
         max_sub_acs = MAX_SUB_ACS
+        profile_metadata = self._decomposition_profile_metadata()
         if self._execution_profile is not None:
             params = params_from_profile(
                 self._execution_profile,
@@ -2626,6 +2627,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 log.info(
                     "parallel_executor.decomposition.atomic",
                     ac_index=ac_index,
+                    **profile_metadata,
                 )
                 return None
 
@@ -2639,6 +2641,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                             "parallel_executor.decomposition.success",
                             ac_index=ac_index,
                             sub_ac_count=len(sub_acs),
+                            **profile_metadata,
                         )
                         return sub_acs
 
@@ -2646,6 +2649,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 "parallel_executor.decomposition.parse_failed",
                 ac_index=ac_index,
                 response_preview=response_text[:100],
+                **profile_metadata,
             )
             return None
 
@@ -2654,6 +2658,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 "parallel_executor.decomposition.timeout",
                 ac_index=ac_index,
                 timeout_seconds=DECOMPOSITION_TIMEOUT_SECONDS,
+                **profile_metadata,
             )
             return None
         except Exception as e:
@@ -2661,6 +2666,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 "parallel_executor.decomposition.error",
                 ac_index=ac_index,
                 error=str(e),
+                **profile_metadata,
             )
             return None
 
@@ -2704,6 +2710,26 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             await asyncio.sleep(_MEMORY_CHECK_INTERVAL_SECONDS)
             elapsed += _MEMORY_CHECK_INTERVAL_SECONDS
         log.warning("memory_pressure.timeout", label=label)
+
+    def _decomposition_profile_metadata(self) -> dict[str, Any]:
+        """Return audit metadata for profile-aware decomposition decisions.
+
+        The metadata is intentionally descriptive only. It lets projections,
+        tests, and reviewers prove which profile shaped decomposition without
+        changing dispatch behavior or flipping the fat-harness default path.
+        """
+        profile = self._execution_profile
+        if profile is None:
+            return {"decomposition_profile": None}
+        return {
+            "decomposition_profile": {
+                "profile": profile.profile,
+                "axis": profile.axis,
+                "min_unit": profile.min_unit,
+                "cut_signal": profile.cut_signal,
+                "max_branching": profile.max_branching,
+            }
+        }
 
     @staticmethod
     def _runtime_event_metadata(message: AgentMessage) -> dict[str, Any]:
@@ -3512,6 +3538,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 "total_levels": total_levels,
                 "child_indices": ac_indices,  # TUI expects this field name
                 "ac_count": len(ac_indices),
+                **self._decomposition_profile_metadata(),
             },
         )
         await self._event_store.append(event)

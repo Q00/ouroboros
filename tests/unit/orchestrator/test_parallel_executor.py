@@ -30,6 +30,7 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
+from ouroboros.orchestrator.profile_loader import load_profile
 
 
 def _make_seed(*acceptance_criteria: str) -> Seed:
@@ -80,6 +81,54 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
     event_store.append.side_effect = _append
     event_store.replay.side_effect = _replay
     return event_store, appended_events
+
+
+class TestProfileAwareDecompositionAudit:
+    @pytest.mark.asyncio
+    async def test_level_started_event_records_active_decomposition_profile(self) -> None:
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            execution_profile=load_profile("code"),
+        )
+
+        await executor._emit_level_started(
+            session_id="sess_profile",
+            level=1,
+            ac_indices=[0, 1],
+            total_levels=2,
+        )
+
+        event = event_store.append.await_args.args[0]
+        assert event.type == "execution.decomposition.level_started"
+        assert event.data["decomposition_profile"] == {
+            "profile": "code",
+            "axis": "testable_unit",
+            "min_unit": "single function or module with at least one runnable test",
+            "cut_signal": "sub-AC produces an independently runnable test",
+            "max_branching": 5,
+        }
+
+    @pytest.mark.asyncio
+    async def test_level_started_event_records_legacy_decomposition_fallback(self) -> None:
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+        )
+
+        await executor._emit_level_started(
+            session_id="sess_legacy",
+            level=1,
+            ac_indices=[0],
+            total_levels=1,
+        )
+
+        event = event_store.append.await_args.args[0]
+        assert event.data["decomposition_profile"] is None
 
 
 class TestParallelACExecutor:

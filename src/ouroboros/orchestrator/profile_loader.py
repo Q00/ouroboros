@@ -4,9 +4,9 @@ Loads structured per-domain profiles consumed by harness invariants
 (verifier focus, decomposition axis, evidence schema, suggested tools).
 
 This module is wiring-only: it defines the schema and loads YAML files.
-No existing caller is modified by this module — downstream PRs wire the
-loaded profile into `execution_strategy`, `parallel_executor`, and the
-forthcoming verifier loop.
+The live runner now passes loaded profiles into `parallel_executor`
+for decomposition. Evidence/verifier-loop consumption remains staged for
+follow-up PRs.
 
 Usage:
     from ouroboros.orchestrator.profile_loader import load_profile

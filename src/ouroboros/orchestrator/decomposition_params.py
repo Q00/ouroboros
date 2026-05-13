@@ -4,15 +4,10 @@ H4 reframes decomposition from "free prose system prompt" to "structured
 parameters consumed by a uniform decomposer". Adding a new domain becomes
 a YAML edit, not a prompt-engineering pass.
 
-The current `parallel_executor._try_decompose_ac` runs with a hardcoded
-`system_prompt="You are a task decomposition expert..."` — the splitter
-has no notion of which profile it is splitting for. After PR 9 wires
-this module in, the decomposer will receive a `DecompositionParams`
-built from the active `ExecutionProfile` and use the axis/min_unit/
-cut_signal verbatim.
-
-This PR ships the parameter shape and the prompt builder only.
-parallel_executor is unchanged.
+`parallel_executor._try_decompose_ac` consumes these parameters when
+the live runner supplies an `ExecutionProfile`, while preserving the
+legacy generic prompt when no profile is available. This keeps the
+profile-aware path additive and auditable before any default flip.
 """
 
 from __future__ import annotations
