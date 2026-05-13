@@ -51,27 +51,43 @@ from pydantic import (
 PROJECTION_SCHEMA_VERSION = 1
 """Initial schema version for the projection vocabulary."""
 
+ProjectionSchemaVersion = Literal[1]
+"""Supported projection schema version for v1 records."""
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers — immutable metadata + identifier hygiene
 # ---------------------------------------------------------------------------
 
 
-def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
-    """Normalize the incoming value into an immutable ``MappingProxyType``.
+def _freeze_value(value: Any) -> Any:
+    """Recursively copy common JSON-like containers into immutable views."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_freeze_value(item) for item in value)
+    return value
 
-    Accepts ``None``, plain mappings, and existing ``MappingProxyType``
-    views. Anything else is rejected so callers cannot smuggle mutable
-    state in through unexpected types. ``ValueError`` is raised on
-    non-mapping inputs so Pydantic surfaces it as a regular
-    ``ValidationError``.
-    """
+
+def _thaw_value(value: Any) -> Any:
+    """Convert immutable container views back to plain serializable containers."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | frozenset):
+        return [_thaw_value(item) for item in value]
+    return value
+
+
+def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
+    """Normalize incoming mapping-shaped input into a recursively frozen copy."""
     if value is None:
         return MappingProxyType({})
-    if isinstance(value, MappingProxyType):
-        return value
     if isinstance(value, Mapping):
-        return MappingProxyType(dict(value))
+        frozen = _freeze_value(value)
+        if isinstance(frozen, MappingProxyType):
+            return frozen
     msg = f"metadata must be a mapping, got {type(value).__name__}"
     raise ValueError(msg)
 
@@ -88,17 +104,11 @@ def _empty_frozen_metadata() -> Mapping[str, Any]:
 
 
 def _ensure_frozen_after(value: Any) -> Mapping[str, Any]:
-    """Final-stage wrapper that guarantees a ``MappingProxyType`` view.
-
-    Pydantic's built-in mapping handling may unwrap a ``MappingProxyType``
-    back into a plain dict between the ``BeforeValidator`` and the final
-    field value. This AfterValidator runs last so the stored attribute
-    is always a read-only view regardless of upstream coercion choices.
-    """
-    if isinstance(value, MappingProxyType):
-        return value
+    """Final-stage wrapper guaranteeing recursively immutable values."""
     if isinstance(value, Mapping):
-        return MappingProxyType(dict(value))
+        frozen = _freeze_value(value)
+        if isinstance(frozen, MappingProxyType):
+            return frozen
     msg = f"metadata must be a mapping, got {type(value).__name__}"
     raise ValueError(msg)
 
@@ -107,7 +117,7 @@ FrozenMetadata = Annotated[
     Mapping[str, Any],
     BeforeValidator(_coerce_to_mapping),
     AfterValidator(_ensure_frozen_after),
-    PlainSerializer(lambda value: dict(value), return_type=dict, when_used="always"),
+    PlainSerializer(lambda value: _thaw_value(value), return_type=dict, when_used="always"),
 ]
 """Metadata field type that blocks top-level dict mutation.
 
@@ -245,7 +255,7 @@ class ArtifactRecord(BaseModel, frozen=True):
             and additive; top-level mutation is blocked at runtime.
     """
 
-    schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
+    schema_version: ProjectionSchemaVersion = PROJECTION_SCHEMA_VERSION
     artifact_id: Identifier = Field(default_factory=lambda: _new_id("artifact"))
     step_id: Identifier
     kind: str = Field(..., min_length=1)
@@ -300,7 +310,7 @@ class StepRecord(BaseModel, frozen=True):
             ``MappingProxyType`` view.
     """
 
-    schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
+    schema_version: ProjectionSchemaVersion = PROJECTION_SCHEMA_VERSION
     step_id: Identifier = Field(default_factory=lambda: _new_id("step"))
     run_id: Identifier
     stage_id: Identifier
@@ -363,7 +373,7 @@ class StageRecord(BaseModel, frozen=True):
             ``MappingProxyType`` view.
     """
 
-    schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
+    schema_version: ProjectionSchemaVersion = PROJECTION_SCHEMA_VERSION
     stage_id: Identifier = Field(default_factory=lambda: _new_id("stage"))
     run_id: Identifier
     kind: StageKind
@@ -406,7 +416,7 @@ class VerdictRecord(BaseModel, frozen=True):
             ``MappingProxyType`` view.
     """
 
-    schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
+    schema_version: ProjectionSchemaVersion = PROJECTION_SCHEMA_VERSION
     verdict_id: Identifier = Field(default_factory=lambda: _new_id("verdict"))
     run_id: Identifier
     scope: Literal["run", "ac"]
@@ -461,7 +471,7 @@ class RunRecord(BaseModel, frozen=True):
             ``MappingProxyType`` view.
     """
 
-    schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
+    schema_version: ProjectionSchemaVersion = PROJECTION_SCHEMA_VERSION
     run_id: Identifier = Field(default_factory=lambda: _new_id("run"))
     seed_id: Identifier
     goal: str = Field(default="")
@@ -495,6 +505,7 @@ __all__ = [
     "ArtifactRecord",
     "FrozenMetadata",
     "Identifier",
+    "ProjectionSchemaVersion",
     "IdentifierTuple",
     "RunRecord",
     "StageKind",

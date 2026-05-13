@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
+from typing import Any, cast
 
 from pydantic import ValidationError
 import pytest
@@ -57,6 +58,10 @@ class TestRunRecord:
     def test_default_schema_version(self) -> None:
         record = RunRecord(seed_id="seed_abc")
         assert record.schema_version == PROJECTION_SCHEMA_VERSION
+
+    def test_rejects_unsupported_schema_version(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(seed_id="seed_abc", schema_version=2)
 
     def test_is_frozen(self) -> None:
         record = RunRecord(seed_id="seed_abc")
@@ -328,6 +333,28 @@ class TestMetadataIsRuntimeImmutable:
         dumped = record.model_dump()
         assert isinstance(dumped["metadata"], dict)
         assert dumped["metadata"] == {"k": "v", "n": 1}
+
+    def test_metadata_copies_existing_mapping_proxy(self) -> None:
+        backing = {"k": "v"}
+        record = RunRecord(seed_id="seed_abc", metadata=MappingProxyType(backing))
+
+        backing["k"] = "tampered"
+
+        assert record.metadata["k"] == "v"
+
+    def test_nested_metadata_is_copied_and_frozen(self) -> None:
+        backing: dict[str, Any] = {"nested": {"k": "v"}, "items": ["a"]}
+        record = RunRecord(seed_id="seed_abc", metadata=backing)
+
+        backing["nested"]["k"] = "tampered"
+        backing["items"].append("b")
+
+        nested = cast(dict[str, Any], record.metadata["nested"])
+        assert nested["k"] == "v"
+        with pytest.raises(TypeError):
+            nested["k"] = "tampered"
+        assert record.metadata["items"] == ("a",)
+        assert record.model_dump()["metadata"] == {"nested": {"k": "v"}, "items": ["a"]}
 
     def test_metadata_rejects_non_mapping_input(self) -> None:
         with pytest.raises(ValidationError):
