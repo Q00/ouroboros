@@ -30,6 +30,7 @@ from ouroboros.mcp.tools.definitions import (
     LateralThinkHandler,
     LineageStatusHandler,
     MeasureDriftHandler,
+    ProjectionQueryHandler,
     QueryEventsHandler,
     RalphHandler,
     SessionStatusHandler,
@@ -506,6 +507,134 @@ class TestQueryEventsHandler:
         assert "exec_parallel_123_sub_ac_0_0" in text
 
 
+class TestProjectionQueryHandler:
+    """Test ProjectionQueryHandler class."""
+
+    def test_definition_name(self) -> None:
+        handler = ProjectionQueryHandler()
+        assert handler.definition.name == "ouroboros_query_projection"
+
+    def test_definition_has_read_only_query_parameters(self) -> None:
+        handler = ProjectionQueryHandler()
+        param_names = {p.name for p in handler.definition.parameters}
+        assert param_names == {"session_id", "execution_id", "seed_id", "limit"}
+        assert all(p.required is False for p in handler.definition.parameters)
+
+    async def test_handle_requires_session_or_execution_id(self) -> None:
+        handler = ProjectionQueryHandler()
+        result = await handler.handle({})
+
+        assert result.is_err
+        assert "session_id or execution_id is required" in str(result.error)
+
+    async def test_handle_projects_execution_events(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Execution aggregate queries expose machine-readable projection records."""
+        from datetime import UTC, datetime, timedelta
+
+        from ouroboros.events.base import BaseEvent
+
+        t0 = datetime(2026, 1, 1, tzinfo=UTC)
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_proj_start",
+                type="tool.call.started",
+                timestamp=t0,
+                aggregate_type="execution",
+                aggregate_id="exec_projection_123",
+                data={
+                    "call_id": "call_1",
+                    "tool_name": "Bash",
+                    "seed_id": "seed_projection_123",
+                    "goal": "Inspect projection",
+                    "args_preview": "pytest -q",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_proj_return",
+                type="tool.call.returned",
+                timestamp=t0 + timedelta(milliseconds=10),
+                aggregate_type="execution",
+                aggregate_id="exec_projection_123",
+                data={
+                    "call_id": "call_1",
+                    "tool_name": "Bash",
+                    "is_error": False,
+                    "duration_ms": 10,
+                    "result_preview": "ok",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"execution_id": "exec_projection_123"})
+
+        assert result.is_ok
+        assert "Run Projection" in result.value.text_content
+        assert result.value.meta["execution_id"] == "exec_projection_123"
+        assert result.value.meta["seed_id"] == "seed_projection_123"
+        assert result.value.meta["event_count"] == 2
+        assert result.value.meta["run"]["goal"] == "Inspect projection"
+        assert len(result.value.meta["stages"]) == 1
+        assert len(result.value.meta["steps"]) == 1
+        step = result.value.meta["steps"][0]
+        assert step["kind"] == "shell_command"
+        assert step["ok"] is True
+        assert step["source_event_ids"] == ["evt_proj_start", "evt_proj_return"]
+
+    async def test_handle_projects_session_related_events(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Session queries include execution events connected by execution_id."""
+        from datetime import UTC, datetime
+
+        from ouroboros.events.base import BaseEvent
+
+        t0 = datetime(2026, 1, 1, tzinfo=UTC)
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_session_start",
+                type="orchestrator.session.started",
+                timestamp=t0,
+                aggregate_type="session",
+                aggregate_id="orch_projection_123",
+                data={
+                    "execution_id": "exec_projection_456",
+                    "seed_id": "seed_projection_456",
+                    "goal": "Project session",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_session_tool",
+                type="tool.call.started",
+                timestamp=t0,
+                aggregate_type="execution",
+                aggregate_id="exec_projection_456",
+                data={
+                    "execution_id": "exec_projection_456",
+                    "call_id": "call_session",
+                    "tool_name": "Read",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "orch_projection_123"})
+
+        assert result.is_ok
+        assert result.value.meta["session_id"] == "orch_projection_123"
+        assert result.value.meta["seed_id"] == "seed_projection_456"
+        assert result.value.meta["event_count"] == 2
+        assert result.value.meta["steps"][0]["name"] == "Read"
+
+
 class TestOuroborosTools:
     """Test OUROBOROS_TOOLS constant."""
 
@@ -530,6 +659,7 @@ class TestOuroborosTools:
         "ouroboros_measure_drift",
         "ouroboros_pm_interview",
         "ouroboros_qa",
+        "ouroboros_query_projection",
         "ouroboros_query_events",
         "ouroboros_ralph",
         "ouroboros_session_status",
@@ -556,6 +686,7 @@ class TestOuroborosTools:
         assert JobResultHandler in handler_types
         assert CancelJobHandler in handler_types
         assert QueryEventsHandler in handler_types
+        assert ProjectionQueryHandler in handler_types
         assert GenerateSeedHandler in handler_types
         assert MeasureDriftHandler in handler_types
         assert InterviewHandler in handler_types

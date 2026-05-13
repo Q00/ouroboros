@@ -1175,6 +1175,7 @@ def create_ouroboros_server(
         LateralThinkHandler,
         LineageStatusHandler,
         MeasureDriftHandler,
+        ProjectionQueryHandler,
         QueryEventsHandler,
         RalphHandler,
         SessionStatusHandler,
@@ -1724,6 +1725,9 @@ def create_ouroboros_server(
             job_manager=job_manager,
         ),
         QueryEventsHandler(
+            event_store=event_store,
+        ),
+        ProjectionQueryHandler(
             event_store=event_store,
         ),
         GenerateSeedHandler(
