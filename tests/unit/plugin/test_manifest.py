@@ -61,6 +61,12 @@ REFERENCE_MANIFEST: dict = {
 }
 
 
+def _hook_manifest() -> dict:
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["schema_version"] = "0.2"
+    return payload
+
+
 def _write(tmp_path: Path, payload: dict | str) -> Path:
     target = tmp_path / "ouroboros.plugin.json"
     if isinstance(payload, str):
@@ -84,13 +90,13 @@ def test_load_reference_manifest(tmp_path: Path) -> None:
 
 def test_hook_declarations_load_as_frozen_specs(tmp_path: Path) -> None:
     """Lifecycle hooks are optional manifest declarations, not executable side effects."""
-    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload = _hook_manifest()
     payload["hooks"] = [
         {
             "name": "before_invocation",
             "description": "Inspect invocation metadata before execution.",
             "entrypoint": {"type": "command", "command": "python -m plugin_hooks before"},
-            "permissions": ["ledger:read"],
+            "permissions": ["github:read"],
             "timeout_seconds": 5,
             "failure_policy": "fail_closed",
         },
@@ -106,11 +112,51 @@ def test_hook_declarations_load_as_frozen_specs(tmp_path: Path) -> None:
     assert len(manifest.hooks) == 2
     assert manifest.hooks[0].name == "before_invocation"
     assert manifest.hooks[0].entrypoint.command == "python -m plugin_hooks before"
-    assert manifest.hooks[0].permissions == ("ledger:read",)
+    assert manifest.hooks[0].permissions == ("github:read",)
     assert manifest.hooks[0].timeout_seconds == 5
     assert manifest.hooks[0].failure_policy == "fail_closed"
     assert manifest.hooks[1].timeout_seconds is None
     assert manifest.hooks[1].permissions == ()
+
+
+def test_hook_permission_must_be_declared_top_level(tmp_path: Path) -> None:
+    payload = _hook_manifest()
+    payload["hooks"] = [
+        {
+            "name": "before_invocation",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks before"},
+            "permissions": ["ledger:read"],
+            "failure_policy": "fail_closed",
+        }
+    ]
+
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, payload))
+
+    err = excinfo.value
+    assert err.json_pointer == "/hooks/0/permissions/0"
+    assert "top-level permissions" in err.args[0]
+    assert "permissions[].scope" in err.expected
+    assert err.got == "ledger:read"
+
+
+def test_duplicate_hook_permissions_still_rejected_by_schema(tmp_path: Path) -> None:
+    payload = _hook_manifest()
+    payload["hooks"] = [
+        {
+            "name": "before_invocation",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks before"},
+            "permissions": ["github:read", "github:read"],
+            "failure_policy": "fail_closed",
+        }
+    ]
+
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, payload))
+
+    err = excinfo.value
+    assert err.json_pointer == "/hooks/0/permissions"
+    assert "unique" in err.args[0].lower()
 
 
 def test_optional_hooks_default_to_empty_tuple(tmp_path: Path) -> None:
@@ -118,8 +164,23 @@ def test_optional_hooks_default_to_empty_tuple(tmp_path: Path) -> None:
     assert manifest.hooks == ()
 
 
-def test_unknown_hook_name_rejected(tmp_path: Path) -> None:
+def test_v01_rejects_top_level_hooks(tmp_path: Path) -> None:
     bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["hooks"] = [
+        {
+            "name": "before_invocation",
+            "entrypoint": {"type": "command", "command": "python -m plugin_hooks"},
+            "failure_policy": "fail_open",
+        }
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/hooks"
+    assert "hooks" in excinfo.value.args[0]
+
+
+def test_unknown_hook_name_rejected(tmp_path: Path) -> None:
+    bad = _hook_manifest()
     bad["hooks"] = [
         {
             "name": "around_everything",
@@ -133,7 +194,7 @@ def test_unknown_hook_name_rejected(tmp_path: Path) -> None:
 
 
 def test_hook_failure_policy_rejected_outside_enum(tmp_path: Path) -> None:
-    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad = _hook_manifest()
     bad["hooks"] = [
         {
             "name": "before_invocation",
@@ -147,7 +208,7 @@ def test_hook_failure_policy_rejected_outside_enum(tmp_path: Path) -> None:
 
 
 def test_hook_timeout_has_bounded_positive_integer(tmp_path: Path) -> None:
-    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad = _hook_manifest()
     bad["hooks"] = [
         {
             "name": "before_invocation",
@@ -226,7 +287,7 @@ def test_returned_manifest_is_frozen(tmp_path: Path) -> None:
 
 def test_optional_fields_omitted(tmp_path: Path) -> None:
     """Test 9: manifest without description and audit loads with defaults
-    (per Q00/ouroboros-plugins#6 lock — 8 required + 2 optional)."""
+    (per Q00/ouroboros-plugins#6 lock — v0.1 has 8 required + 2 optional)."""
     bare = {k: v for k, v in REFERENCE_MANIFEST.items() if k not in ("description", "audit")}
     manifest = load_manifest(_write(tmp_path, bare))
     assert manifest.description == ""

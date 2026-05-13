@@ -160,7 +160,7 @@ This layer is distinct from the in-process Skills & Agents Registry
 operational workflows (GitHub PR ops, Jira triage, Slack incident
 response) into pluggable packages rather than into core or `ooo auto`.
 
-**Manifest contract**: see [Q00/ouroboros-plugins/schemas/0.1/](https://github.com/Q00/ouroboros-plugins/tree/main/schemas/0.1).
+**Manifest contract**: see [Q00/ouroboros-plugins/schemas/0.1/](https://github.com/Q00/ouroboros-plugins/tree/main/schemas/0.1). Core currently supports archived v0.1 plus a local v0.2 extension for optional hook declarations.
 
 > **Terminology guard**: in this codebase, "plugin" by itself can refer to
 > either the in-process Skills/Agents Registry or the UserLevel Programs

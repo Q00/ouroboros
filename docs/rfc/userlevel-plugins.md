@@ -148,7 +148,7 @@ The success metric is therefore **"the boundary holds"** — measurable, not
 
 ## Manifest Schema
 
-Authoritative source:
+Authoritative v0.1 source:
 [Q00/ouroboros-plugins/schemas/0.1/plugin.schema.json](https://github.com/Q00/ouroboros-plugins/blob/main/schemas/0.1/plugin.schema.json).
 
 Per the locked decision in
@@ -164,6 +164,10 @@ the manifest carries **8 required + 2 optional** top-level fields:
 Each required field is load-bearing for some part of the lifecycle, lockfile,
 or firewall; each optional field has a sensible default the firewall provides
 unconditionally.
+
+Core supports v0.1 and a local v0.2 extension. Archived v0.1 manifests do
+not accept top-level `hooks`; v0.2 adds optional hook declarations while
+preserving the v0.1 fields.
 
 The `source.type` enum is `local_path | plugin_home | first_party`. Per
 [Q00/ouroboros-plugins#8](https://github.com/Q00/ouroboros-plugins/issues/8),

@@ -5,8 +5,8 @@ against the vendored JSON Schema under `src/ouroboros/plugin/schemas/<major>/`.
 
 The locked spec (Q00/ouroboros#728) requires:
 
-  - `PluginManifest` is a frozen dataclass with 8 required + 2 optional fields
-    (per Q00/ouroboros-plugins#6 lock).
+  - `PluginManifest` is a frozen dataclass with 8 required + optional fields
+    selected by the manifest schema version.
   - `load_manifest(path)` returns a frozen, validated manifest.
   - On any schema violation, raise `PluginManifestError` with structured
     fields: `path`, `json_pointer`, `expected`, `got`. A reviewer can match
@@ -39,9 +39,9 @@ except ImportError as exc:  # pragma: no cover
 
 
 # Support window per Q00/ouroboros-plugins#11 lock: current MAJOR + previous MAJOR.
-# Today we only ship 0.1; once 1.0 ships, both "0.1" and "1.0" are accepted, "0.x"
-# below the latest is unsupported.
-SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1",)
+# v0.1 is the archived base manifest contract; v0.2 is the local extension
+# that adds optional hook declarations.
+SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2")
 
 # Source types whose `path` must be a sandboxed relative slug — no absolute
 # paths and no parent-directory traversal. `local_path` resolves relative to
@@ -159,9 +159,8 @@ class AuditSpec:
 class PluginManifest:
     """Frozen representation of a validated plugin manifest.
 
-    Field shape matches Q00/ouroboros-plugins/schemas/0.1/plugin.schema.json
-    after the locked Q00/ouroboros-plugins#6 (8 required + 2 optional)
-    decision is applied.
+    Field shape matches the selected plugin manifest schema. v0.1 manifests
+    do not accept hooks; v0.2 manifests may declare optional hooks.
     """
 
     schema_version: str
@@ -343,7 +342,26 @@ def _build_command(raw: dict[str, Any]) -> CommandSpec:
     )
 
 
-def _build_hook(raw: dict[str, Any]) -> HookSpec:
+def _build_hook(
+    raw: dict[str, Any],
+    *,
+    declared_permission_scopes: frozenset[str],
+    hook_index: int,
+    manifest_path: str | Path,
+) -> HookSpec:
+    for permission_index, scope in enumerate(raw.get("permissions", ())):
+        if scope not in declared_permission_scopes:
+            raise PluginManifestError(
+                "hook permission must be declared in top-level permissions",
+                path=str(manifest_path),
+                json_pointer=f"/hooks/{hook_index}/permissions/{permission_index}",
+                expected=(
+                    "permission scope declared in top-level permissions[].scope "
+                    f"({sorted(declared_permission_scopes)!r})"
+                ),
+                got=scope,
+            )
+
     entrypoint_raw = raw["entrypoint"]
     return HookSpec(
         name=raw["name"],
@@ -355,6 +373,26 @@ def _build_hook(raw: dict[str, Any]) -> HookSpec:
         timeout_seconds=raw.get("timeout_seconds"),
         permissions=tuple(raw.get("permissions", ())),
         description=raw.get("description", ""),
+    )
+
+
+def _escape_json_pointer_token(token: str) -> str:
+    return token.replace("~", "~0").replace("/", "~1")
+
+
+def _validation_error_pointer(error: Any) -> str:
+    """Return the most useful manifest pointer for a jsonschema error."""
+    if error.validator == "additionalProperties" and isinstance(error.instance, dict):
+        allowed = set(error.schema.get("properties", ()))
+        unexpected = [key for key in error.instance if key not in allowed]
+        if unexpected:
+            path = [*error.absolute_path, unexpected[0]]
+            return "/" + "/".join(_escape_json_pointer_token(str(p)) for p in path)
+
+    return (
+        "/" + "/".join(_escape_json_pointer_token(str(p)) for p in error.absolute_path)
+        if error.absolute_path
+        else ""
     )
 
 
@@ -450,7 +488,7 @@ def load_manifest(path: str | Path) -> PluginManifest:
     )
     if errors:
         err = errors[0]
-        pointer = "/" + "/".join(str(p) for p in err.absolute_path) if err.absolute_path else ""
+        pointer = _validation_error_pointer(err)
         raise PluginManifestError(
             err.message,
             path=str(manifest_path),
@@ -495,7 +533,16 @@ def load_manifest(path: str | Path) -> PluginManifest:
     else:
         audit = AuditSpec(events=tuple(audit_raw["events"]))
 
-    hooks = tuple(_build_hook(h) for h in raw.get("hooks", ()))
+    declared_permission_scopes = frozenset(p.scope for p in permissions)
+    hooks = tuple(
+        _build_hook(
+            h,
+            declared_permission_scopes=declared_permission_scopes,
+            hook_index=index,
+            manifest_path=manifest_path,
+        )
+        for index, h in enumerate(raw.get("hooks", ()))
+    )
 
     return PluginManifest(
         schema_version=schema_version,

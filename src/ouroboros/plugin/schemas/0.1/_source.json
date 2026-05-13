@@ -2,7 +2,7 @@
   "repo": "Q00/ouroboros-plugins",
   "schema_version": "0.1",
   "vendored_at": "2026-05-07",
-  "note": "These schemas mirror Q00/ouroboros-plugins/schemas/0.1/. They reflect the locked decisions in Q00/ouroboros-plugins #6 (manifest 8+2 fields), #10 (3-value risk enum), #11 (per-major archive). Sync via scripts/sync-plugin-schemas.sh once Q00/ouroboros-plugins#13/#16/#19/#20 land on upstream main.",
+  "note": "These schemas mirror Q00/ouroboros-plugins/schemas/0.1/. They reflect the locked decisions in Q00/ouroboros-plugins #6 (manifest 8+2 fields), #10 (3-value risk enum), #11 (per-major archive). Hook declarations are a local 0.2 extension and are not accepted by archived 0.1 manifests. Sync via scripts/sync-plugin-schemas.sh once Q00/ouroboros-plugins#13/#16/#19/#20 land on upstream main.",
   "local_extensions": {
     "audit-event.schema.json": [
       "Added 'trust_subject_changed' to result.status enum to satisfy the locked RFC at docs/rfc/userlevel-plugins.md (Trust identity / canonical tree hash): the firewall MUST emit plugin.failed with result.status='trust_subject_changed' when an installed plugin's bytes drift from the trusted artifact_digest. Pending upstream sync; the next vendored copy MUST preserve this enum value."
