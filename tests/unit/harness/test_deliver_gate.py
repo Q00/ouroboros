@@ -653,6 +653,51 @@ class TestEvaluateDeliverClaim:
             "unsupported_fact_id: fact is not present in manifest",
         )
 
+    def test_unsupported_claim_rate_counts_factless_rejections(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(_manifest_entry(handle="ev_actual", ok=True, source_event_ids=("evt_1",)),),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="fact_actual",
+                    evidence_handle="ev_actual",
+                    statement="Supported claim.",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="fact_missing",
+                    evidence_handle="ev_missing",
+                    statement="Missing claim.",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=lambda **_: _TraceGuardResult(
+                accepted=False,
+                allowed_fact_ids=("fact_actual",),
+                allowed_chunk_ids=("ev_actual",),
+                rejected_claims=(
+                    _TraceGuardRejection(
+                        reason="chunk_handle_without_fact",
+                        claim=_TraceGuardClaim(fact_id=None, chunk_id="ev_orphan"),
+                        detail="chunk was cited without a supported fact",
+                    ),
+                ),
+            ),
+        )
+
+        assert verdict.unsupported_claim_rate == 1.0
+        assert verdict.rejected_fact_ids == ("fact_missing",)
+        assert verdict.rejected_reasons == (
+            "missing_evidence_handle: ev_missing is not present in manifest",
+            "chunk_handle_without_fact: chunk was cited without a supported fact",
+        )
+
     def test_claim_ac_id_must_match_manifest_scope(self) -> None:
         manifest = EvidenceManifest(
             ac_id="AC-1",

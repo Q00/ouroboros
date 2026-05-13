@@ -464,11 +464,20 @@ def _unsupported_claim_rate(
 ) -> float:
     if total_claims <= 0:
         return raw_rate
-    rejected_fact_ids = {fact_id for fact_id, _, _ in rejected if fact_id is not None}
-    rejected_count = len(rejected_fact_ids) if rejected_fact_ids else len(rejected)
+    rejected_keys = {_rejection_key(item) for item in rejected}
+    rejected_count = len(rejected_keys)
     if rejected_count:
         return round(min(1.0, rejected_count / total_claims), 4)
     return raw_rate
+
+
+def _rejection_key(item: tuple[str | None, str | None, str]) -> tuple[str, str]:
+    fact_id, chunk_id, reason = item
+    if fact_id is not None:
+        return ("fact", fact_id)
+    if chunk_id is not None:
+        return ("chunk", chunk_id)
+    return ("reason", reason)
 
 
 def _evidence_event_ids_for_handles(
