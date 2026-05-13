@@ -227,8 +227,8 @@ class TestProfileAwareContextGovernance:
         ]
         assert len(context_events) == 1
         assert context_events[0].data["context_governed"] is True
-        assert context_events[0].data["context_observe_only"] is True
-        assert context_events[0].data["context_enforced"] is False
+        assert context_events[0].data["context_acceptance_enforced"] is False
+        assert context_events[0].data["context_default_flipped"] is False
         assert context_events[0].data["profile"] == "code"
         assert context_events[0].data["context_sibling_status_count"] == 1
 

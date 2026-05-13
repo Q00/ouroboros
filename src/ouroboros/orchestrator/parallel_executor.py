@@ -2789,16 +2789,16 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             # how often the hard governor would have rejected a leaf.
             return f"## Your Task ({label})\n{ac_content}", {
                 "context_governed": False,
-                "context_observe_only": True,
-                "context_enforced": False,
+                "context_acceptance_enforced": False,
+                "context_default_flipped": False,
                 "context_governance_error": str(exc),
                 "context_fallback": "legacy_prompt",
             }
         rendered = composed.render()
         audit = {
             "context_governed": True,
-            "context_observe_only": True,
-            "context_enforced": False,
+            "context_acceptance_enforced": False,
+            "context_default_flipped": False,
             "context_rendered_chars": len(rendered),
             "context_truncated": composed.truncated,
             "context_sibling_status_count": len(composed.sibling_lines),
