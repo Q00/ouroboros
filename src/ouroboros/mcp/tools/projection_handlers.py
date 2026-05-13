@@ -77,8 +77,7 @@ class ProjectionQueryHandler:
                     name="limit",
                     type=ToolInputType.INTEGER,
                     description=(
-                        "Maximum related events to inspect for session queries. "
-                        "Default: 1000."
+                        "Maximum related events to inspect for session queries. Default: 1000."
                     ),
                     required=False,
                     default=_DEFAULT_LIMIT,
@@ -189,7 +188,10 @@ async def _load_projection_events(
             limit=limit,
         )
     if execution_id is not None:
-        return await store.replay("execution", execution_id)
+        return await store.query_execution_related_events(
+            execution_id=execution_id,
+            limit=limit,
+        )
     return []
 
 

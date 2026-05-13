@@ -569,6 +569,20 @@ class TestProjectionQueryHandler:
                 },
             )
         )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_proj_child",
+                type="tool.call.started",
+                timestamp=t0 + timedelta(milliseconds=20),
+                aggregate_type="execution",
+                aggregate_id="exec_projection_123_child_0",
+                data={
+                    "parent_execution_id": "exec_projection_123",
+                    "call_id": "call_child",
+                    "tool_name": "Read",
+                },
+            )
+        )
 
         handler = ProjectionQueryHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_projection_123"})
@@ -577,14 +591,15 @@ class TestProjectionQueryHandler:
         assert "Run Projection" in result.value.text_content
         assert result.value.meta["execution_id"] == "exec_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_123"
-        assert result.value.meta["event_count"] == 2
+        assert result.value.meta["event_count"] == 3
         assert result.value.meta["run"]["goal"] == "Inspect projection"
         assert len(result.value.meta["stages"]) == 1
-        assert len(result.value.meta["steps"]) == 1
+        assert len(result.value.meta["steps"]) == 2
         step = result.value.meta["steps"][0]
         assert step["kind"] == "shell_command"
         assert step["ok"] is True
         assert step["source_event_ids"] == ["evt_proj_start", "evt_proj_return"]
+        assert result.value.meta["steps"][1]["name"] == "Read"
 
     async def test_handle_projects_session_related_events(
         self,

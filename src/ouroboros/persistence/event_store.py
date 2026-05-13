@@ -853,6 +853,64 @@ class EventStore:
                 },
             ) from e
 
+    async def query_execution_related_events(
+        self,
+        execution_id: str,
+        event_type: str | None = None,
+        limit: int | None = 50,
+        offset: int = 0,
+    ) -> list[BaseEvent]:
+        """Query events for an execution and its child/runtime scopes.
+
+        This is the execution-only counterpart to
+        :meth:`query_session_related_events`: it includes the root execution
+        aggregate plus events whose payload links back through ``execution_id``
+        or ``parent_execution_id``.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="query_execution_related_events",
+            )
+
+        conditions = [
+            events_table.c.aggregate_id == execution_id,
+            func.json_extract(events_table.c.payload, "$.execution_id") == execution_id,
+            func.json_extract(events_table.c.payload, "$.parent_execution_id") == execution_id,
+        ]
+
+        try:
+            async with self._engine.begin() as conn:
+                query = (
+                    select(events_table)
+                    .where(or_(*conditions))
+                    .order_by(events_table.c.timestamp.desc())
+                )
+
+                if event_type:
+                    query = query.where(events_table.c.event_type == event_type)
+
+                if limit is not None:
+                    query = query.limit(limit).offset(offset)
+                elif offset:
+                    query = query.offset(offset)
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to query execution-related events: {e}",
+                operation="select",
+                table="events",
+                details={
+                    "execution_id": execution_id,
+                    "event_type": event_type,
+                    "limit": limit,
+                    "offset": offset,
+                },
+            ) from e
+
     async def query_session_related_events_after(
         self,
         session_id: str,

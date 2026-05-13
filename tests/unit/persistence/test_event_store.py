@@ -784,6 +784,45 @@ class TestSessionRelatedEvents:
         assert f"{execution_scope}_child_0" in aggregate_ids
         assert "other_evolve_ac_0" not in aggregate_ids
 
+    async def test_execution_related_events_include_child_scopes(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """Execution-only queries include child/runtime aggregates."""
+        execution_id = "exec-related-only"
+        events = [
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={"execution_id": execution_id},
+            ),
+            BaseEvent(
+                type="execution.subagent.started",
+                aggregate_type="execution",
+                aggregate_id="exec-related-only-child",
+                data={"parent_execution_id": execution_id},
+            ),
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id="other-execution-child",
+                data={"parent_execution_id": "other-execution"},
+            ),
+        ]
+        for event in events:
+            await event_store.append(event)
+
+        result = await event_store.query_execution_related_events(
+            execution_id,
+            limit=None,
+        )
+        aggregate_ids = {event.aggregate_id for event in result}
+
+        assert execution_id in aggregate_ids
+        assert "exec-related-only-child" in aggregate_ids
+        assert "other-execution-child" not in aggregate_ids
+
     async def test_session_related_events_do_not_join_on_lossy_normalized_scope(
         self,
         event_store: EventStore,
