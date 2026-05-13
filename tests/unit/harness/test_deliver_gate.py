@@ -15,7 +15,12 @@ from ouroboros.harness.deliver_gate import (
     evaluate_deliver_claim,
     load_ac_evidence_manifest,
 )
-from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
+from ouroboros.harness.journal import (
+    EvidenceEntry,
+    EvidenceKind,
+    EvidenceManifest,
+    normalize_events,
+)
 
 
 def _tool_started(
@@ -25,6 +30,9 @@ def _tool_started(
     aggregate_id: str = "exec_1",
     session_id: str | None = None,
     execution_id: str | None = None,
+    tool_name: str = "Bash",
+    args_preview: str | None = None,
+    child_ac_id: str | None = None,
     when: datetime,
 ) -> BaseEvent:
     return BaseEvent(
@@ -37,8 +45,10 @@ def _tool_started(
             key: value
             for key, value in {
                 "call_id": call_id,
-                "tool_name": "Bash",
+                "tool_name": tool_name,
                 "ac_id": ac_id,
+                "args_preview": args_preview,
+                "child_ac_id": child_ac_id,
                 "session_id": session_id,
                 "execution_id": execution_id,
             }.items()
@@ -54,10 +64,14 @@ def _tool_returned(
     aggregate_id: str = "exec_1",
     session_id: str | None = None,
     execution_id: str | None = None,
+    tool_name: str = "Bash",
+    result_preview: str | None = None,
+    child_ac_id: str | None = None,
+    event_id: str | None = None,
     when: datetime,
 ) -> BaseEvent:
     return BaseEvent(
-        id=f"evt_returned_{call_id}",
+        id=event_id or f"evt_returned_{call_id}",
         type="tool.call.returned",
         timestamp=when,
         aggregate_type="execution",
@@ -66,10 +80,12 @@ def _tool_returned(
             key: value
             for key, value in {
                 "call_id": call_id,
-                "tool_name": "Bash",
+                "tool_name": tool_name,
                 "ac_id": ac_id,
                 "is_error": False,
                 "duration_ms": 7,
+                "result_preview": result_preview,
+                "child_ac_id": child_ac_id,
                 "session_id": session_id,
                 "execution_id": execution_id,
             }.items()
@@ -519,33 +535,51 @@ class TestEvaluateDeliverClaim:
 
     def test_q5_fixture_parent_synthesis_lifts_multiple_child_ac_facts(self) -> None:
         """#978 Q5 fixture: parent synthesis can cite child AC evidence handles."""
-        manifest = EvidenceManifest(
+        base = datetime.now(UTC)
+        manifest = normalize_events(
+            [
+                _tool_started(
+                    call_id="ac1_test",
+                    ac_id="AC-PARENT",
+                    child_ac_id="AC-1",
+                    when=base,
+                ),
+                _tool_returned(
+                    call_id="ac1_test",
+                    ac_id="AC-PARENT",
+                    child_ac_id="AC-1",
+                    result_preview="tests passed",
+                    event_id="evt_ac1_test",
+                    when=base + timedelta(milliseconds=1),
+                ),
+                _tool_started(
+                    call_id="ac2_edit",
+                    ac_id="AC-PARENT",
+                    child_ac_id="AC-2",
+                    tool_name="Edit",
+                    args_preview="path=docs/ac2.md; scope=whole_file",
+                    when=base + timedelta(milliseconds=2),
+                ),
+                _tool_returned(
+                    call_id="ac2_edit",
+                    ac_id="AC-PARENT",
+                    child_ac_id="AC-2",
+                    tool_name="Edit",
+                    result_preview="docs updated",
+                    event_id="evt_ac2_edit",
+                    when=base + timedelta(milliseconds=3),
+                ),
+            ],
             ac_id="AC-PARENT",
-            metadata={"child_ac_ids": ("AC-1", "AC-2")},
-            entries=(
-                _manifest_entry(
-                    handle="ev_child_ac_1",
-                    ok=True,
-                    payload={
-                        "tool_name": "Bash",
-                        "result_preview": "tests passed",
-                        "child_ac_id": "AC-1",
-                    },
-                    source_event_ids=("evt_ac1_test",),
+        )
+        manifest = manifest.model_copy(
+            update={
+                "metadata": {"child_ac_ids": ("AC-1", "AC-2")},
+                "entries": (
+                    manifest.entries[0].model_copy(update={"handle": "ev_child_ac_1"}),
+                    manifest.entries[1].model_copy(update={"handle": "ev_child_ac_2"}),
                 ),
-                _manifest_entry(
-                    handle="ev_child_ac_2",
-                    ok=True,
-                    kind=EvidenceKind.FILE_MODIFIED,
-                    payload={
-                        "tool_name": "Edit",
-                        "args_preview": "path=docs/ac2.md; scope=whole_file",
-                        "result_preview": "docs updated",
-                        "child_ac_id": "AC-2",
-                    },
-                    source_event_ids=("evt_ac2_edit",),
-                ),
-            ),
+            }
         )
         claim = DeliverEvidenceClaim(
             ac_id="AC-PARENT",
@@ -575,7 +609,12 @@ class TestEvaluateDeliverClaim:
             "child_ac:AC-1:test_passed",
             "child_ac:AC-2:file_modified",
         )
-        assert verdict.evidence_event_ids == ("evt_ac1_test", "evt_ac2_edit")
+        assert verdict.evidence_event_ids == (
+            "evt_started_ac1_test",
+            "evt_ac1_test",
+            "evt_started_ac2_edit",
+            "evt_ac2_edit",
+        )
         assert validator.calls[0]["parent_synthesis"]["result"]["observed_facts"] == [
             {
                 "fact_id": "child_ac:AC-1:test_passed",
@@ -593,13 +632,13 @@ class TestEvaluateDeliverClaim:
                 fact_id="child_ac:AC-1:test_passed",
                 chunk_id="ev_child_ac_1",
                 text="child_ac_id=AC-1; tests passed",
-                child_call_id="evt_ac1_test",
+                child_call_id="evt_started_ac1_test,evt_ac1_test",
             ),
             TraceGuardEvidenceInput(
                 fact_id="child_ac:AC-2:file_modified",
                 chunk_id="ev_child_ac_2",
                 text="child_ac_id=AC-2; path=docs/ac2.md; scope=whole_file; docs updated",
-                child_call_id="evt_ac2_edit",
+                child_call_id="evt_started_ac2_edit,evt_ac2_edit",
             ),
         )
 

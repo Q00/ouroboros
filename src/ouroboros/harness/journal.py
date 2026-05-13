@@ -321,8 +321,11 @@ def _tool_payload(
     duration_ms: int | None,
     is_error: bool | None,
     error_kind: str | None,
+    child_ac_id: str | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"tool_name": tool_name}
+    if child_ac_id is not None:
+        payload["child_ac_id"] = child_ac_id
     if args_preview is not None:
         payload["args_preview"] = args_preview
     if result_preview is not None:
@@ -465,6 +468,16 @@ def _slot_call_id(event: BaseEvent) -> str:
     return call_id.strip() if isinstance(call_id, str) else ""
 
 
+def _event_child_ac_id(*events: BaseEvent | None) -> str | None:
+    for event in events:
+        if event is None or not isinstance(event.data, dict):
+            continue
+        value = event.data.get("child_ac_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _build_tool_entry_for_returned(
     start_event: BaseEvent | None,
     returned_event: BaseEvent,
@@ -493,6 +506,7 @@ def _build_tool_entry_for_returned(
         duration_ms=returned_event.data.get("duration_ms"),
         is_error=is_error if isinstance(is_error, bool) else None,
         error_kind=returned_event.data.get("error_kind"),
+        child_ac_id=_event_child_ac_id(returned_event, start_event),
     )
 
     source_event_ids: list[str] = []
@@ -527,6 +541,7 @@ def _build_tool_entry_from_start_only(
         duration_ms=None,
         is_error=None,
         error_kind=None,
+        child_ac_id=_event_child_ac_id(start_event),
     )
     return EvidenceEntry(
         kind=_classify_tool_kind(tool_name.strip()),
