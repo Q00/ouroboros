@@ -375,10 +375,13 @@ def test_no_token_shaped_strings_in_any_envelope(tmp_path: Path) -> None:
 
 
 def test_envelopes_carry_all_emitted_event_types() -> None:
-    """The locked spec lists 7 audit event types. Path 1 exercises 3 of
-    them (invoked, permission_used, completed); Path 2 exercises failed;
-    discovered/installed/trusted are emitted by the manager (#731). This
-    test confirms the audit-event types tuple covers all of them."""
+    """The audit-event type tuple covers lifecycle and hook events.
+
+    Path 1 exercises invoked, permission_used, completed; Path 2
+    exercises failed; discovered/installed/trusted are emitted by the
+    manager (#731). Hook-specific names are part of the closed audit
+    vocabulary even though this E2E fixture does not execute hooks.
+    """
     expected = {
         "plugin.discovered",
         "plugin.installed",
@@ -387,5 +390,9 @@ def test_envelopes_carry_all_emitted_event_types() -> None:
         "plugin.permission_used",
         "plugin.completed",
         "plugin.failed",
+        "plugin.hook_started",
+        "plugin.hook_completed",
+        "plugin.hook_failed",
+        "plugin.permission_denied",
     }
     assert set(AUDIT_EVENT_TYPES) == expected

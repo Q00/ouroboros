@@ -14,6 +14,7 @@ import sys
 
 import pytest
 
+from ouroboros.plugin.ledger_adapter import AUDIT_EVENT_TYPES
 from ouroboros.plugin.manifest import (
     SUPPORTED_SCHEMA_VERSIONS,
     PluginManifest,
@@ -154,6 +155,27 @@ def test_optional_fields_omitted(tmp_path: Path) -> None:
     assert "plugin.invoked" in manifest.audit.events
     assert "plugin.completed" in manifest.audit.events
     assert "plugin.failed" in manifest.audit.events
+
+
+def test_audit_events_accept_full_explicit_vocabulary(tmp_path: Path) -> None:
+    """Manifests may opt into any event type the audit-event schema emits."""
+    raw = json.loads(json.dumps(REFERENCE_MANIFEST))
+    raw["audit"] = {"events": list(AUDIT_EVENT_TYPES)}
+
+    manifest = load_manifest(_write(tmp_path, raw))
+
+    assert manifest.audit.events == AUDIT_EVENT_TYPES
+
+
+def test_audit_events_reject_unknown_names(tmp_path: Path) -> None:
+    """Keep the manifest audit contract closed to the explicit vocabulary."""
+    raw = json.loads(json.dumps(REFERENCE_MANIFEST))
+    raw["audit"] = {"events": ["plugin.hook_started", "plugin.not_real"]}
+
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, raw))
+
+    assert excinfo.value.json_pointer == "/audit/events/1"
 
 
 def test_first_party_source_branch(tmp_path: Path) -> None:
