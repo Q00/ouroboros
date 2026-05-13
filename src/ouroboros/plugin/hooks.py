@@ -135,6 +135,22 @@ HOOK_BLOCKED_EVENT: Final[str] = "plugin.hook.blocked"
 HOOK_FAILED_EVENT: Final[str] = "plugin.hook.failed"
 HOOK_AUDIT_EVENTS: Final[frozenset[str]] = frozenset({HOOK_BLOCKED_EVENT, HOOK_FAILED_EVENT})
 
+#: Hook permission scope reserved for read-only lifecycle observation
+#: (the v1 baseline used by ``before_invocation`` / ``after_invocation``
+#: observability hooks per ``docs/rfc/userlevel-plugins.md``). Manifest
+#: authors declare it under top-level ``permissions[].scope`` so the
+#: existing ``plugin.permission_used`` emission rule covers it without
+#: a separate event family. Stronger lifecycle scopes for policy
+#: decisions are deferred to a follow-up RFC slice.
+HOOK_LIFECYCLE_READ_SCOPE: Final[str] = "plugin.lifecycle.read"
+
+#: Frozen set of v1 hook permission scopes. Validators and manifest
+#: authors reference this set rather than the bare string so the
+#: contract intent is observable at every call site. The set is
+#: intentionally a single entry for v1 — additional lifecycle scopes
+#: land alongside the RFC update that introduces them.
+HOOK_LIFECYCLE_SCOPES: Final[frozenset[str]] = frozenset({HOOK_LIFECYCLE_READ_SCOPE})
+
 
 def is_v1_hook_kind(value: str) -> bool:
     """Return True iff ``value`` names a hook included in v1.
@@ -161,16 +177,30 @@ def is_v1_failure_policy(value: str) -> bool:
     return value in {policy.value for policy in HookFailurePolicy}
 
 
+def is_hook_lifecycle_scope(value: str) -> bool:
+    """Return True iff ``value`` names a v1 hook lifecycle permission scope.
+
+    Use this in manifest validators and capability resolvers so the
+    set of acceptable lifecycle scopes stays in sync with
+    :data:`HOOK_LIFECYCLE_SCOPES` — no new scope can sneak past the
+    routing path without an explicit code change here.
+    """
+    return value in HOOK_LIFECYCLE_SCOPES
+
+
 __all__ = [
     "HOOK_AUDIT_EVENTS",
     "HOOK_BLOCKED_EVENT",
     "HOOK_FAILED_EVENT",
+    "HOOK_LIFECYCLE_READ_SCOPE",
+    "HOOK_LIFECYCLE_SCOPES",
     "DeferredHookKind",
     "ExcludedHookKind",
     "HookFailurePolicy",
     "HookKind",
     "is_deferred_hook_kind",
     "is_excluded_hook_kind",
+    "is_hook_lifecycle_scope",
     "is_v1_failure_policy",
     "is_v1_hook_kind",
 ]
