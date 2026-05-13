@@ -122,9 +122,7 @@ def test_auto_sub_interview_entrypoint_manifest_has_isolation_test_mapping() -> 
     assert discovered_entrypoints == manifest_entrypoints
 
     available_tests = {
-        name
-        for name, value in globals().items()
-        if name.startswith("test_") and callable(value)
+        name for name, value in globals().items() if name.startswith("test_") and callable(value)
     }
     for entrypoint, mapped_tests in _AUTO_SUB_INTERVIEW_ENTRYPOINT_TEST_MANIFEST.items():
         assert mapped_tests, f"{entrypoint} has no explicit isolation test mapping"
