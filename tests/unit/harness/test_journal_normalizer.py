@@ -558,3 +558,25 @@ class TestDeepImmutability:
         inner["nested"]["k"] = "tampered"
         assert entry.payload["tool_name"] == "Bash"
         assert entry.payload["nested"]["k"] == "v"
+
+
+def test_free_form_payload_freezes_sets_and_bytearrays() -> None:
+    mutable_bytes = bytearray(b"abc")
+    entry = EvidenceEntry(
+        handle="ev_1",
+        kind=EvidenceKind.TOOL_INVOCATION,
+        source_event_ids=("evt_1",),
+        started_at=datetime.now(UTC),
+        payload={"tags": {"a", "b"}, "blob": mutable_bytes},
+    )
+
+    mutable_bytes[0] = ord("z")
+
+    assert entry.payload["tags"] == frozenset({"a", "b"})
+    assert entry.payload["blob"] == b"abc"
+
+
+def test_manifest_metadata_freezes_sets() -> None:
+    manifest = EvidenceManifest(ac_id="AC-1", metadata={"tags": {"x"}})
+
+    assert manifest.metadata["tags"] == frozenset({"x"})

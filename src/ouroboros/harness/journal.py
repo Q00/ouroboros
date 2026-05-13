@@ -65,12 +65,17 @@ def _deep_freeze(value: Any) -> Any:
     ``__setitem__``; nested ``dict``/``list`` values remain mutable and
     can be reached through the proxy. To honour the "cached projections
     cannot silently drift" contract we deep-copy + freeze every layer,
-    converting dicts to ``MappingProxyType`` views and lists to tuples.
+    converting dicts to ``MappingProxyType`` views, lists to tuples,
+    sets to ``frozenset`` values, and mutable byte arrays to ``bytes``.
     """
     if isinstance(value, Mapping):
         return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
     if isinstance(value, list | tuple):
         return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_deep_freeze(item) for item in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
     return value
 
 
