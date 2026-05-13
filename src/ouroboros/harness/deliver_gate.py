@@ -263,9 +263,14 @@ def evaluate_deliver_claim(
         parent_synthesis=parent_synthesis,
     )
     rejected = _rejected_claim_summaries(raw_result)
-    accepted_fact_ids = _claim_fact_ids(getattr(raw_result, "accepted_claims", ()))
+    accepted_claims = getattr(raw_result, "accepted_claims", ())
+    accepted_fact_ids = _claim_fact_ids(accepted_claims)
+    if not accepted_fact_ids and bool(raw_result.accepted):
+        accepted_fact_ids = _string_tuple(getattr(raw_result, "allowed_fact_ids", ()))
     rejected_fact_ids = tuple(fact_id for fact_id, _, _ in rejected if fact_id is not None)
-    accepted_handles = _claim_chunk_ids(getattr(raw_result, "accepted_claims", ()))
+    accepted_handles = _claim_chunk_ids(accepted_claims)
+    if not accepted_handles and bool(raw_result.accepted):
+        accepted_handles = _string_tuple(getattr(raw_result, "allowed_chunk_ids", ()))
 
     return DeliverGateVerdict(
         ac_id=manifest.ac_id,
@@ -445,6 +450,12 @@ def _iter_result_items(value: object) -> tuple[object, ...]:
     if isinstance(value, list):
         return tuple(value)
     return ()
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    return tuple(
+        item.strip() for item in _iter_result_items(value) if isinstance(item, str) and item.strip()
+    )
 
 
 def _claim_attr(claim: object, name: str) -> str | None:
