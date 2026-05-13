@@ -688,6 +688,20 @@ class TestProjectionQueryHandler:
                 },
             )
         )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_session_foreign",
+                type="tool.call.started",
+                aggregate_type="lineage",
+                aggregate_id="lineage_projection_456",
+                data={
+                    "session_id": "orch_projection_123",
+                    "execution_id": "exec_projection_456",
+                    "call_id": "foreign",
+                    "tool_name": "Bash",
+                },
+            )
+        )
 
         handler = ProjectionQueryHandler(event_store=memory_event_store)
         result = await handler.handle({"session_id": "orch_projection_123"})
@@ -796,6 +810,19 @@ class TestProjectionQueryHandler:
                     "parent_execution_id": "exec_projection_b",
                     "call_id": "b_child",
                     "tool_name": "Read",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_exec_b_foreign",
+                type="tool.call.started",
+                aggregate_type="lineage",
+                aggregate_id="lineage_projection_b",
+                data={
+                    "execution_id": "exec_projection_b",
+                    "call_id": "b_foreign",
+                    "tool_name": "Write",
                 },
             )
         )

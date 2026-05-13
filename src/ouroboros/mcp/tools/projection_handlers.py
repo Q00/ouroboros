@@ -210,6 +210,18 @@ async def _load_projection_events(
                     "provide execution_id for an unambiguous projection"
                 )
                 raise ValueError(msg)
+            if len(declared_execution_ids) == 1:
+                declared_execution_id = next(iter(declared_execution_ids))
+                return [
+                    event
+                    for event in events
+                    if _is_session_metadata_event(
+                        event,
+                        session_id,
+                        execution_id=declared_execution_id,
+                    )
+                    or _event_links_execution(event, declared_execution_id)
+                ]
             return events
         if not _session_declares_execution(events, session_id, execution_id):
             msg = f"execution_id {execution_id!r} does not belong to session_id {session_id!r}"
@@ -328,7 +340,9 @@ def _is_session_metadata_event(
 
 
 def _event_links_execution(event: BaseEvent, execution_id: str) -> bool:
-    if event.aggregate_type == "execution" and event.aggregate_id == execution_id:
+    if event.aggregate_type != "execution":
+        return False
+    if event.aggregate_id == execution_id:
         return True
     if not isinstance(event.data, dict):
         return False
