@@ -163,6 +163,59 @@ def test_answered_event_rejects_kind_mismatch() -> None:
         create_hitl_answered_event(_request(), response)
 
 
+def test_answered_event_accepts_cancel_and_timeout_responses() -> None:
+    cancel = HumanInputResponse(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.CANCEL,
+        payload={"reason_code": "user_abort"},
+    )
+    timeout = HumanInputResponse(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        actor="runtime",
+        response_kind=HumanInputResponseKind.TIMEOUT,
+        payload={"deadline_ms": 60000},
+    )
+
+    cancel_event = create_hitl_answered_event(_request(), cancel)
+    timeout_event = create_hitl_answered_event(_request(), timeout)
+
+    assert cancel_event.type == "hitl.answered"
+    assert cancel_event.data["response_kind"] == "cancel"
+    assert cancel_event.data["payload"] == {"reason_code": "user_abort"}
+    assert cancel_event.data["actor"] == "local-user"
+    assert timeout_event.type == "hitl.answered"
+    assert timeout_event.data["response_kind"] == "timeout"
+    assert timeout_event.data["payload"] == {"deadline_ms": 60000}
+    assert timeout_event.data["actor"] == "runtime"
+
+
+def test_answered_event_rejects_timeout_response_without_request_timeout() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve the plan?",
+        resume_target="ralplan:approval",
+    )
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        actor="runtime",
+        response_kind=HumanInputResponseKind.TIMEOUT,
+    )
+
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        create_hitl_answered_event(request, response)
+
+
 def test_destructive_confirmation_answered_event_accepts_approval_response() -> None:
     request = HumanInputRequest(
         request_id="hitl-1",

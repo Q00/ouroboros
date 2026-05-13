@@ -33,6 +33,14 @@ def _validate_response_matches_request(
     if response.request_id != request.request_id:
         raise ValueError("HITL response request_id must match the originating request")
 
+    if response.response_kind is HumanInputResponseKind.CANCEL:
+        return
+
+    if response.response_kind is HumanInputResponseKind.TIMEOUT:
+        if request.timeout_seconds is None:
+            raise ValueError("timeout HITL responses require a request timeout_seconds value")
+        return
+
     if request.kind in (
         HumanInputKind.APPROVAL,
         HumanInputKind.DESTRUCTIVE_CONFIRMATION,
