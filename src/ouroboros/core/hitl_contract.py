@@ -7,14 +7,21 @@ payloads without choosing a renderer (CLI, MCP, TUI, or structured question).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, ClassVar
+import json
+from types import MappingProxyType
+from typing import Any, ClassVar, cast
 
 HITL_CONTRACT_SCHEMA_VERSION = 1
 MAX_HITL_PAYLOAD_BYTES = 8192
 _SECRET_MARKERS = ("password", "passwd", "secret", "token", "api_key", "apikey", "credential")
+
+type JsonScalar = str | int | float | bool | None
+type JsonValue = JsonScalar | dict[str, JsonValue] | list[JsonValue]
+type FrozenJsonValue = JsonScalar | Mapping[str, FrozenJsonValue] | tuple[FrozenJsonValue, ...]
 
 
 class HumanInputKind(StrEnum):
@@ -62,16 +69,63 @@ def _require_non_empty(name: str, value: str) -> str:
     return normalized
 
 
-def _ensure_json_safe_payload(name: str, value: dict[str, Any]) -> dict[str, Any]:
+def _contains_secret_marker(value: str) -> bool:
+    lowered = value.lower()
+    return any(marker in lowered for marker in _SECRET_MARKERS)
+
+
+def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
+    if value is None or isinstance(value, str | int | bool):
+        if isinstance(value, str) and _contains_secret_marker(value):
+            raise ValueError(f"HumanInput {name} must not persist secret-like content")
+        return value
+    if isinstance(value, float):
+        return value
+    if isinstance(value, Mapping):
+        normalized: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"HumanInput {name} key at {path} must be a string")
+            if _contains_secret_marker(key):
+                raise ValueError(f"HumanInput {name} must not persist secret-like content")
+            normalized[key] = _normalize_json_value(name, item, f"{path}.{key}")
+        return normalized
+    if isinstance(value, list | tuple):
+        return [
+            _normalize_json_value(name, item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(f"HumanInput {name} value at {path} must be JSON serializable")
+
+
+def _freeze_json_value(value: JsonValue) -> FrozenJsonValue:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _thaw_json_value(value: FrozenJsonValue) -> JsonValue:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json_value(item) for item in value]
+    return value
+
+
+def _ensure_json_safe_payload(name: str, value: dict[str, Any]) -> Mapping[str, FrozenJsonValue]:
     if not isinstance(value, dict):
         raise TypeError(f"HumanInput {name} must be a dict")
-    text = repr(value)
-    if len(text.encode("utf-8")) > MAX_HITL_PAYLOAD_BYTES:
+    normalized = _normalize_json_value(name, value, name)
+    encoded = json.dumps(normalized, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > MAX_HITL_PAYLOAD_BYTES:
         raise ValueError(f"HumanInput {name} exceeds {MAX_HITL_PAYLOAD_BYTES} bytes")
-    lowered = text.lower()
-    if any(marker in lowered for marker in _SECRET_MARKERS):
-        raise ValueError(f"HumanInput {name} must not persist secret-like content")
-    return dict(value)
+    return cast(Mapping[str, FrozenJsonValue], _freeze_json_value(normalized))
+
+
+def _payload_to_event_data(value: Mapping[str, FrozenJsonValue]) -> dict[str, JsonValue]:
+    return cast(dict[str, JsonValue], _thaw_json_value(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +148,7 @@ class HumanInputRequest:
     timeout_seconds: int | None = None
     timeout_action: HumanInputTimeoutAction = HumanInputTimeoutAction.STAY_WAITING
     surface: str | None = None
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: Mapping[str, FrozenJsonValue] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     REQUESTED_EVENT_TYPE: ClassVar[str] = "hitl.requested"
@@ -175,7 +229,7 @@ class HumanInputRequest:
         if self.surface is not None:
             data["surface"] = self.surface
         if self.payload:
-            data["payload"] = dict(self.payload)
+            data["payload"] = _payload_to_event_data(self.payload)
         return data
 
 
@@ -192,7 +246,7 @@ class HumanInputResponse:
     text: str | None = None
     approval_decision: bool | None = None
     surface: str | None = None
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: Mapping[str, FrozenJsonValue] = field(default_factory=dict)
     received_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     ANSWERED_EVENT_TYPE: ClassVar[str] = "hitl.answered"
@@ -210,13 +264,41 @@ class HumanInputResponse:
                 object.__setattr__(self, field_name, _require_non_empty(field_name, value))
         if any(not value.strip() for value in self.selected_values):
             raise ValueError("HumanInputResponse selected_values must be non-empty")
-        if (
-            self.approval_decision is not None
-            and self.response_kind is not HumanInputResponseKind.APPROVAL
-        ):
-            raise ValueError("approval_decision is only valid for approval responses")
         object.__setattr__(self, "selected_values", tuple(self.selected_values))
+        self._validate_response_content()
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
+
+    def _validate_response_content(self) -> None:
+        has_text = self.text is not None
+        has_selection = bool(self.selected_values)
+        has_approval = self.approval_decision is not None
+
+        if has_approval and self.response_kind is not HumanInputResponseKind.APPROVAL:
+            raise ValueError("approval_decision is only valid for approval responses")
+
+        if self.response_kind is HumanInputResponseKind.TEXT:
+            if not has_text:
+                raise ValueError("text responses require text")
+            if has_selection:
+                raise ValueError("text responses must not include selection content")
+            return
+
+        if self.response_kind is HumanInputResponseKind.SELECTION:
+            if not has_selection:
+                raise ValueError("selection responses require selected_values")
+            if has_text or has_approval:
+                raise ValueError("selection responses must not include text or approval content")
+            return
+
+        if self.response_kind is HumanInputResponseKind.APPROVAL:
+            if not has_approval:
+                raise ValueError("approval responses require approval_decision")
+            if has_text or has_selection:
+                raise ValueError("approval responses must not include text or selection content")
+            return
+
+        if has_text or has_selection or has_approval:
+            raise ValueError("cancel and timeout responses must not include answer content")
 
     @property
     def aggregate_id(self) -> str:
@@ -245,5 +327,5 @@ class HumanInputResponse:
         if self.surface is not None:
             data["surface"] = self.surface
         if self.payload:
-            data["payload"] = dict(self.payload)
+            data["payload"] = _payload_to_event_data(self.payload)
         return data

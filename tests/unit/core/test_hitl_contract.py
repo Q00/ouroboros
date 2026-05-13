@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime
+import json
 
 import pytest
 
 from ouroboros.core.hitl_contract import (
+    MAX_HITL_PAYLOAD_BYTES,
     HumanInputKind,
     HumanInputRequest,
     HumanInputResponse,
@@ -75,6 +78,77 @@ def test_request_rejects_secret_like_persisted_payload() -> None:
         )
 
 
+def test_request_rejects_non_json_payload_values() -> None:
+    with pytest.raises(TypeError, match="JSON serializable"):
+        HumanInputRequest(
+            request_id="hitl-1",
+            session_id="session-1",
+            created_by="plugin-firewall",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.CREDENTIAL_GATED,
+            question="Approve?",
+            resume_target="plugin:permission",
+            payload={"created_at": datetime.now(UTC)},
+        )
+
+
+def test_request_payload_is_json_serializable_and_deeply_unaliased() -> None:
+    nested = {"items": [{"name": "alpha"}]}
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve?",
+        resume_target="plan:approval",
+        payload=nested,
+    )
+
+    nested["items"][0]["name"] = "mutated"
+    data = request.to_event_data()
+
+    assert data["payload"] == {"items": [{"name": "alpha"}]}
+    json.dumps(data)
+
+
+def test_request_payload_event_data_is_deep_copy() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve?",
+        resume_target="plan:approval",
+        payload={"items": [{"name": "alpha"}]},
+    )
+
+    first = request.to_event_data()
+    first["payload"]["items"][0]["name"] = "mutated"
+    second = request.to_event_data()
+
+    assert second["payload"] == {"items": [{"name": "alpha"}]}
+
+
+def test_request_rejects_payload_over_json_encoded_byte_limit() -> None:
+    with pytest.raises(ValueError, match=str(MAX_HITL_PAYLOAD_BYTES)):
+        HumanInputRequest(
+            request_id="hitl-1",
+            session_id="session-1",
+            created_by="plan",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLAN_APPROVAL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Approve?",
+            resume_target="plan:approval",
+            payload={"value": "x" * MAX_HITL_PAYLOAD_BYTES},
+        )
+
+
 def test_human_input_response_serializes_matching_answer() -> None:
     response = HumanInputResponse(
         request_id="hitl-1",
@@ -114,4 +188,72 @@ def test_response_rejects_approval_decision_on_non_approval() -> None:
             response_kind=HumanInputResponseKind.TEXT,
             text="yes",
             approval_decision=True,
+        )
+
+
+def test_text_response_requires_text_and_forbids_other_answer_content() -> None:
+    with pytest.raises(ValueError, match="require text"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.TEXT,
+        )
+    with pytest.raises(ValueError, match="must not include selection"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.TEXT,
+            text="yes",
+            selected_values=("yes",),
+        )
+
+
+def test_selection_response_requires_selected_values_and_forbids_other_answer_content() -> None:
+    with pytest.raises(ValueError, match="require selected_values"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.SELECTION,
+        )
+    with pytest.raises(ValueError, match="must not include text"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.SELECTION,
+            selected_values=("yes",),
+            text="yes",
+        )
+
+
+def test_approval_response_requires_decision_and_forbids_other_answer_content() -> None:
+    with pytest.raises(ValueError, match="require approval_decision"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.APPROVAL,
+        )
+    with pytest.raises(ValueError, match="must not include text"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.APPROVAL,
+            approval_decision=True,
+            text="yes",
+        )
+
+
+def test_cancel_and_timeout_responses_forbid_answer_content() -> None:
+    with pytest.raises(ValueError, match="must not include answer content"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.CANCEL,
+            text="never mind",
+        )
+    with pytest.raises(ValueError, match="must not include answer content"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.TIMEOUT,
+            selected_values=("late",),
         )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from ouroboros.core.hitl_contract import (
     HumanInputKind,
     HumanInputRequest,
@@ -38,6 +40,26 @@ def test_requested_event_uses_hitl_event_type_and_run_aggregate() -> None:
     assert event.aggregate_id == "run-1"
     assert event.data["request_id"] == "hitl-1"
     assert event.data["resume_target"] == "ralplan:approval"
+
+
+def test_requested_event_data_is_plain_json() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve the plan?",
+        resume_target="ralplan:approval",
+        payload={"items": ("alpha", {"count": 1})},
+    )
+
+    event = create_hitl_requested_event(request)
+
+    assert event.data["payload"] == {"items": ["alpha", {"count": 1}]}
+    json.dumps(event.data)
 
 
 def test_answered_event_preserves_request_correlation() -> None:
