@@ -203,7 +203,7 @@ class WorkflowNode(BaseModel, frozen=True):
     metadata: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
 
     @model_validator(mode="after")
-    def _validate_evidence_requirement(self) -> WorkflowNode:
+    def _validate_schema_requirements(self) -> WorkflowNode:
         # Owners that produce evidence MUST declare an evidence_schema_ref.
         # Harness and human-gate nodes are exempt because they do not emit
         # evidence-bearing artifacts in the fat-harness loop.
@@ -213,6 +213,19 @@ class WorkflowNode(BaseModel, frozen=True):
                 f"WorkflowNode(owner={self.owner.value}) must declare "
                 "evidence_schema_ref; see #956 validation rule "
                 "'missing required evidence/output schema metadata'."
+            )
+            raise ValueError(msg)
+        # Owners that consume a typed input payload MUST declare an
+        # input_schema_ref so the harness can validate the payload shape
+        # before dispatch. Verifier nodes are exempt because they consume
+        # the evidence manifest itself rather than a free-form input.
+        # Harness and human-gate nodes do not take a typed input.
+        input_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN}
+        if self.owner in input_owners and not self.input_schema_ref:
+            msg = (
+                f"WorkflowNode(owner={self.owner.value}) must declare "
+                "input_schema_ref; the harness must validate the payload "
+                "shape before dispatching agent/plugin work."
             )
             raise ValueError(msg)
         return self
@@ -311,6 +324,7 @@ class WorkflowValidationError(BaseModel, frozen=True):
         "unreachable_terminal",
         "no_terminal_node",
         "missing_evidence_schema",
+        "missing_input_schema",
         "isolated_node",
     ]
     message: str
@@ -377,8 +391,9 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
         else:
             seen_node_ids.add(node.node_id)
 
-    # 2. Missing evidence schema (idempotent with per-node validator).
+    # 2. Missing evidence/input schemas (idempotent with per-node validator).
     evidence_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN, NodeOwner.VERIFIER}
+    input_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN}
     for node in spec.nodes:
         if node.owner in evidence_owners and not node.evidence_schema_ref:
             errors.append(
@@ -387,6 +402,18 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                     message=(
                         f"Node '{node.node_id}' (owner={node.owner.value}) is "
                         "missing evidence_schema_ref."
+                    ),
+                    node_id=node.node_id,
+                )
+            )
+        if node.owner in input_owners and not node.input_schema_ref:
+            errors.append(
+                WorkflowValidationError(
+                    code="missing_input_schema",
+                    message=(
+                        f"Node '{node.node_id}' (owner={node.owner.value}) is "
+                        "missing input_schema_ref; agent/plugin nodes must "
+                        "declare the payload contract before dispatch."
                     ),
                     node_id=node.node_id,
                 )

@@ -104,6 +104,47 @@ class TestWorkflowNode:
                 owner=NodeOwner.VERIFIER,
             )
 
+    def test_input_required_for_agent(self) -> None:
+        # Agent has evidence_schema_ref but is still missing input_schema_ref.
+        with pytest.raises(ValidationError):
+            WorkflowNode(
+                node_id="node_agent",
+                kind=NodeKind.TASK,
+                owner=NodeOwner.AGENT,
+                evidence_schema_ref="evidence://agent_default",
+            )
+
+    def test_input_required_for_plugin(self) -> None:
+        with pytest.raises(ValidationError):
+            WorkflowNode(
+                node_id="node_plugin",
+                kind=NodeKind.TASK,
+                owner=NodeOwner.PLUGIN,
+                evidence_schema_ref="evidence://plugin_default",
+            )
+
+    def test_verifier_does_not_require_input_schema(self) -> None:
+        # Verifier consumes the evidence manifest, not a typed input
+        # payload — input_schema_ref must remain optional for it.
+        node = WorkflowNode(
+            node_id="node_verifier",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.VERIFIER,
+            evidence_schema_ref="evidence://verifier_default",
+        )
+        assert node.input_schema_ref is None
+
+    def test_agent_with_both_schemas_accepted(self) -> None:
+        node = WorkflowNode(
+            node_id="node_agent",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.AGENT,
+            evidence_schema_ref="evidence://agent_default",
+            input_schema_ref="input://agent_default",
+        )
+        assert node.evidence_schema_ref == "evidence://agent_default"
+        assert node.input_schema_ref == "input://agent_default"
+
     def test_harness_owner_omits_evidence_ok(self) -> None:
         node = WorkflowNode(
             node_id="node_h",
@@ -111,6 +152,7 @@ class TestWorkflowNode:
             owner=NodeOwner.HARNESS,
         )
         assert node.evidence_schema_ref is None
+        assert node.input_schema_ref is None
 
     def test_human_gate_omits_evidence_ok(self) -> None:
         node = WorkflowNode(
@@ -119,6 +161,7 @@ class TestWorkflowNode:
             owner=NodeOwner.HUMAN_GATE,
         )
         assert node.evidence_schema_ref is None
+        assert node.input_schema_ref is None
 
 
 class TestWorkflowEdge:
@@ -220,6 +263,37 @@ class TestValidateWorkflow:
         result = validate_workflow(spec)
         assert result.ok is True  # warning, not error
         assert any(w.code == "isolated_node" for w in result.warnings)
+
+    def test_missing_input_schema_detected_by_validator(self) -> None:
+        # Construct an agent node with evidence but no input via
+        # ``model_construct`` to bypass the per-node validator, then
+        # verify the spec-level rule flags it.
+        bad_node = WorkflowNode.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            node_id="agent_no_input",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.AGENT,
+            evidence_schema_ref="evidence://agent_default",
+            input_schema_ref=None,
+            capability_envelope=(),
+            runtime_hints={},
+            metadata={},
+            name="",
+        )
+        end_node = _make_terminal("end")
+        edge = _edge("agent_no_input", "end")
+        spec = WorkflowSpec.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            spec_id="wfspec_test",
+            source=SourceKind.SYNTHETIC,
+            source_ref=None,
+            nodes=(bad_node, end_node),
+            edges=(edge,),
+            metadata={},
+        )
+        result = validate_workflow(spec)
+        assert result.ok is False
+        assert any(e.code == "missing_input_schema" for e in result.errors)
 
     def test_missing_evidence_schema_detected_by_validator(self) -> None:
         # Build a spec that bypasses Pydantic re-validation (mirrors a future
@@ -403,20 +477,50 @@ class TestCapabilityEnvelopeHygiene:
 
 class TestNoExternalFrameworkDependency:
     """Smoke-test that the IR module does not import MAF / DurableTask /
-    Azure workflow SDKs at runtime. Acceptance criterion #6 of #956."""
+    Azure workflow SDKs. Acceptance criterion #6 of #956.
+
+    Inspects the IR module's direct imports rather than a global
+    ``sys.modules`` snapshot so the check stays order-independent —
+    an earlier test pulling in a forbidden SDK cannot falsely fail
+    this assertion.
+    """
+
+    @staticmethod
+    def _module_direct_imports(module: object) -> set[str]:
+        """Return the set of top-level package names imported by ``module``."""
+        import ast
+        import inspect
+
+        try:
+            source = inspect.getsource(module)  # type: ignore[arg-type]
+        except (OSError, TypeError):
+            return set()
+
+        tree = ast.parse(source)
+        imports: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imports.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module.split(".")[0])
+        return imports
 
     def test_module_imports_are_repo_local(self) -> None:
         import ouroboros.orchestrator.workflow_ir as wf_ir
 
-        # The module's top-level imports must not pull in forbidden SDKs.
-        forbidden_prefixes = (
+        direct_imports = self._module_direct_imports(wf_ir)
+
+        forbidden = {
             "agent_framework",
-            "azure.durabletask",
-            "microsoft.agent",
+            "microsoft",
+            "azure",
+            "durabletask",
+            "msrest",
+        }
+        leaked = forbidden & direct_imports
+        assert not leaked, (
+            "Forbidden external workflow SDK imported by "
+            f"ouroboros.orchestrator.workflow_ir: {leaked}"
         )
-        for module_name in list(__import__("sys").modules):
-            assert not any(module_name.startswith(prefix) for prefix in forbidden_prefixes), (
-                f"Forbidden dependency loaded transitively: {module_name}"
-            )
-        # Tautological assertion to keep the import alive in the test body.
         assert wf_ir.WORKFLOW_IR_SCHEMA_VERSION == 1
