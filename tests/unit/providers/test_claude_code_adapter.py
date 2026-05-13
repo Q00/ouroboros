@@ -1038,6 +1038,74 @@ class TestJsonSchemaHandling:
         assert options_call_kwargs.get("include_hook_events") is False
 
     @pytest.mark.asyncio
+    async def test_empty_allowed_tools_with_strict_mcp_config_merges_extra_args(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The nested interview path must preserve both strict-envelope flags.
+
+        The supported SDK surface forwards ``strict-mcp-config`` through
+        ``extra_args`` while ``allowed_tools=[]`` also requires the literal
+        ``allowedTools=""`` CLI passthrough.  Regressions in this merge would
+        drop one of the two safeguards only when they are combined.
+        """
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset(
+                {
+                    "extra_args",
+                    "allowed_tools",
+                    "tools",
+                    "setting_sources",
+                    "skills",
+                    "agents",
+                    "plugins",
+                    "hooks",
+                    "include_hook_events",
+                }
+            ),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=[], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert options_call_kwargs["allowed_tools"] == []
+        assert options_call_kwargs["tools"] == []
+        assert "strict_mcp_config" not in options_call_kwargs
+        assert options_call_kwargs["extra_args"]["allowedTools"] == ""
+        assert options_call_kwargs["extra_args"]["strict-mcp-config"] is None
+        assert options_call_kwargs.get("setting_sources") == []
+        assert options_call_kwargs.get("skills") == []
+        assert options_call_kwargs.get("agents") == {}
+        assert options_call_kwargs.get("plugins") == []
+        assert options_call_kwargs.get("hooks") == {}
+        assert options_call_kwargs.get("include_hook_events") is False
+
+    @pytest.mark.asyncio
     async def test_strict_mcp_config_isolation_is_noop_when_sdk_lacks_fields(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
