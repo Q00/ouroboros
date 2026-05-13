@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from ouroboros.orchestrator.evidence_schema import EvidenceRecord
-from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
+from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ProfileEvidenceConfigError
+from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile, load_profile
 from ouroboros.orchestrator.verifier import (
     DEFAULT_MAX_RETRIES,
     LoopResult,
@@ -492,6 +492,32 @@ class TestEvidenceShortCircuit:
         assert first.validation is None
         assert first.verdict is None
         assert any("evidence validation failed" in line for line in executor.feedbacks[1])
+
+    def test_malformed_profile_rejected_if_propagates_without_retry(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        broken_profile = code_profile.model_copy(
+            update={
+                "evidence_schema": EvidenceSchema(
+                    required=(),
+                    rejected_if=("len(tests_passed) < 1",),
+                )
+            }
+        )
+        executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[VerifierVerdict(passed=True)])
+
+        with pytest.raises(ProfileEvidenceConfigError, match="Unsupported rejected_if"):
+            run_with_verifier(
+                executor=executor,
+                verifier=verifier,
+                profile=broken_profile,
+                ac="x",
+            )
+
+        # A malformed profile cannot be fixed by asking the leaf to retry.
+        assert len(executor.feedbacks) == 1
+        assert verifier.calls == 0
 
     def test_evidence_fail_exhausts_budget_without_verifier(
         self, code_profile: ExecutionProfile

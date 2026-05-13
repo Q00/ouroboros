@@ -7,6 +7,7 @@ import pytest
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
     EvidenceRecord,
+    ProfileEvidenceConfigError,
     extract_evidence,
     validate_evidence,
 )
@@ -207,7 +208,7 @@ class TestRejectionGrammar:
             }
         )
         record = EvidenceRecord(data={"tests_passed": [1]})
-        with pytest.raises(EvidenceError, match="Unsupported rejected_if"):
+        with pytest.raises(ProfileEvidenceConfigError, match="Unsupported rejected_if"):
             validate_evidence(broken, record)
 
     def test_unsupported_literal_raises(self, code_profile) -> None:
@@ -222,7 +223,7 @@ class TestRejectionGrammar:
             }
         )
         record = EvidenceRecord(data={"tests_passed": []})
-        with pytest.raises(EvidenceError, match="Unsupported literal"):
+        with pytest.raises(ProfileEvidenceConfigError, match="Unsupported literal"):
             validate_evidence(broken, record)
 
     def test_missing_field_compared_to_none_triggers(self) -> None:
@@ -368,5 +369,5 @@ class TestBlockedEvidence:
             }
         )
 
-        with pytest.raises(EvidenceError, match="Unsupported rejected_if"):
+        with pytest.raises(ProfileEvidenceConfigError, match="Unsupported rejected_if"):
             validate_evidence(broken, record)

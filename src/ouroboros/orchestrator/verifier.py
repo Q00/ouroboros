@@ -38,6 +38,7 @@ from typing import Protocol
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
     EvidenceRecord,
+    ProfileEvidenceConfigError,
     ValidationResult,
     extract_evidence,
     validate_evidence,
@@ -269,6 +270,12 @@ def run_with_verifier(
         if record is not None:
             try:
                 validation = validate_evidence(profile, record)
+            except ProfileEvidenceConfigError:
+                # Profile-authored rejected_if expressions are deterministic
+                # configuration bugs. Retrying the same leaf cannot repair the
+                # profile, so surface the error immediately instead of
+                # converting it into an evidence validation retry.
+                raise
             except EvidenceError as exc:
                 validation_error = str(exc)
                 validation = None

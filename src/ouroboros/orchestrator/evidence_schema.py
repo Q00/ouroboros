@@ -13,8 +13,9 @@ The evaluator for `rejected_if` is intentionally narrow. It supports only
 `<field> == <literal>` where literal is parsed first as JSON (so YAML/JSON
 authors can write `null`, `true`, `false`, numbers, strings, lists) and
 then as a Python literal as a fallback (so legacy `None`/`True`/`False`
-keep working). Any other expression shape raises EvidenceError so that
-profile authors get an immediate, loud failure instead of silent acceptance.
+keep working). Any other expression shape raises ProfileEvidenceConfigError
+so that profile authors get an immediate, loud failure instead of silent
+acceptance.
 
 Usage:
     from ouroboros.orchestrator.evidence_schema import (
@@ -49,7 +50,11 @@ _DECODER = json.JSONDecoder()
 
 
 class EvidenceError(ValueError):
-    """Raised when evidence cannot be parsed or a profile expression is invalid."""
+    """Raised when leaf evidence cannot be parsed or validated."""
+
+
+class ProfileEvidenceConfigError(EvidenceError):
+    """Raised when a profile-authored evidence expression is invalid."""
 
 
 class BlockerCode(StrEnum):
@@ -200,7 +205,7 @@ def _parse_literal(raw: str) -> Any:
         return ast.literal_eval(raw)
     except (ValueError, SyntaxError) as exc:
         msg = f"Unsupported literal in rejected_if right-hand side: {raw!r} ({exc})"
-        raise EvidenceError(msg) from exc
+        raise ProfileEvidenceConfigError(msg) from exc
 
 
 def _parse_blocker(data: dict[str, Any]) -> EvidenceBlocker | None:
@@ -252,8 +257,9 @@ def _parse_blocker(data: dict[str, Any]) -> EvidenceBlocker | None:
 def _evaluate_rejection(expr: str, data: dict[str, Any]) -> bool:
     """Evaluate a single rejected_if expression.
 
-    Grammar: `<field> == <literal>` only. Anything else raises EvidenceError
-    so profile authors notice immediately instead of silently passing.
+    Grammar: `<field> == <literal>` only. Anything else raises
+    ProfileEvidenceConfigError so profile authors notice immediately instead
+    of silently passing.
     """
     match = _EXPR_RE.match(expr)
     if not match:
@@ -261,7 +267,7 @@ def _evaluate_rejection(expr: str, data: dict[str, Any]) -> bool:
             f"Unsupported rejected_if expression: {expr!r}. "
             "Only '<field> == <literal>' is currently supported."
         )
-        raise EvidenceError(msg)
+        raise ProfileEvidenceConfigError(msg)
     field_name = match.group("field")
     literal = _parse_literal(match.group("lit"))
     # Missing fields evaluate as None for comparison purposes — that way
@@ -282,8 +288,9 @@ def validate_evidence(profile: ExecutionProfile, record: EvidenceRecord) -> Vali
         and no rejected_if expression matched.
 
     Raises:
-        EvidenceError: If any rejected_if expression has unsupported syntax.
-            (Profile bugs should be loud, not silent.)
+        EvidenceError: If leaf evidence is malformed.
+        ProfileEvidenceConfigError: If any rejected_if expression has unsupported
+            syntax. (Profile bugs should be loud, not silent.)
     """
     schema = profile.evidence_schema
 
@@ -305,6 +312,7 @@ __all__ = [
     "BlockerCode",
     "EvidenceBlocker",
     "EvidenceError",
+    "ProfileEvidenceConfigError",
     "EvidenceRecord",
     "ValidationResult",
     "extract_evidence",
