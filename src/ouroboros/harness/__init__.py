@@ -16,6 +16,7 @@ from ouroboros.harness.deliver_gate import (
     evaluate_deliver_claim,
     load_ac_evidence_manifest,
 )
+from ouroboros.harness.deliver_routing import DeliverGateRoute, route_deliver_gate_verdict
 from ouroboros.harness.journal import (
     EvidenceEntry,
     EvidenceKind,
@@ -39,6 +40,7 @@ __all__ = [
     "DeliverEvidenceClaim",
     "DeliverEvidenceFact",
     "DeliverGateVerdict",
+    "DeliverGateRoute",
     "EvidenceEntry",
     "EvidenceKind",
     "EventStoreEvidenceReader",
@@ -57,4 +59,5 @@ __all__ = [
     "filter_events_for_ac",
     "load_ac_evidence_manifest",
     "normalize_events",
+    "route_deliver_gate_verdict",
 ]
