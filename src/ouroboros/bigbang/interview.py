@@ -68,6 +68,24 @@ AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS = 128
 # model locally while still tripling the original 4.8k interview budget.
 AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 14_000
 
+_TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
+- You are only an interviewer.
+- Generate exactly one Socratic question that reduces requirements ambiguity.
+- Do not explore files, commands, repositories, APIs, tools, or external systems.
+- Do not ask to inspect implementation details unless the caller already supplied those details.
+- The caller supplies any code or research context in answers.
+
+## Response Format
+- Ask one focused question in 1-2 sentences.
+- Do not include a preamble.
+- End with the question.
+
+## Questioning Strategy
+- Target the biggest unresolved decision.
+- Prefer scope, non-goal, success criteria, ownership, risk, and verification questions.
+- For brownfield work, focus on intent and decisions rather than discovering what exists.
+"""
+
 
 class InterviewPerspective(StrEnum):
     """Internal perspectives used to keep interviews broad and practical."""
@@ -305,6 +323,7 @@ class InterviewEngine:
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
     _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
+    suppress_tool_use_prompt_cues: bool = False
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -690,7 +709,11 @@ class InterviewEngine:
         effective_round_number = self._next_conversation_round_number(state)
         round_info = f"Round {effective_round_number}"
 
-        base_prompt = load_agent_prompt("socratic-interviewer")
+        base_prompt = (
+            _TOOLLESS_INTERVIEW_BASE_PROMPT
+            if self.suppress_tool_use_prompt_cues
+            else load_agent_prompt("socratic-interviewer")
+        )
 
         context_for_prompt = (
             initial_context if initial_context is not None else state.initial_context
@@ -716,19 +739,34 @@ class InterviewEngine:
 
         # Answer prefix hints — always present so the question generator
         # can interpret enriched answers regardless of brownfield status.
-        dynamic_header += (
-            "\n\nAnswer prefixes the caller may use:\n"
-            "- [from-code]: Existing codebase state (factual, read from files).\n"
-            "- [from-user]: Human decisions/judgments.\n"
-            "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
-        )
+        if self.suppress_tool_use_prompt_cues:
+            dynamic_header += (
+                "\n\nAnswer prefixes the caller may use:\n"
+                "- [from-code]: Caller-supplied existing-system context (factual).\n"
+                "- [from-user]: Human decisions/judgments.\n"
+                "- [from-research]: Caller-supplied external context."
+            )
+        else:
+            dynamic_header += (
+                "\n\nAnswer prefixes the caller may use:\n"
+                "- [from-code]: Existing codebase state (factual, read from files).\n"
+                "- [from-user]: Human decisions/judgments.\n"
+                "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
+            )
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:
-            dynamic_header += (
-                "\n\nThis is a BROWNFIELD project. The caller (main session) has direct "
-                "codebase access and will enrich answers with code context. Focus your "
-                "questions on INTENT and DECISIONS, not on discovering what exists."
-            )
+            if self.suppress_tool_use_prompt_cues:
+                dynamic_header += (
+                    "\n\nThis is a BROWNFIELD project. The caller will enrich answers "
+                    "with existing-system context. Focus your questions on INTENT and "
+                    "DECISIONS, not on discovering what exists."
+                )
+            else:
+                dynamic_header += (
+                    "\n\nThis is a BROWNFIELD project. The caller (main session) has direct "
+                    "codebase access and will enrich answers with code context. Focus your "
+                    "questions on INTENT and DECISIONS, not on discovering what exists."
+                )
 
         ambiguity_snapshot = self._build_ambiguity_snapshot_prompt(state)
         if ambiguity_snapshot:
@@ -899,6 +937,21 @@ class InterviewEngine:
 
     def _build_perspective_panel_prompt(self, state: InterviewState) -> str:
         """Build instructions for the internal perspective panel."""
+        if self.suppress_tool_use_prompt_cues:
+            return "\n".join(
+                [
+                    "## Perspective Panel",
+                    "Silently check breadth, simplicity, architecture, and closure readiness.",
+                    "Use those perspectives only to choose one clarifying question.",
+                    "",
+                    "## Panel Synthesis Rules",
+                    "- Keep independent ambiguity tracks visible instead of collapsing onto one favorite subtopic.",
+                    "- Preserve both implementation and written-output requirements when the user asked for both.",
+                    "- Prefer breadth recap questions when multiple unresolved tracks still exist.",
+                    "- Only ask a closure question when closure mode is active; otherwise keep drilling into the weakest area.",
+                    "- Even when the score is seed-ready, do not end the interview on the first low-ambiguity turn.",
+                ]
+            )
         strategies = _load_interview_perspective_strategies()
         sections = [
             "## Perspective Panel",

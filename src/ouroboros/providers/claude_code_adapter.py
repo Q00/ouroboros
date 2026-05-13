@@ -933,6 +933,22 @@ class ClaudeCodeAdapter:
                             # Callback for tool usage
                             if self._on_message:
                                 self._on_message("tool", tool_info)
+                            if self._allowed_tools is not None and not self._allowed_tools:
+                                error_result = ProviderError(
+                                    message=(
+                                        "Claude Agent SDK emitted a ToolUseBlock despite "
+                                        "allowed_tools=[]"
+                                    ),
+                                    details={
+                                        "session_id": session_id,
+                                        "error_type": "ToolUseBlockViolation",
+                                        "tool_name": tool_name,
+                                        "tool_input": tool_input,
+                                        "allowed_tools": [],
+                                        "max_turns": options_kwargs["max_turns"],
+                                        "cwd": self._cwd,
+                                    },
+                                )
 
                 elif class_name == "ResultMessage":
                     # Check for structured output first (from json_schema output_format)

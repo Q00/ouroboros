@@ -695,6 +695,63 @@ class TestJsonSchemaHandling:
         assert "Read" in options_call_kwargs["disallowed_tools"]
 
     @pytest.mark.asyncio
+    async def test_empty_allowed_tools_spy_fails_on_tool_use_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spy regression: a no-tools request must fail on any ToolUseBlock.
+
+        The ``ooo auto`` sub-interview path runs with ``max_turns=1`` and
+        ``allowed_tools=[]``.  If Claude emits a tool block anyway, accepting a
+        later text result would hide the turn-stealing leak this path is meant
+        to prevent.
+        """
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset({"extra_args", "allowed_tools", "tools"}),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=[], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6", max_turns=1)
+
+        class ToolUseBlock:
+            name = "Read"
+            input = {"file_path": "README.md"}
+
+        class AssistantMessage:
+            content = [ToolUseBlock()]
+
+        class ResultMessage:
+            structured_output = None
+            result = "What is the primary user goal?"
+            is_error = False
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            yield AssistantMessage()
+            yield ResultMessage()
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert result.error.details["error_type"] == "ToolUseBlockViolation"
+        assert result.error.details["tool_name"] == "Read"
+        assert result.error.details["allowed_tools"] == []
+        assert result.error.details["max_turns"] == 1
+
+    @pytest.mark.asyncio
     async def test_explicit_allowed_tools_sets_visible_sdk_tools(self) -> None:
         """Explicit tool envelopes restrict both permissions and exposed SDK tools."""
         allowed_tools = ["Read", "Grep", "mcp__ouroboros__qa"]

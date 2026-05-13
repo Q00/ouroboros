@@ -889,6 +889,7 @@ class InterviewHandler:
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
     data_dir: Path | None = field(default=None, repr=False)
+    suppress_tool_use_prompt_cues: bool = False
 
     def __post_init__(self) -> None:
         """Initialize event store."""
@@ -1437,11 +1438,19 @@ class InterviewHandler:
             ),
             strict_mcp_config=True,
         )
-        engine = self.interview_engine or InterviewEngine(
-            llm_adapter=llm_adapter,
-            state_dir=self.data_dir or _DATA_DIR,
-            model=get_clarification_model(self.llm_backend),
-        )
+        if self.interview_engine is not None:
+            engine = self.interview_engine
+            if self.suppress_tool_use_prompt_cues and hasattr(
+                engine, "suppress_tool_use_prompt_cues"
+            ):
+                engine.suppress_tool_use_prompt_cues = True
+        else:
+            engine = InterviewEngine(
+                llm_adapter=llm_adapter,
+                state_dir=self.data_dir or _DATA_DIR,
+                model=get_clarification_model(self.llm_backend),
+                suppress_tool_use_prompt_cues=self.suppress_tool_use_prompt_cues,
+            )
 
         _interview_id: str | None = None  # Track for error event emission
 
