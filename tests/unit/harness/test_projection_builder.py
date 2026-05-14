@@ -338,8 +338,10 @@ class TestIncrementalIngestion:
 
         assert first.run.run_id == second.run.run_id
         assert first.stages[0].stage_id == second.stages[0].stage_id
+        assert first.steps[0].step_id == second.steps[0].step_id
         assert first.run.run_id != different.run.run_id
         assert first.stages[0].stage_id != different.stages[0].stage_id
+        assert first.steps[0].step_id != different.steps[0].step_id
 
     def test_in_flight_step_id_stays_stable_across_builds_and_completion(self) -> None:
         t0 = datetime.now(UTC)

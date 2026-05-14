@@ -181,8 +181,13 @@ class ProjectionBuilder:
         ended_at = self._last_event_at
 
         steps_for_stage = tuple(
-            _rewrite_step_run_stage(step, run_id=run_id, stage_id=stage_id)
-            for step in self._steps.values()
+            _rewrite_step_identity(
+                step,
+                step_id=_stable_step_id(source_key, *_slot_parts(slot_key)),
+                run_id=run_id,
+                stage_id=stage_id,
+            )
+            for slot_key, step in self._steps.items()
         )
 
         stage = StageRecord(
@@ -242,7 +247,9 @@ class ProjectionBuilder:
         previous = self._steps.get(key)
         step = StepRecord(
             schema_version=PROJECTION_SCHEMA_VERSION,
-            step_id=previous.step_id if previous is not None else _stable_step_id("tool", call_id),
+            step_id=previous.step_id
+            if previous is not None
+            else _stable_step_id("pending", "tool", call_id),
             run_id="run_placeholder",  # rewritten in build()
             stage_id="stage_placeholder",
             kind=kind,
@@ -278,7 +285,9 @@ class ProjectionBuilder:
         previous = self._steps.get(key)
         step = StepRecord(
             schema_version=PROJECTION_SCHEMA_VERSION,
-            step_id=previous.step_id if previous is not None else _stable_step_id("llm", call_id),
+            step_id=previous.step_id
+            if previous is not None
+            else _stable_step_id("pending", "llm", call_id),
             run_id="run_placeholder",  # rewritten in build()
             stage_id="stage_placeholder",
             kind=StepKind.MODEL_CALL,
@@ -471,15 +480,29 @@ def _slot_key(family: str, call_id: str) -> str:
     return f"{family}:{call_id}"
 
 
-def _stable_step_id(family: str, call_id: str) -> str:
-    digest = uuid5(NAMESPACE_URL, f"ouroboros:harness:{family}:{call_id}").hex[:12]
+def _stable_step_id(source_key: str, family: str, call_id: str) -> str:
+    digest = uuid5(
+        NAMESPACE_URL,
+        f"ouroboros:harness:step:{source_key}:{family}:{call_id}",
+    ).hex[:12]
     return f"step_{family}_{digest}"
 
 
-def _rewrite_step_run_stage(step: StepRecord, *, run_id: str, stage_id: str) -> StepRecord:
+def _slot_parts(slot_key: str) -> tuple[str, str]:
+    family, call_id = slot_key.split(":", 1)
+    return family, call_id
+
+
+def _rewrite_step_identity(
+    step: StepRecord,
+    *,
+    step_id: str,
+    run_id: str,
+    stage_id: str,
+) -> StepRecord:
     return StepRecord(
         schema_version=step.schema_version,
-        step_id=step.step_id,
+        step_id=step_id,
         run_id=run_id,
         stage_id=stage_id,
         kind=step.kind,
@@ -516,7 +539,7 @@ def _step_from_start_only(
             metadata["args_preview"] = preview
     return StepRecord(
         schema_version=PROJECTION_SCHEMA_VERSION,
-        step_id=_stable_step_id(family, call_id),
+        step_id=_stable_step_id("pending", family, call_id),
         run_id=run_id,
         stage_id=stage_id,
         kind=kind,
