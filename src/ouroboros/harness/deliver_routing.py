@@ -39,6 +39,7 @@ _REDISPATCH_REASONS = frozenset(
         "chunk_handle_without_fact",
         "evidence_handle_mismatch",
         "malformed_evidence_claim",
+        "semantic_miss",
     }
 )
 _HITL_REASONS = frozenset(

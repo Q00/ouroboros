@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.claim_term_guard import deterministic_claim_term_guard
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
     DeliverEvidenceFact,
@@ -783,6 +784,49 @@ class TestEvaluateDeliverClaim:
                 },
             }
         ]
+
+    def test_claim_term_guard_rejects_traceguard_accepted_semantic_miss(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_test",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "result_preview": "pytest passed for user profile update",
+                    },
+                    source_event_ids=("evt_test",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="test_passed:admin_delete_denied",
+                    evidence_handle="ev_test",
+                    statement="test_passed behavior=admin_delete_denied",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=_RecordingTraceGuardValidator(),
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 1.0
+        assert verdict.accepted_fact_ids == ("test_passed:admin_delete_denied",)
+        assert verdict.rejected_fact_ids == ("test_passed:admin_delete_denied",)
+        assert verdict.rejected_reasons == (
+            "semantic_miss: test_passed:admin_delete_denied cites ev_test but evidence text lacks "
+            "required term(s): behavior=admin_delete_denied",
+        )
+        assert verdict.evidence_event_ids == ("evt_test",)
 
     def test_rejected_traceguard_result_is_preserved_for_routing(self) -> None:
         manifest = EvidenceManifest(

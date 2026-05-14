@@ -23,8 +23,14 @@ def test_traceguard_benchmark_reports_required_ab_metrics() -> None:
     assert capture.traceguard_report.fabrication_incidents_per_100_acs == 0.0
     assert capture.legacy_report.semantic_miss_incidents_per_100_acs == pytest.approx(25.0)
     assert capture.traceguard_report.semantic_miss_incidents_per_100_acs == pytest.approx(12.5)
+    assert capture.claim_term_guard_report.fabrication_incidents_per_100_acs == 0.0
+    assert capture.claim_term_guard_report.semantic_miss_incidents_per_100_acs == 0.0
     assert (
         capture.traceguard_report.median_chars_per_ac / capture.legacy_report.median_chars_per_ac
+    ) <= 1.5
+    assert (
+        capture.claim_term_guard_report.median_chars_per_ac
+        / capture.legacy_report.median_chars_per_ac
     ) <= 1.5
 
 
@@ -34,6 +40,10 @@ def test_traceguard_benchmark_delta_is_json_serializable() -> None:
     assert payload["delta"]["fabrication_incidents_per_100_acs"] == pytest.approx(-25.0)
     assert payload["delta"]["semantic_miss_incidents_per_100_acs"] == pytest.approx(-12.5)
     assert payload["delta"]["median_chars_ratio"] <= 1.5
+    assert payload["delta"]["claim_term_guard_semantic_miss_incidents_per_100_acs"] == pytest.approx(
+        -12.5
+    )
+    assert payload["delta"]["claim_term_guard_median_chars_ratio"] <= 1.5
     json.dumps(payload)
 
 
@@ -44,3 +54,4 @@ def test_traceguard_benchmark_markdown_artifact_matches_renderer() -> None:
     assert artifact == expected
     assert "Fabrication incidents per 100 ACs" in artifact
     assert "Semantic-miss incidents per 100 ACs" in artifact
+    assert "TraceGuard + claim-term guard" in artifact

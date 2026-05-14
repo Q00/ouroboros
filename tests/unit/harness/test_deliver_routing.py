@@ -103,6 +103,20 @@ def test_unsupported_fact_routes_to_redispatch_before_escalation_threshold() -> 
     assert route.reason == "deliver_gate_redispatch_required"
 
 
+def test_semantic_miss_routes_to_redispatch_before_escalation_threshold() -> None:
+    route = route_deliver_gate_verdict(
+        _verdict(
+            accepted=False,
+            reasons=("semantic_miss: evidence text lacks behavior=admin_delete_denied",),
+        ),
+        rejection_count=1,
+        model_escalation_threshold=2,
+    )
+
+    assert route.action is RecoveryAction.REDISPATCH
+    assert route.reason == "deliver_gate_redispatch_required"
+
+
 def test_repeated_traceguard_rejections_route_to_model_escalation() -> None:
     route = route_deliver_gate_verdict(
         _verdict(accepted=False, reasons=("unsupported_fact_id: fact_1 is not present",)),

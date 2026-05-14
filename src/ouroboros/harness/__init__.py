@@ -5,6 +5,12 @@ Run / Stage / Step / Artifact / Verdict records for #946 plus the
 journal-to-evidence-manifest normalizer for #978.
 """
 
+from ouroboros.harness.claim_term_guard import (
+    ClaimTermGuard,
+    ClaimTermGuardFact,
+    ClaimTermGuardVerdict,
+    deterministic_claim_term_guard,
+)
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
     DeliverEvidenceFact,
@@ -46,6 +52,9 @@ __all__ = [
     "EventStoreEvidenceReader",
     "EvidenceManifest",
     "RunRecord",
+    "ClaimTermGuard",
+    "ClaimTermGuardFact",
+    "ClaimTermGuardVerdict",
     "StageKind",
     "StageRecord",
     "StepKind",
@@ -55,6 +64,7 @@ __all__ = [
     "TraceGuardValidator",
     "VerdictOutcome",
     "VerdictRecord",
+    "deterministic_claim_term_guard",
     "evaluate_deliver_claim",
     "filter_events_for_ac",
     "load_ac_evidence_manifest",

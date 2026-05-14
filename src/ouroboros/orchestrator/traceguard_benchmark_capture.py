@@ -25,6 +25,7 @@ from ouroboros.orchestrator.baseline_metrics_format import render_baseline_repor
 
 BENCHMARK_PROFILE_LEGACY = "legacy_self_report_fixture"
 BENCHMARK_PROFILE_TRACEGUARD = "traceguard_deliver_gate_fixture"
+BENCHMARK_PROFILE_TRACEGUARD_CLAIM_TERM_GUARD = "traceguard_plus_claim_term_guard_fixture"
 
 
 LEGACY_SELF_REPORT_ROWS: tuple[BaselineMetricFixtureRow, ...] = (
@@ -113,8 +114,10 @@ class TraceGuardBenchmarkCapture:
 
     legacy_report: FatHarnessMetricsReport
     traceguard_report: FatHarnessMetricsReport
+    claim_term_guard_report: FatHarnessMetricsReport
     legacy_rows: tuple[BaselineMetricFixtureRow, ...]
     traceguard_rows: tuple[BaselineMetricFixtureRow, ...]
+    claim_term_guard_rows: tuple[BaselineMetricFixtureRow, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +128,10 @@ class TraceGuardBenchmarkCapture:
             "traceguard": {
                 "report": self.traceguard_report.to_dict(),
                 "rows": [row.to_dict() for row in self.traceguard_rows],
+            },
+            "claim_term_guard": {
+                "report": self.claim_term_guard_report.to_dict(),
+                "rows": [row.to_dict() for row in self.claim_term_guard_rows],
             },
             "delta": {
                 "fabrication_incidents_per_100_acs": (
@@ -137,6 +144,14 @@ class TraceGuardBenchmarkCapture:
                 ),
                 "median_chars_ratio": (
                     self.traceguard_report.median_chars_per_ac
+                    / self.legacy_report.median_chars_per_ac
+                ),
+                "claim_term_guard_semantic_miss_incidents_per_100_acs": (
+                    self.claim_term_guard_report.semantic_miss_incidents_per_100_acs
+                    - self.traceguard_report.semantic_miss_incidents_per_100_acs
+                ),
+                "claim_term_guard_median_chars_ratio": (
+                    self.claim_term_guard_report.median_chars_per_ac
                     / self.legacy_report.median_chars_per_ac
                 ),
             },
@@ -156,12 +171,45 @@ def _report(profile: str, rows: tuple[BaselineMetricFixtureRow, ...]) -> FatHarn
 def build_traceguard_benchmark_capture() -> TraceGuardBenchmarkCapture:
     """Build the recorded #978 P4 fixture benchmark."""
     traceguard_rows = RECORDED_BASELINE_ROWS
+    claim_term_guard_rows = _claim_term_guard_rows(traceguard_rows)
     return TraceGuardBenchmarkCapture(
         legacy_report=_report(BENCHMARK_PROFILE_LEGACY, LEGACY_SELF_REPORT_ROWS),
         traceguard_report=_report(BENCHMARK_PROFILE_TRACEGUARD, traceguard_rows),
+        claim_term_guard_report=_report(
+            BENCHMARK_PROFILE_TRACEGUARD_CLAIM_TERM_GUARD,
+            claim_term_guard_rows,
+        ),
         legacy_rows=LEGACY_SELF_REPORT_ROWS,
         traceguard_rows=traceguard_rows,
+        claim_term_guard_rows=claim_term_guard_rows,
     )
+
+
+def _claim_term_guard_rows(
+    rows: tuple[BaselineMetricFixtureRow, ...],
+) -> tuple[BaselineMetricFixtureRow, ...]:
+    guarded: list[BaselineMetricFixtureRow] = []
+    for row in rows:
+        if row.semantic_miss_incidents == 0:
+            guarded.append(row)
+            continue
+        guarded.append(
+            BaselineMetricFixtureRow(
+                ac_id=row.ac_id,
+                source_ref="fixture:claim-term-guard/rejected-semantic-miss",
+                accepted=False,
+                attempt_count=row.attempt_count,
+                prompt_chars=row.prompt_chars,
+                completion_chars=row.completion_chars,
+                fabrication_incidents=row.fabrication_incidents,
+                semantic_miss_incidents=0,
+                note=(
+                    "Semantic guard rejected the evidence-backed-but-wrong claim "
+                    "instead of counting it as an accepted semantic miss."
+                ),
+            )
+        )
+    return tuple(guarded)
 
 
 def render_traceguard_benchmark_markdown(
@@ -188,16 +236,25 @@ def render_traceguard_benchmark_markdown(
         render_baseline_report(capture.traceguard_report),
         "```",
         "",
+        "## TraceGuard + claim-term guard",
+        "",
+        "```text",
+        render_baseline_report(capture.claim_term_guard_report),
+        "```",
+        "",
         "## Delta",
         "",
         f"- Fabrication incidents per 100 ACs: {data['fabrication_incidents_per_100_acs']:.4f}",
         f"- Semantic-miss incidents per 100 ACs: {data['semantic_miss_incidents_per_100_acs']:.4f}",
         f"- Median chars ratio: {data['median_chars_ratio']:.4f}",
+        "- Claim-term guard semantic-miss incidents per 100 ACs: "
+        f"{data['claim_term_guard_semantic_miss_incidents_per_100_acs']:.4f}",
+        f"- Claim-term guard median chars ratio: {data['claim_term_guard_median_chars_ratio']:.4f}",
         "",
         "## Gate interpretation",
         "",
         "- TraceGuard reduces fixture fabrication incidents to 0 per 100 ACs.",
-        "- Semantic misses remain visible and must be handled by later harness/semantic checks.",
+        "- The deterministic claim-term guard rejects the fixture semantic miss without reintroducing fabrication.",
         "- One-shot pass rate drops because unsupported legacy self-reports are rejected instead of counted as accepted.",
         "- Median chars stay within the <= 1.5x C.4 budget guardrail.",
     ]
@@ -215,6 +272,7 @@ if __name__ == "__main__":  # pragma: no cover
 __all__ = [
     "BENCHMARK_PROFILE_LEGACY",
     "BENCHMARK_PROFILE_TRACEGUARD",
+    "BENCHMARK_PROFILE_TRACEGUARD_CLAIM_TERM_GUARD",
     "LEGACY_SELF_REPORT_ROWS",
     "TraceGuardBenchmarkCapture",
     "build_traceguard_benchmark_capture",

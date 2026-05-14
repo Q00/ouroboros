@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.claim_term_guard import ClaimTermGuard, ClaimTermGuardFact
 from ouroboros.harness.journal import EvidenceManifest, normalize_events
 
 
@@ -244,6 +245,7 @@ def evaluate_deliver_claim(
     claim: DeliverEvidenceClaim,
     *,
     traceguard_validator: TraceGuardValidator,
+    claim_term_guard: ClaimTermGuard | None = None,
 ) -> DeliverGateVerdict:
     """Evaluate a typed AC deliver claim with a TraceGuard-compatible validator.
 
@@ -262,6 +264,9 @@ def evaluate_deliver_claim(
         raise ValueError(msg)
 
     traceguard_manifest, source_events_by_handle = _traceguard_manifest(manifest, claim)
+    evidence_text_by_handle = {
+        entry.chunk_id: entry.text for entry in traceguard_manifest if entry.chunk_id
+    }
     missing_evidence = _missing_evidence_summaries(
         claim,
         available_handles=frozenset(source_events_by_handle),
@@ -276,12 +281,37 @@ def evaluate_deliver_claim(
     accepted_fact_ids = _claim_fact_ids(accepted_claims)
     if not accepted_fact_ids:
         accepted_fact_ids = _string_tuple(getattr(raw_result, "allowed_fact_ids", ()))
-    rejected_fact_ids = _dedupe_strings(
-        fact_id for fact_id, _, _ in rejected if fact_id is not None
-    )
     accepted_handles = _claim_chunk_ids(accepted_claims)
     if not accepted_handles:
         accepted_handles = _string_tuple(getattr(raw_result, "allowed_chunk_ids", ()))
+    claim_term_guard_verdict = None
+    if claim_term_guard is not None and bool(raw_result.accepted) and not missing_evidence:
+        claim_term_guard_verdict = claim_term_guard(
+            ac_id=manifest.ac_id,
+            facts=_claim_term_guard_facts(
+                claim,
+                accepted_fact_ids=accepted_fact_ids,
+                accepted_handles=accepted_handles,
+                evidence_text_by_handle=evidence_text_by_handle,
+            ),
+        )
+        if not claim_term_guard_verdict.accepted:
+            rejected_fact_ids_by_index = claim_term_guard_verdict.rejected_fact_ids
+            rejected += tuple(
+                (
+                    (
+                        rejected_fact_ids_by_index[index]
+                        if index < len(rejected_fact_ids_by_index)
+                        else None
+                    ),
+                    None,
+                    reason,
+                )
+                for index, reason in enumerate(claim_term_guard_verdict.rejected_reasons)
+            )
+    rejected_fact_ids = _dedupe_strings(
+        fact_id for fact_id, _, _ in rejected if fact_id is not None
+    )
     unsupported_claim_rate = _unsupported_claim_rate(
         raw_rate=float(raw_result.unsupported_claim_rate),
         rejected=rejected,
@@ -290,7 +320,11 @@ def evaluate_deliver_claim(
 
     return DeliverGateVerdict(
         ac_id=manifest.ac_id,
-        accepted=bool(raw_result.accepted) and not missing_evidence,
+        accepted=(
+            bool(raw_result.accepted)
+            and not missing_evidence
+            and (claim_term_guard_verdict is None or claim_term_guard_verdict.accepted)
+        ),
         unsupported_claim_rate=unsupported_claim_rate,
         accepted_fact_ids=accepted_fact_ids,
         rejected_fact_ids=rejected_fact_ids,
@@ -397,6 +431,35 @@ def _traceguard_manifest(
         )
         source_events_by_handle[entry.handle] = entry.source_event_ids
     return tuple(entries), source_events_by_handle
+
+
+def _claim_term_guard_facts(
+    claim: DeliverEvidenceClaim,
+    *,
+    accepted_fact_ids: tuple[str, ...],
+    accepted_handles: tuple[str, ...],
+    evidence_text_by_handle: dict[str, str],
+) -> tuple[ClaimTermGuardFact, ...]:
+    accepted_fact_set = frozenset(accepted_fact_ids)
+    accepted_handle_set = frozenset(accepted_handles)
+    facts: list[ClaimTermGuardFact] = []
+    for fact in claim.facts:
+        if accepted_fact_set and fact.fact_id not in accepted_fact_set:
+            continue
+        if accepted_handle_set and fact.evidence_handle not in accepted_handle_set:
+            continue
+        evidence_text = evidence_text_by_handle.get(fact.evidence_handle)
+        if evidence_text is None:
+            continue
+        facts.append(
+            ClaimTermGuardFact(
+                fact_id=fact.fact_id,
+                evidence_handle=fact.evidence_handle,
+                statement=fact.statement,
+                evidence_text=evidence_text,
+            )
+        )
+    return tuple(facts)
 
 
 def _evidence_text(payload: object) -> str:
