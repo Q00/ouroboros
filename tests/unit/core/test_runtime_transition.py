@@ -101,6 +101,20 @@ def test_expected_revision_without_current_revision_fails_closed() -> None:
     assert "requires current_revision" in result.message
 
 
+def test_invalid_current_revision_is_retryable_rejection_not_crash() -> None:
+    result = evaluate_runtime_transition(
+        _transition(expected_revision=7),
+        current_state="pending",
+        allowed_transitions=_ALLOWED,
+        current_revision="7",  # type: ignore[arg-type]
+    )
+
+    assert result.accepted is False
+    assert result.failure_class is RuntimeFailureClass.RETRYABLE
+    assert result.failure_kind is RuntimeTransitionFailureKind.STALE_REVISION
+    assert "current_revision must be an int" in result.message
+
+
 def test_from_state_mismatch_is_retryable_snapshot_drift() -> None:
     result = evaluate_runtime_transition(
         _transition(from_state="pending", expected_revision=None),
@@ -179,3 +193,9 @@ def test_validation_rejects_noop_duplicate_evidence_and_secret_metadata() -> Non
 
     with pytest.raises(ValueError, match="secret-like key"):
         _transition(metadata={"dbPassword": "secret"})
+
+    with pytest.raises(ValueError, match="secret-like key"):
+        _transition(metadata={"db.password": "secret"})
+
+    with pytest.raises(ValueError, match="secret-like key"):
+        _transition(metadata={"db/password": "secret"})

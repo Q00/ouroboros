@@ -121,7 +121,9 @@ def _normalize_utc(name: str, value: datetime) -> datetime:
 def _is_secret_key(value: str) -> bool:
     camel_split = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value.strip())
     camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", camel_split)
-    normalized = camel_split.lower().replace("-", "_").replace(" ", "_")
+    normalized = (
+        camel_split.lower().replace("-", "_").replace(" ", "_").replace(".", "_").replace("/", "_")
+    )
     return normalized in _SECRET_KEYS or normalized.endswith(_SECRET_SUFFIXES)
 
 
@@ -332,6 +334,24 @@ def evaluate_runtime_transition(
 ) -> RuntimeTransitionResult:
     """Validate a transition request without mutating runtime state."""
     normalized_current = _require_non_blank("current_state", current_state)
+    if current_revision is not None and type(current_revision) is not int:
+        return RuntimeTransitionResult(
+            transition=transition,
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class=RuntimeFailureClass.RETRYABLE,
+            failure_kind=RuntimeTransitionFailureKind.STALE_REVISION,
+            message="current_revision must be an int; reload the latest runtime snapshot",
+            current_state=normalized_current,
+        )
+    if current_revision is not None and current_revision < 0:
+        return RuntimeTransitionResult(
+            transition=transition,
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class=RuntimeFailureClass.RETRYABLE,
+            failure_kind=RuntimeTransitionFailureKind.STALE_REVISION,
+            message="current_revision must be >= 0; reload the latest runtime snapshot",
+            current_state=normalized_current,
+        )
     if transition.from_state != normalized_current:
         return RuntimeTransitionResult(
             transition=transition,
