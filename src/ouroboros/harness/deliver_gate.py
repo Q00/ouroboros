@@ -321,6 +321,16 @@ def evaluate_deliver_claim(
         rejected=rejected,
         total_claims=len(claim.facts),
     )
+    final_accepted_fact_ids = _final_accepted_fact_ids(
+        accepted_fact_ids=accepted_fact_ids,
+        rejected_fact_ids=rejected_fact_ids,
+    )
+    final_accepted_handles = _final_accepted_handles(
+        claim,
+        accepted_fact_ids=accepted_fact_ids,
+        final_accepted_fact_ids=final_accepted_fact_ids,
+        accepted_handles=accepted_handles,
+    )
 
     return DeliverGateVerdict(
         ac_id=manifest.ac_id,
@@ -330,13 +340,41 @@ def evaluate_deliver_claim(
             and (claim_term_guard_verdict is None or claim_term_guard_verdict.accepted)
         ),
         unsupported_claim_rate=unsupported_claim_rate,
-        accepted_fact_ids=accepted_fact_ids,
+        accepted_fact_ids=final_accepted_fact_ids,
         rejected_fact_ids=rejected_fact_ids,
         rejected_reasons=_dedupe_strings(reason for _, _, reason in rejected),
         evidence_event_ids=_evidence_event_ids_for_handles(
-            accepted_handles,
+            final_accepted_handles,
             source_events_by_handle=source_events_by_handle,
         ),
+    )
+
+
+def _final_accepted_fact_ids(
+    *,
+    accepted_fact_ids: tuple[str, ...],
+    rejected_fact_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    rejected_fact_set = frozenset(rejected_fact_ids)
+    return tuple(fact_id for fact_id in accepted_fact_ids if fact_id not in rejected_fact_set)
+
+
+def _final_accepted_handles(
+    claim: DeliverEvidenceClaim,
+    *,
+    accepted_fact_ids: tuple[str, ...],
+    final_accepted_fact_ids: tuple[str, ...],
+    accepted_handles: tuple[str, ...],
+) -> tuple[str, ...]:
+    if not accepted_fact_ids:
+        return accepted_handles
+    final_accepted_fact_set = frozenset(final_accepted_fact_ids)
+    accepted_handle_set = frozenset(accepted_handles)
+    return tuple(
+        fact.evidence_handle
+        for fact in claim.facts
+        if fact.fact_id in final_accepted_fact_set
+        and (not accepted_handle_set or fact.evidence_handle in accepted_handle_set)
     )
 
 

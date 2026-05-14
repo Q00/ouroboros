@@ -822,13 +822,13 @@ class TestEvaluateDeliverClaim:
 
         assert verdict.accepted is False
         assert verdict.unsupported_claim_rate == 0.0
-        assert verdict.accepted_fact_ids == ("test_passed:admin_delete_denied",)
+        assert verdict.accepted_fact_ids == ()
         assert verdict.rejected_fact_ids == ("test_passed:admin_delete_denied",)
         assert verdict.rejected_reasons == (
             "semantic_miss: test_passed:admin_delete_denied cites ev_test but evidence text lacks "
             "required term(s): behavior=admin_delete_denied",
         )
-        assert verdict.evidence_event_ids == ("evt_test",)
+        assert verdict.evidence_event_ids == ()
 
 
     def test_claim_term_guard_checks_mixed_traceguard_allowed_facts(self) -> None:
@@ -882,7 +882,7 @@ class TestEvaluateDeliverClaim:
 
         assert verdict.accepted is False
         assert verdict.unsupported_claim_rate == 0.5
-        assert verdict.accepted_fact_ids == ("fact_actual",)
+        assert verdict.accepted_fact_ids == ()
         assert verdict.rejected_fact_ids == ("fact_missing", "fact_actual")
         assert verdict.rejected_reasons == (
             "missing_evidence_handle: ev_missing is not present in manifest",
@@ -890,7 +890,7 @@ class TestEvaluateDeliverClaim:
             "semantic_miss: fact_actual cites ev_actual but evidence text lacks "
             "required term(s): behavior=admin_delete_denied",
         )
-        assert verdict.evidence_event_ids == ("evt_1",)
+        assert verdict.evidence_event_ids == ()
 
     def test_claim_term_guard_skips_chunk_only_fallback_for_mixed_rejection(self) -> None:
         manifest = EvidenceManifest(
