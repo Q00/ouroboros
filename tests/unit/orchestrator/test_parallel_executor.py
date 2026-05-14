@@ -1302,6 +1302,11 @@ class TestParallelACExecutor:
                         tool_name="Bash",
                         data={"tool_input": {"command": "pytest tests/test_app.py"}},
                     ),
+                    AgentMessage(
+                        type="result",
+                        content="tests/test_app.py passed",
+                        data={"subtype": "success"},
+                    ),
                 ),
             ),
             event_store=event_store,
@@ -1425,7 +1430,10 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="generated.py updated; tests/test_generated.py passed",
+                        content=(
+                            "generated.py updated; tests/test_generated.py passed; "
+                            "0 failed, 0 errors, 1 passed"
+                        ),
                         data={"subtype": "success"},
                     ),
                 ),
@@ -1528,6 +1536,73 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_preexisting_file_without_transcript_support(
+        self, tmp_path
+    ) -> None:
+        """A stale workspace file must not prove this run touched that file."""
+        preexisting_file = tmp_path / "src" / "preexisting.py"
+        preexisting_file.parent.mkdir()
+        preexisting_file.write_text("VALUE = 1\n", encoding="utf-8")
+        test_file = tmp_path / "tests" / "test_preexisting.py"
+        test_file.parent.mkdir()
+        test_file.write_text("def test_preexisting():\n    assert True\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/preexisting.py"],'
+                '"commands_run":["pytest tests/test_preexisting.py"],'
+                '"tests_passed":["tests/test_preexisting.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_preexisting.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_preexisting.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="tests/test_preexisting.py passed",
+                        data={"subtype": "success"},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/preexisting.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
     async def test_fat_harness_verifier_rejects_test_not_covered_by_success_chunk(
         self, tmp_path
     ) -> None:
@@ -1588,6 +1663,72 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error is not None
         assert "tests_passed: tests/test_b.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_targeted_failed_test_command(
+        self, tmp_path
+    ) -> None:
+        """A targeted test command mentioning the claim is not proof without success."""
+        touched_file = tmp_path / "src" / "generated.py"
+        touched_file.parent.mkdir()
+        touched_file.write_text("VALUE = 1\n", encoding="utf-8")
+        test_file = tmp_path / "tests" / "test_generated.py"
+        test_file.parent.mkdir()
+        test_file.write_text("def test_generated():\n    assert False\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/generated.py"],'
+                '"commands_run":["pytest tests/test_generated.py"],'
+                '"tests_passed":["tests/test_generated.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="tests/test_generated.py failed",
+                        data={"subtype": "success"},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "tests_passed: tests/test_generated.py" in result.error
         evidence_event = next(
             event
             for event in appended_events

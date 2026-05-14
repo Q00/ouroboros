@@ -199,6 +199,61 @@ def _runtime_messages_support_claim(value: str, messages: tuple[AgentMessage, ..
     )
 
 
+def _runtime_messages_support_file_claim(
+    value: str,
+    messages: tuple[AgentMessage, ...],
+    *,
+    task_cwd: str | None,
+) -> bool:
+    """Return True when runtime transcript evidence backs a workspace file claim.
+
+    Existence alone is not sufficient for ``files_touched``: a stale file in the
+    workspace must not prove that this run created or modified it. Exact
+    transcript support is preferred; basename support is accepted only when the
+    claimed relative path resolves inside the active workspace, which covers
+    tool outputs that report ``generated.py`` instead of ``src/generated.py``.
+    """
+    if _runtime_messages_support_claim(value, messages):
+        return True
+    if task_cwd is None:
+        return False
+    candidate = Path(value)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    base = Path(task_cwd).resolve()
+    resolved = (base / candidate).resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        return False
+    if not resolved.exists():
+        return False
+    basename = candidate.name.strip().lower()
+    return bool(basename) and any(
+        _runtime_message_supports_file_basename(basename, message) for message in messages
+    )
+
+
+def _runtime_message_supports_file_basename(basename: str, message: AgentMessage) -> bool:
+    """Return True when one message plausibly reports touching a basename."""
+    text = _runtime_message_search_text(message)
+    basename_pattern = re.compile(rf"(?<![\w.-]){re.escape(basename)}(?![\w.-])")
+    if not basename_pattern.search(text):
+        return False
+    if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
+        return True
+    return bool(
+        re.search(
+            rf"(?<![\w.-]){re.escape(basename)}(?![\w.-]).*\b("
+            r"updated|modified|changed|created|generated|wrote|written|patched"
+            r")\b|\b("
+            r"updated|modified|changed|created|generated|wrote|written|patched"
+            rf")\b.*(?<![\w.-]){re.escape(basename)}(?![\w.-])",
+            text,
+        )
+    )
+
+
 def _looks_like_test_command(command: str) -> bool:
     """Return True for common whole-suite or targeted test invocations."""
     normalized = command.strip().lower()
@@ -223,7 +278,16 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
         if isinstance(value, str):
             parts.append(value)
     text = "\n".join(parts).lower()
-    if re.search(r"\b(failed|failure|error|errors)\b|exit\s*code\s*[1-9]", text):
+    failure_scan_text = re.sub(r"\b0\s+(failed|failures|error|errors)\b", "", text)
+    if re.search(
+        r"\b[1-9]\d*\s+failed\b|\b(failure|error|errors)\b|exit\s*code\s*[1-9]",
+        failure_scan_text,
+    ):
+        return False
+    if re.search(r"\bfailed\b", text) and not re.search(
+        r"\b0\s+failed\b|\bno\s+tests?\s+failed\b",
+        text,
+    ):
         return False
     return bool(re.search(r"\b(passed|pass|success|succeeded)\b|exit\s*code\s*0|0\s+failed", text))
 
@@ -3926,13 +3990,20 @@ When complete, explicitly state: [TASK_COMPLETE]
                 continue
             field_messages = _runtime_support_messages_for_field(field_name, support_messages)
             for value in values:
-                if field_name == "files_touched" and self._evidence_path_exists(value):
-                    continue
-                if field_name == "tests_passed" and _runtime_messages_support_test_claim(
-                    value=value,
-                    backed_commands=backed_commands,
-                    messages=support_messages,
+                if field_name == "files_touched" and _runtime_messages_support_file_claim(
+                    value,
+                    field_messages,
+                    task_cwd=self._task_cwd or self._adapter.working_directory,
                 ):
+                    continue
+                if field_name == "tests_passed":
+                    if _runtime_messages_support_test_claim(
+                        value=value,
+                        backed_commands=backed_commands,
+                        messages=support_messages,
+                    ):
+                        continue
+                    unsupported.append(f"{field_name}: {value}")
                     continue
                 if not _runtime_messages_support_claim(value, field_messages):
                     unsupported.append(f"{field_name}: {value}")
@@ -3945,24 +4016,6 @@ When complete, explicitly state: [TASK_COMPLETE]
             )
 
         return VerifierVerdict(passed=True)
-
-    def _evidence_path_exists(self, value: str) -> bool:
-        """Return True when a file claim exists under the task working directory."""
-        task_cwd = self._task_cwd or self._adapter.working_directory
-        if task_cwd is None:
-            return False
-        candidate = Path(value)
-        if candidate.is_absolute():
-            return False
-        if ".." in candidate.parts:
-            return False
-        base = Path(task_cwd).resolve()
-        resolved = (base / candidate).resolve()
-        try:
-            resolved.relative_to(base)
-        except ValueError:
-            return False
-        return resolved.exists()
 
     async def _emit_atomic_typed_evidence_event(
         self,
