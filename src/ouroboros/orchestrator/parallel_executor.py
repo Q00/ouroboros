@@ -414,29 +414,66 @@ _MEMORY_WAIT_MAX_SECONDS = 120.0
 _MAX_LEAF_RESULT_CHARS = 1200
 _SIBLING_HEADLINE_CHARS = 80
 _SiblingACRef = tuple[int | None, str]
-_GOVERNED_COORDINATOR_REVIEW_HEADING_RE = re.compile(r"^## Coordinator Review \(Level (\d+)\)$")
 
 
-def _normalize_governed_parent_summary(parent_summary: str) -> str:
-    """Render legacy level context inside the governor without nested H2 headings.
+def _build_governed_parent_summary(level_contexts: list[LevelContext] | None) -> str:
+    """Render level context for governed dispatch without nested H2 headings.
 
     ``build_context_prompt()`` is also used by the legacy prompt path, where its
     top-level ``##`` sections are appropriate.  Governed dispatch already wraps
     that text in ``## Parent context`` via ``compose_context()``, so preserving
-    those headings creates a hard-to-scan nested hierarchy.  Convert only the
-    known top-level headings to compact labels; leave indented or embedded
-    markdown from AC outputs untouched.
+    those headings creates a hard-to-scan nested hierarchy.  Build the governed
+    variant from structured ``LevelContext`` data so only orchestrator-owned
+    section wrappers become compact labels; embedded markdown from AC outputs
+    remains byte-for-byte content inside its original summary text.
     """
+    if not level_contexts:
+        return ""
+
+    sections: list[str] = []
+    for ctx in level_contexts:
+        text = ctx.to_prompt_text()
+        if text:
+            sections.append(text)
+
+    has_reviews = any(ctx.coordinator_review for ctx in level_contexts)
+    if not sections and not has_reviews:
+        return ""
+
     lines: list[str] = []
-    for line in parent_summary.strip().splitlines():
-        if line == "## Previous Work Context":
-            lines.append("Previous Work Context:")
-            continue
-        coordinator_review = _GOVERNED_COORDINATOR_REVIEW_HEADING_RE.fullmatch(line)
-        if coordinator_review:
-            lines.append(f"Coordinator Review (Level {coordinator_review.group(1)}):")
-            continue
-        lines.append(line)
+    if sections:
+        lines.extend(
+            (
+                "Previous Work Context:",
+                "The following ACs have already been completed. "
+                "Use this context to inform your work.",
+                "",
+                "\n\n".join(sections),
+            )
+        )
+
+    for ctx in level_contexts:
+        if ctx.coordinator_review:
+            review = ctx.coordinator_review
+            review_lines: list[str] = []
+
+            if review.review_summary:
+                review_lines.append(f"**Review**: {review.review_summary}")
+
+            if review.fixes_applied:
+                fixes = "; ".join(review.fixes_applied)
+                review_lines.append(f"**Fixes applied**: {fixes}")
+
+            if review.warnings_for_next_level:
+                for warning in review.warnings_for_next_level:
+                    review_lines.append(f"- WARNING: {warning}")
+
+            if review_lines:
+                if lines:
+                    lines.append("")
+                lines.append(f"Coordinator Review (Level {review.level_number}):")
+                lines.extend(review_lines)
+
     return "\n".join(lines).strip()
 
 
@@ -3010,9 +3047,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         try:
             composed = compose_context(
                 ac=ac_content,
-                parent_summary=_normalize_governed_parent_summary(
-                    build_context_prompt(level_contexts or [])
-                ),
+                parent_summary=_build_governed_parent_summary(level_contexts),
                 siblings=sibling_statuses,
             )
         except ValueError as exc:
