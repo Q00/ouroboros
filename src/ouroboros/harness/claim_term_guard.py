@@ -140,7 +140,10 @@ def _structured_terms(statement: str) -> tuple[_StructuredTerm, ...]:
 
 
 def _strip_literal(value: str) -> str:
-    return value.strip().strip("`'\"")
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "`'\"":
+        return stripped[1:-1].strip()
+    return stripped.rstrip(".,;:!?")
 
 
 def _term_value_alternatives(term: _StructuredTerm) -> tuple[str, ...]:

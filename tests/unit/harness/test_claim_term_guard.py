@@ -65,6 +65,22 @@ def test_accepts_existing_child_ac_result_vocabulary() -> None:
     assert verdict.accepted is True
 
 
+def test_accepts_unquoted_structured_term_with_sentence_punctuation() -> None:
+    verdict = deterministic_claim_term_guard(
+        ac_id="AC-1",
+        facts=(
+            ClaimTermGuardFact(
+                fact_id="test_passed:admin_delete_denied",
+                evidence_handle="ev_1",
+                statement="test_passed behavior=admin_delete_denied.",
+                evidence_text="pytest passed: admin_delete_denied",
+            ),
+        ),
+    )
+
+    assert verdict.accepted is True
+
+
 def test_rejects_when_structured_statement_terms_are_missing_from_evidence() -> None:
     verdict = deterministic_claim_term_guard(
         ac_id="AC-1",
