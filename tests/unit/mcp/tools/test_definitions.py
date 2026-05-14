@@ -946,6 +946,84 @@ class TestProjectionQueryHandler:
         assert result.is_err
         assert "references multiple executions" in str(result.error)
 
+    async def test_handle_ignores_foreign_payload_execution_candidates(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Foreign aggregates must not establish session execution membership."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_real_exec",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_payload_real",
+                data={
+                    "session_id": "orch_projection_foreign_payload",
+                    "execution_id": "exec_payload_real",
+                    "call_id": "payload_real",
+                    "tool_name": "Bash",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_foreign_exec",
+                type="tool.call.started",
+                aggregate_type="lineage",
+                aggregate_id="lineage_payload_foreign",
+                data={
+                    "session_id": "orch_projection_foreign_payload",
+                    "execution_id": "exec_payload_foreign",
+                    "call_id": "payload_foreign",
+                    "tool_name": "Read",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "orch_projection_foreign_payload"})
+
+        assert result.is_ok
+        assert result.value.meta["event_count"] == 1
+        assert result.value.meta["seed_id"] == "orch_projection_foreign_payload"
+        assert result.value.meta["seed_id_source"] == "fallback"
+        assert [step["name"] for step in result.value.meta["steps"]] == ["Bash"]
+
+    async def test_handle_rejects_foreign_only_payload_session_execution(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Explicit session/execution selectors cannot be proven by foreign aggregates."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_foreign_only_exec",
+                type="tool.call.started",
+                aggregate_type="lineage",
+                aggregate_id="lineage_payload_foreign_only",
+                data={
+                    "session_id": "orch_projection_foreign_only",
+                    "execution_id": "exec_payload_foreign_only",
+                    "call_id": "payload_foreign_only",
+                    "tool_name": "Read",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle(
+            {
+                "session_id": "orch_projection_foreign_only",
+                "execution_id": "exec_payload_foreign_only",
+            }
+        )
+
+        assert result.is_err
+        assert "does not belong" in str(result.error)
+
     async def test_handle_disambiguates_metadata_less_session_with_execution_id(
         self,
         memory_event_store: EventStore,

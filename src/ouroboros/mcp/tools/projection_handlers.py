@@ -247,7 +247,7 @@ async def _load_projection_events(
                     or _is_session_terminal_event(event, session_id)
                     or _event_links_execution(event, declared_execution_id)
                 ]
-            payload_execution_ids = _event_payload_execution_ids(events)
+            payload_execution_ids = _event_payload_execution_ids(events, session_id)
             if len(payload_execution_ids) > 1:
                 msg = (
                     f"session_id {session_id!r} references multiple executions; "
@@ -398,29 +398,40 @@ def _session_payload_links_execution(
     session_id: str,
     execution_id: str,
 ) -> bool:
-    for event in events:
-        if not isinstance(event.data, dict):
-            continue
-        payload_session_id = event.data.get("session_id")
-        if not isinstance(payload_session_id, str) or payload_session_id.strip() != session_id:
-            continue
-        for key in ("execution_id", "parent_execution_id"):
-            value = event.data.get(key)
-            if isinstance(value, str) and value.strip() == execution_id:
-                return True
-    return False
+    return any(
+        _event_payload_links_session_execution(event, session_id, execution_id) for event in events
+    )
 
 
-def _event_payload_execution_ids(events: Sequence[BaseEvent]) -> frozenset[str]:
+def _event_payload_execution_ids(
+    events: Sequence[BaseEvent],
+    session_id: str,
+) -> frozenset[str]:
     execution_ids: set[str] = set()
     for event in events:
         if not isinstance(event.data, dict):
             continue
         for key in ("execution_id", "parent_execution_id"):
             value = event.data.get(key)
-            if isinstance(value, str) and value.strip():
-                execution_ids.add(value.strip())
+            if not isinstance(value, str) or not value.strip():
+                continue
+            execution_id = value.strip()
+            if _event_payload_links_session_execution(event, session_id, execution_id):
+                execution_ids.add(execution_id)
     return frozenset(execution_ids)
+
+
+def _event_payload_links_session_execution(
+    event: BaseEvent,
+    session_id: str,
+    execution_id: str,
+) -> bool:
+    if not isinstance(event.data, dict):
+        return False
+    payload_session_id = event.data.get("session_id")
+    if not isinstance(payload_session_id, str) or payload_session_id.strip() != session_id:
+        return False
+    return _event_links_execution(event, execution_id)
 
 
 def _is_session_metadata_event(
@@ -484,7 +495,7 @@ def _query_projection_source_key(
         execution_ids = _session_execution_ids(events, session_id)
         if len(execution_ids) == 1:
             return f"execution:{next(iter(execution_ids))}"
-        payload_execution_ids = _event_payload_execution_ids(events)
+        payload_execution_ids = _event_payload_execution_ids(events, session_id)
         if len(payload_execution_ids) == 1:
             return f"execution:{next(iter(payload_execution_ids))}"
     if session_id is not None:
