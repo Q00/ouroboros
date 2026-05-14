@@ -111,8 +111,14 @@ def _missing_structured_terms(*, statement: str, evidence_text: str) -> tuple[st
     evidence_tokens = _normalize_tokens(evidence_text)
     missing: list[str] = []
     for term in terms:
-        term_tokens = _normalize_tokens(term.value)
-        if not term_tokens or not _contains_token_sequence(evidence_tokens, term_tokens):
+        alternatives = tuple(
+            tokens
+            for value in _term_value_alternatives(term)
+            if (tokens := _normalize_tokens(value))
+        )
+        if not alternatives or not any(
+            _contains_token_sequence(evidence_tokens, tokens) for tokens in alternatives
+        ):
             missing.append(f"{term.key}={term.value}")
     return tuple(missing)
 
@@ -135,6 +141,24 @@ def _structured_terms(statement: str) -> tuple[_StructuredTerm, ...]:
 
 def _strip_literal(value: str) -> str:
     return value.strip().strip("`'\"")
+
+
+def _term_value_alternatives(term: _StructuredTerm) -> tuple[str, ...]:
+    alternatives = [term.value, term.value.replace("_", " ")]
+    normalized_key = term.key.lower()
+    normalized_value = term.value.lower()
+    if normalized_key == "result":
+        alternatives.extend(_RESULT_VALUE_ALIASES.get(normalized_value, ()))
+    return tuple(dict.fromkeys(alternatives))
+
+
+_RESULT_VALUE_ALIASES: dict[str, tuple[str, ...]] = {
+    # Existing deliver-claim vocabulary records outcome labels in the claim while
+    # journal evidence often stores natural-language previews. Keep aliases
+    # narrow and result-key scoped so behavior/path terms remain exact.
+    "test_passed": ("tests passed", "test passed", "pytest passed"),
+    "file_modified": ("file modified", "modified file", "file updated", "docs updated"),
+}
 
 
 def _normalize_tokens(value: str) -> tuple[str, ...]:

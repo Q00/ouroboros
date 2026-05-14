@@ -43,6 +43,28 @@ def test_accepts_when_structured_term_value_is_present_without_key() -> None:
     assert verdict.accepted is True
 
 
+def test_accepts_existing_child_ac_result_vocabulary() -> None:
+    verdict = deterministic_claim_term_guard(
+        ac_id="AC-PARENT",
+        facts=(
+            ClaimTermGuardFact(
+                fact_id="child_ac:AC-1:test_passed",
+                evidence_handle="ev_child_ac_1",
+                statement="child_ac=AC-1 result=test_passed",
+                evidence_text="child_ac_id=AC-1; tests passed",
+            ),
+            ClaimTermGuardFact(
+                fact_id="child_ac:AC-2:file_modified",
+                evidence_handle="ev_child_ac_2",
+                statement="child_ac=AC-2 result=file_modified",
+                evidence_text="child_ac_id=AC-2; path=docs/ac2.md; scope=whole_file; docs updated",
+            ),
+        ),
+    )
+
+    assert verdict.accepted is True
+
+
 def test_rejects_when_structured_statement_terms_are_missing_from_evidence() -> None:
     verdict = deterministic_claim_term_guard(
         ac_id="AC-1",

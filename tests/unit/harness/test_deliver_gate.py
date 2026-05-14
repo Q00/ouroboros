@@ -596,6 +596,7 @@ class TestEvaluateDeliverClaim:
             manifest,
             claim,
             traceguard_validator=validator,
+            claim_term_guard=deterministic_claim_term_guard,
         )
 
         assert verdict.accepted is True
@@ -691,6 +692,7 @@ class TestEvaluateDeliverClaim:
             manifest,
             claim,
             traceguard_validator=validator,
+            claim_term_guard=deterministic_claim_term_guard,
         )
 
         assert verdict.accepted is True
