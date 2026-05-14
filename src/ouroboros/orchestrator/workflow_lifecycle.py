@@ -124,6 +124,24 @@ _NODE_STATE_BY_EVENT: Final[dict[WorkflowLifecycleEventType, WorkflowNodeLifecyc
     WorkflowLifecycleEventType.NODE_RETRIED: WorkflowNodeLifecycleState.RETRIED,
 }
 
+_EVENT_SORT_ORDER: Final[dict[WorkflowLifecycleEventType, int]] = {
+    WorkflowLifecycleEventType.RUN_CREATED: 0,
+    WorkflowLifecycleEventType.NODE_SCHEDULED: 10,
+    WorkflowLifecycleEventType.NODE_STARTED: 20,
+    WorkflowLifecycleEventType.NODE_FAILED: 30,
+    WorkflowLifecycleEventType.NODE_RETRIED: 40,
+    WorkflowLifecycleEventType.NODE_COMPLETED: 50,
+    WorkflowLifecycleEventType.EDGE_TRAVERSED: 60,
+    WorkflowLifecycleEventType.CHECKPOINT_SAVED: 70,
+    WorkflowLifecycleEventType.RUN_COMPLETED: 80,
+    WorkflowLifecycleEventType.RUN_FAILED: 80,
+    WorkflowLifecycleEventType.RUN_CANCELLED: 80,
+}
+
+
+def _event_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int, str]:
+    return (event.timestamp, _EVENT_SORT_ORDER[event.event_type], event.event_type.value)
+
 
 def _normalize_non_blank(name: str, value: str) -> str:
     if not isinstance(value, str):
@@ -376,7 +394,7 @@ def effective_node_states(
 ) -> Mapping[str, WorkflowNodeLifecycleState]:
     """Project latest effective node state while preserving failed history in events."""
     states: dict[str, WorkflowNodeLifecycleState] = {}
-    for event in sorted(events, key=lambda item: item.timestamp):
+    for event in sorted(events, key=_event_sort_key):
         if event.event_type not in _NODE_EVENT_TYPES or event.node_id is None:
             continue
         states[event.node_id] = _NODE_STATE_BY_EVENT[event.event_type]
@@ -397,7 +415,7 @@ def next_runnable_node_ids(
     latest_run_event = next(
         (
             event
-            for event in sorted(event_list, key=lambda item: item.timestamp, reverse=True)
+            for event in sorted(event_list, key=_event_sort_key, reverse=True)
             if event.event_type in _RUN_EVENT_TYPES
         ),
         None,
@@ -418,7 +436,7 @@ def next_runnable_node_ids(
     latest_node_attempts: dict[str, int | None] = {}
     latest_node_completed_at: dict[str, datetime] = {}
     traversed_edge_events: dict[str, list[WorkflowLifecycleEvent]] = {}
-    for event in sorted(event_list, key=lambda item: item.timestamp):
+    for event in sorted(event_list, key=_event_sort_key):
         if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
             latest_node_attempts[event.node_id] = event.attempt
             if event.event_type is WorkflowLifecycleEventType.NODE_COMPLETED:

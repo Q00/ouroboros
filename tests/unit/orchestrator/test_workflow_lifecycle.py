@@ -440,6 +440,50 @@ def test_next_runnable_nodes_stop_after_terminal_run_events() -> None:
         assert next_runnable_node_ids(spec, events) == ()
 
 
+def test_lifecycle_projection_uses_deterministic_tie_breakers() -> None:
+    spec = _spec()
+    timestamp = datetime(2026, 5, 15, tzinfo=UTC)
+    tied_node_events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=timestamp,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_RETRIED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            attempt=2,
+            reason_code="retry",
+            timestamp=timestamp,
+        ),
+    )
+
+    assert effective_node_states(tied_node_events)["node_a"] is WorkflowNodeLifecycleState.COMPLETED
+    assert (
+        effective_node_states(tuple(reversed(tied_node_events)))["node_a"]
+        is WorkflowNodeLifecycleState.COMPLETED
+    )
+
+    tied_run_events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CANCELLED,
+            workflow_id=spec.spec_id,
+            reason_code="cancelled",
+            timestamp=timestamp,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=timestamp,
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, tied_run_events) == ()
+    assert next_runnable_node_ids(spec, tuple(reversed(tied_run_events))) == ()
+
+
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:
     import ouroboros.orchestrator.workflow_lifecycle as lifecycle
 
