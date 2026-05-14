@@ -285,9 +285,10 @@ def evaluate_deliver_claim(
     if not accepted_handles:
         accepted_handles = _string_tuple(getattr(raw_result, "allowed_chunk_ids", ()))
     claim_term_guard_verdict = None
-    should_run_claim_term_guard = bool(raw_result.accepted) or bool(
-        accepted_fact_ids or accepted_handles
-    )
+    # In mixed rejected TraceGuard results, chunk-only fallbacks are provenance,
+    # not per-fact acceptance. Semantic checks must not fan out to every claim
+    # sharing a structurally allowed evidence handle.
+    should_run_claim_term_guard = bool(raw_result.accepted) or bool(accepted_fact_ids)
     if claim_term_guard is not None and should_run_claim_term_guard:
         claim_term_guard_verdict = claim_term_guard(
             ac_id=manifest.ac_id,

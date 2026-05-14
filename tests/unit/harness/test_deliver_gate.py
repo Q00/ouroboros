@@ -890,6 +890,67 @@ class TestEvaluateDeliverClaim:
         )
         assert verdict.evidence_event_ids == ("evt_1",)
 
+    def test_claim_term_guard_skips_chunk_only_fallback_for_mixed_rejection(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_shared",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "result_preview": "pytest passed for behavior=supported_update",
+                    },
+                    source_event_ids=("evt_shared",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="fact_supported",
+                    evidence_handle="ev_shared",
+                    statement="test_passed behavior=supported_update",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="fact_unsupported",
+                    evidence_handle="ev_shared",
+                    statement="test_passed behavior=unsupported_delete",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=lambda **_: _TraceGuardResult(
+                accepted=False,
+                allowed_fact_ids=(),
+                allowed_chunk_ids=("ev_shared",),
+                rejected_claims=(
+                    _TraceGuardRejection(
+                        reason="unsupported_fact_id",
+                        claim=_TraceGuardClaim(
+                            fact_id="fact_unsupported",
+                            chunk_id="ev_shared",
+                        ),
+                        detail="fact was not structurally accepted",
+                    ),
+                ),
+            ),
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 0.5
+        assert verdict.accepted_fact_ids == ()
+        assert verdict.rejected_fact_ids == ("fact_unsupported",)
+        assert verdict.rejected_reasons == (
+            "unsupported_fact_id: fact was not structurally accepted",
+        )
+        assert verdict.evidence_event_ids == ("evt_shared",)
+
     def test_rejected_traceguard_result_is_preserved_for_routing(self) -> None:
         manifest = EvidenceManifest(
             ac_id="AC-1",
