@@ -184,6 +184,16 @@ class TestEvidenceEntry:
 
         assert entry.handle == "ev_caller_supplied"
 
+    def test_explicit_auto_sentinel_handle_is_preserved(self) -> None:
+        entry = EvidenceEntry(
+            handle="__auto__",
+            kind=EvidenceKind.TOOL_INVOCATION,
+            started_at=datetime.now(UTC),
+            source_event_ids=("evt_1",),
+        )
+
+        assert entry.handle == "__auto__"
+
 
 class TestEvidenceManifest:
     def test_ac_id_required(self) -> None:
@@ -213,6 +223,11 @@ class TestEvidenceManifest:
         manifest = EvidenceManifest(ac_id="ac_1", manifest_id="manifest_external")
 
         assert manifest.manifest_id == "manifest_external"
+
+    def test_explicit_auto_sentinel_manifest_id_is_preserved(self) -> None:
+        manifest = EvidenceManifest(ac_id="ac_1", manifest_id="__auto__")
+
+        assert manifest.manifest_id == "__auto__"
 
     def test_is_frozen(self) -> None:
         manifest = EvidenceManifest(ac_id="ac_1")
@@ -385,7 +400,7 @@ class TestNormalizeEventsACScope:
         assert len(manifest.entries) == 1
         assert manifest.entries[0].source_event_ids == ("evt_fresh_start", "evt_fresh_return")
 
-    def test_excludes_pair_when_returned_event_references_memory_file(self) -> None:
+    def test_keeps_pair_when_result_only_mentions_memory_file(self) -> None:
         events = [
             _tool_started(
                 call_id="memory_result",
@@ -403,7 +418,11 @@ class TestNormalizeEventsACScope:
 
         manifest = normalize_events(events, ac_id="ac_1")
 
-        assert manifest.entries == ()
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == (
+            "evt_memory_result_start",
+            "evt_memory_result_return",
+        )
 
     def test_excludes_memory_reference_in_event_aggregate_id(self) -> None:
         event = BaseEvent(
@@ -443,7 +462,7 @@ class TestNormalizeEventsACScope:
 
         assert manifest.entries == ()
 
-    def test_excludes_memory_derived_token_with_suffix_punctuation(self) -> None:
+    def test_excludes_read_memory_derived_token_with_suffix_punctuation(self) -> None:
         event = _tool_started(
             call_id="memory_derived",
             tool_name="Read",
@@ -454,6 +473,27 @@ class TestNormalizeEventsACScope:
         manifest = normalize_events([event], ac_id="ac_1")
 
         assert manifest.entries == ()
+
+    def test_keeps_non_read_args_that_only_mention_memory_file(self) -> None:
+        events = [
+            _tool_started(
+                call_id="grep_docs",
+                tool_name="Bash",
+                args_preview="grep -R MEMORY.md docs tests",
+                event_id="evt_grep_start",
+            ),
+            _tool_returned(
+                call_id="grep_docs",
+                tool_name="Bash",
+                result_preview="docs/setup.md mentions MEMORY.md",
+                event_id="evt_grep_return",
+            ),
+        ]
+
+        manifest = normalize_events(events, ac_id="ac_1")
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == ("evt_grep_start", "evt_grep_return")
 
     def test_memory_event_from_other_ac_does_not_suppress_matching_call_id(self) -> None:
         events = [

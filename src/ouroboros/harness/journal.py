@@ -259,7 +259,7 @@ class EvidenceEntry(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _stabilize_generated_handle(self) -> EvidenceEntry:
-        if self.handle != "__auto__":
+        if "handle" in self.model_fields_set:
             return self
         object.__setattr__(
             self,
@@ -308,7 +308,7 @@ class EvidenceManifest(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _stabilize_generated_manifest_id(self) -> EvidenceManifest:
-        if self.manifest_id != "__auto__":
+        if "manifest_id" in self.model_fields_set:
             return self
         object.__setattr__(
             self,
@@ -455,6 +455,8 @@ def normalize_events(
     llm_slot_index: dict[str, int] = {}
     memory_tool_call_ids: set[str] = set()
     memory_llm_call_ids: set[str] = set()
+    orphan_tool_slot_index: dict[str, int] = {}
+    orphan_llm_slot_index: dict[str, int] = {}
 
     for event in events:
         # Skip events that carry explicit scope tokens but none of them
@@ -472,11 +474,17 @@ def normalize_events(
                     slot = tool_slot_index.pop(call_id, None)
                     if slot is not None:
                         slots[slot] = None
+                    orphan_slot = orphan_tool_slot_index.pop(call_id, None)
+                    if orphan_slot is not None:
+                        slots[orphan_slot] = None
                 elif event.type in {_LLM_REQUESTED, _LLM_RETURNED}:
                     memory_llm_call_ids.add(call_id)
                     slot = llm_slot_index.pop(call_id, None)
                     if slot is not None:
                         slots[slot] = None
+                    orphan_slot = orphan_llm_slot_index.pop(call_id, None)
+                    if orphan_slot is not None:
+                        slots[orphan_slot] = None
             continue
 
         if event.type == _TOOL_STARTED:
@@ -502,6 +510,8 @@ def normalize_events(
             if slot is not None:
                 slots[slot] = entry
             else:
+                if call_id:
+                    orphan_tool_slot_index[call_id] = len(slots)
                 slots.append(entry)
             continue
 
@@ -528,6 +538,8 @@ def normalize_events(
             if slot is not None:
                 slots[slot] = entry
             else:
+                if call_id:
+                    orphan_llm_slot_index[call_id] = len(slots)
                 slots.append(entry)
             continue
 
@@ -580,28 +592,89 @@ def _event_child_ac_id(*events: BaseEvent | None) -> str | None:
 
 
 def _is_memory_derived_event(event: BaseEvent) -> bool:
-    return (
-        _is_memory_derived_value(event.aggregate_id)
-        or _is_memory_derived_value(event.aggregate_type)
-        or _is_memory_derived_value(event.data)
+    if _looks_like_memory_reference(event.aggregate_id) or _looks_like_memory_reference(
+        event.aggregate_type
+    ):
+        return True
+    if not isinstance(event.data, Mapping):
+        return False
+
+    extra = event.data.get("extra")
+    if _is_memory_provenance_mapping(extra):
+        return True
+
+    if event.type == _TOOL_STARTED:
+        return _is_memory_derived_tool_start(event.data)
+    if event.type == _LLM_REQUESTED:
+        return _is_memory_derived_llm_request(event.data)
+    return _has_memory_provenance_marker(event.data)
+
+
+def _is_memory_derived_tool_start(data: Mapping[str, Any]) -> bool:
+    caller = data.get("caller")
+    if _has_memory_provenance_marker(caller):
+        return True
+
+    tool_name = data.get("tool_name")
+    args_preview = data.get("args_preview")
+    if not isinstance(args_preview, str):
+        return False
+
+    if isinstance(tool_name, str) and tool_name.strip() == "Read":
+        return _looks_like_memory_reference(args_preview)
+    return _looks_like_memory_command(args_preview)
+
+
+def _is_memory_derived_llm_request(data: Mapping[str, Any]) -> bool:
+    return _has_memory_provenance_marker(data.get("caller")) or _has_memory_provenance_marker(
+        data.get("prompt_preview")
     )
 
 
-def _is_memory_derived_value(value: Any) -> bool:
-    if isinstance(value, Mapping):
-        return any(
-            _looks_like_memory_reference(str(key)) or _is_memory_derived_value(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list | tuple | set | frozenset):
-        return any(_is_memory_derived_value(item) for item in value)
-    if isinstance(value, str):
-        return _looks_like_memory_reference(value)
+def _is_memory_provenance_mapping(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    provenance_keys = {
+        "derived_from",
+        "memory_source",
+        "memory_path",
+        "source_path",
+        "source_file",
+        "provenance",
+        "origin",
+    }
+    for key, item in value.items():
+        normalized_key = str(key).strip().lower()
+        if normalized_key in provenance_keys and _looks_like_memory_reference(item):
+            return True
+        if normalized_key in {"memory_derived", "from_memory"} and item is True:
+            return True
     return False
 
 
-def _looks_like_memory_reference(value: str) -> bool:
-    if not value:
+def _has_memory_provenance_marker(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    lowered = value.lower()
+    return "memory.md-derived" in lowered or ".memory.md-derived" in lowered
+
+
+def _looks_like_memory_command(value: str) -> bool:
+    stripped = value.strip()
+    lowered = stripped.lower()
+    if not any(name.lower() in lowered for name in _MEMORY_FILENAMES):
+        return False
+    return bool(
+        re.search(
+            r"(?:^|[;&|()\s])(?:cat|less|more|head|tail|sed|awk|python|python3|node|ruby|perl)\s+[^;&|]*\.?memory\.md(?:$|[\s;&|)])",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _looks_like_memory_reference(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
         return False
     if _MEMORY_REFERENCE_RE.search(value):
         return True
