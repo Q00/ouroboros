@@ -92,3 +92,12 @@ def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
     assert "MCP `seed-ready`" in guide
     assert "### When a skill requires `restate_goal`" in guide
     assert "require explicit user approval" in guide
+
+
+def test_renders_generic_skill_capability_guides_for_phase_two_runtimes() -> None:
+    for backend_name in ("hermes", "claude"):
+        guide = render_backend_skill_capability_guide(backend_name)
+
+        assert guide.startswith(f"## Ouroboros Skill Capability Guide: {backend_name.title()}\n")
+        assert "### When a skill requires `ask_user`" in guide
+        assert "### When a skill requires `run_closure_gate`" in guide

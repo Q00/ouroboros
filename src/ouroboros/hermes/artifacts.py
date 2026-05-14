@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import shutil
 
+from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 from ouroboros.skills.artifacts import (
     collect_skill_bundle_dirs,
     contains_skill_bundles,
@@ -16,6 +17,7 @@ from ouroboros.skills.artifacts import (
 
 HERMES_SKILL_CATEGORY = "autonomous-ai-agents"
 HERMES_SKILL_NAME = "ouroboros"
+HERMES_SKILL_CAPABILITY_GUIDE_FILENAME = "SKILL_CAPABILITY_GUIDE.md"
 _SKILL_ENTRYPOINT = "SKILL.md"
 _LEGACY_PACKAGE_ARTIFACTS = ("__init__.py", "artifacts.py", "__pycache__")
 
@@ -71,6 +73,11 @@ def install_hermes_skills(
         target_dir.mkdir(parents=True, exist_ok=True)
         source_skill_dirs = collect_skill_bundle_dirs(source_root)
         desired_skill_names = {skill_dir.name for skill_dir in source_skill_dirs}
+
+        (target_dir / HERMES_SKILL_CAPABILITY_GUIDE_FILENAME).write_text(
+            render_backend_skill_capability_guide("hermes"),
+            encoding="utf-8",
+        )
 
         for artifact_name in _LEGACY_PACKAGE_ARTIFACTS:
             _remove_target_path(target_dir / artifact_name)

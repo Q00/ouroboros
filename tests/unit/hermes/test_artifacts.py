@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ouroboros.hermes.artifacts import install_hermes_skills
+from ouroboros.hermes.artifacts import (
+    HERMES_SKILL_CAPABILITY_GUIDE_FILENAME,
+    install_hermes_skills,
+)
 
 
 class TestInstallHermesSkills:
@@ -56,6 +59,24 @@ class TestInstallHermesSkills:
         )
         assert installed_path.joinpath("run", "notes.txt").read_text(encoding="utf-8") == "copied"
         assert installed_path.joinpath("interview", "SKILL.md").is_file()
+
+    def test_installs_runtime_skill_capability_guide(self, tmp_path: Path, monkeypatch) -> None:
+        """Hermes installs should include backend-specific skill execution guidance."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "interview", body="fresh skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+
+        installed_path = install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        guide = installed_path.joinpath(HERMES_SKILL_CAPABILITY_GUIDE_FILENAME).read_text(
+            encoding="utf-8"
+        )
+
+        assert guide.startswith("## Ouroboros Skill Capability Guide: Hermes\n")
+        assert "### When a skill requires `ask_user`" in guide
+        assert "### When a skill requires `run_closure_gate`" in guide
 
     def test_replaces_existing_hermes_bundle(self, tmp_path: Path, monkeypatch) -> None:
         """Refreshing the Hermes install should replace managed skill directories."""
