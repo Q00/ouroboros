@@ -1452,14 +1452,24 @@ class InterviewHandler:
         # unchanged: they cannot leak under concurrency because they are not
         # shared across production requests, and tests inject them to observe
         # the question-generation flow.
-        # NOTE: `isinstance(..., InterviewEngine)` must NOT be reached when
+        # NOTE: ``isinstance(..., InterviewEngine)`` must NOT be reached when
         # ``InterviewEngine`` has been monkey-patched in tests to a non-type
         # (e.g. ``patch("authoring_handlers.InterviewEngine", return_value=...)``
-        # replaces the name with a MagicMock instance). Guard with an explicit
-        # ``is not None`` short-circuit so the isinstance arm only runs when a
-        # caller actually supplied an engine template.
+        # replaces the name with a MagicMock instance). The previous short-
+        # circuit only guarded the left operand: once ``template`` was non-None,
+        # ``isinstance(template, InterviewEngine)`` still ran and raised
+        # ``TypeError: isinstance() arg 2 must be a type``, turning a supported
+        # dependency-injection / test-harness path into a hard failure.
+        # Add an ``isinstance(InterviewEngine, type)`` guard so the clone arm
+        # is only taken when the bound name is still a real class, and any
+        # patched non-type value falls through to the ``elif template is not
+        # None`` passthrough branch.
         template = self.interview_engine
-        if template is not None and isinstance(template, InterviewEngine):
+        if (
+            template is not None
+            and isinstance(InterviewEngine, type)
+            and isinstance(template, InterviewEngine)
+        ):
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
                 state_dir=template.state_dir,

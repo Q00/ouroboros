@@ -1679,3 +1679,70 @@ def test_authoring_interview_handler_preserves_explicit_llm_adapter() -> None:
         "different-backend rebuild must still preserve the caller-supplied llm_adapter"
     )
     assert different_backend.suppress_tool_use_prompt_cues is True
+
+
+def test_handle_falls_through_when_interview_engine_is_patched_to_non_type(
+    tmp_path: Path,
+) -> None:
+    """``handle()`` must not crash when ``InterviewEngine`` is patched to a non-type.
+
+    Regression for the PR #979 follow-up review: even with the
+    ``template is not None`` short-circuit, once ``template`` is non-None the
+    inner ``isinstance(template, InterviewEngine)`` still runs. When other
+    tests (or a caller's dependency-injection harness) have monkey-patched
+    ``ouroboros.mcp.tools.authoring_handlers.InterviewEngine`` to a non-type
+    such as a ``MagicMock`` instance, that ``isinstance`` call raises
+    ``TypeError: isinstance() arg 2 must be a type``. The guard must check
+    ``isinstance(InterviewEngine, type)`` first and otherwise fall through to
+    the passthrough branch.
+    """
+    from unittest.mock import AsyncMock
+
+    from ouroboros.mcp.tools import authoring_handlers
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+
+    supplied_engine = MagicMock(name="supplied_engine")
+    supplied_engine.start_interview = AsyncMock(
+        side_effect=RuntimeError("forced stop after engine selection is observed")
+    )
+    supplied_engine.resume_interview = AsyncMock()
+    supplied_engine.score_interview = AsyncMock()
+
+    handler = InterviewHandler(
+        interview_engine=supplied_engine,
+        event_store=MagicMock(),
+        llm_adapter=None,
+        llm_backend="claude_code",
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+        data_dir=tmp_path,
+        suppress_tool_use_prompt_cues=True,
+    )
+    handler._owns_event_store = False
+    handler._initialized = True
+
+    async def _run() -> None:
+        try:
+            await handler.handle({"initial_context": "Test goal"})
+        except TypeError as exc:
+            raise AssertionError(
+                f"handle() must not crash on patched non-type InterviewEngine: {exc}"
+            ) from exc
+        except Exception:
+            pass
+
+    with (
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            return_value=MagicMock(name="isolated_adapter"),
+        ),
+        patch.object(authoring_handlers, "InterviewEngine", MagicMock(name="patched_non_type")),
+    ):
+        asyncio.run(_run())
+
+    # The supplied engine must have been used directly (passthrough), since
+    # ``InterviewEngine`` was patched to a non-type and the clone arm cannot
+    # safely fire. ``start_interview`` is the first method the handler calls
+    # on the engine after selection, so its invocation proves the passthrough
+    # branch was taken.
+    supplied_engine.start_interview.assert_awaited()
