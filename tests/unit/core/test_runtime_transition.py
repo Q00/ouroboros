@@ -180,6 +180,17 @@ def test_terminal_current_state_is_terminal_rejection() -> None:
     assert result.failure_kind is RuntimeTransitionFailureKind.TERMINAL_STATE
 
 
+def test_terminal_states_rejects_plain_string_iterable() -> None:
+    with pytest.raises(TypeError, match="terminal_states must be an iterable of strings"):
+        evaluate_runtime_transition(
+            _transition(from_state="running", to_state="blocked", expected_revision=None),
+            current_state="completed",
+            allowed_transitions=_ALLOWED,
+            terminal_states="completed",
+            current_revision=9,
+        )
+
+
 def test_terminal_current_state_wins_over_from_state_drift() -> None:
     result = evaluate_runtime_transition(
         _transition(from_state="running", to_state="blocked", expected_revision=None),

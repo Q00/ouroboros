@@ -387,6 +387,8 @@ def evaluate_runtime_transition(
                 current_revision=current_revision,
                 current_state=normalized_current,
             )
+    if isinstance(terminal_states, str | bytes):
+        raise TypeError("RuntimeTransition terminal_states must be an iterable of strings")
     terminal_set = {_require_non_blank("terminal_state", state) for state in terminal_states}
     if normalized_current in terminal_set:
         return RuntimeTransitionResult(
