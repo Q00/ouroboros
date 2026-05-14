@@ -1450,6 +1450,63 @@ class TestParallelACExecutor:
         ]
 
     @pytest.mark.asyncio
+    async def test_fat_harness_mode_surfaces_operational_verifier_error(self) -> None:
+        """Operational verifier failures remain typed verifier rejections."""
+
+        def _timeout_verifier(**kwargs: object) -> VerifierVerdict:
+            del kwargs
+            raise TimeoutError("verifier timed out")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/app.py"],'
+                '"commands_run":["pytest"],'
+                '"tests_passed":["tests/test_app.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            atomic_verifier=_timeout_verifier,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "verifier raised TimeoutError: verifier timed out" in result.error
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.failure_class == "STALL"
+
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is False
+        assert evidence_event.data["verifier_failure_class"] == "STALL"
+        assert evidence_event.data["verifier_reasons"] == [
+            "verifier raised TimeoutError: verifier timed out"
+        ]
+
+    @pytest.mark.asyncio
     async def test_observe_only_mode_does_not_run_injected_verifier(self) -> None:
         """Non-enforced profile evidence telemetry must stay observe-only."""
 

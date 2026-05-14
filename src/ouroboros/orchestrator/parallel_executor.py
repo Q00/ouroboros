@@ -110,6 +110,7 @@ from ouroboros.orchestrator.verifier import (
     Verifier,
     VerifierContractError,
     VerifierVerdict,
+    verifier_operational_failure_verdict,
 )
 
 if TYPE_CHECKING:
@@ -3805,19 +3806,24 @@ When complete, explicitly state: [TASK_COMPLETE]
             return None
 
         verifier = self._atomic_verifier
-        verdict = (
-            verifier(
-                profile=self._execution_profile,
-                ac=ac_content,
-                leaf_output=final_message,
-                record=typed_evidence,
+        try:
+            verdict = (
+                verifier(
+                    profile=self._execution_profile,
+                    ac=ac_content,
+                    leaf_output=final_message,
+                    record=typed_evidence,
+                )
+                if verifier is not None
+                else self._verify_atomic_evidence_against_runtime_messages(
+                    messages=messages,
+                    typed_evidence=typed_evidence,
+                )
             )
-            if verifier is not None
-            else self._verify_atomic_evidence_against_runtime_messages(
-                messages=messages,
-                typed_evidence=typed_evidence,
-            )
-        )
+        except VerifierContractError:
+            raise
+        except Exception as exc:
+            verdict = verifier_operational_failure_verdict(exc)
         if not isinstance(verdict, VerifierVerdict):
             msg = f"Atomic verifier returned {type(verdict).__name__}, expected VerifierVerdict."
             raise VerifierContractError(msg)

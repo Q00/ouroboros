@@ -162,6 +162,24 @@ class Verifier(Protocol):
     ) -> VerifierVerdict: ...
 
 
+def verifier_operational_failure_verdict(exc: BaseException) -> VerifierVerdict:
+    """Convert an operational verifier failure into a retryable verdict.
+
+    Programming bugs are deliberately not accepted here; callers should let
+    those propagate so broken verifier implementations are fixed instead of
+    silently consuming the acceptance boundary.
+    """
+    if isinstance(exc, VerifierContractError):
+        raise exc
+    if isinstance(exc, _OPERATIONAL_VERIFIER_ERRORS):
+        return VerifierVerdict(
+            passed=False,
+            reasons=(f"verifier raised {type(exc).__name__}: {exc}",),
+            failure_class="STALL",
+        )
+    raise exc
+
+
 class LeafExecutor(Protocol):
     """Callable that runs the leaf executor for a given AC.
 
@@ -352,11 +370,7 @@ def run_with_verifier(
                     # are NOT in the catch list — they propagate so the
                     # operator can fix the broken verifier instead of
                     # watching it silently exhaust retries.
-                    verdict = VerifierVerdict(
-                        passed=False,
-                        reasons=(f"verifier raised {type(exc).__name__}: {exc}",),
-                        failure_class="STALL",
-                    )
+                    verdict = verifier_operational_failure_verdict(exc)
                 else:
                     # Verifier is only a static Protocol — Python won't
                     # enforce the return type at runtime. A buggy impl
@@ -403,4 +417,5 @@ __all__ = [
     "VerifierVerdict",
     "run_with_verifier",
     "structural_atomic_verifier",
+    "verifier_operational_failure_verdict",
 ]
