@@ -787,6 +787,52 @@ class TestEvaluateDeliverClaim:
             }
         ]
 
+    def test_claim_term_guard_sees_non_edit_args_when_result_preview_exists(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_test",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "args_preview": "uv run pytest -k admin_delete_denied",
+                        "result_preview": "pytest passed",
+                    },
+                    source_event_ids=("evt_test",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="test_passed:admin_delete_denied",
+                    evidence_handle="ev_test",
+                    statement="test_passed behavior=admin_delete_denied",
+                ),
+            ),
+        )
+        validator = _RecordingTraceGuardValidator()
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=validator,
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is True
+        assert verdict.accepted_fact_ids == ("test_passed:admin_delete_denied",)
+        assert validator.calls[0]["evidence_manifest"] == (
+            TraceGuardEvidenceInput(
+                fact_id="test_passed:admin_delete_denied",
+                chunk_id="ev_test",
+                text="pytest passed; uv run pytest -k admin_delete_denied",
+                child_call_id="evt_test",
+            ),
+        )
+
     def test_claim_term_guard_rejects_traceguard_accepted_semantic_miss(self) -> None:
         manifest = EvidenceManifest(
             ac_id="AC-1",
@@ -829,7 +875,6 @@ class TestEvaluateDeliverClaim:
             "required term(s): behavior=admin_delete_denied",
         )
         assert verdict.evidence_event_ids == ()
-
 
     def test_claim_term_guard_checks_mixed_traceguard_allowed_facts(self) -> None:
         manifest = EvidenceManifest(

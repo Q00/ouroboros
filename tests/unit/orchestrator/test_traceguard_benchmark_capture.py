@@ -35,12 +35,9 @@ def test_traceguard_benchmark_reports_required_ab_metrics() -> None:
     ) <= 1.5
 
 
-
 def test_claim_term_guard_benchmark_semantic_miss_matches_guard_logic() -> None:
     capture = build_traceguard_benchmark_capture()
-    semantic_miss_rows = [
-        row for row in capture.traceguard_rows if row.semantic_miss_incidents > 0
-    ]
+    semantic_miss_rows = [row for row in capture.traceguard_rows if row.semantic_miss_incidents > 0]
 
     assert [row.ac_id for row in semantic_miss_rows] == ["FH-AC-008"]
     guard_verdict = deterministic_claim_term_guard(
@@ -62,15 +59,16 @@ def test_claim_term_guard_benchmark_semantic_miss_matches_guard_logic() -> None:
     assert guarded_row.semantic_miss_incidents == 0
     assert guarded_row.source_ref == "fixture:claim-term-guard/rejected-semantic-miss"
 
+
 def test_traceguard_benchmark_delta_is_json_serializable() -> None:
     payload = build_traceguard_benchmark_capture().to_dict()
 
     assert payload["delta"]["fabrication_incidents_per_100_acs"] == pytest.approx(-25.0)
     assert payload["delta"]["semantic_miss_incidents_per_100_acs"] == pytest.approx(-12.5)
     assert payload["delta"]["median_chars_ratio"] <= 1.5
-    assert payload["delta"]["claim_term_guard_semantic_miss_incidents_per_100_acs"] == pytest.approx(
-        -12.5
-    )
+    assert payload["delta"][
+        "claim_term_guard_semantic_miss_incidents_per_100_acs"
+    ] == pytest.approx(-12.5)
     assert payload["delta"]["claim_term_guard_median_chars_ratio"] <= 1.5
     json.dumps(payload)
 

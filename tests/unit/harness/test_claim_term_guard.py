@@ -117,8 +117,7 @@ def test_rejects_partial_numeric_token_match() -> None:
 
     assert verdict.accepted is False
     assert verdict.rejected_reasons == (
-        "semantic_miss: user_check cites ev_1 but evidence text lacks required term(s): "
-        "user_id=1",
+        "semantic_miss: user_check cites ev_1 but evidence text lacks required term(s): user_id=1",
     )
 
 

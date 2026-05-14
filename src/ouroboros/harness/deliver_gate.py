@@ -521,12 +521,17 @@ def _evidence_text(payload: object) -> str:
         if context_parts:
             return "; ".join(context_parts)
 
-    for key in ("result_preview", "args_preview", "tool_name"):
+    preview_parts: list[str] = []
+    for key in ("result_preview", "args_preview"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
-            if context_parts:
-                return "; ".join([*context_parts, value.strip()])
-            return value.strip()
+            preview_parts.append(value.strip())
+    if preview_parts:
+        return "; ".join([*context_parts, *preview_parts])
+
+    tool_name = payload.get("tool_name")
+    if isinstance(tool_name, str) and tool_name.strip():
+        return "; ".join([*context_parts, tool_name.strip()])
     if context_parts:
         return "; ".join(context_parts)
     return str(dict(payload))
@@ -606,9 +611,7 @@ def _unsupported_claim_rate(
     if total_claims <= 0:
         return raw_rate
     rejected_keys = {
-        _rejection_key(item)
-        for item in rejected
-        if _counts_toward_unsupported_claim_rate(item)
+        _rejection_key(item) for item in rejected if _counts_toward_unsupported_claim_rate(item)
     }
     rejected_count = len(rejected_keys)
     if rejected_count:
