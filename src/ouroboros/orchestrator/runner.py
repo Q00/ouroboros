@@ -88,6 +88,7 @@ from ouroboros.orchestrator.policy import (
     evaluate_capability_policy,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
+from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
@@ -267,6 +268,15 @@ def _execution_profile_for_seed(seed: Seed) -> ExecutionProfile | None:
         return None
 
 
+def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = False) -> ExecutionStrategy:
+    """Resolve the prompt/tool strategy for the active execution mode."""
+    if fat_harness_mode:
+        profile = _execution_profile_for_seed(seed)
+        if profile is not None:
+            return ProfileBackedStrategy(profile)
+    return get_strategy(seed.task_type)
+
+
 def build_system_prompt(
     seed: Seed,
     strategy: ExecutionStrategy | None = None,
@@ -440,9 +450,10 @@ class OrchestratorRunner:
                         and recovery. When provided, enables per-level state snapshots.
             max_decomposition_depth: Maximum recursive AC decomposition depth.
             max_parallel_workers: Maximum concurrent AC workers for parallel execution.
-            fat_harness_mode: Temporary opt-in path that enforces profile
-                typed-evidence validation at atomic AC acceptance before the
-                #920 PR-5 default flip removes the opt-in selection.
+            fat_harness_mode: Enforce profile typed-evidence validation plus
+                verifier PASS at atomic AC acceptance. CLI `ooo run` enables
+                this by default after #920 PR-5; the constructor default stays
+                False as the internal legacy fallback until #978 P5 removes it.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -2080,8 +2091,10 @@ class OrchestratorRunner:
                     start_time=start_time,
                 )
 
-            # Build prompts with strategy
-            strategy = get_strategy(seed.task_type)
+            # Build prompts with strategy. The fat-harness default path must use
+            # the profile-backed prompt contract so leaf agents are told to emit
+            # schema-valid evidence before the acceptance gate parses it.
+            strategy = _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
             system_prompt = build_system_prompt(seed, strategy=strategy)
             task_prompt = build_task_prompt(seed, strategy=strategy)
 
@@ -2109,7 +2122,7 @@ class OrchestratorRunner:
 
             # Check for fat-harness / parallel execution mode. Fat-harness
             # uses the AC executor even for single-AC or --sequential runs so
-            # the opt-in evidence gate is never silently bypassed.
+            # the evidence gate is never silently bypassed.
             if (
                 self._fat_harness_mode
                 or force_sequential_levels
@@ -2985,6 +2998,28 @@ class OrchestratorRunner:
                 OrchestratorError(
                     message=f"Session is in terminal state {tracker.status.value}, cannot resume",
                     details={"session_id": session_id, "status": tracker.status.value},
+                )
+            )
+
+        if self._fat_harness_mode:
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=(
+                        "Fat-harness resume is blocked because the legacy resume path "
+                        "cannot enforce typed evidence plus verifier PASS; restart the "
+                        "run so each AC goes through the fat-harness acceptance gate."
+                    ),
+                    details={
+                        "session_id": session_id,
+                        "execution_id": tracker.execution_id,
+                        "fat_harness_mode": True,
+                        "resume_blocked": "typed_evidence_gate_required",
+                    },
                 )
             )
 

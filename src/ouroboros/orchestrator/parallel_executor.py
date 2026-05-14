@@ -3110,7 +3110,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         The metadata is intentionally descriptive only. It lets projections,
         tests, and reviewers prove which profile shaped decomposition without
-        changing dispatch behavior or flipping the fat-harness default path.
+        changing dispatch behavior or the CLI fat-harness default path.
         """
         profile = self._execution_profile
         if profile is None:
@@ -3582,6 +3582,23 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         except OSError:
             file_listing = "(unable to list)"
 
+        if self._fat_harness_mode and self._execution_profile is not None:
+            required_fields = ", ".join(self._execution_profile.evidence_schema.required)
+            completion_instruction = (
+                "Use the available tools to accomplish this task. Report progress through "
+                "tool-visible work, not a prose-only completion claim.\n"
+                "When complete, emit exactly ONE fenced JSON evidence record as the "
+                "final response and then stop. Populate the active profile fields "
+                f"directly ({required_fields}); do not emit a generic command_result "
+                "wrapper. Do not prefix it with [TASK_COMPLETE] or any prose; the "
+                "harness decides success from typed evidence plus the verifier PASS."
+            )
+        else:
+            completion_instruction = (
+                "Use the available tools to accomplish this task. Report your progress "
+                "clearly.\nWhen complete, explicitly state: [TASK_COMPLETE]"
+            )
+
         prompt = f"""Execute the following task:
 
 ## Working Directory
@@ -3597,8 +3614,7 @@ Files present:
 
 {task_section}
 {legacy_context_section}{retry_section}{parallel_section}
-Use the available tools to accomplish this task. Report your progress clearly.
-When complete, explicitly state: [TASK_COMPLETE]
+{completion_instruction}
 """
 
         messages: list[AgentMessage] = []

@@ -175,6 +175,8 @@ class _FinalMessageRuntime:
         self._native_session_id = native_session_id
         self._support_messages = support_messages
         self._cwd = cwd
+        self.last_prompt: str | None = None
+        self.last_system_prompt: str | None = None
 
     @property
     def runtime_backend(self) -> str:
@@ -196,7 +198,9 @@ class _FinalMessageRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
     ):
-        del prompt, tools, system_prompt, resume_session_id
+        del tools, resume_session_id
+        self.last_prompt = prompt
+        self.last_system_prompt = system_prompt
         for message in self._support_messages:
             yield message
         yield AgentMessage(
@@ -1309,8 +1313,227 @@ class TestParallelACExecutor:
         assert "Evidence is not valid JSON" in evidence_event.data["typed_evidence_error"]
 
     @pytest.mark.asyncio
+    async def test_fat_harness_atomic_prompt_requests_json_evidence_without_task_complete(
+        self,
+    ) -> None:
+        """Fat-harness atomic prompts must not ask for prose [TASK_COMPLETE]."""
+        event_store, _ = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "```json\n"
+            '{"files_touched":["src/app.py"],"commands_run":["pytest"],"tests_passed":["pytest"]}'
+            "\n```",
+            native_session_id="opencode-session-prompt",
+            support_messages=(
+                AgentMessage(
+                    type="tool",
+                    content="Edit src/app.py",
+                    tool_name="Edit",
+                    data={"input": {"file_path": "src/app.py"}},
+                ),
+                AgentMessage(
+                    type="tool",
+                    content="pytest passed",
+                    tool_name="Bash",
+                    data={"input": {"command": "pytest"}},
+                ),
+            ),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert runtime.last_prompt is not None
+        assert "emit exactly ONE fenced JSON evidence record" in runtime.last_prompt
+        assert "files_touched, commands_run, tests_passed" in runtime.last_prompt
+        assert "do not emit a generic command_result wrapper" in runtime.last_prompt
+        assert "Do not prefix it with [TASK_COMPLETE]" in runtime.last_prompt
+        assert "explicitly state: [TASK_COMPLETE]" not in runtime.last_prompt
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_accepts_validation_evidence_after_code_fence(self) -> None:
+        """Regression for #978 batch 2b: parser must skip earlier code fences."""
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "[AC_COMPLETE: 1]\n\n"
+                "`hello.py` contains:\n\n"
+                "```python\n"
+                "def hello():\n"
+                '    return "hello"\n'
+                "```\n\n"
+                "Validation evidence:\n\n"
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["hello.py", "test_hello.py"],\n'
+                '  "commands_run": ["pytest test_hello.py"],\n'
+                '  "tests_passed": ["test_hello.py::test_hello"]\n'
+                "}\n"
+                "```",
+                native_session_id="opencode-session-evidence-code-fence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Write: hello.py created",
+                        tool_name="Write",
+                        data={"tool_input": {"file_path": "hello.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Write: test_hello.py created",
+                        tool_name="Write",
+                        data={"tool_input": {"file_path": "test_hello.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest test_hello.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest test_hello.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="test_hello.py::test_hello passed",
+                        data={"subtype": "success"},
+                    ),
+                ),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content='Create hello.py with hello() returning "hello".',
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        assert result.typed_evidence is not None
+        assert result.typed_evidence.data["files_touched"] == ["hello.py", "test_hello.py"]
+        assert result.typed_evidence_validation is not None
+        assert result.typed_evidence_validation.ok is True
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.passed is True
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["typed_evidence_present"] is True
+        assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_rejects_command_result_wrapper_after_parsing_json_fence(
+        self,
+    ) -> None:
+        """Actual #978 failing shape parses, then fails schema without verifier."""
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "[AC_COMPLETE: 1]\n\n"
+                "```python\n"
+                "def hello():\n"
+                '    return "hello"\n'
+                "```\n\n"
+                "Validation evidence:\n\n"
+                "```json\n"
+                "{\n"
+                '  "type": "command_result",\n'
+                '  "command": "pytest test_hello.py",\n'
+                '  "cwd": "/Users/jh0927/character-chat",\n'
+                '  "exit_code": 0,\n'
+                '  "result": "1 passed in 0.01s"\n'
+                "}\n"
+                "```",
+                native_session_id="opencode-session-command-result-wrapper",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest test_hello.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest test_hello.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="1 passed in 0.01s",
+                        data={"subtype": "success"},
+                    ),
+                ),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content='Create hello.py with hello() returning "hello".',
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.typed_evidence is not None
+        assert result.typed_evidence.data["type"] == "command_result"
+        assert result.typed_evidence_validation is not None
+        assert result.typed_evidence_validation.ok is False
+        assert result.typed_evidence_error is None
+        assert "Fat-harness typed evidence validation failed" in (result.error or "")
+        assert result.atomic_verifier_verdict is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["typed_evidence_present"] is True
+        assert evidence_event.data["typed_evidence_valid"] is False
+        assert evidence_event.data["typed_evidence_error"] is None
+        assert evidence_event.data["missing_fields"] == [
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        ]
+        assert evidence_event.data["verifier_ran"] is False
+
+    @pytest.mark.asyncio
     async def test_fat_harness_mode_rejects_missing_typed_evidence(self) -> None:
-        """Temporary opt-in mode gates atomic success on profile evidence."""
+        """Fat-harness mode gates atomic success on profile evidence."""
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=_FinalMessageRuntime(

@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
@@ -39,12 +40,18 @@ from typing import Any
 
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
-# Fence openers signal where the JSON evidence body starts. Once we've
-# located the opener, parsing the body is delegated to JSON itself via
+# Fence openers signal where the JSON evidence body starts. Prefer
+# language-tagged JSON fences over bare fences anywhere in the output:
+# leaf results commonly include earlier non-JSON code fences before the
+# final "Validation evidence" block. Once we've located the opener,
+# parsing the body is delegated to JSON itself via
 # json.JSONDecoder.raw_decode — that's how we avoid every sentinel-
 # scanning class of bug (the closing ``` or any `}` may appear inside a
 # JSON string value, and only a real JSON parser knows string boundaries).
-_FENCE_OPENERS: tuple[str, ...] = ("```json", "```JSON", "```")
+_FENCE_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]{0,3})(?P<fence>`{3,})(?P<info>[^`\n]*)$",
+    re.MULTILINE,
+)
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 _DECODER = json.JSONDecoder()
 
@@ -127,31 +134,58 @@ class EvidenceRecord:
         return self.data.get(name, default)
 
 
+def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int]]:
+    """Yield (info, body_start) for Markdown fences outside other fences."""
+    search_pos = 0
+    while True:
+        opener = _FENCE_LINE_RE.search(text, search_pos)
+        if opener is None:
+            return
+
+        fence_len = len(opener.group("fence"))
+        info = opener.group("info").strip().lower()
+        body_start = opener.end()
+        if body_start < len(text) and text[body_start] == "\n":
+            body_start += 1
+
+        yield info, body_start
+
+        closing_fence_re = re.compile(rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*\r?$", re.MULTILINE)
+        closer = closing_fence_re.search(text, body_start)
+        if closer is None:
+            return
+        search_pos = closer.end()
+
+
+def _skip_json_whitespace(text: str, start: int) -> int:
+    """Move start to the first non-whitespace JSON character."""
+    while start < len(text) and text[start] in " \t\r\n":
+        start += 1
+    return start
+
+
 def _find_body_start(text: str) -> int:
     """Locate where the JSON body begins.
 
-    Scans for the earliest fence opener (```json / ```JSON / ```). If
-    none is found we treat the whole input as a bare JSON body — the
-    JSON decoder will skip leading whitespace itself.
+    Prefer the first explicit top-level JSON fence (```json / ```JSON),
+    even if an earlier prose/code fence exists. Fence detection is itself
+    fence-aware: a literal ````json`` token printed inside an earlier
+    non-JSON code block is not treated as the evidence opener. If no
+    explicit JSON fence is found, use the first top-level fence. If no
+    fence is found, treat the whole input as a bare JSON body — the JSON
+    decoder will skip leading whitespace itself.
     """
-    best_open = -1
-    best_open_len = 0
-    for opener in _FENCE_OPENERS:
-        idx = text.find(opener)
-        if idx == -1:
-            continue
-        if best_open == -1 or idx < best_open:
-            best_open = idx
-            best_open_len = len(opener)
-    if best_open == -1:
-        return 0
-    body_start = best_open + best_open_len
-    # JSONDecoder tolerates leading whitespace but `raw_decode` requires
-    # the *first* non-whitespace character to start the value, so skip
-    # whitespace explicitly to give clean offsets in error messages.
-    while body_start < len(text) and text[body_start] in " \t\r\n":
-        body_start += 1
-    return body_start
+    first_fence_body_start: int | None = None
+
+    for info, body_start in _top_level_fence_body_starts(text):
+        if first_fence_body_start is None:
+            first_fence_body_start = body_start
+        if info.split(maxsplit=1)[0:1] == ["json"]:
+            return _skip_json_whitespace(text, body_start)
+
+    if first_fence_body_start is not None:
+        return _skip_json_whitespace(text, first_fence_body_start)
+    return 0
 
 
 def extract_evidence(text: str) -> EvidenceRecord:
