@@ -1722,14 +1722,9 @@ def test_handle_falls_through_when_interview_engine_is_patched_to_non_type(
     handler._initialized = True
 
     async def _run() -> None:
-        try:
-            await handler.handle({"initial_context": "Test goal"})
-        except TypeError as exc:
-            raise AssertionError(
-                f"handle() must not crash on patched non-type InterviewEngine: {exc}"
-            ) from exc
-        except Exception:
-            pass
+        result = await handler.handle({"initial_context": "Test goal"})
+        assert result.is_err
+        assert "forced stop after engine selection is observed" in str(result.error)
 
     with (
         patch(
