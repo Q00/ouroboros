@@ -88,6 +88,7 @@ from ouroboros.orchestrator.policy import (
     evaluate_capability_policy,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
+from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
@@ -265,6 +266,30 @@ def _execution_profile_for_seed(seed: Seed) -> ExecutionProfile | None:
             task_type=seed.task_type,
         )
         return None
+
+
+def _execution_strategy_for_seed(
+    seed: Seed,
+    *,
+    fat_harness_mode: bool = False,
+) -> ExecutionStrategy:
+    """Return the prompt/tool strategy for a seed execution.
+
+    Fat-harness mode enforces profile-shaped typed evidence at atomic
+    acceptance. Use the profile-backed strategy there as well, otherwise
+    the runner can enforce evidence that the leaf prompt never requested.
+    If a profile is unavailable, fall back to the legacy strategy so the
+    existing task_type error/compatibility behavior is preserved.
+    """
+    if fat_harness_mode:
+        try:
+            return ProfileBackedStrategy(load_profile(seed.task_type))
+        except ProfileError:
+            log.warning(
+                "orchestrator.runner.profile_strategy_unavailable",
+                task_type=seed.task_type,
+            )
+    return get_strategy(seed.task_type)
 
 
 def build_system_prompt(
@@ -2081,7 +2106,10 @@ class OrchestratorRunner:
                 )
 
             # Build prompts with strategy
-            strategy = get_strategy(seed.task_type)
+            strategy = _execution_strategy_for_seed(
+                seed,
+                fat_harness_mode=self._fat_harness_mode,
+            )
             system_prompt = build_system_prompt(seed, strategy=strategy)
             task_prompt = build_task_prompt(seed, strategy=strategy)
 
@@ -3001,10 +3029,14 @@ class OrchestratorRunner:
             )
 
             # Build resume prompt
-            system_prompt = build_system_prompt(seed)
+            resume_strategy = _execution_strategy_for_seed(
+                seed,
+                fat_harness_mode=self._fat_harness_mode,
+            )
+            system_prompt = build_system_prompt(seed, strategy=resume_strategy)
             resume_prompt = f"""Continue executing the task from where you left off.
 
-{build_task_prompt(seed)}
+{build_task_prompt(seed, strategy=resume_strategy)}
 
 Note: This is a resumed session. Please continue from where execution was interrupted.
 """
@@ -3020,6 +3052,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             merged_tools, mcp_provider, tool_catalog = await self._get_merged_tools(
                 session_id=session_id,
                 tool_prefix=self._mcp_tool_prefix,
+                strategy=resume_strategy,
             )
             runtime_handle = self._seed_runtime_handle(runtime_handle, tool_catalog=tool_catalog)
 
@@ -3032,7 +3065,6 @@ Note: This is a resumed session. Please continue from where execution was interr
             # Create workflow state tracker for progress display
             from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
-            resume_strategy = get_strategy(seed.task_type)
             state_tracker = WorkflowStateTracker(
                 acceptance_criteria=seed.acceptance_criteria,
                 goal=seed.goal,

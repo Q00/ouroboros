@@ -2200,7 +2200,7 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -2214,7 +2214,7 @@ class TestOrchestratorRunner:
                 runner,
                 "_get_merged_tools",
                 AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
-            ),
+            ) as get_merged_tools,
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
             result = await runner.execute_precreated_session(
@@ -2226,6 +2226,13 @@ class TestOrchestratorRunner:
         assert result is expected
         assert execute.await_args.kwargs["seed"] is single_ac_seed
         assert "force_sequential_levels" not in execute.await_args.kwargs
+        system_prompt = execute.await_args.kwargs["system_prompt"]
+        assert "[POST" in system_prompt
+        assert "files_touched" in system_prompt
+        assert "commands_run" in system_prompt
+        assert "tests_passed" in system_prompt
+        strategy = get_merged_tools.await_args.kwargs["strategy"]
+        assert "[POST" in strategy.get_system_prompt_fragment()
 
     @pytest.mark.asyncio
     async def test_fat_harness_sequential_run_uses_sequential_ac_executor_plan(
@@ -2245,7 +2252,7 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -2280,7 +2287,7 @@ class TestOrchestratorRunner:
 
         tracker = SessionTracker.create("exec_forced", sample_seed.metadata.seed_id)
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
