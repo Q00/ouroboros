@@ -14,6 +14,7 @@ from ouroboros.core.runtime_transition import (
     RuntimeTransitionActor,
     RuntimeTransitionDecision,
     RuntimeTransitionFailureKind,
+    RuntimeTransitionResult,
     evaluate_runtime_transition,
 )
 
@@ -99,6 +100,24 @@ def test_expected_revision_without_current_revision_fails_closed() -> None:
     assert result.failure_class is RuntimeFailureClass.RETRYABLE
     assert result.failure_kind is RuntimeTransitionFailureKind.STALE_REVISION
     assert "requires current_revision" in result.message
+
+
+def test_result_rejects_non_enum_failure_data() -> None:
+    with pytest.raises(TypeError, match="failure_class must be a RuntimeFailureClass"):
+        RuntimeTransitionResult(
+            transition=_transition(),
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class="retryable",  # type: ignore[arg-type]
+            failure_kind=RuntimeTransitionFailureKind.STALE_REVISION,
+        )
+
+    with pytest.raises(TypeError, match="failure_kind must be a RuntimeTransitionFailureKind"):
+        RuntimeTransitionResult(
+            transition=_transition(),
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class=RuntimeFailureClass.RETRYABLE,
+            failure_kind="stale_revision",  # type: ignore[arg-type]
+        )
 
 
 def test_invalid_current_revision_is_retryable_rejection_not_crash() -> None:

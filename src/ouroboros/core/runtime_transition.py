@@ -294,6 +294,14 @@ class RuntimeTransitionResult:
         else:
             if self.failure_class is None or self.failure_kind is None:
                 raise ValueError("rejected RuntimeTransitionResult requires failure data")
+            if not isinstance(self.failure_class, RuntimeFailureClass):
+                raise TypeError(
+                    "RuntimeTransitionResult failure_class must be a RuntimeFailureClass"
+                )
+            if not isinstance(self.failure_kind, RuntimeTransitionFailureKind):
+                raise TypeError(
+                    "RuntimeTransitionResult failure_kind must be a RuntimeTransitionFailureKind"
+                )
         if self.message:
             object.__setattr__(self, "message", _require_non_blank("message", self.message))
         if self.current_revision is not None and self.current_revision < 0:
