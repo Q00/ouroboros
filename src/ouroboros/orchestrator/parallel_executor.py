@@ -233,7 +233,13 @@ def _runtime_messages_support_file_claim(
         return False
     basename = candidate.name.strip().lower()
     return bool(basename) and any(
-        _runtime_message_supports_file_reference(basename, message, messages=messages, index=index)
+        _runtime_message_supports_file_reference(
+            basename,
+            message,
+            messages=messages,
+            index=index,
+            allow_bash_command_text=False,
+        )
         for index, message in enumerate(messages)
     )
 
@@ -244,6 +250,7 @@ def _runtime_message_supports_file_reference(
     *,
     messages: tuple[AgentMessage, ...],
     index: int,
+    allow_bash_command_text: bool = True,
 ) -> bool:
     """Return True when one message plausibly reports touching a file reference."""
     normalized_reference = reference.strip().lower()
@@ -252,7 +259,8 @@ def _runtime_message_supports_file_reference(
     text = _runtime_message_file_proof_text(message)
     if message.tool_name == "Bash":
         return _text_supports_file_mutation_reference(text, normalized_reference) or (
-            _bash_command_mutates_file_reference(message, normalized_reference)
+            allow_bash_command_text
+            and _bash_command_mutates_file_reference(message, normalized_reference)
             and _runtime_message_has_following_success(messages, index)
         )
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
