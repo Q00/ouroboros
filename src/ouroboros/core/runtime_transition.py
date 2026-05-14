@@ -304,8 +304,11 @@ class RuntimeTransitionResult:
                 )
         if self.message:
             object.__setattr__(self, "message", _require_non_blank("message", self.message))
-        if self.current_revision is not None and self.current_revision < 0:
-            raise ValueError("RuntimeTransitionResult current_revision must be >= 0")
+        if self.current_revision is not None:
+            if type(self.current_revision) is not int:
+                raise TypeError("RuntimeTransitionResult current_revision must be an int")
+            if self.current_revision < 0:
+                raise ValueError("RuntimeTransitionResult current_revision must be >= 0")
         if self.current_state is not None:
             object.__setattr__(
                 self, "current_state", _require_non_blank("current_state", self.current_state)
