@@ -821,7 +821,7 @@ class TestEvaluateDeliverClaim:
         )
 
         assert verdict.accepted is False
-        assert verdict.unsupported_claim_rate == 1.0
+        assert verdict.unsupported_claim_rate == 0.0
         assert verdict.accepted_fact_ids == ("test_passed:admin_delete_denied",)
         assert verdict.rejected_fact_ids == ("test_passed:admin_delete_denied",)
         assert verdict.rejected_reasons == (
@@ -881,7 +881,7 @@ class TestEvaluateDeliverClaim:
         )
 
         assert verdict.accepted is False
-        assert verdict.unsupported_claim_rate == 1.0
+        assert verdict.unsupported_claim_rate == 0.5
         assert verdict.accepted_fact_ids == ("fact_actual",)
         assert verdict.rejected_fact_ids == ("fact_missing", "fact_actual")
         assert verdict.rejected_reasons == (

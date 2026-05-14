@@ -567,11 +567,21 @@ def _unsupported_claim_rate(
 ) -> float:
     if total_claims <= 0:
         return raw_rate
-    rejected_keys = {_rejection_key(item) for item in rejected}
+    rejected_keys = {
+        _rejection_key(item)
+        for item in rejected
+        if _counts_toward_unsupported_claim_rate(item)
+    }
     rejected_count = len(rejected_keys)
     if rejected_count:
         return round(min(1.0, rejected_count / total_claims), 4)
     return raw_rate
+
+
+def _counts_toward_unsupported_claim_rate(
+    item: tuple[str | None, str | None, str],
+) -> bool:
+    return _reason_code(item[2]) != "semantic_miss"
 
 
 def _rejection_key(item: tuple[str | None, str | None, str]) -> tuple[str, str]:
@@ -581,6 +591,10 @@ def _rejection_key(item: tuple[str | None, str | None, str]) -> tuple[str, str]:
     if chunk_id is not None:
         return ("chunk", chunk_id)
     return ("reason", reason)
+
+
+def _reason_code(reason: str) -> str:
+    return reason.split(":", maxsplit=1)[0].strip()
 
 
 def _evidence_event_ids_for_handles(
