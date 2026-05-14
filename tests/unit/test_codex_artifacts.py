@@ -189,6 +189,17 @@ class TestLoadPackagedCodexSkills:
         assert "must be executed by invoking MCP tool `ouroboros_auto`" in skill
         assert "manual fallback is not an `ooo auto` run" in skill
 
+    def test_packaged_interview_skill_uses_runtime_capability_terms(self) -> None:
+        """Runtime skill instructions should not hardcode Claude-only tool surfaces."""
+        skill = load_packaged_codex_skill("interview")
+
+        assert "AskUserQuestion" not in skill
+        assert "ToolSearch" not in skill
+        assert "Read/Glob/Grep" not in skill
+        assert "WebFetch/WebSearch" not in skill
+        assert "active runtime's `ask_user` capability" in skill
+        assert "active runtime's tool-discovery capability" in skill
+
     def test_raises_when_explicit_packaged_skill_is_missing(self, tmp_path: Path) -> None:
         """Missing skill entrypoints should fail fast."""
         packaged_skills_dir = tmp_path / "packaged-skills"

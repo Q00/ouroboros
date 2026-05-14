@@ -72,7 +72,28 @@ def test_codex_skill_execution_guidance_is_registry_owned() -> None:
         "ask_user",
         "inspect_code",
         "call_mcp",
+        "web_research",
+        "run_shell",
         "refine_answer",
+        "maintain_ledger",
+        "run_closure_gate",
+        "restate_goal",
+    }.issubset(names)
+
+
+def test_generic_skill_execution_guidance_covers_interview_requirements() -> None:
+    capability = get_backend_capability("claude")
+
+    assert capability is not None
+    names = {item.name for item in capability.skill_execution_capabilities}
+    assert {
+        "ask_user",
+        "inspect_code",
+        "call_mcp",
+        "web_research",
+        "run_shell",
+        "refine_answer",
+        "maintain_ledger",
         "run_closure_gate",
         "restate_goal",
     }.issubset(names)

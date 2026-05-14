@@ -55,8 +55,8 @@ Before starting the interview, check if a newer version is available:
 curl -s --max-time 3 https://api.github.com/repos/Q00/ouroboros/releases/latest | grep -o '"tag_name": "[^"]*"' | head -1
 ```
 
-Compare the result with the current version in `.claude-plugin/plugin.json`.
-- If a newer version exists, ask the user via `AskUserQuestion`:
+Compare the result with the current version in the active runtime's local plugin metadata (for Claude installs this is `.claude-plugin/plugin.json`).
+- If a newer version exists, ask the user through the active runtime's `ask_user` capability:
   ```json
   {
     "questions": [{
@@ -71,8 +71,10 @@ Compare the result with the current version in `.claude-plugin/plugin.json`.
   }
   ```
   - If "Update now":
-    1. Run `claude plugin marketplace update ouroboros` via Bash (refresh marketplace index). If this fails, tell the user "⚠️ Marketplace refresh failed, continuing…" and proceed.
-    2. Run `claude plugin update ouroboros@ouroboros` via Bash (update plugin/skills). If this fails, inform the user and stop — do NOT proceed to step 3.
+    - On Claude-plugin installs only:
+      1. Run `claude plugin marketplace update ouroboros` via the active runtime's `run_shell` capability (refresh marketplace index). If this fails, tell the user "⚠️ Marketplace refresh failed, continuing…" and proceed.
+      2. Run `claude plugin update ouroboros@ouroboros` via the active runtime's `run_shell` capability (update plugin/skills). If this fails, inform the user and stop — do NOT proceed to the package-manager step.
+    - On non-Claude runtimes, skip Claude plugin commands and proceed directly to the package-manager step for `ouroboros-ai`; do not require Claude-only commands or tools.
     3. Detect the user's Python package manager and upgrade the MCP server:
        - Check which tool installed `ouroboros-ai` by running these in order:
          - `uv tool list 2>/dev/null | grep "^ouroboros-ai "` → if found, use `uv tool upgrade ouroboros-ai`
@@ -88,22 +90,22 @@ Then choose the execution path:
 
 The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
 
-1. Use the `ToolSearch` tool to find and load the interview MCP tool:
+1. Use the active runtime's tool-discovery capability to find and load the interview MCP tool:
    ```
-   ToolSearch query: "+ouroboros interview"
+   tool discovery query: "+ouroboros interview"
    ```
    This searches for tools with "ouroboros" in the name related to "interview".
 
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_interview` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
+2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_interview` (with a plugin prefix). After runtime tool discovery returns, the tool becomes callable.
 
-3. If ToolSearch finds the tool → proceed to **Path A**.
-   If ToolSearch returns no matching tools → proceed to **Path B**.
+3. If runtime tool discovery finds the tool → proceed to **Path A**.
+   If runtime tool discovery returns no matching tools → proceed to **Path B**.
 
 **IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
 ### Path A: MCP Mode (Preferred)
 
-If the `ouroboros_interview` MCP tool is available (loaded via ToolSearch above), use it for persistent, structured interviews.
+If the `ouroboros_interview` MCP tool is available (loaded via runtime tool discovery above), use it for persistent, structured interviews.
 
 **Architecture**: MCP is a pure question generator. You (the main session) are the answerer and router.
 
@@ -113,7 +115,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 **Role split**:
 - **MCP**: Generates Socratic questions, manages interview state, scores ambiguity. Does NOT read code.
-- **You (main session)**: Receives MCP questions, answers them by reading code (Read/Glob/Grep), or routes to the user when human judgment is needed.
+- **You (main session)**: Receives MCP questions, answers them by reading code through the active runtime's `inspect_code` capability, or routes to the user when human judgment is needed.
 - **User**: Only answers questions that require human decisions (goals, acceptance criteria, business logic, preferences).
 
 #### Interview Flow
@@ -132,7 +134,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    **PATH 1 — Code Answer** (describe current state from codebase):
    When the question asks about existing tech stack, frameworks, dependencies,
    current patterns, architecture, or file structure:
-   - Use Read/Glob/Grep to find the factual answer
+   - Use the active runtime's `inspect_code` capability to find the factual answer
    - **Description, not prescription**: "The project uses JWT" is fact.
      "The new feature should also use JWT" is a DECISION — route to PATH 2.
    - Evaluate confidence and choose sub-path:
@@ -162,7 +164,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    **PATH 1b — Code Confirmation** (medium/low confidence, user confirms):
    When the codebase has relevant information but confidence is not high enough
    for auto-confirm (inferred from patterns, multiple candidates, or no manifest match):
-   - Present findings to user as a **confirmation question** via AskUserQuestion:
+   - Present findings to user as a **confirmation question** through the active runtime's `ask_user` capability:
      ```json
      {
        "questions": [{
@@ -180,8 +182,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - If the user picks "Yes, correct", send the concise factual answer with
      `[from-code]` and do not apply the Refine gate. Increment the
      auto-confirm counter (see Dialectic Rhythm Guard below).
-   - If the user picks "No, let me correct", immediately ask a second
-     AskUserQuestion to collect the corrected answer as free text:
+   - If the user picks "No, let me correct", immediately use the `ask_user` capability to collect the corrected answer as free text:
      ```json
      {
        "questions": [{
@@ -203,13 +204,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    **PATH 2 — Human Judgment** (decisions only humans can make):
    When the question asks about goals, vision, acceptance criteria, business logic,
    preferences, tradeoffs, scope, or desired behavior for NEW features:
-   - Present question directly to user via AskUserQuestion with suggested options
+   - Present question directly to user through the active runtime's `ask_user` capability with suggested options
    - Prefix answer with `[from-user]` when sending to MCP
 
    **PATH 3 — Code + Judgment** (facts exist but interpretation needed):
    When code contains relevant facts BUT the question also requires judgment
    (e.g., "I see a saga pattern in orders/. Should payments use the same?"):
-   - Read relevant code first
+   - Use the active runtime's `inspect_code` capability to read relevant code first
    - Present BOTH the code findings AND the question to user
    - If any part of the question requires judgment, route the ENTIRE question to user
    - Prefix answer with `[from-user]` (human made the decision)
@@ -218,8 +219,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    When the question asks about third-party APIs, pricing models, library
    capabilities, version compatibility, security advisories, or industry
    standards that are NOT answerable from the local codebase:
-   - Use WebFetch/WebSearch to gather external information
-   - Present findings to user as a **confirmation question** via AskUserQuestion
+   - Use the active runtime's `web_research` capability to gather external information
+   - Present findings to user as a **confirmation question** through the active runtime's `ask_user` capability
      (same pattern as PATH 1, but with web sources instead of code):
      ```json
      {
@@ -238,8 +239,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - If the user picks "Yes, correct", send the concise factual answer with
      `[from-research]` and do not apply the Refine gate. Increment the
      auto-confirm counter (see Dialectic Rhythm Guard below).
-   - If the user picks "No, let me correct", immediately ask a second
-     AskUserQuestion to collect the corrected answer as free text:
+   - If the user picks "No, let me correct", immediately use the `ask_user` capability to collect the corrected answer as free text:
      ```json
      {
        "questions": [{
@@ -320,7 +320,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    When the user gives a free-text answer that carries reasoning, constraints,
    or scope decisions, do NOT forward it to MCP unmodified and do NOT compress
    it to a label. Structure it into the multi-section payload above, then ask
-   the user a single AskUserQuestion to confirm nothing is lost:
+   the user a single `ask_user` capability to confirm nothing is lost:
 
    ```json
    {
@@ -364,7 +364,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    If the user picks "Add to Constraints", "Add to Out of scope", "Add context",
    or "Rewrite", do not infer the missing text from the option label. Immediately
-   ask one follow-up AskUserQuestion to collect the exact text:
+   use the `ask_user` capability for one follow-up to collect the exact text:
    ```json
    {
      "questions": [{
@@ -435,7 +435,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    ```
 
    Only after the user accepts the restated line do you suggest `ooo seed`.
-   If the user picks "Adjust wording", immediately ask a second AskUserQuestion
+   If the user picks "Adjust wording", immediately use the `ask_user` capability
    to collect the replacement wording:
    ```json
    {
@@ -446,7 +446,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    }
    ```
 
-   If the user picks "Missing scope", immediately ask a second AskUserQuestion
+   If the user picks "Missing scope", immediately use the `ask_user` capability
    to collect the missing condition or boundary:
    ```json
    {
@@ -533,7 +533,7 @@ response carries this `meta.reason` (with `meta.recoverable=true` and
 `is_error=false` — the wire success/failure axis is intentionally **not**
 flipped, to keep existing callers like the auto driver working), the text
 body is a meta-directive asking *you* to re-send a shorter context — it is
-**NOT** an interview question. Do not route it via AskUserQuestion.
+**NOT** an interview question. Do not route it through the active runtime's `ask_user` capability.
 Instead, produce a concise summary of the original `initial_context`
 (≤ `meta.max_chars` characters; covers goal, constraints, success criteria)
 and re-call `ouroboros_interview` with `session_id=<from meta>` and the
@@ -546,10 +546,10 @@ summary as `answer`. The next response will contain the real first question.
 If the MCP tool is NOT available, fall back to agent-based interview:
 
 1. Read `src/ouroboros/agents/socratic-interviewer.md` and adopt that role
-2. **Pre-scan the codebase**: Use Glob to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, use Read/Grep to scan key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
+2. **Pre-scan the codebase**: Use the active runtime's `inspect_code` capability to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, inspect key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
 3. Ask clarifying questions based on the user's topic and codebase context
-4. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
-5. Use Read, Glob, Grep, WebFetch to explore further context if needed
+4. **Present each question using the active runtime's `ask_user` capability** with contextually relevant suggested answers (same format as Path A step 2)
+5. Use the active runtime's `inspect_code` and `web_research` capabilities to explore further context if needed
 6. Maintain the same ambiguity ledger and breadth-check behavior as in Path A:
    - Track multiple independent ambiguity threads
    - Revisit unresolved threads every few rounds
@@ -581,7 +581,7 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 
 **You (main session)** are a Socratic facilitator:
 - Read `src/ouroboros/agents/socratic-interviewer.md` to understand the interview methodology
-- You CAN use Read/Glob/Grep to scan the codebase for answering MCP questions
+- You CAN use the active runtime's `inspect_code` capability to scan the codebase for answering MCP questions
 - For high-confidence factual questions (PATH 1a), auto-confirm and notify the user
 - For all other questions, present to user as confirmation or direct question
 - You NEVER make decisions on behalf of the user — auto-confirm is for FACTS only

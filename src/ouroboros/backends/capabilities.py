@@ -124,8 +124,20 @@ _GENERIC_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
         guidance="Call available Ouroboros MCP tools through the runtime's MCP/tool surface instead of emulating MCP workflows manually.",
     ),
     SkillExecutionCapability(
+        name="web_research",
+        guidance="Use the runtime's web/search capability only when current external facts are required, and cite the sources used.",
+    ),
+    SkillExecutionCapability(
+        name="run_shell",
+        guidance="Use the runtime's bounded local shell capability for safe repository/version checks; avoid destructive commands unless explicitly authorized.",
+    ),
+    SkillExecutionCapability(
         name="refine_answer",
         guidance="Confirm structured interpretations of free-text decisions before forwarding them to workflow state.",
+    ),
+    SkillExecutionCapability(
+        name="maintain_ledger",
+        guidance="Keep ambiguity, gates, and unresolved decisions visible in the main session rather than hiding them only in tool state.",
     ),
     SkillExecutionCapability(
         name="run_closure_gate",
