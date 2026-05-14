@@ -4006,9 +4006,6 @@ When complete, explicitly state: [TASK_COMPLETE]
                         continue
                     unsupported.append(f"{field_name}: {value}")
                     continue
-                if field_name == "files_touched":
-                    unsupported.append(f"{field_name}: {value}")
-                    continue
                 if field_name == "tests_passed":
                     if _runtime_messages_support_test_claim(
                         value=value,
