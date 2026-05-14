@@ -79,7 +79,33 @@ rm -rf /tmp/character-chat-978-observation
 mkdir -p /tmp/character-chat-978-observation
 cd /tmp/character-chat-978-observation
 git init
-# write controlled-hello-seed-978.yaml here
+cat > controlled-hello-seed-978.yaml <<'YAML'
+name: "Controlled hello #978 observation"
+description: "Single-AC observation seed for post-#1026 TraceGuard evidence gate."
+
+constraints:
+  - "Use Python only."
+  - "Do not add external dependencies beyond pytest."
+  - "Keep the implementation minimal."
+
+acceptance_criteria:
+  - |
+    Create hello.py with a hello() function that returns exactly 'hello'.
+    Create test_hello.py with a pytest test proving hello() returns exactly
+    'hello'. Run python -m pytest test_hello.py successfully.
+
+ontology_schema:
+  name: "ControlledHello"
+  description: "Minimal controlled seed for #978 typed evidence observation."
+  fields:
+    - name: "hello_function"
+      field_type: "function"
+      description: "hello() returns exactly hello."
+
+metadata:
+  seed_id: "controlled_hello_978_single_ac"
+  ambiguity_score: 0.0
+YAML
 
 PYTHONPATH=/tmp/ouroboros-observation-main/src \
 uv --project /tmp/ouroboros-observation-main run ouroboros run controlled-hello-seed-978.yaml \
