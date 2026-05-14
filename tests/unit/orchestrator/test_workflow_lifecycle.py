@@ -305,8 +305,6 @@ def test_retried_node_becomes_runnable_again_after_failure_history() -> None:
     assert next_runnable_node_ids(spec, events) == ("node_a",)
 
 
-
-
 def test_next_runnable_nodes_follow_traversed_conditional_edges_only() -> None:
     spec = _conditional_spec()
     completed_decision = (
