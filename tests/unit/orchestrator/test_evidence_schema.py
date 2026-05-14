@@ -64,6 +64,31 @@ class TestExtractEvidence:
             "tests_passed": ["test_hello.py::test_hello"],
         }
 
+    def test_ignores_json_fence_literal_inside_earlier_code_block(self) -> None:
+        text = (
+            "Implemented markdown emitter:\n\n"
+            "```python\n"
+            "def example():\n"
+            '    return "```json"\n'
+            "```\n\n"
+            "Validation evidence:\n\n"
+            "```json\n"
+            "{\n"
+            '  "files_touched": ["emitter.py"],\n'
+            '  "commands_run": ["pytest tests/test_emitter.py"],\n'
+            '  "tests_passed": ["tests/test_emitter.py::test_example"]\n'
+            "}\n"
+            "```\n"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data == {
+            "files_touched": ["emitter.py"],
+            "commands_run": ["pytest tests/test_emitter.py"],
+            "tests_passed": ["tests/test_emitter.py::test_example"],
+        }
+
     def test_fenced_block_without_lang_tag(self) -> None:
         record = extract_evidence('prelude\n```\n{"y": 2}\n```\n')
         assert record.data == {"y": 2}
