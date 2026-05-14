@@ -316,14 +316,14 @@ the contract and keeps review scope small.
 
 | Hook | Phase | Side-effect class | Default failure policy | Required permission class | v1 status |
 |---|---|---|---|---|---|
-| `before_invocation` | After trust/confirmation, before `plugin.invoked` | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin.lifecycle.read` for read-only, stronger scope for policy decisions | **Included** |
-| `after_invocation` | After `plugin.completed` / `plugin.failed` is known, before the wrapper returns to the caller | Observability / summary emission | `fail_open` | `plugin.lifecycle.read` | **Included** |
+| `before_invocation` | After trust/confirmation, before `plugin.invoked` | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin:lifecycle:read` for read-only, stronger scope for policy decisions | **Included** |
+| `after_invocation` | After `plugin.completed` / `plugin.failed` is known, before the wrapper returns to the caller | Observability / summary emission | `fail_open` | `plugin:lifecycle:read` | **Included** |
 | `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin.tool.intercept` | Deferred |
 | `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin.tool.observe` | Deferred |
 | `before_artifact_write` | Before artifact service writes plugin-provided output | Policy / mutation gate | `fail_closed` | artifact-specific write permission | Deferred |
 | `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin.artifact.observe` | Deferred |
-| `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin.lifecycle.read` | Deferred |
-| `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin.lifecycle.read` or cleanup-specific scope | Deferred |
+| `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | Deferred |
+| `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin:lifecycle:read` or cleanup-specific scope | Deferred |
 
 The following candidate hooks are intentionally **not** in the v1 hook
 vocabulary:
@@ -402,7 +402,10 @@ Hooks inherit the same trust model as commands: a required permission that is
 not trusted blocks before plugin-controlled code runs. Additional rules:
 
 1. Read-only lifecycle hooks require at least a read lifecycle scope such as
-   `plugin.lifecycle.read`.
+   `plugin:lifecycle:read`.
+   Lifecycle permission scopes use the same colon-delimited grammar as manifest
+   `permissions[].scope`; dot-delimited forms such as `plugin.lifecycle.read` are
+   invalid.
 2. Hooks that can block, authorize, rewrite, or mutate work require an explicit
    policy/mutation permission and default to `fail_closed`.
 3. Hooks MUST NOT directly edit `.omx`, EventStore rows, artifacts, or user

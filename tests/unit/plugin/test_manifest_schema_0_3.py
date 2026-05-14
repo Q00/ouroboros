@@ -159,6 +159,17 @@ class TestV02Compatibility:
 
 
 class TestV03HookAuditEvents:
+    def test_manifest_audit_default_matches_loader_standard_events(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload.pop("audit", None)
+        manifest = load_manifest(_write(tmp_path, payload))
+        assert manifest.audit.events == (
+            "plugin.invoked",
+            "plugin.permission_used",
+            "plugin.completed",
+            "plugin.failed",
+        )
+
     def test_manifest_audit_events_accept_hook_wrapper_events(self, tmp_path: Path) -> None:
         payload = _v03_manifest()
         payload["audit"] = {"events": ["plugin.hook.blocked", "plugin.hook.failed"]}

@@ -44,6 +44,7 @@ class TestRoutingHelper:
     def test_rejects_unrelated_scope(self) -> None:
         assert not is_hook_lifecycle_scope("github:read")
         assert not is_hook_lifecycle_scope("plugin.tool.intercept")
+        assert not is_hook_lifecycle_scope("plugin.lifecycle.read")
 
     def test_rejects_case_variant(self) -> None:
         # The scope set is exact-match by design; capability resolvers
