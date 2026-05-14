@@ -149,6 +149,10 @@ uv run --python 3.12 pytest tests/unit/ -q
 
 > See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contributor setup (linting, testing, pre-commit hooks).
 
+### Windows users
+
+Use WSL 2 for the supported Windows path, then run the Linux install commands from inside the WSL distribution. Windows 11 Home can run WSL 2; if `wsl --install` or distro installation fails, see [Windows WSL 2 troubleshooting](guides/windows-wsl-troubleshooting.md).
+
 ### Prerequisites
 
 | Path | Requirements |

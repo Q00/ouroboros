@@ -39,6 +39,8 @@ See the [runtime capability matrix](runtime-capability-matrix.md) for a feature 
 
 For the best Windows experience, use [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install) with a supported Linux distribution (Ubuntu recommended). All runtime backends and features are fully supported under WSL 2.
 
+Windows 11 Home is a valid WSL 2 host when virtualization and the required Windows optional features are available. If WSL itself will not install, follow the [Windows WSL 2 troubleshooting guide](guides/windows-wsl-troubleshooting.md) before installing Ouroboros.
+
 ## Windows (native) Caveats
 
 Native Windows support is **experimental**. Known limitations:
