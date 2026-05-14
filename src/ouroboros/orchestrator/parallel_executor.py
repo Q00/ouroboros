@@ -273,9 +273,7 @@ def _file_reference_pattern(normalized_reference: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])")
 
 
-def _bash_command_mutates_file_reference(
-    message: AgentMessage, normalized_reference: str
-) -> bool:
+def _bash_command_mutates_file_reference(message: AgentMessage, normalized_reference: str) -> bool:
     """Return True for explicit shell writes to the referenced file.
 
     Bash command text is only trusted when the command itself carries mutation
