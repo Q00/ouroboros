@@ -213,8 +213,6 @@ def _runtime_messages_support_file_claim(
     claimed relative path resolves inside the active workspace, which covers
     tool outputs that report ``generated.py`` instead of ``src/generated.py``.
     """
-    if _runtime_messages_support_claim(value, messages):
-        return True
     if task_cwd is None:
         return False
     candidate = Path(value)
@@ -226,29 +224,34 @@ def _runtime_messages_support_file_claim(
         resolved.relative_to(base)
     except ValueError:
         return False
+    if any(_runtime_message_supports_file_reference(value, message) for message in messages):
+        return True
     if not resolved.exists():
         return False
     basename = candidate.name.strip().lower()
     return bool(basename) and any(
-        _runtime_message_supports_file_basename(basename, message) for message in messages
+        _runtime_message_supports_file_reference(basename, message) for message in messages
     )
 
 
-def _runtime_message_supports_file_basename(basename: str, message: AgentMessage) -> bool:
-    """Return True when one message plausibly reports touching a basename."""
+def _runtime_message_supports_file_reference(reference: str, message: AgentMessage) -> bool:
+    """Return True when one message plausibly reports touching a file reference."""
+    normalized_reference = reference.strip().lower()
+    if not normalized_reference:
+        return False
     text = _runtime_message_search_text(message)
-    basename_pattern = re.compile(rf"(?<![\w.-]){re.escape(basename)}(?![\w.-])")
-    if not basename_pattern.search(text):
+    reference_pattern = re.compile(rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])")
+    if not reference_pattern.search(text):
         return False
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
         return True
     return bool(
         re.search(
-            rf"(?<![\w.-]){re.escape(basename)}(?![\w.-]).*\b("
+            rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-]).*\b("
             r"updated|modified|changed|created|generated|wrote|written|patched"
             r")\b|\b("
             r"updated|modified|changed|created|generated|wrote|written|patched"
-            rf")\b.*(?<![\w.-]){re.escape(basename)}(?![\w.-])",
+            rf")\b.*(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])",
             text,
         )
     )
@@ -289,7 +292,11 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
         text,
     ):
         return False
-    return bool(re.search(r"\b(passed|pass|success|succeeded)\b|exit\s*code\s*0|0\s+failed", text))
+    if re.search(r"\b0\s+passed\b", text) and not re.search(r"\b[1-9]\d*\s+passed\b", text):
+        return False
+    return bool(
+        re.search(r"\b([1-9]\d*\s+passed|passed|pass|success|succeeded)\b|exit\s*code\s*0", text)
+    )
 
 
 def _runtime_messages_support_test_claim(
@@ -3990,11 +3997,14 @@ When complete, explicitly state: [TASK_COMPLETE]
                 continue
             field_messages = _runtime_support_messages_for_field(field_name, support_messages)
             for value in values:
-                if field_name == "files_touched" and _runtime_messages_support_file_claim(
-                    value,
-                    field_messages,
-                    task_cwd=self._task_cwd or self._adapter.working_directory,
-                ):
+                if field_name == "files_touched":
+                    if _runtime_messages_support_file_claim(
+                        value,
+                        field_messages,
+                        task_cwd=self._task_cwd or self._adapter.working_directory,
+                    ):
+                        continue
+                    unsupported.append(f"{field_name}: {value}")
                     continue
                 if field_name == "tests_passed":
                     if _runtime_messages_support_test_claim(
