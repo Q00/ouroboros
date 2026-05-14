@@ -26,7 +26,7 @@ _RULE_SUFFIX = Path(CODEX_RULE_FILENAME).suffix
 
 def _render_codex_rules(source: str) -> str:
     """Return Codex rules with the generated skill capability guide appended."""
-    base = source.rstrip()
+    base = source.split(_SKILL_CAPABILITY_GUIDE_MARKER, 1)[0].rstrip()
     guide = render_backend_skill_capability_guide("codex").rstrip()
     return f"{base}\n\n{_SKILL_CAPABILITY_GUIDE_MARKER}\n{guide}\n"
 

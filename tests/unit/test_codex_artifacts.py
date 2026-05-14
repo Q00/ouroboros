@@ -133,6 +133,24 @@ class TestInstallCodexRules:
         assert "### When a skill requires `run_closure_gate`" in rules
         assert "MCP `seed-ready`" in rules
 
+    def test_rendered_skill_capability_guide_is_idempotent(self, tmp_path: Path) -> None:
+        """Refreshing from an already rendered rule source should not duplicate the guide."""
+        packaged_rules_dir = tmp_path / "packaged-rules"
+        rendered_once = (
+            f"# custom rules\n\n{_SKILL_CAPABILITY_GUIDE_MARKER}\n## stale generated guide\n"
+        )
+        self._write_rule(packaged_rules_dir, CODEX_RULE_FILENAME, rendered_once)
+
+        installed_path = install_codex_rules(
+            codex_dir=tmp_path / ".codex",
+            rules_dir=packaged_rules_dir,
+        )
+        installed_content = installed_path.read_text(encoding="utf-8")
+
+        assert installed_content.count(_SKILL_CAPABILITY_GUIDE_MARKER) == 1
+        assert "## stale generated guide" not in installed_content
+        assert "## Ouroboros Skill Capability Guide: Codex" in installed_content
+
 
 class TestLoadPackagedCodexSkills:
     """Test packaged Codex skill entrypoint resolution helpers."""
