@@ -186,7 +186,16 @@ def _runtime_message_file_path_values(message: AgentMessage) -> tuple[str, ...]:
     structured path extraction separate from broad text search so read-only text
     mentions still cannot prove ``files_touched``.
     """
-    path_keys = {"file_path", "filepath", "filePath", "path", "target_file", "targetFile"}
+    path_keys = {
+        "file_path",
+        "filepath",
+        "filePath",
+        "notebook_path",
+        "notebookPath",
+        "path",
+        "target_file",
+        "targetFile",
+    }
     values: list[str] = []
 
     def visit(value: object) -> None:
@@ -531,6 +540,7 @@ def _test_command_targets_claim(
     command: str,
     claim: str,
     chunk_text: str,
+    messages: tuple[AgentMessage, ...],
     task_cwd: str | None,
 ) -> bool:
     """Return True when a successful test command can cover a test claim."""
@@ -546,11 +556,10 @@ def _test_command_targets_claim(
     if normalized_file in chunk_text or normalized_file in normalized_command:
         return True
 
-    # A broad suite command such as ``pytest`` covers an existing claimed test
-    # file when its own output reports success. This keeps unrelated targeted
-    # commands (for example ``pytest tests/test_a.py`` while claiming
-    # ``tests/test_b.py``) rejected, but lets real Codex CLI transcripts that
-    # only report ``pytest`` + ``1 passed`` support node-id evidence.
+    # A broad suite command such as ``pytest`` can cover a node-id claim when
+    # the claimed test file is also backed by current-run mutation evidence.
+    # Existence alone is deliberately insufficient: otherwise a transcript with
+    # unrelated ``pytest`` output could prove any stale test file in the tree.
     command_parts = normalized_command.split()
     broad_pytest = command_parts in (["pytest"], ["py.test"]) or command_parts[-3:] == [
         "python",
@@ -559,16 +568,7 @@ def _test_command_targets_claim(
     ]
     if not broad_pytest or task_cwd is None:
         return False
-    candidate = Path(file_part)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    base = Path(task_cwd).resolve()
-    resolved = (base / candidate).resolve()
-    try:
-        resolved.relative_to(base)
-    except ValueError:
-        return False
-    return resolved.exists()
+    return _runtime_messages_support_file_claim(file_part, messages, task_cwd=task_cwd)
 
 
 def _runtime_messages_support_test_claim(
@@ -606,6 +606,7 @@ def _runtime_messages_support_test_claim(
                 command=command,
                 claim=value,
                 chunk_text=chunk_text,
+                messages=messages,
                 task_cwd=task_cwd,
             )
             for command in matching_commands

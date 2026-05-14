@@ -1538,6 +1538,149 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
+    async def test_fat_harness_verifier_accepts_notebookedit_notebook_path(self, tmp_path) -> None:
+        """NotebookEdit reports its target as notebook_path, not file_path."""
+        notebook_file = tmp_path / "analysis.ipynb"
+        notebook_file.write_text("{}\n", encoding="utf-8")
+        test_file = tmp_path / "tests" / "test_analysis.py"
+        test_file.parent.mkdir()
+        test_file.write_text("def test_analysis():\n    assert True\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["analysis.ipynb"],\n'
+                '  "commands_run": ["pytest tests/test_analysis.py"],\n'
+                '  "tests_passed": ["tests/test_analysis.py"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-notebook-path",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content="Calling tool: NotebookEdit",
+                        tool_name="NotebookEdit",
+                        data={"tool_input": {"notebook_path": str(notebook_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content="Calling tool: Bash: pytest tests/test_analysis.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_analysis.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="tests/test_analysis.py passed; 1 passed",
+                        data={"subtype": "success"},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Update notebook and tests.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_bare_pytest_for_unmentioned_stale_test(
+        self, tmp_path
+    ) -> None:
+        """A bare pytest success must not prove arbitrary existing test files."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        stale_test = tmp_path / "tests" / "test_other.py"
+        stale_test.parent.mkdir()
+        stale_test.write_text("def test_other():\n    assert True\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["src/generated.py"],\n'
+                '  "commands_run": ["pytest"],\n'
+                '  "tests_passed": ["tests/test_other.py::test_other"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-bare-pytest-unrelated-test",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {generated_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(generated_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content="Calling tool: Bash: pytest",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": "pytest"},
+                            "output": "1 passed in 0.01s",
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement generated module.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "tests_passed: tests/test_other.py::test_other" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
     async def test_fat_harness_rejects_command_result_wrapper_after_parsing_json_fence(
         self,
     ) -> None:
