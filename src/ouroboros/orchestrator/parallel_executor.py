@@ -3730,10 +3730,10 @@ When complete, explicitly state: [TASK_COMPLETE]
     ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
         """Parse and validate typed evidence at the atomic AC acceptance boundary.
 
-        This is observe-only for #920 PR-2: it records whether a successful
-        atomic leaf emitted profile-shaped evidence, but it does not change the
-        legacy success value returned by the runtime. Enforcement belongs to a
-        later sequenced evidence-loop/default-gate PR.
+        In observe-only mode this only records whether a successful atomic
+        leaf emitted profile-shaped evidence. In fat-harness mode, the caller
+        subsequently requires both this validation result and a separate
+        verifier PASS before accepting the AC.
         """
         if not success or self._execution_profile is None:
             return None, None, None
