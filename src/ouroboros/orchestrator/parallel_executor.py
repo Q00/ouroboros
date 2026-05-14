@@ -239,7 +239,9 @@ def _runtime_message_supports_file_reference(reference: str, message: AgentMessa
     normalized_reference = reference.strip().lower()
     if not normalized_reference:
         return False
-    text = _runtime_message_search_text(message)
+    text = _runtime_message_file_proof_text(message)
+    if not text:
+        return False
     reference_pattern = re.compile(rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])")
     if not reference_pattern.search(text):
         return False
@@ -255,6 +257,25 @@ def _runtime_message_supports_file_reference(reference: str, message: AgentMessa
             text,
         )
     )
+
+
+def _runtime_message_file_proof_text(message: AgentMessage) -> str:
+    """Return text that can prove a file was touched by the current run.
+
+    For Bash tool invocations, command text is not proof by itself: read-only
+    commands such as ``grep updated src/app.py`` can contain both the claimed
+    path and mutation verbs. Trust Bash result/output fields instead. Dedicated
+    edit/write tools still expose their tool inputs because their tool identity
+    supplies the mutation semantics.
+    """
+    if message.tool_name == "Bash":
+        parts: list[str] = []
+        for key in ("result_preview", "output", "stdout", "stderr"):
+            value = message.data.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        return "\n".join(parts).lower()
+    return _runtime_message_search_text(message)
 
 
 def _looks_like_test_command(command: str) -> bool:
