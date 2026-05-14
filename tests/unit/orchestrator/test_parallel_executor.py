@@ -277,6 +277,11 @@ class TestProfileAwareContextGovernance:
                     key_output="Helper is ready",
                 ),
             ),
+            coordinator_review=CoordinatorReview(
+                level_number=1,
+                review_summary="No conflicts remain",
+                warnings_for_next_level=("Keep edits localized",),
+            ),
         )
 
         result = await executor._execute_atomic_ac(
@@ -297,7 +302,13 @@ class TestProfileAwareContextGovernance:
         prompt = runtime.calls[0]["prompt"]
         assert "## Governed Dispatch Context (AC 2)" in prompt
         assert "## Parent context" in prompt
+        assert "## Previous Work Context" not in prompt
+        assert "## Coordinator Review" not in prompt
+        assert "Previous Work Context:" in prompt
+        assert "Coordinator Review (Level 1):" in prompt
         assert "Helper is ready" in prompt
+        assert "No conflicts remain" in prompt
+        assert "Keep edits localized" in prompt
         assert "## Sibling status" in prompt
         assert "… sibling-1: Implement duplicate leaf" in prompt
         assert "## AC\nImplement duplicate leaf" in prompt

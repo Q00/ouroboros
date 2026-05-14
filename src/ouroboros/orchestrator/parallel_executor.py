@@ -416,6 +416,27 @@ _SIBLING_HEADLINE_CHARS = 80
 _SiblingACRef = tuple[int | None, str]
 
 
+def _normalize_governed_parent_summary(parent_summary: str) -> str:
+    """Render legacy level context inside the governor without nested H2 headings.
+
+    ``build_context_prompt()`` is also used by the legacy prompt path, where its
+    top-level ``##`` sections are appropriate.  Governed dispatch already wraps
+    that text in ``## Parent context`` via ``compose_context()``, so preserving
+    those headings creates a hard-to-scan nested hierarchy.  Convert only the
+    known top-level headings to compact labels; leave indented or embedded
+    markdown from AC outputs untouched.
+    """
+    lines: list[str] = []
+    for line in parent_summary.strip().splitlines():
+        if line.startswith("## "):
+            heading = line[3:].strip()
+            if heading:
+                lines.append(f"{heading}:")
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def _get_available_memory_gb() -> float | None:
     """Get available memory in GB. Returns None if check fails."""
     system = platform.system()
@@ -2986,7 +3007,9 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         try:
             composed = compose_context(
                 ac=ac_content,
-                parent_summary=build_context_prompt(level_contexts or []),
+                parent_summary=_normalize_governed_parent_summary(
+                    build_context_prompt(level_contexts or [])
+                ),
                 siblings=sibling_statuses,
             )
         except ValueError as exc:
