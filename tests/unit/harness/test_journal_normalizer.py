@@ -495,6 +495,39 @@ class TestNormalizeEventsACScope:
         assert len(manifest.entries) == 1
         assert manifest.entries[0].source_event_ids == ("evt_grep_start", "evt_grep_return")
 
+    def test_excludes_orphan_returned_with_memory_provenance_marker(self) -> None:
+        event = BaseEvent(
+            id="evt_orphan_memory_return",
+            type="tool.call.returned",
+            timestamp=datetime.now(UTC),
+            aggregate_type="session",
+            aggregate_id="session_test",
+            data={
+                "call_id": "orphan_memory",
+                "tool_name": "Read",
+                "caller": "executor:MEMORY.md-derived-summary",
+                "result_preview": "prior context summary",
+                "ac_id": "ac_1",
+            },
+        )
+
+        manifest = normalize_events([event], ac_id="ac_1")
+
+        assert manifest.entries == ()
+
+    def test_keeps_orphan_returned_when_result_only_mentions_memory_file(self) -> None:
+        event = _tool_returned(
+            call_id="orphan_memory_text",
+            tool_name="Bash",
+            result_preview="grep output mentioned MEMORY.md",
+            event_id="evt_orphan_memory_text",
+        )
+
+        manifest = normalize_events([event], ac_id="ac_1")
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == ("evt_orphan_memory_text",)
+
     def test_memory_event_from_other_ac_does_not_suppress_matching_call_id(self) -> None:
         events = [
             BaseEvent(
@@ -678,6 +711,27 @@ class TestLLMPairing:
         entry = manifest.entries[0]
         assert entry.kind is EvidenceKind.LLM_CALL
         assert entry.source_event_ids == ("evt_ret_orphan",)
+
+    def test_excludes_orphan_returned_with_memory_provenance_flag(self) -> None:
+        event = BaseEvent(
+            id="evt_orphan_memory_llm",
+            type="llm.call.returned",
+            timestamp=datetime.now(UTC),
+            aggregate_type="execution",
+            aggregate_id="execution_x",
+            data={
+                "call_id": "llm_orphan_memory",
+                "model_id": "claude-sonnet-4.6",
+                "duration_ms": 1200,
+                "is_error": False,
+                "memory_derived": True,
+                "execution_id": "ac_1",
+            },
+        )
+
+        manifest = normalize_events([event], ac_id="ac_1")
+
+        assert manifest.entries == ()
 
     def test_excludes_memory_derived_llm_pair(self) -> None:
         events = [

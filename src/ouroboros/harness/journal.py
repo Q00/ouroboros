@@ -607,6 +607,8 @@ def _is_memory_derived_event(event: BaseEvent) -> bool:
         return _is_memory_derived_tool_start(event.data)
     if event.type == _LLM_REQUESTED:
         return _is_memory_derived_llm_request(event.data)
+    if event.type in {_TOOL_RETURNED, _LLM_RETURNED}:
+        return _is_memory_derived_return(event.data)
     return _has_memory_provenance_marker(event.data)
 
 
@@ -628,6 +630,15 @@ def _is_memory_derived_tool_start(data: Mapping[str, Any]) -> bool:
 def _is_memory_derived_llm_request(data: Mapping[str, Any]) -> bool:
     return _has_memory_provenance_marker(data.get("caller")) or _has_memory_provenance_marker(
         data.get("prompt_preview")
+    )
+
+
+def _is_memory_derived_return(data: Mapping[str, Any]) -> bool:
+    if _is_memory_provenance_mapping(data):
+        return True
+    return any(
+        _has_memory_provenance_marker(data.get(key))
+        for key in ("caller", "args_preview", "prompt_preview")
     )
 
 
