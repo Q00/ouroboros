@@ -32,6 +32,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
 import platform
 import re
 import subprocess
@@ -106,6 +107,12 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
+from ouroboros.orchestrator.verifier import (
+    Verifier,
+    VerifierContractError,
+    VerifierVerdict,
+    verifier_operational_failure_verdict,
+)
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -135,6 +142,122 @@ def _subtask_event_label(content: str, *, max_length: int = 50) -> str:
     if len(normalized) <= max_length:
         return normalized
     return normalized[:max_length]
+
+
+def _flatten_evidence_values(value: object) -> tuple[str, ...]:
+    """Return concrete string claims from a typed evidence field."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        stripped = value.strip()
+        return (stripped,) if stripped else ()
+    if isinstance(value, (int, float, bool)):
+        return (str(value),)
+    if isinstance(value, dict):
+        flattened: list[str] = []
+        for item in value.values():
+            flattened.extend(_flatten_evidence_values(item))
+        return tuple(flattened)
+    if isinstance(value, (list, tuple, set)):
+        flattened_sequence: list[str] = []
+        for item in value:
+            flattened_sequence.extend(_flatten_evidence_values(item))
+        return tuple(flattened_sequence)
+    return (str(value),)
+
+
+def _runtime_message_search_text(message: AgentMessage) -> str:
+    """Build searchable transcript text for one non-final runtime message."""
+    parts: list[str] = [message.content]
+    if message.tool_name:
+        parts.append(message.tool_name)
+    tool_input = message.data.get("tool_input")
+    if isinstance(tool_input, dict):
+        parts.extend(str(value) for value in tool_input.values() if value is not None)
+    parts.extend(_flatten_evidence_values(message.data))
+    return "\n".join(parts).lower()
+
+
+def _runtime_support_messages_for_field(
+    field_name: str,
+    messages: tuple[AgentMessage, ...],
+) -> tuple[AgentMessage, ...]:
+    """Narrow support messages for profile-known evidence fields."""
+    normalized = field_name.lower()
+    if normalized == "files_touched":
+        return messages
+    if normalized in {"commands_run", "tests_passed"}:
+        return tuple(message for message in messages if message.tool_name == "Bash")
+    return messages
+
+
+def _runtime_messages_support_claim(value: str, messages: tuple[AgentMessage, ...]) -> bool:
+    """Return True when a non-final runtime message backs a claim string."""
+    needle = value.strip().lower()
+    return bool(needle) and any(
+        needle in _runtime_message_search_text(message) for message in messages
+    )
+
+
+def _looks_like_test_command(command: str) -> bool:
+    """Return True for common whole-suite or targeted test invocations."""
+    normalized = command.strip().lower()
+    if not normalized:
+        return False
+    return bool(
+        re.search(
+            r"(^|[\s;&|])("
+            r"pytest|py\.test|tox|nox|npm\s+test|pnpm\s+test|yarn\s+test|"
+            r"uv\s+run\s+pytest|python\s+-m\s+pytest"
+            r")($|[\s;&|])",
+            normalized,
+        )
+    )
+
+
+def _message_contains_test_success(message: AgentMessage) -> bool:
+    """Return True when one message says a test command passed."""
+    parts = [message.content]
+    for key in ("result_preview", "output", "stdout"):
+        value = message.data.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    text = "\n".join(parts).lower()
+    if re.search(r"\b(failed|failure|error|errors)\b|exit\s*code\s*[1-9]", text):
+        return False
+    return bool(re.search(r"\b(passed|pass|success|succeeded)\b|exit\s*code\s*0|0\s+failed", text))
+
+
+def _runtime_messages_support_test_claim(
+    *,
+    value: str,
+    backed_commands: tuple[str, ...],
+    messages: tuple[AgentMessage, ...],
+) -> bool:
+    """Return True when a backed test command chunk proves one test claim."""
+    needle = value.strip().lower()
+    if not needle:
+        return False
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash":
+            continue
+        if not any(
+            _looks_like_test_command(candidate)
+            and _runtime_messages_support_claim(candidate, (message,))
+            for candidate in backed_commands
+        ):
+            continue
+        chunk = [message]
+        for following in messages[index + 1 :]:
+            if following.tool_name == "Bash":
+                break
+            chunk.append(following)
+        chunk_text = "\n".join(_runtime_message_search_text(item) for item in chunk)
+        if needle not in chunk_text:
+            continue
+        if any(_message_contains_test_success(item) for item in chunk):
+            return True
+    return False
 
 
 _REUSABLE_RUNTIME_EVENT_TYPES = frozenset(
@@ -500,6 +623,7 @@ class ParallelACExecutor:
         task_cwd: str | None = None,
         execution_profile: ExecutionProfile | None = None,
         fat_harness_mode: bool = False,
+        atomic_verifier: Verifier | None = None,
     ):
         """Initialize executor.
 
@@ -516,8 +640,11 @@ class ParallelACExecutor:
             task_cwd: Explicit working directory override for task execution metadata.
             execution_profile: Optional profile that makes decomposition split along
                 profile axis/min_unit instead of the legacy generic prompt.
-            fat_harness_mode: Temporary PR-4 opt-in mode that enforces
-                profile typed-evidence validation at atomic AC acceptance.
+            fat_harness_mode: Enforce profile typed evidence plus a verifier
+                PASS at atomic AC acceptance.
+            atomic_verifier: Optional verifier callable for the separate
+                atomic evidence PASS gate. Defaults to the harness-owned
+                structural verifier.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -528,6 +655,7 @@ class ParallelACExecutor:
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
+        self._atomic_verifier = atomic_verifier
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=inherited_runtime_handle,
@@ -3517,11 +3645,20 @@ When complete, explicitly state: [TASK_COMPLETE]
                 final_message=final_message,
                 success=success,
             )
+            verifier_verdict = self._run_atomic_verifier_pass(
+                ac_content=ac_content,
+                final_message=final_message,
+                success=success,
+                messages=tuple(messages),
+                typed_evidence=typed_evidence,
+                typed_validation=typed_validation,
+            )
             fat_harness_error = self._fat_harness_acceptance_error(
                 runtime_success=success,
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
                 typed_error=typed_error,
+                verifier_verdict=verifier_verdict,
             )
             result_final_message = final_message
             if fat_harness_error is not None:
@@ -3539,6 +3676,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
                 typed_error=typed_error,
+                verifier_verdict=verifier_verdict,
                 enforcement_error=fat_harness_error,
             )
             await self._emit_ac_runtime_event(
@@ -3583,6 +3721,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 typed_evidence=typed_evidence,
                 typed_evidence_validation=typed_validation,
                 typed_evidence_error=typed_error,
+                atomic_verifier_verdict=verifier_verdict,
                 error=fat_harness_error,
             )
 
@@ -3654,10 +3793,10 @@ When complete, explicitly state: [TASK_COMPLETE]
     ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
         """Parse and validate typed evidence at the atomic AC acceptance boundary.
 
-        This is observe-only for #920 PR-2: it records whether a successful
-        atomic leaf emitted profile-shaped evidence, but it does not change the
-        legacy success value returned by the runtime. Enforcement belongs to a
-        later sequenced evidence-loop/default-gate PR.
+        In observe-only mode this only records whether a successful atomic
+        leaf emitted profile-shaped evidence. In fat-harness mode, the caller
+        subsequently requires both this validation result and a separate
+        verifier PASS before accepting the AC.
         """
         if not success or self._execution_profile is None:
             return None, None, None
@@ -3678,8 +3817,9 @@ When complete, explicitly state: [TASK_COMPLETE]
         typed_evidence: EvidenceRecord | None,
         typed_validation: ValidationResult | None,
         typed_error: str | None,
+        verifier_verdict: VerifierVerdict | None,
     ) -> str | None:
-        """Return the opt-in fat-harness rejection reason for an atomic leaf."""
+        """Return the fat-harness rejection reason for an atomic leaf."""
         if not self._fat_harness_mode or not runtime_success:
             return None
         if self._execution_profile is None:
@@ -3689,7 +3829,12 @@ When complete, explicitly state: [TASK_COMPLETE]
         if typed_validation is None:
             return "Fat-harness mode could not validate typed evidence."
         if typed_validation.ok:
-            return None
+            if verifier_verdict is None:
+                return "Fat-harness mode requires verifier PASS before atomic acceptance."
+            if verifier_verdict.passed:
+                return None
+            detail = "; ".join(verifier_verdict.reasons) or "verifier rejected atomic evidence"
+            return f"Fat-harness verifier failed ({detail})."
 
         reasons: list[str] = []
         if typed_validation.missing_fields:
@@ -3701,6 +3846,124 @@ When complete, explicitly state: [TASK_COMPLETE]
         detail = "; ".join(reasons) if reasons else "profile evidence validation failed"
         return f"Fat-harness typed evidence validation failed ({detail})."
 
+    def _run_atomic_verifier_pass(
+        self,
+        *,
+        ac_content: str,
+        final_message: str,
+        success: bool,
+        messages: tuple[AgentMessage, ...],
+        typed_evidence: EvidenceRecord | None,
+        typed_validation: ValidationResult | None,
+    ) -> VerifierVerdict | None:
+        """Run the separate verifier pass once typed evidence is schema-valid."""
+        if (
+            not success
+            or not self._fat_harness_mode
+            or self._execution_profile is None
+            or typed_evidence is None
+            or typed_validation is None
+            or not typed_validation.ok
+        ):
+            return None
+
+        verifier = self._atomic_verifier
+        try:
+            verdict = (
+                verifier(
+                    profile=self._execution_profile,
+                    ac=ac_content,
+                    leaf_output=final_message,
+                    record=typed_evidence,
+                )
+                if verifier is not None
+                else self._verify_atomic_evidence_against_runtime_messages(
+                    messages=messages,
+                    typed_evidence=typed_evidence,
+                )
+            )
+        except VerifierContractError:
+            raise
+        except Exception as exc:
+            verdict = verifier_operational_failure_verdict(exc)
+        if not isinstance(verdict, VerifierVerdict):
+            msg = f"Atomic verifier returned {type(verdict).__name__}, expected VerifierVerdict."
+            raise VerifierContractError(msg)
+        return verdict
+
+    def _verify_atomic_evidence_against_runtime_messages(
+        self,
+        *,
+        messages: tuple[AgentMessage, ...],
+        typed_evidence: EvidenceRecord,
+    ) -> VerifierVerdict:
+        """Verify leaf evidence is backed by runtime transcript events.
+
+        The verifier deliberately ignores the final result message so the
+        accepted evidence cannot be supported only by the leaf's self-report.
+        """
+        support_messages = tuple(messages[:-1] if messages and messages[-1].is_final else messages)
+        if not support_messages:
+            return VerifierVerdict(
+                passed=False,
+                reasons=("no runtime transcript evidence supports the typed evidence claims",),
+                failure_class="EVIDENCE_MISSING",
+            )
+
+        unsupported: list[str] = []
+        backed_commands = tuple(
+            command
+            for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
+            if _runtime_messages_support_claim(
+                command,
+                _runtime_support_messages_for_field("commands_run", support_messages),
+            )
+        )
+        for field_name in self._execution_profile.evidence_schema.required:
+            values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
+            if not values:
+                unsupported.append(f"{field_name}: no concrete claim values")
+                continue
+            field_messages = _runtime_support_messages_for_field(field_name, support_messages)
+            for value in values:
+                if field_name == "files_touched" and self._evidence_path_exists(value):
+                    continue
+                if field_name == "tests_passed" and _runtime_messages_support_test_claim(
+                    value=value,
+                    backed_commands=backed_commands,
+                    messages=support_messages,
+                ):
+                    continue
+                if not _runtime_messages_support_claim(value, field_messages):
+                    unsupported.append(f"{field_name}: {value}")
+
+        if unsupported:
+            return VerifierVerdict(
+                passed=False,
+                reasons=("unsupported evidence claims: " + "; ".join(unsupported),),
+                failure_class="FABRICATION_SUSPECTED",
+            )
+
+        return VerifierVerdict(passed=True)
+
+    def _evidence_path_exists(self, value: str) -> bool:
+        """Return True when a file claim exists under the task working directory."""
+        task_cwd = self._task_cwd or self._adapter.working_directory
+        if task_cwd is None:
+            return False
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return False
+        if ".." in candidate.parts:
+            return False
+        base = Path(task_cwd).resolve()
+        resolved = (base / candidate).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            return False
+        return resolved.exists()
+
     async def _emit_atomic_typed_evidence_event(
         self,
         *,
@@ -3711,6 +3974,7 @@ When complete, explicitly state: [TASK_COMPLETE]
         typed_evidence: EvidenceRecord | None,
         typed_validation: ValidationResult | None,
         typed_error: str | None,
+        verifier_verdict: VerifierVerdict | None = None,
         enforcement_error: str | None = None,
     ) -> None:
         """Persist typed-evidence metadata for atomic AC completion."""
@@ -3734,7 +3998,12 @@ When complete, explicitly state: [TASK_COMPLETE]
             "typed_evidence_present": typed_evidence is not None,
             "typed_evidence_valid": typed_validation.ok if typed_validation is not None else False,
             "typed_evidence_error": typed_error,
+            "verifier_ran": verifier_verdict is not None,
+            "verifier_passed": verifier_verdict.passed if verifier_verdict is not None else False,
         }
+        if verifier_verdict is not None:
+            data["verifier_reasons"] = list(verifier_verdict.reasons)
+            data["verifier_failure_class"] = verifier_verdict.failure_class
         if typed_evidence is not None:
             data["typed_evidence_fields"] = sorted(typed_evidence.data)
         if typed_validation is not None:

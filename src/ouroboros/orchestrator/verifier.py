@@ -6,11 +6,11 @@ layer: it is any callable that, given the active profile, the leaf's
 parsed evidence record, the AC text, and the raw leaf output, returns a
 VerifierVerdict.
 
-This module is wiring-only at the orchestrator seam — `parallel_executor`
-is not yet routed through `run_with_verifier`. The integration PR follows
-once the failure taxonomy (H7) and routing (H5) hooks are in place. For
-now this gives downstream PRs a stable, fully-tested loop they can plug
-the real LLM-backed verifier into.
+This module owns the verifier verdict contract consumed at the
+`parallel_executor` atomic acceptance boundary. The full bounded retry
+helper (`run_with_verifier`) remains available for the future live retry
+loop once the failure taxonomy (H7) and routing (H5) hooks are promoted
+into redispatch decisions.
 
 Loop semantics:
     1. Executor produces a leaf output.
@@ -162,6 +162,24 @@ class Verifier(Protocol):
     ) -> VerifierVerdict: ...
 
 
+def verifier_operational_failure_verdict(exc: BaseException) -> VerifierVerdict:
+    """Convert an operational verifier failure into a retryable verdict.
+
+    Programming bugs are deliberately not accepted here; callers should let
+    those propagate so broken verifier implementations are fixed instead of
+    silently consuming the acceptance boundary.
+    """
+    if isinstance(exc, VerifierContractError):
+        raise exc
+    if isinstance(exc, _OPERATIONAL_VERIFIER_ERRORS):
+        return VerifierVerdict(
+            passed=False,
+            reasons=(f"verifier raised {type(exc).__name__}: {exc}",),
+            failure_class="STALL",
+        )
+    raise exc
+
+
 class LeafExecutor(Protocol):
     """Callable that runs the leaf executor for a given AC.
 
@@ -171,6 +189,53 @@ class LeafExecutor(Protocol):
     """
 
     def __call__(self, *, ac: str, feedback: tuple[str, ...]) -> str: ...
+
+
+def structural_atomic_verifier(
+    *,
+    profile: ExecutionProfile,
+    ac: str,
+    leaf_output: str,
+    record: EvidenceRecord,
+) -> VerifierVerdict:
+    """Harness-owned structural verifier helper for atomic acceptance seams.
+
+    This verifier is intentionally narrower than the future TraceGuard /
+    test-runner verifier: it provides a separate, typed ``VerifierVerdict``
+    PASS/FAIL boundary over the parsed evidence contract without making
+    live model calls or removing the legacy fallback. The live
+    ``parallel_executor`` default adds runtime-transcript support checks on
+    top; profile-specific semantic/test verification can still replace this
+    callable through the `Verifier` protocol without changing the acceptance
+    boundary.
+    """
+    del ac
+    if record.source and record.source not in leaf_output:
+        return VerifierVerdict(
+            passed=False,
+            reasons=("parsed evidence source is not present in the leaf output",),
+            failure_class="FABRICATION_SUSPECTED",
+        )
+
+    try:
+        validation = validate_evidence(profile, record)
+    except EvidenceError as exc:
+        return VerifierVerdict(
+            passed=False,
+            reasons=(f"profile evidence validation failed: {exc}",),
+            failure_class="EVIDENCE_MISSING",
+        )
+
+    if not validation.ok:
+        reasons = validation.reasons() or ("profile evidence validation failed",)
+        failure_class = "BLOCKED" if validation.blocker is not None else "EVIDENCE_MISSING"
+        return VerifierVerdict(
+            passed=False,
+            reasons=tuple(reasons),
+            failure_class=failure_class,
+        )
+
+    return VerifierVerdict(passed=True)
 
 
 @dataclass(frozen=True)
@@ -305,11 +370,7 @@ def run_with_verifier(
                     # are NOT in the catch list — they propagate so the
                     # operator can fix the broken verifier instead of
                     # watching it silently exhaust retries.
-                    verdict = VerifierVerdict(
-                        passed=False,
-                        reasons=(f"verifier raised {type(exc).__name__}: {exc}",),
-                        failure_class="STALL",
-                    )
+                    verdict = verifier_operational_failure_verdict(exc)
                 else:
                     # Verifier is only a static Protocol — Python won't
                     # enforce the return type at runtime. A buggy impl
@@ -355,4 +416,6 @@ __all__ = [
     "VerifierContractError",
     "VerifierVerdict",
     "run_with_verifier",
+    "structural_atomic_verifier",
+    "verifier_operational_failure_verdict",
 ]

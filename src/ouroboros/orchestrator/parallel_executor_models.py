@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.coordinator import CoordinatorReview
     from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
     from ouroboros.orchestrator.level_context import LevelContext
+    from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
 class ACExecutionOutcome(str, Enum):  # noqa: UP042
@@ -58,7 +59,9 @@ class ACExecutionResult:
         typed_evidence_validation: Profile-schema validation result for
             typed_evidence, if parsing succeeded.
         typed_evidence_error: Parse/validation error observed at atomic
-            completion, if any. Does not change success semantics yet.
+            completion, if any.
+        atomic_verifier_verdict: Separate verifier pass verdict for the
+            parsed typed evidence at atomic completion, when available.
     """
 
     ac_index: int
@@ -79,6 +82,7 @@ class ACExecutionResult:
     typed_evidence: EvidenceRecord | None = None
     typed_evidence_validation: ValidationResult | None = None
     typed_evidence_error: str | None = None
+    atomic_verifier_verdict: VerifierVerdict | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""
