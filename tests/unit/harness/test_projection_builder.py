@@ -343,6 +343,28 @@ class TestIncrementalIngestion:
         assert first.stages[0].stage_id != different.stages[0].stage_id
         assert first.steps[0].step_id != different.steps[0].step_id
 
+    def test_incremental_build_after_empty_build_converges_with_one_shot(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            _tool_started(
+                call_id="late",
+                tool_name="Bash",
+                when=t0,
+                event_id="evt_late_start",
+            )
+        ]
+        builder = ProjectionBuilder(seed_id="seed_abc")
+
+        empty = builder.build()
+        builder.add_events(events)
+        incremental = builder.build()
+        one_shot = build_projection(events, seed_id="seed_abc")
+
+        assert empty.run.run_id != incremental.run.run_id
+        assert incremental.run.run_id == one_shot.run.run_id
+        assert incremental.stages[0].stage_id == one_shot.stages[0].stage_id
+        assert incremental.steps[0].step_id == one_shot.steps[0].step_id
+
     def test_in_flight_step_id_stays_stable_across_builds_and_completion(self) -> None:
         t0 = datetime.now(UTC)
         builder = ProjectionBuilder(seed_id="seed_abc")
