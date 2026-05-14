@@ -828,6 +828,68 @@ class TestEvaluateDeliverClaim:
         )
         assert verdict.evidence_event_ids == ("evt_test",)
 
+
+    def test_claim_term_guard_checks_mixed_traceguard_allowed_facts(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_actual",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "result_preview": "pytest passed for user profile update",
+                    },
+                    source_event_ids=("evt_1",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="fact_actual",
+                    evidence_handle="ev_actual",
+                    statement="test_passed behavior=admin_delete_denied",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="fact_missing",
+                    evidence_handle="ev_missing",
+                    statement="Unsupported claim.",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=lambda **_: _TraceGuardResult(
+                accepted=False,
+                allowed_fact_ids=("fact_actual",),
+                allowed_chunk_ids=("ev_actual",),
+                rejected_claims=(
+                    _TraceGuardRejection(
+                        reason="unsupported_fact_id",
+                        claim=_TraceGuardClaim(fact_id="fact_missing", chunk_id="ev_missing"),
+                        detail="fact is not present in manifest",
+                    ),
+                ),
+            ),
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 1.0
+        assert verdict.accepted_fact_ids == ("fact_actual",)
+        assert verdict.rejected_fact_ids == ("fact_missing", "fact_actual")
+        assert verdict.rejected_reasons == (
+            "missing_evidence_handle: ev_missing is not present in manifest",
+            "unsupported_fact_id: fact is not present in manifest",
+            "semantic_miss: fact_actual cites ev_actual but evidence text lacks "
+            "required term(s): behavior=admin_delete_denied",
+        )
+        assert verdict.evidence_event_ids == ("evt_1",)
+
     def test_rejected_traceguard_result_is_preserved_for_routing(self) -> None:
         manifest = EvidenceManifest(
             ac_id="AC-1",

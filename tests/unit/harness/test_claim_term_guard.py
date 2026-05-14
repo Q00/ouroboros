@@ -80,6 +80,46 @@ def test_prose_only_claims_are_left_to_later_semantic_evaluators() -> None:
     assert verdict.accepted is True
 
 
+def test_rejects_partial_numeric_token_match() -> None:
+    verdict = deterministic_claim_term_guard(
+        ac_id="AC-1",
+        facts=(
+            ClaimTermGuardFact(
+                fact_id="user_check",
+                evidence_handle="ev_1",
+                statement="validated user_id=1",
+                evidence_text="validated user_id=10",
+            ),
+        ),
+    )
+
+    assert verdict.accepted is False
+    assert verdict.rejected_reasons == (
+        "semantic_miss: user_check cites ev_1 but evidence text lacks required term(s): "
+        "user_id=1",
+    )
+
+
+def test_rejects_partial_path_token_match() -> None:
+    verdict = deterministic_claim_term_guard(
+        ac_id="AC-1",
+        facts=(
+            ClaimTermGuardFact(
+                fact_id="file_modified:src/app.py",
+                evidence_handle="ev_1",
+                statement="file_modified path=src/app.py",
+                evidence_text="wrote backup path=src/app.py.bak",
+            ),
+        ),
+    )
+
+    assert verdict.accepted is False
+    assert verdict.rejected_reasons == (
+        "semantic_miss: file_modified:src/app.py cites ev_1 but evidence text lacks "
+        "required term(s): path=src/app.py",
+    )
+
+
 def test_rejected_verdict_requires_reason() -> None:
     with pytest.raises(ValueError, match="must include rejection reasons"):
         ClaimTermGuardVerdict(accepted=False)

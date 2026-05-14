@@ -108,10 +108,11 @@ def _missing_structured_terms(*, statement: str, evidence_text: str) -> tuple[st
     if not terms:
         return ()
 
-    normalized_evidence = _normalize_text(evidence_text)
+    evidence_tokens = _normalize_tokens(evidence_text)
     missing: list[str] = []
     for term in terms:
-        if _normalize_text(term.value) not in normalized_evidence:
+        term_tokens = _normalize_tokens(term.value)
+        if not term_tokens or not _contains_token_sequence(evidence_tokens, term_tokens):
             missing.append(f"{term.key}={term.value}")
     return tuple(missing)
 
@@ -136,8 +137,17 @@ def _strip_literal(value: str) -> str:
     return value.strip().strip("`'\"")
 
 
-def _normalize_text(value: str) -> str:
-    return " ".join(_tokenize(value))
+def _normalize_tokens(value: str) -> tuple[str, ...]:
+    return tuple(_tokenize(value))
+
+
+def _contains_token_sequence(tokens: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+    if len(needle) > len(tokens):
+        return False
+    return any(
+        tokens[index : index + len(needle)] == needle
+        for index in range(len(tokens) - len(needle) + 1)
+    )
 
 
 def _tokenize(value: str) -> Iterable[str]:
