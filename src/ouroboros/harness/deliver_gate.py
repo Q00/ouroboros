@@ -231,7 +231,12 @@ async def load_ac_evidence_manifest(
     manifest = normalize_events(_chronological_events(filtered_events), ac_id=normalized_scope_id)
     if normalized_scope_id == normalized_ac_id:
         return manifest
-    return manifest.model_copy(update={"ac_id": normalized_ac_id})
+    return EvidenceManifest(
+        ac_id=normalized_ac_id,
+        entries=manifest.entries,
+        normalized_at=manifest.normalized_at,
+        metadata=manifest.metadata,
+    )
 
 
 def evaluate_deliver_claim(

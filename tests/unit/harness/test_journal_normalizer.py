@@ -142,6 +142,48 @@ class TestEvidenceEntry:
         )
         assert entry.handle.startswith("ev_")
 
+    def test_generated_handle_is_stable_from_entry_evidence(self) -> None:
+        first = EvidenceEntry(
+            kind=EvidenceKind.TOOL_INVOCATION,
+            started_at=datetime.now(UTC),
+            payload={"tool_name": "Read", "args_preview": "path=src/app.py"},
+            source_event_ids=("evt_1",),
+        )
+        second = EvidenceEntry(
+            kind=EvidenceKind.TOOL_INVOCATION,
+            started_at=datetime.now(UTC) + timedelta(seconds=10),
+            payload={"tool_name": "Read", "args_preview": "path=src/app.py"},
+            source_event_ids=("evt_1",),
+        )
+
+        assert first.handle == second.handle
+
+    def test_generated_handle_is_stable_for_unordered_payload_sets(self) -> None:
+        first = EvidenceEntry(
+            kind=EvidenceKind.TOOL_INVOCATION,
+            started_at=datetime.now(UTC),
+            payload={"tags": {"write", "test", "review"}},
+            source_event_ids=("evt_1",),
+        )
+        second = EvidenceEntry(
+            kind=EvidenceKind.TOOL_INVOCATION,
+            started_at=datetime.now(UTC),
+            payload={"tags": {"review", "write", "test"}},
+            source_event_ids=("evt_1",),
+        )
+
+        assert first.handle == second.handle
+
+    def test_explicit_handle_is_preserved(self) -> None:
+        entry = EvidenceEntry(
+            handle="ev_caller_supplied",
+            kind=EvidenceKind.TOOL_INVOCATION,
+            started_at=datetime.now(UTC),
+            source_event_ids=("evt_1",),
+        )
+
+        assert entry.handle == "ev_caller_supplied"
+
 
 class TestEvidenceManifest:
     def test_ac_id_required(self) -> None:
@@ -152,6 +194,25 @@ class TestEvidenceManifest:
         manifest = EvidenceManifest(ac_id="ac_1")
         with pytest.raises(TypeError):
             manifest.metadata["k"] = "v"  # type: ignore[index]
+
+    def test_generated_manifest_id_is_stable(self) -> None:
+        entry = EvidenceEntry(
+            kind=EvidenceKind.COMMAND_EXECUTED,
+            started_at=datetime.now(UTC),
+            payload={"tool_name": "Bash", "result_preview": "1 passed"},
+            source_event_ids=("evt_1",),
+        )
+
+        first = EvidenceManifest(ac_id="ac_1", entries=(entry,))
+        second = EvidenceManifest(ac_id="ac_1", entries=(entry,))
+
+        assert first.manifest_id == second.manifest_id
+        assert first.manifest_id.startswith("manifest_")
+
+    def test_explicit_manifest_id_is_preserved(self) -> None:
+        manifest = EvidenceManifest(ac_id="ac_1", manifest_id="manifest_external")
+
+        assert manifest.manifest_id == "manifest_external"
 
     def test_is_frozen(self) -> None:
         manifest = EvidenceManifest(ac_id="ac_1")
@@ -242,6 +303,33 @@ class TestNormalizeEventsToolPairs:
         assert entry.kind is EvidenceKind.COMMAND_EXECUTED
         assert entry.source_event_ids == ("evt_returned_orphan",)
 
+    def test_normalization_is_replay_stable_for_same_journal(self) -> None:
+        start_time = datetime.now(UTC)
+        events = [
+            _tool_started(
+                call_id="stable",
+                tool_name="Bash",
+                event_id="evt_start_stable",
+                when=start_time,
+                args_preview="pytest tests/unit/harness/test_journal_normalizer.py",
+            ),
+            _tool_returned(
+                call_id="stable",
+                tool_name="Bash",
+                event_id="evt_return_stable",
+                when=start_time + timedelta(milliseconds=5),
+                result_preview="1 passed",
+            ),
+        ]
+
+        first = normalize_events(events, ac_id="ac_1")
+        second = normalize_events(events, ac_id="ac_1")
+
+        assert first.manifest_id == second.manifest_id
+        assert [entry.handle for entry in first.entries] == [
+            entry.handle for entry in second.entries
+        ]
+
 
 class TestNormalizeEventsACScope:
     def test_drops_events_belonging_to_other_ac(self) -> None:
@@ -263,6 +351,130 @@ class TestNormalizeEventsACScope:
     def test_trims_ac_id_whitespace(self) -> None:
         manifest = normalize_events([], ac_id="  ac_padded  ")
         assert manifest.ac_id == "ac_padded"
+
+    def test_excludes_memory_file_events_from_evidence_manifest(self) -> None:
+        events = [
+            _tool_started(
+                call_id="memory",
+                tool_name="Read",
+                args_preview="path=MEMORY.md",
+                event_id="evt_memory_start",
+            ),
+            _tool_returned(
+                call_id="memory",
+                tool_name="Read",
+                result_preview="schema prior content",
+                event_id="evt_memory_return",
+            ),
+            _tool_started(
+                call_id="fresh",
+                tool_name="Read",
+                args_preview="path=src/app.py",
+                event_id="evt_fresh_start",
+            ),
+            _tool_returned(
+                call_id="fresh",
+                tool_name="Read",
+                result_preview="fresh run content",
+                event_id="evt_fresh_return",
+            ),
+        ]
+
+        manifest = normalize_events(events, ac_id="ac_1")
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == ("evt_fresh_start", "evt_fresh_return")
+
+    def test_excludes_pair_when_returned_event_references_memory_file(self) -> None:
+        events = [
+            _tool_started(
+                call_id="memory_result",
+                tool_name="Bash",
+                args_preview="pytest tests/unit",
+                event_id="evt_memory_result_start",
+            ),
+            _tool_returned(
+                call_id="memory_result",
+                tool_name="Bash",
+                result_preview="Read MEMORY.md during execution",
+                event_id="evt_memory_result_return",
+            ),
+        ]
+
+        manifest = normalize_events(events, ac_id="ac_1")
+
+        assert manifest.entries == ()
+
+    def test_excludes_memory_reference_in_event_aggregate_id(self) -> None:
+        event = BaseEvent(
+            id="evt_memory_aggregate",
+            type="tool.call.started",
+            timestamp=datetime.now(UTC),
+            aggregate_type="session",
+            aggregate_id="/tmp/MEMORY.md",
+            data={
+                "call_id": "memory_aggregate",
+                "tool_name": "Read",
+                "ac_id": "ac_1",
+            },
+        )
+
+        manifest = normalize_events([event], ac_id="ac_1")
+
+        assert manifest.entries == ()
+
+    def test_excludes_memory_return_before_started_pair(self) -> None:
+        events = [
+            _tool_returned(
+                call_id="memory",
+                tool_name="Read",
+                result_preview="read /tmp/MEMORY.md",
+                event_id="evt_memory_return",
+            ),
+            _tool_started(
+                call_id="memory",
+                tool_name="Read",
+                args_preview="path=/tmp/MEMORY.md",
+                event_id="evt_memory_start",
+            ),
+        ]
+
+        manifest = normalize_events(events, ac_id="ac_1")
+
+        assert manifest.entries == ()
+
+    def test_memory_event_from_other_ac_does_not_suppress_matching_call_id(self) -> None:
+        events = [
+            BaseEvent(
+                id="evt_other_memory",
+                type="tool.call.returned",
+                timestamp=datetime.now(UTC),
+                aggregate_type="ac",
+                aggregate_id="other_ac",
+                data={
+                    "call_id": "reused",
+                    "tool_name": "Read",
+                    "result_preview": "read MEMORY.md",
+                },
+            ),
+            _tool_started(
+                call_id="reused",
+                tool_name="Bash",
+                args_preview="pytest tests/unit",
+                event_id="evt_target_start",
+            ),
+            _tool_returned(
+                call_id="reused",
+                tool_name="Bash",
+                result_preview="1 passed",
+                event_id="evt_target_return",
+            ),
+        ]
+
+        manifest = normalize_events(events, ac_id="ac_1")
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == ("evt_target_start", "evt_target_return")
 
 
 class TestFilterEventsForAC:
