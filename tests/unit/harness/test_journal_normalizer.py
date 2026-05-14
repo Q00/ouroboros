@@ -443,6 +443,18 @@ class TestNormalizeEventsACScope:
 
         assert manifest.entries == ()
 
+    def test_excludes_memory_derived_token_with_suffix_punctuation(self) -> None:
+        event = _tool_started(
+            call_id="memory_derived",
+            tool_name="Read",
+            args_preview="MEMORY.md-derived prior context",
+            event_id="evt_memory_derived",
+        )
+
+        manifest = normalize_events([event], ac_id="ac_1")
+
+        assert manifest.entries == ()
+
     def test_memory_event_from_other_ac_does_not_suppress_matching_call_id(self) -> None:
         events = [
             BaseEvent(
@@ -626,6 +638,32 @@ class TestLLMPairing:
         entry = manifest.entries[0]
         assert entry.kind is EvidenceKind.LLM_CALL
         assert entry.source_event_ids == ("evt_ret_orphan",)
+
+    def test_excludes_memory_derived_llm_pair(self) -> None:
+        events = [
+            BaseEvent(
+                id="evt_req_memory_llm",
+                type="llm.call.requested",
+                timestamp=datetime.now(UTC),
+                aggregate_type="execution",
+                aggregate_id="execution_x",
+                data={
+                    "call_id": "llm_memory",
+                    "model_id": "claude-sonnet-4.6",
+                    "caller": "executor:MEMORY.md-derived-summary",
+                    "execution_id": "ac_1",
+                },
+            ),
+            _llm_returned(
+                call_id="llm_memory",
+                model_id="claude-sonnet-4.6",
+                event_id="evt_ret_memory_llm",
+            ),
+        ]
+
+        manifest = normalize_events(events, ac_id="ac_1")
+
+        assert manifest.entries == ()
 
 
 class TestACScopingMultiChannel:

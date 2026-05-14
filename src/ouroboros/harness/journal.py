@@ -36,6 +36,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from pathlib import PurePosixPath
+import re
 from types import MappingProxyType
 from typing import Annotated, Any
 
@@ -55,6 +56,7 @@ JOURNAL_SCHEMA_VERSION = 1
 """Initial schema version for the evidence manifest."""
 
 _MEMORY_FILENAMES = frozenset({"MEMORY.md", ".memory.md"})
+_MEMORY_REFERENCE_RE = re.compile(r"(?<![A-Za-z0-9_.])(?:MEMORY\.md|\.memory\.md)(?![A-Za-z0-9_.])")
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +603,8 @@ def _is_memory_derived_value(value: Any) -> bool:
 def _looks_like_memory_reference(value: str) -> bool:
     if not value:
         return False
+    if _MEMORY_REFERENCE_RE.search(value):
+        return True
     normalized = value.replace("\\", "/")
     for part in normalized.split():
         token = part.strip("`'\".,:;()[]{}")

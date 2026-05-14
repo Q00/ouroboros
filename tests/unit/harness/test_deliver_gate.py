@@ -395,12 +395,15 @@ class TestLoadAcEvidenceManifest:
             "evt_started_target",
             "evt_returned_target",
         )
-        assert manifest.manifest_id == EvidenceManifest(
-            ac_id="AC-1",
-            entries=manifest.entries,
-            normalized_at=manifest.normalized_at,
-            metadata=manifest.metadata,
-        ).manifest_id
+        assert (
+            manifest.manifest_id
+            == EvidenceManifest(
+                ac_id="AC-1",
+                entries=manifest.entries,
+                normalized_at=manifest.normalized_at,
+                metadata=manifest.metadata,
+            ).manifest_id
+        )
 
     @pytest.mark.asyncio
     async def test_rejects_session_only_query_to_avoid_mixed_execution_manifests(self) -> None:
