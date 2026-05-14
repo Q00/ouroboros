@@ -78,6 +78,48 @@ _SUGGESTED_INTERVIEW_ID_RE = re.compile(r"^interview_[a-f0-9]{16}$")
 
 _LIVE_AMBIGUITY_MAX_RETRIES = 3
 
+_REQUIRED_CLIENT_GATES: tuple[str, ...] = (
+    "seed_ready_acceptance_guard",
+    "restate_goal_approved",
+)
+
+
+def _normalize_client_gates(value: Any) -> frozenset[str]:
+    """Normalize caller-reported client-side gate acknowledgements."""
+    if isinstance(value, str):
+        return frozenset(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return frozenset(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return frozenset()
+
+
+def _client_gate_status(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return required/accepted/missing client gate metadata for seed generation."""
+    accepted = _normalize_client_gates(arguments.get("client_gates"))
+    missing = tuple(gate for gate in _REQUIRED_CLIENT_GATES if gate not in accepted)
+    status: dict[str, Any] = {
+        "required_client_gates": _REQUIRED_CLIENT_GATES,
+        "accepted_client_gates": tuple(sorted(accepted)),
+        "missing_client_gates": missing,
+    }
+    if missing:
+        status["client_gate_warning"] = (
+            "Seed generation was requested without all client-side interview gates "
+            "being acknowledged. The client should run the Seed-ready Acceptance Guard "
+            "and Restate gate, then pass client_gates with the acknowledged gate names."
+        )
+    return status
+
+
+def _client_gate_warning_text(gate_status: dict[str, Any]) -> str:
+    warning = gate_status.get("client_gate_warning")
+    missing = gate_status.get("missing_client_gates")
+    if not isinstance(warning, str) or not missing:
+        return ""
+    missing_display = ", ".join(str(item) for item in missing)
+    return f"Client Gate Warning: {warning} Missing: {missing_display}.\n\n"
+
+
 _INTERVIEW_COMPLETION_SIGNALS = {
     "done",
     "complete",
@@ -628,6 +670,16 @@ class GenerateSeedHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="client_gates",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Client-side interview gates acknowledged before seed generation. "
+                        "Expected values include seed_ready_acceptance_guard and "
+                        "restate_goal_approved."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -653,6 +705,7 @@ class GenerateSeedHandler:
             )
 
         ambiguity_score_value = arguments.get("ambiguity_score")
+        client_gate_status = _client_gate_status(arguments)
 
         log.info(
             "mcp.tool.generate_seed",
@@ -729,6 +782,7 @@ class GenerateSeedHandler:
                     "session_id": session_id,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",
+                    **client_gate_status,
                 },
             )
 
@@ -841,7 +895,7 @@ class GenerateSeedHandler:
             )
 
             result_text = (
-                f"Seed Generated Successfully\n"
+                _client_gate_warning_text(client_gate_status) + f"Seed Generated Successfully\n"
                 f"=========================\n"
                 f"Seed ID: {seed.metadata.seed_id}\n"
                 f"Interview ID: {seed.metadata.interview_id}\n"
@@ -859,6 +913,7 @@ class GenerateSeedHandler:
                         "seed_id": seed.metadata.seed_id,
                         "interview_id": seed.metadata.interview_id,
                         "ambiguity_score": seed.metadata.ambiguity_score,
+                        **client_gate_status,
                     },
                 )
             )
@@ -1114,6 +1169,7 @@ class InterviewHandler:
                     "ambiguity_score": score.overall_score if score is not None else None,
                     "milestone": _milestone_for_score(score),
                     "seed_ready": score.is_ready_for_seed if score is not None else None,
+                    "required_client_gates": _REQUIRED_CLIENT_GATES,
                 },
             )
         )
