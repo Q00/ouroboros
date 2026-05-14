@@ -224,26 +224,37 @@ def _runtime_messages_support_file_claim(
         resolved.relative_to(base)
     except ValueError:
         return False
-    if any(_runtime_message_supports_file_reference(value, message) for message in messages):
+    if any(
+        _runtime_message_supports_file_reference(value, message, messages=messages, index=index)
+        for index, message in enumerate(messages)
+    ):
         return True
     if not resolved.exists():
         return False
     basename = candidate.name.strip().lower()
     return bool(basename) and any(
-        _runtime_message_supports_file_reference(basename, message) for message in messages
+        _runtime_message_supports_file_reference(basename, message, messages=messages, index=index)
+        for index, message in enumerate(messages)
     )
 
 
-def _runtime_message_supports_file_reference(reference: str, message: AgentMessage) -> bool:
+def _runtime_message_supports_file_reference(
+    reference: str,
+    message: AgentMessage,
+    *,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+) -> bool:
     """Return True when one message plausibly reports touching a file reference."""
     normalized_reference = reference.strip().lower()
     if not normalized_reference:
         return False
     text = _runtime_message_file_proof_text(message)
     if message.tool_name == "Bash":
-        return _text_supports_file_mutation_reference(
-            text, normalized_reference
-        ) or _bash_command_mutates_file_reference(message, normalized_reference)
+        return _text_supports_file_mutation_reference(text, normalized_reference) or (
+            _bash_command_mutates_file_reference(message, normalized_reference)
+            and _runtime_message_has_following_success(messages, index)
+        )
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
         return bool(text and _file_reference_pattern(normalized_reference).search(text))
     return _text_supports_file_mutation_reference(text, normalized_reference)
@@ -307,6 +318,33 @@ def _bash_command_mutates_file_reference(message: AgentMessage, normalized_refer
             normalized_command,
         )
     )
+
+
+def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], index: int) -> bool:
+    """Return True when a tool-call message is followed by a successful result."""
+    for candidate in messages[index + 1 :]:
+        if candidate.type == "tool":
+            return False
+        if candidate.is_error:
+            return False
+        exit_code = candidate.data.get("exit_code")
+        if isinstance(exit_code, int):
+            return exit_code == 0
+        if candidate.data.get("subtype") == "success":
+            return True
+        text = "\n".join(
+            str(part)
+            for part in (
+                candidate.content,
+                candidate.data.get("result_preview"),
+                candidate.data.get("output"),
+                candidate.data.get("stdout"),
+            )
+            if isinstance(part, str)
+        ).lower()
+        if re.search(r"\b(exit\s*code\s*0|completed|succeeded|success)\b", text):
+            return True
+    return False
 
 
 def _runtime_message_file_proof_text(message: AgentMessage) -> str:

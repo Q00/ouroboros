@@ -1801,6 +1801,11 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": command}},
                     ),
                     AgentMessage(
+                        type="result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "success", "exit_code": 0},
+                    ),
+                    AgentMessage(
                         type="tool",
                         content="Bash: pytest tests/test_generated.py",
                         tool_name="Bash",
@@ -1911,6 +1916,79 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error is not None
         assert "files_touched: src/preexisting.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_failed_explicit_bash_file_mutation(
+        self, tmp_path
+    ) -> None:
+        """An explicit shell write command must also have a successful result."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/generated.py"],'
+                '"commands_run":["touch src/generated.py","pytest tests/test_generated.py"],'
+                '"tests_passed":["tests/test_generated.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: touch src/generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "touch src/generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="touch: src/generated.py: permission denied",
+                        data={"subtype": "error", "exit_code": 1},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="tests/test_generated.py passed",
+                        data={"subtype": "success"},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
         evidence_event = next(
             event
             for event in appended_events
