@@ -76,19 +76,20 @@ FAKE_VERIFICATION_ARTIFACTS = VerificationArtifacts(
 )
 
 
-def test_resolve_fat_harness_mode_defaults_to_legacy() -> None:
-    """The temporary fat-harness path must not flip on by default."""
-    assert _resolve_fat_harness_mode(VALID_SEED_DATA) is False
+def test_resolve_fat_harness_mode_defaults_to_enabled() -> None:
+    """The #920 PR-5 default flip enables fat-harness without seed opt-in."""
+    assert _resolve_fat_harness_mode(VALID_SEED_DATA) is True
 
 
-def test_resolve_fat_harness_mode_accepts_seed_execution_mode() -> None:
-    """PR-4 exposes opt-in mode through seed execution_mode, not a CLI flag."""
-    seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "fat_harness"}}
+def test_resolve_fat_harness_mode_accepts_old_execution_mode_as_noop() -> None:
+    """Old PR-4 seeds should resume, but the selector no longer changes mode."""
+    for execution_mode in ("fat_harness", "legacy"):
+        seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": execution_mode}}
 
-    assert _resolve_fat_harness_mode(seed_data) is True
+        assert _resolve_fat_harness_mode(seed_data) is True
 
 
-def test_resolve_fat_harness_mode_rejects_unknown_mode() -> None:
+def test_resolve_fat_harness_mode_rejects_unknown_execution_mode() -> None:
     seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "mystery"}}
 
     with pytest.raises(typer.Exit):
@@ -280,12 +281,12 @@ async def test_run_orchestrator_passes_resolved_execution_caps_to_runner(tmp_pat
 
     assert mock_runner_cls.call_args.kwargs["max_decomposition_depth"] == 3
     assert mock_runner_cls.call_args.kwargs["max_parallel_workers"] == 7
-    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
+    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is True
 
 
 @pytest.mark.asyncio
-async def test_run_orchestrator_passes_fat_harness_mode_to_runner(tmp_path: Path) -> None:
-    """Seed execution_mode selects the temporary #920 PR-4 fat-harness path."""
+async def test_run_orchestrator_passes_default_fat_harness_mode_to_runner(tmp_path: Path) -> None:
+    """The default #920 PR-5 path selects fat-harness without seed opt-in."""
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
 
@@ -301,7 +302,7 @@ async def test_run_orchestrator_passes_fat_harness_mode_to_runner(tmp_path: Path
     mock_runner = MagicMock()
     mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
     mock_runner.resume_session = AsyncMock()
-    seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "fat_harness"}}
+    seed_data = {**VALID_SEED_DATA, "orchestrator": {"max_decomposition_depth": 2}}
 
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=seed_data),
