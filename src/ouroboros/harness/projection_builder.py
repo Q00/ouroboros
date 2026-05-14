@@ -94,8 +94,8 @@ class ProjectionBuilder:
             raise ValueError(msg)
         self._seed_id = seed_id.strip()
         self._goal = goal
-        self._run_id = run_id
-        self._stage_id = stage_id
+        self._run_id_override = run_id.strip() if run_id and run_id.strip() else None
+        self._stage_id_override = stage_id.strip() if stage_id and stage_id.strip() else None
         self._source_key = source_key.strip() if source_key and source_key.strip() else None
         self._tool_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
@@ -163,19 +163,16 @@ class ProjectionBuilder:
     def build(self) -> ProjectionBuildResult:
         """Finalize the record bundle from ingested events.
 
-        Repeated calls return identical ``run_id`` / ``stage_id`` so
-        replayable projections stay stable.
+        Repeated calls derive ``run_id`` / ``stage_id`` from the current
+        source key so incremental builds converge with one-shot replays
+        over the same final event set.
         """
         source_key = self._source_key or _derive_projection_source_key(
             self._identity_events,
             seed_id=self._seed_id,
         )
-        if self._run_id is None:
-            self._run_id = _stable_run_id(source_key)
-        if self._stage_id is None:
-            self._stage_id = _stable_stage_id(self._run_id, StageKind.EXECUTE)
-        run_id = self._run_id
-        stage_id = self._stage_id
+        run_id = self._run_id_override or _stable_run_id(source_key)
+        stage_id = self._stage_id_override or _stable_stage_id(run_id, StageKind.EXECUTE)
 
         started_at = self._first_event_at or self._idle_started_at
         ended_at = self._last_event_at
