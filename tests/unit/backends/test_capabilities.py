@@ -7,6 +7,7 @@ from ouroboros.backends import (
     get_backend_capability,
     interview_driver_backend_choices,
     llm_backend_choices,
+    render_backend_skill_capability_guide,
     resolve_backend_alias,
     resolve_llm_backend_name,
     resolve_runtime_backend_name,
@@ -60,3 +61,34 @@ def test_switchable_runtime_metadata_is_registry_owned() -> None:
     assert capability.name == "gemini"
     assert capability.switchable_runtime is True
     assert capability.cli_config_key == "gemini_cli_path"
+
+
+def test_codex_skill_execution_guidance_is_registry_owned() -> None:
+    capability = get_backend_capability("codex_cli")
+
+    assert capability is not None
+    names = {item.name for item in capability.skill_execution_capabilities}
+    assert {
+        "ask_user",
+        "inspect_code",
+        "call_mcp",
+        "refine_answer",
+        "run_closure_gate",
+        "restate_goal",
+    }.issubset(names)
+
+
+def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
+    guide = render_backend_skill_capability_guide("codex")
+
+    assert guide.startswith("## Ouroboros Skill Capability Guide: Codex\n")
+    assert "### When a skill requires `ask_user`" in guide
+    assert "request_user_input" in guide
+    assert "### When a skill requires `inspect_code`" in guide
+    assert "`rg`" in guide
+    assert "### When a skill requires `call_mcp`" in guide
+    assert "Do not rely on Claude-specific `ToolSearch` names." in guide
+    assert "### When a skill requires `run_closure_gate`" in guide
+    assert "MCP `seed-ready`" in guide
+    assert "### When a skill requires `restate_goal`" in guide
+    assert "require explicit user approval" in guide

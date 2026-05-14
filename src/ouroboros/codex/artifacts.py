@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Literal
 
+from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 from ouroboros.skills.artifacts import (
     SKILL_ENTRYPOINT,
     collect_skill_bundle_dirs,
@@ -18,8 +19,16 @@ from ouroboros.skills.artifacts import (
 
 CODEX_RULE_FILENAME = "ouroboros.md"
 CODEX_SKILL_NAMESPACE = "ouroboros-"
+_SKILL_CAPABILITY_GUIDE_MARKER = "<!-- ouroboros:skill-capability-guide -->"
 _RULE_NAMESPACE = Path(CODEX_RULE_FILENAME).stem
 _RULE_SUFFIX = Path(CODEX_RULE_FILENAME).suffix
+
+
+def _render_codex_rules(source: str) -> str:
+    """Return Codex rules with the generated skill capability guide appended."""
+    base = source.rstrip()
+    guide = render_backend_skill_capability_guide("codex").rstrip()
+    return f"{base}\n\n{_SKILL_CAPABILITY_GUIDE_MARKER}\n{guide}\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +276,7 @@ def resolve_packaged_codex_assets(
 def load_packaged_codex_rules() -> str:
     """Load the packaged Codex rules markdown."""
     with _packaged_codex_rules_path() as resolved_rules_path:
-        return resolved_rules_path.read_text(encoding="utf-8")
+        return _render_codex_rules(resolved_rules_path.read_text(encoding="utf-8"))
 
 
 def load_packaged_codex_skill(
@@ -326,10 +335,15 @@ def install_codex_rules(
             if target_path.exists():
                 _remove_installed_artifact(target_path)
 
-            shutil.copy2(source_path, target_path)
-            installed_names.add(target_path.name)
             if source_path == primary_source_path:
+                target_path.write_text(
+                    _render_codex_rules(source_path.read_text(encoding="utf-8")),
+                    encoding="utf-8",
+                )
                 primary_target_path = target_path
+            else:
+                shutil.copy2(source_path, target_path)
+            installed_names.add(target_path.name)
 
     if prune:
         for installed_path in tuple(target_root.iterdir()):

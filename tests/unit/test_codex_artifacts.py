@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ouroboros.codex.artifacts import (
+    _SKILL_CAPABILITY_GUIDE_MARKER,
     CODEX_RULE_FILENAME,
     CODEX_SKILL_NAMESPACE,
     CodexManagedArtifact,
@@ -58,7 +59,9 @@ class TestInstallCodexRules:
         installed_path = install_codex_rules(codex_dir=codex_dir, rules_dir=packaged_rules_dir)
 
         assert installed_path == target_path
-        assert installed_path.read_text(encoding="utf-8") == "# fresh rules\n"
+        installed_content = installed_path.read_text(encoding="utf-8")
+        assert installed_content.startswith("# fresh rules\n")
+        assert _SKILL_CAPABILITY_GUIDE_MARKER in installed_content
         assert secondary_target_path.read_text(encoding="utf-8") == "# status rules\n"
         assert not rules_dir.joinpath("team.md").exists()
 
@@ -77,7 +80,9 @@ class TestInstallCodexRules:
         installed_path = install_codex_rules(codex_dir=codex_dir, rules_dir=packaged_rules_dir)
 
         assert installed_path == rules_dir / CODEX_RULE_FILENAME
-        assert installed_path.read_text(encoding="utf-8") == "# fresh rules\n"
+        installed_content = installed_path.read_text(encoding="utf-8")
+        assert installed_content.startswith("# fresh rules\n")
+        assert _SKILL_CAPABILITY_GUIDE_MARKER in installed_content
         assert stale_namespaced_rule.read_text(encoding="utf-8") == "keep for refresh-only"
         assert unrelated_rule.read_text(encoding="utf-8") == "keep me"
 
@@ -101,7 +106,9 @@ class TestInstallCodexRules:
         )
 
         assert installed_path == rules_dir / CODEX_RULE_FILENAME
-        assert installed_path.read_text(encoding="utf-8") == "# upgraded rules\n"
+        installed_content = installed_path.read_text(encoding="utf-8")
+        assert installed_content.startswith("# upgraded rules\n")
+        assert _SKILL_CAPABILITY_GUIDE_MARKER in installed_content
         assert rules_dir.joinpath("ouroboros-status.md").read_text(encoding="utf-8") == (
             "# upgraded status\n"
         )
@@ -115,6 +122,16 @@ class TestInstallCodexRules:
         assert "| `ooo auto ...` | `ouroboros_auto`" in rules
         assert "Do not emulate it with manual" in rules
         assert "If that MCP tool\nis unavailable" in rules
+
+    def test_packaged_rules_include_rendered_skill_capability_guide(self) -> None:
+        """Codex rules should include the generated runtime skill capability guide."""
+        rules = load_packaged_codex_rules()
+
+        assert _SKILL_CAPABILITY_GUIDE_MARKER in rules
+        assert "## Ouroboros Skill Capability Guide: Codex" in rules
+        assert "### When a skill requires `ask_user`" in rules
+        assert "### When a skill requires `run_closure_gate`" in rules
+        assert "MCP `seed-ready`" in rules
 
 
 class TestLoadPackagedCodexSkills:
@@ -597,7 +614,9 @@ class TestCodexAssetSyncSmoke:
         )
 
         assert installed_rule == codex_dir / "rules" / CODEX_RULE_FILENAME
-        assert installed_rule.read_text(encoding="utf-8") == "# codex rules v1\n"
+        installed_content = installed_rule.read_text(encoding="utf-8")
+        assert installed_content.startswith("# codex rules v1\n")
+        assert _SKILL_CAPABILITY_GUIDE_MARKER in installed_content
         assert installed_skills == (
             codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run",
             codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}setup",
@@ -680,7 +699,9 @@ class TestCodexAssetSyncSmoke:
         )
 
         assert installed_rule == codex_dir / "rules" / CODEX_RULE_FILENAME
-        assert installed_rule.read_text(encoding="utf-8") == "# codex rules v2\n"
+        installed_content = installed_rule.read_text(encoding="utf-8")
+        assert installed_content.startswith("# codex rules v2\n")
+        assert _SKILL_CAPABILITY_GUIDE_MARKER in installed_content
         assert installed_skills == (
             codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}interview",
             codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run",

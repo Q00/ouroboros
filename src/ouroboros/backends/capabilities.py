@@ -12,6 +12,14 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
+class SkillExecutionCapability:
+    """Runtime-specific guidance for one abstract skill capability."""
+
+    name: str
+    guidance: str
+
+
+@dataclass(frozen=True, slots=True)
 class BackendCapability:
     """Capabilities and aliases for one canonical backend."""
 
@@ -25,12 +33,109 @@ class BackendCapability:
     cli_config_key: str | None = None
     soft_tool_enforcement: bool = False
     supports_tool_envelope: bool = True
+    skill_execution_capabilities: tuple[SkillExecutionCapability, ...] = ()
 
     @property
     def names(self) -> tuple[str, ...]:
         """Canonical name plus accepted aliases."""
         return (self.name, *self.aliases)
 
+
+_CODEX_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
+    SkillExecutionCapability(
+        name="ask_user",
+        guidance=(
+            "Ask directly in the main Codex conversation. Use `request_user_input` "
+            "only when that structured input tool is available; otherwise ask one "
+            "concise question and wait for the answer."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="inspect_code",
+        guidance=(
+            "Use local repository inspection with `rg`, `find`, `sed`, `cat`, and "
+            "`exec_command`; prefer reading exact files over guessing from memory."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="call_mcp",
+        guidance=(
+            "Use available Ouroboros MCP tools directly when exposed, and use "
+            "Codex tool discovery only when a deferred MCP surface must be loaded. "
+            "Do not rely on Claude-specific `ToolSearch` names."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="web_research",
+        guidance=(
+            "Use Codex web/search tooling only when current external evidence is "
+            "required; cite sources and keep repo-local facts grounded in local files."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="run_shell",
+        guidance=(
+            "Use `exec_command` for safe local shell commands, keep commands scoped, "
+            "and avoid destructive or external-production actions unless explicitly authorized."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="refine_answer",
+        guidance=(
+            "When a free-text answer carries scope, constraints, or decisions, restate "
+            "the structured interpretation and get confirmation before treating it as settled."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="maintain_ledger",
+        guidance=(
+            "Keep the ambiguity or acceptance ledger visible in concise updates; do not "
+            "hide unresolved gates inside MCP state alone."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="run_closure_gate",
+        guidance=(
+            "Treat MCP `seed-ready` as permission to audit closure in the main session, "
+            "not as completion by itself. Verify non-goals, constraints, acceptance criteria, "
+            "and unresolved decisions before moving on."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="restate_goal",
+        guidance=(
+            "Before suggesting or running seed generation, restate the goal, non-goals, "
+            "constraints, and acceptance criteria, then require explicit user approval."
+        ),
+    ),
+)
+
+_GENERIC_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
+    SkillExecutionCapability(
+        name="ask_user",
+        guidance="Use the runtime's native structured question surface when available; otherwise ask one concise question and wait.",
+    ),
+    SkillExecutionCapability(
+        name="inspect_code",
+        guidance="Use the runtime's local file search/read tools and prefer exact repository evidence over inference.",
+    ),
+    SkillExecutionCapability(
+        name="call_mcp",
+        guidance="Call available Ouroboros MCP tools through the runtime's MCP/tool surface instead of emulating MCP workflows manually.",
+    ),
+    SkillExecutionCapability(
+        name="refine_answer",
+        guidance="Confirm structured interpretations of free-text decisions before forwarding them to workflow state.",
+    ),
+    SkillExecutionCapability(
+        name="run_closure_gate",
+        guidance="Audit required client-side gates even when an MCP response says the workflow is ready to proceed.",
+    ),
+    SkillExecutionCapability(
+        name="restate_goal",
+        guidance="Restate the goal and require explicit approval before irreversible workflow transitions such as seed generation.",
+    ),
+)
 
 _CAPABILITIES: tuple[BackendCapability, ...] = (
     BackendCapability(
@@ -42,6 +147,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         switchable_runtime=True,
         cli_name="claude",
         cli_config_key="cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
         name="codex",
@@ -52,6 +158,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         switchable_runtime=True,
         cli_name="codex",
         cli_config_key="codex_cli_path",
+        skill_execution_capabilities=_CODEX_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
         name="copilot",
@@ -61,6 +168,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_interview_driver=True,
         cli_name="copilot",
         cli_config_key="copilot_cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
         name="gemini",
@@ -71,6 +179,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         switchable_runtime=True,
         cli_name="gemini",
         cli_config_key="gemini_cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
         soft_tool_enforcement=True,
     ),
     BackendCapability(
@@ -82,6 +191,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         switchable_runtime=True,
         cli_name="hermes",
         cli_config_key="hermes_cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
         supports_tool_envelope=False,
     ),
     BackendCapability(
@@ -92,6 +202,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_interview_driver=True,
         cli_name="kiro",
         cli_config_key="kiro_cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
         name="opencode",
@@ -101,6 +212,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_interview_driver=True,
         cli_name="opencode",
         cli_config_key="opencode_cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
         soft_tool_enforcement=True,
     ),
     BackendCapability(
@@ -114,6 +226,29 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
 _BY_NAME: dict[str, BackendCapability] = {
     name: capability for capability in _CAPABILITIES for name in capability.names
 }
+
+
+def render_backend_skill_capability_guide(name: str) -> str:
+    """Render runtime-specific guidance for abstract skill capabilities as Markdown."""
+    capability = get_backend_capability(name)
+    if capability is None:
+        msg = f"Unsupported backend: {name.strip().lower()}"
+        raise ValueError(msg)
+
+    lines = [f"## Ouroboros Skill Capability Guide: {capability.name.title()}", ""]
+    if not capability.skill_execution_capabilities:
+        lines.append("No backend-specific skill execution capability guidance is registered yet.")
+        return "\n".join(lines).rstrip() + "\n"
+
+    for skill_capability in capability.skill_execution_capabilities:
+        lines.extend(
+            (
+                f"### When a skill requires `{skill_capability.name}`",
+                skill_capability.guidance,
+                "",
+            )
+        )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def get_backend_capability(name: str) -> BackendCapability | None:
@@ -195,11 +330,13 @@ def backend_supports_tool_envelope(name: str | None) -> bool:
 
 __all__ = [
     "BackendCapability",
+    "SkillExecutionCapability",
     "backend_supports_tool_envelope",
     "get_backend_capability",
     "interview_driver_backend_choices",
     "llm_backend_choices",
     "resolve_backend_alias",
+    "render_backend_skill_capability_guide",
     "resolve_interview_driver_backend",
     "resolve_llm_backend_name",
     "resolve_runtime_backend_name",

@@ -11,6 +11,28 @@ mcp_args:
 
 Socratic interview to crystallize vague requirements into clear specifications.
 
+
+## Required Skill Capabilities
+
+- `ask_user` — ask human-judgment questions through the active runtime's user-question surface.
+- `inspect_code` — answer repo-local factual questions from exact local files before asking the user.
+- `call_mcp` — use Ouroboros MCP tools for persistent interview state and seed generation.
+- `web_research` — fetch current external facts only when the interview genuinely depends on them.
+- `run_shell` — run bounded local commands for version checks and repository inspection.
+- `refine_answer` — confirm structured interpretations of free-text answers before forwarding them.
+- `maintain_ledger` — keep ambiguity, gates, and unresolved decisions visible in the main session.
+- `run_closure_gate` — audit readiness locally even when MCP reports `seed-ready`.
+- `restate_goal` — restate the goal and require explicit approval before seed generation.
+
+## Non-Skippable Gates
+
+- Refine free-text answers that carry scope, constraints, or decisions.
+- Maintain a visible ambiguity ledger in the main session.
+- Treat MCP `seed-ready` as permission to audit closure, not as completion.
+- Apply Seed Closer criteria before suggesting or running seed generation.
+- Run the Restate gate before seed generation.
+- Require explicit user approval before suggesting or running seed generation.
+
 ## Usage
 
 ```

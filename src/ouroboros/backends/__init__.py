@@ -2,10 +2,12 @@
 
 from ouroboros.backends.capabilities import (
     BackendCapability,
+    SkillExecutionCapability,
     backend_supports_tool_envelope,
     get_backend_capability,
     interview_driver_backend_choices,
     llm_backend_choices,
+    render_backend_skill_capability_guide,
     resolve_backend_alias,
     resolve_interview_driver_backend,
     resolve_llm_backend_name,
@@ -16,11 +18,13 @@ from ouroboros.backends.capabilities import (
 
 __all__ = [
     "BackendCapability",
+    "SkillExecutionCapability",
     "backend_supports_tool_envelope",
     "get_backend_capability",
     "interview_driver_backend_choices",
     "llm_backend_choices",
     "resolve_backend_alias",
+    "render_backend_skill_capability_guide",
     "resolve_interview_driver_backend",
     "resolve_llm_backend_name",
     "resolve_runtime_backend_name",
