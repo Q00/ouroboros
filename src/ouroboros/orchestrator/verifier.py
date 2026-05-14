@@ -180,14 +180,16 @@ def structural_atomic_verifier(
     leaf_output: str,
     record: EvidenceRecord,
 ) -> VerifierVerdict:
-    """Harness-owned deterministic verifier for live atomic acceptance.
+    """Harness-owned structural verifier helper for atomic acceptance seams.
 
     This verifier is intentionally narrower than the future TraceGuard /
     test-runner verifier: it provides a separate, typed ``VerifierVerdict``
     PASS/FAIL boundary over the parsed evidence contract without making
-    live model calls or removing the legacy fallback. Profile-specific
-    semantic/test verification can replace this callable through the
-    `Verifier` protocol without changing the acceptance boundary.
+    live model calls or removing the legacy fallback. The live
+    ``parallel_executor`` default adds runtime-transcript support checks on
+    top; profile-specific semantic/test verification can still replace this
+    callable through the `Verifier` protocol without changing the acceptance
+    boundary.
     """
     del ac
     if record.source and record.source not in leaf_output:

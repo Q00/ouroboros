@@ -91,9 +91,16 @@ class _FinalMessageRuntime:
     _cwd = "/tmp/project"
     _permission_mode = "acceptEdits"
 
-    def __init__(self, final_message: str, *, native_session_id: str) -> None:
+    def __init__(
+        self,
+        final_message: str,
+        *,
+        native_session_id: str,
+        support_messages: tuple[AgentMessage, ...] = (),
+    ) -> None:
         self._final_message = final_message
         self._native_session_id = native_session_id
+        self._support_messages = support_messages
 
     @property
     def runtime_backend(self) -> str:
@@ -116,6 +123,8 @@ class _FinalMessageRuntime:
         resume_session_id: str | None = None,
     ):
         del prompt, tools, system_prompt, resume_session_id
+        for message in self._support_messages:
+            yield message
         yield AgentMessage(
             type="result",
             content=self._final_message,
@@ -1107,8 +1116,8 @@ class TestParallelACExecutor:
         assert evidence_event.data["enforcement_error"] is None
         assert evidence_event.data["typed_evidence_present"] is True
         assert evidence_event.data["typed_evidence_valid"] is True
-        assert evidence_event.data["verifier_ran"] is True
-        assert evidence_event.data["verifier_passed"] is True
+        assert evidence_event.data["verifier_ran"] is False
+        assert evidence_event.data["verifier_passed"] is False
         assert evidence_event.data["required_fields"] == [
             "files_touched",
             "commands_run",
@@ -1278,6 +1287,20 @@ class TestParallelACExecutor:
                 '"tests_passed":["tests/test_app.py"]}\n'
                 "```",
                 native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Edit: src/app.py",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": "src/app.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_app.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_app.py"}},
+                    ),
+                ),
             ),
             event_store=event_store,
             console=MagicMock(),
@@ -1314,6 +1337,54 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_valid"] is True
         assert evidence_event.data["verifier_ran"] is True
         assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_mode_rejects_unbacked_typed_evidence(self) -> None:
+        """Default verifier rejects final-message-only self-reported evidence."""
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/app.py"],'
+                '"commands_run":["pytest"],'
+                '"tests_passed":["tests/test_app.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Fat-harness verifier failed" in result.error
+        assert "no runtime transcript evidence supports" in result.error
+
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is False
+        assert evidence_event.data["verifier_failure_class"] == "EVIDENCE_MISSING"
 
     @pytest.mark.asyncio
     async def test_fat_harness_mode_rejects_verifier_fail(self) -> None:
@@ -1377,6 +1448,53 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_reasons"] == [
             "claimed test command did not support the AC"
         ]
+
+    @pytest.mark.asyncio
+    async def test_observe_only_mode_does_not_run_injected_verifier(self) -> None:
+        """Non-enforced profile evidence telemetry must stay observe-only."""
+
+        def _raising_verifier(**kwargs: object) -> VerifierVerdict:
+            del kwargs
+            raise AssertionError("observe-only mode must not invoke the verifier")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/app.py"],'
+                '"commands_run":["pytest"],'
+                '"tests_passed":["tests/test_app.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            atomic_verifier=_raising_verifier,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.atomic_verifier_verdict is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_ran"] is False
 
     @pytest.mark.asyncio
     async def test_atomic_ac_typed_evidence_event_failure_does_not_fail_success(self) -> None:

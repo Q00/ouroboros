@@ -110,7 +110,6 @@ from ouroboros.orchestrator.verifier import (
     Verifier,
     VerifierContractError,
     VerifierVerdict,
-    structural_atomic_verifier,
 )
 
 if TYPE_CHECKING:
@@ -141,6 +140,61 @@ def _subtask_event_label(content: str, *, max_length: int = 50) -> str:
     if len(normalized) <= max_length:
         return normalized
     return normalized[:max_length]
+
+
+def _flatten_evidence_values(value: object) -> tuple[str, ...]:
+    """Return concrete string claims from a typed evidence field."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        stripped = value.strip()
+        return (stripped,) if stripped else ()
+    if isinstance(value, (int, float, bool)):
+        return (str(value),)
+    if isinstance(value, dict):
+        flattened: list[str] = []
+        for item in value.values():
+            flattened.extend(_flatten_evidence_values(item))
+        return tuple(flattened)
+    if isinstance(value, (list, tuple, set)):
+        flattened_sequence: list[str] = []
+        for item in value:
+            flattened_sequence.extend(_flatten_evidence_values(item))
+        return tuple(flattened_sequence)
+    return (str(value),)
+
+
+def _runtime_message_search_text(message: AgentMessage) -> str:
+    """Build searchable transcript text for one non-final runtime message."""
+    parts: list[str] = [message.content]
+    if message.tool_name:
+        parts.append(message.tool_name)
+    tool_input = message.data.get("tool_input")
+    if isinstance(tool_input, dict):
+        parts.extend(str(value) for value in tool_input.values() if value is not None)
+    return "\n".join(parts).lower()
+
+
+def _runtime_support_messages_for_field(
+    field_name: str,
+    messages: tuple[AgentMessage, ...],
+) -> tuple[AgentMessage, ...]:
+    """Narrow support messages for profile-known evidence fields."""
+    normalized = field_name.lower()
+    if normalized == "files_touched":
+        write_tools = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+        return tuple(message for message in messages if message.tool_name in write_tools)
+    if normalized in {"commands_run", "tests_passed"}:
+        return tuple(message for message in messages if message.tool_name == "Bash")
+    return messages
+
+
+def _runtime_messages_support_claim(value: str, messages: tuple[AgentMessage, ...]) -> bool:
+    """Return True when a non-final runtime message backs a claim string."""
+    needle = value.strip().lower()
+    return bool(needle) and any(
+        needle in _runtime_message_search_text(message) for message in messages
+    )
 
 
 _REUSABLE_RUNTIME_EVENT_TYPES = frozenset(
@@ -538,7 +592,7 @@ class ParallelACExecutor:
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
-        self._atomic_verifier = atomic_verifier or structural_atomic_verifier
+        self._atomic_verifier = atomic_verifier
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=inherited_runtime_handle,
@@ -3532,6 +3586,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 ac_content=ac_content,
                 final_message=final_message,
                 success=success,
+                messages=tuple(messages),
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
             )
@@ -3734,12 +3789,14 @@ When complete, explicitly state: [TASK_COMPLETE]
         ac_content: str,
         final_message: str,
         success: bool,
+        messages: tuple[AgentMessage, ...],
         typed_evidence: EvidenceRecord | None,
         typed_validation: ValidationResult | None,
     ) -> VerifierVerdict | None:
         """Run the separate verifier pass once typed evidence is schema-valid."""
         if (
             not success
+            or not self._fat_harness_mode
             or self._execution_profile is None
             or typed_evidence is None
             or typed_validation is None
@@ -3747,16 +3804,63 @@ When complete, explicitly state: [TASK_COMPLETE]
         ):
             return None
 
-        verdict = self._atomic_verifier(
-            profile=self._execution_profile,
-            ac=ac_content,
-            leaf_output=final_message,
-            record=typed_evidence,
+        verifier = self._atomic_verifier
+        verdict = (
+            verifier(
+                profile=self._execution_profile,
+                ac=ac_content,
+                leaf_output=final_message,
+                record=typed_evidence,
+            )
+            if verifier is not None
+            else self._verify_atomic_evidence_against_runtime_messages(
+                messages=messages,
+                typed_evidence=typed_evidence,
+            )
         )
         if not isinstance(verdict, VerifierVerdict):
             msg = f"Atomic verifier returned {type(verdict).__name__}, expected VerifierVerdict."
             raise VerifierContractError(msg)
         return verdict
+
+    def _verify_atomic_evidence_against_runtime_messages(
+        self,
+        *,
+        messages: tuple[AgentMessage, ...],
+        typed_evidence: EvidenceRecord,
+    ) -> VerifierVerdict:
+        """Verify leaf evidence is backed by runtime transcript events.
+
+        The verifier deliberately ignores the final result message so the
+        accepted evidence cannot be supported only by the leaf's self-report.
+        """
+        support_messages = tuple(message for message in messages if not message.is_final)
+        if not support_messages:
+            return VerifierVerdict(
+                passed=False,
+                reasons=("no runtime transcript evidence supports the typed evidence claims",),
+                failure_class="EVIDENCE_MISSING",
+            )
+
+        unsupported: list[str] = []
+        for field_name in self._execution_profile.evidence_schema.required:
+            values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
+            if not values:
+                unsupported.append(f"{field_name}: no concrete claim values")
+                continue
+            field_messages = _runtime_support_messages_for_field(field_name, support_messages)
+            for value in values:
+                if not _runtime_messages_support_claim(value, field_messages):
+                    unsupported.append(f"{field_name}: {value}")
+
+        if unsupported:
+            return VerifierVerdict(
+                passed=False,
+                reasons=("unsupported evidence claims: " + "; ".join(unsupported),),
+                failure_class="FABRICATION_SUSPECTED",
+            )
+
+        return VerifierVerdict(passed=True)
 
     async def _emit_atomic_typed_evidence_event(
         self,
