@@ -120,6 +120,26 @@ def test_result_rejects_non_enum_failure_data() -> None:
         )
 
 
+def test_result_rejects_invalid_current_revision_type() -> None:
+    with pytest.raises(TypeError, match="current_revision must be an int"):
+        RuntimeTransitionResult(
+            transition=_transition(),
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class=RuntimeFailureClass.RETRYABLE,
+            failure_kind=RuntimeTransitionFailureKind.STALE_REVISION,
+            current_revision="7",  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(TypeError, match="current_revision must be an int"):
+        RuntimeTransitionResult(
+            transition=_transition(),
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class=RuntimeFailureClass.RETRYABLE,
+            failure_kind=RuntimeTransitionFailureKind.STALE_REVISION,
+            current_revision=True,  # type: ignore[arg-type]
+        )
+
+
 def test_invalid_current_revision_is_retryable_rejection_not_crash() -> None:
     result = evaluate_runtime_transition(
         _transition(expected_revision=7),
