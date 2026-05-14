@@ -718,6 +718,17 @@ class TestBuildGenerateSeedSubagent:
         assert p.context["session_id"] == "sess-123"
         assert p.context["ambiguity_score"] == 0.15
 
+    def test_context_preserves_client_gate_acknowledgements(self) -> None:
+        p = build_generate_seed_subagent(
+            session_id="sess-123",
+            client_gates=("restate_goal_approved", "seed_ready_acceptance_guard"),
+        )
+
+        assert p.context["client_gates"] == (
+            "restate_goal_approved",
+            "seed_ready_acceptance_guard",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: Evaluate

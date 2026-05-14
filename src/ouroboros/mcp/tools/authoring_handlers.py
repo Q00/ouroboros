@@ -770,6 +770,7 @@ class GenerateSeedHandler:
                 session_id=session_id,
                 ambiguity_score=effective_score,
                 transcript=transcript,
+                client_gates=client_gate_status["accepted_client_gates"],
             )
             await emit_subagent_dispatched_event(
                 self.event_store,

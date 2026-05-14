@@ -656,6 +656,7 @@ def build_generate_seed_subagent(
     session_id: str,
     ambiguity_score: float | None = None,
     transcript: str = "",
+    client_gates: tuple[str, ...] = (),
 ) -> SubagentPayload:
     """Build subagent payload for seed generation from interview."""
     from ouroboros.agents.loader import load_agent_prompt
@@ -690,6 +691,7 @@ autonomous execution."""
     context: dict[str, Any] = {
         "session_id": session_id,
         "ambiguity_score": ambiguity_score,
+        "client_gates": client_gates,
     }
 
     return build_subagent_payload(

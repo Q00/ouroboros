@@ -161,6 +161,21 @@ class TestGenerateSeedHandlerSubagentDispatch:
         # Plugin path now prefers caller-supplied score over persisted
         assert ctx["ambiguity_score"] == 0.15
 
+    async def test_plugin_context_preserves_client_gate_acknowledgements(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "sess-456",
+                "client_gates": ["restate_goal_approved", "seed_ready_acceptance_guard"],
+            }
+        )
+
+        ctx = result.value.meta["_subagent"]["context"]
+        assert ctx["client_gates"] == (
+            "restate_goal_approved",
+            "seed_ready_acceptance_guard",
+        )
+        assert result.value.meta["missing_client_gates"] == ()
+
 
 # ---------------------------------------------------------------------------
 # InterviewHandler
