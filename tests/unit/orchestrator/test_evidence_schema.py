@@ -39,9 +39,40 @@ class TestExtractEvidence:
         record = extract_evidence(text)
         assert record.data == {"x": 1}
 
+    def test_prefers_json_evidence_fence_after_non_json_code_fence(self) -> None:
+        text = (
+            "Implemented `hello.py`:\n\n"
+            "```python\n"
+            "def hello():\n"
+            '    return "hello"\n'
+            "```\n\n"
+            "Validation evidence:\n\n"
+            "```json\n"
+            "{\n"
+            '  "files_touched": ["hello.py", "test_hello.py"],\n'
+            '  "commands_run": ["pytest test_hello.py"],\n'
+            '  "tests_passed": ["test_hello.py::test_hello"]\n'
+            "}\n"
+            "```\n"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data == {
+            "files_touched": ["hello.py", "test_hello.py"],
+            "commands_run": ["pytest test_hello.py"],
+            "tests_passed": ["test_hello.py::test_hello"],
+        }
+
     def test_fenced_block_without_lang_tag(self) -> None:
         record = extract_evidence('prelude\n```\n{"y": 2}\n```\n')
         assert record.data == {"y": 2}
+
+    def test_bare_non_json_fence_still_rejected_without_later_json_fence(self) -> None:
+        text = 'summary\n```python\ndef hello():\n    return "hello"\n```\n'
+
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
 
     def test_empty_text_rejected(self) -> None:
         with pytest.raises(EvidenceError, match="empty"):

@@ -39,12 +39,16 @@ from typing import Any
 
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
-# Fence openers signal where the JSON evidence body starts. Once we've
-# located the opener, parsing the body is delegated to JSON itself via
+# Fence openers signal where the JSON evidence body starts. Prefer
+# language-tagged JSON fences over bare fences anywhere in the output:
+# leaf results commonly include earlier non-JSON code fences before the
+# final "Validation evidence" block. Once we've located the opener,
+# parsing the body is delegated to JSON itself via
 # json.JSONDecoder.raw_decode — that's how we avoid every sentinel-
 # scanning class of bug (the closing ``` or any `}` may appear inside a
 # JSON string value, and only a real JSON parser knows string boundaries).
-_FENCE_OPENERS: tuple[str, ...] = ("```json", "```JSON", "```")
+_JSON_FENCE_RE = re.compile(r"```\s*json\b", re.IGNORECASE)
+_BARE_FENCE = "```"
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 _DECODER = json.JSONDecoder()
 
@@ -130,19 +134,19 @@ class EvidenceRecord:
 def _find_body_start(text: str) -> int:
     """Locate where the JSON body begins.
 
-    Scans for the earliest fence opener (```json / ```JSON / ```). If
-    none is found we treat the whole input as a bare JSON body — the
-    JSON decoder will skip leading whitespace itself.
+    Prefer the first explicit JSON fence (```json / ```JSON), even if
+    an earlier prose/code fence exists. If no explicit JSON fence is
+    found, use the first bare fence. If no fence is found, treat the
+    whole input as a bare JSON body — the JSON decoder will skip leading
+    whitespace itself.
     """
-    best_open = -1
-    best_open_len = 0
-    for opener in _FENCE_OPENERS:
-        idx = text.find(opener)
-        if idx == -1:
-            continue
-        if best_open == -1 or idx < best_open:
-            best_open = idx
-            best_open_len = len(opener)
+    match = _JSON_FENCE_RE.search(text)
+    if match is not None:
+        best_open = match.start()
+        best_open_len = match.end() - match.start()
+    else:
+        best_open = text.find(_BARE_FENCE)
+        best_open_len = len(_BARE_FENCE)
     if best_open == -1:
         return 0
     body_start = best_open + best_open_len

@@ -29,6 +29,7 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelExecutionResult
+from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runner import (
     OrchestratorError,
     OrchestratorResult,
@@ -1211,6 +1212,47 @@ class TestOrchestratorRunner:
         release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
 
     @pytest.mark.asyncio
+    async def test_fat_harness_resume_is_blocked_before_legacy_direct_execution(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Fat-harness resume must not bypass typed evidence acceptance."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            fat_harness_mode=True,
+            task_workspace=_task_workspace(),
+        )
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(running_tracker),
+            ),
+            patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
+            patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_err
+        assert "Fat-harness resume is blocked" in result.error.message
+        assert result.error.details["resume_blocked"] == "typed_evidence_gate_required"
+        get_merged_tools.assert_not_called()
+        execute_task.assert_not_called()
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
     async def test_resume_session_tool_setup_failure_cleans_up_workspace_lock(
         self,
         mock_adapter: MagicMock,
@@ -2114,7 +2156,7 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
         sample_seed: Seed,
     ) -> None:
-        """Runner opt-in should reach the atomic executor without changing defaults."""
+        """Runner fat-harness mode should reach the atomic executor."""
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
         runner = OrchestratorRunner(
@@ -2178,6 +2220,57 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert captured_init["fat_harness_mode"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_uses_profile_backed_prompt_contract(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Default fat-harness leaves must be prompted to emit typed JSON evidence."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            fat_harness_mode=True,
+        )
+        tracker = SessionTracker.create("exec_profile_prompt", sample_seed.metadata.seed_id)
+        expected = Result.ok(
+            OrchestratorResult(
+                success=True,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        )
+        captured_strategy: Any = None
+
+        async def _capture_tools(**kwargs: Any) -> tuple[list[str], None, tuple[Any, ...]]:
+            nonlocal captured_strategy
+            captured_strategy = kwargs["strategy"]
+            return ["Read"], None, assemble_session_tool_catalog(["Read"])
+
+        with (
+            patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+            patch.object(runner, "_get_merged_tools", AsyncMock(side_effect=_capture_tools)),
+            patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
+        ):
+            result = await runner.execute_precreated_session(
+                sample_seed,
+                tracker,
+                parallel=True,
+            )
+
+        assert result is expected
+        assert isinstance(captured_strategy, ProfileBackedStrategy)
+        system_prompt = execute.await_args.kwargs["system_prompt"]
+        assert "consolidated evidence contract" in system_prompt
+        assert "files_touched" in system_prompt
+        assert "commands_run" in system_prompt
+        assert "tests_passed" in system_prompt
 
     @pytest.mark.asyncio
     async def test_fat_harness_single_ac_uses_ac_executor_path(
