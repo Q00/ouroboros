@@ -150,7 +150,7 @@ def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int]]:
 
         yield info, body_start
 
-        closing_fence_re = re.compile(rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*$", re.MULTILINE)
+        closing_fence_re = re.compile(rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*\r?$", re.MULTILINE)
         closer = closing_fence_re.search(text, body_start)
         if closer is None:
             return

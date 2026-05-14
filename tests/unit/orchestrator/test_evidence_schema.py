@@ -116,6 +116,30 @@ class TestExtractEvidence:
             "tests_passed": ["tests/test_docs.py::test_example"],
         }
 
+    def test_accepts_crlf_closing_fence_before_later_json_evidence(self) -> None:
+        text = (
+            "Implemented Windows output:\r\n\r\n"
+            "```python\r\n"
+            "print('hello')\r\n"
+            "```\r\n\r\n"
+            "Validation evidence:\r\n\r\n"
+            "```json\r\n"
+            "{\r\n"
+            '  "files_touched": ["windows.py"],\r\n'
+            '  "commands_run": ["pytest tests/test_windows.py"],\r\n'
+            '  "tests_passed": ["tests/test_windows.py::test_example"]\r\n'
+            "}\r\n"
+            "```\r\n"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data == {
+            "files_touched": ["windows.py"],
+            "commands_run": ["pytest tests/test_windows.py"],
+            "tests_passed": ["tests/test_windows.py::test_example"],
+        }
+
     def test_fenced_block_without_lang_tag(self) -> None:
         record = extract_evidence('prelude\n```\n{"y": 2}\n```\n')
         assert record.data == {"y": 2}
