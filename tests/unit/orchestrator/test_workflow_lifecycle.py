@@ -362,6 +362,56 @@ def test_next_runnable_conditional_edges_ignore_foreign_traversal() -> None:
     assert next_runnable_node_ids(spec, events) == ()
 
 
+def test_next_runnable_conditional_edges_ignore_prior_attempt_traversal() -> None:
+    spec = _conditional_spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="decide",
+            attempt=1,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_yes",
+            attempt=1,
+            timestamp=start + timedelta(seconds=1),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_RETRIED,
+            workflow_id=spec.spec_id,
+            node_id="decide",
+            attempt=2,
+            reason_code="retry_decision",
+            timestamp=start + timedelta(seconds=2),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="decide",
+            attempt=2,
+            timestamp=start + timedelta(seconds=3),
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ()
+
+    retried_branch_selected = events + (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_no",
+            attempt=2,
+            timestamp=start + timedelta(seconds=4),
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, retried_branch_selected) == ("branch_no",)
+
+
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:
     import ouroboros.orchestrator.workflow_lifecycle as lifecycle
 

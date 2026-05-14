@@ -400,12 +400,13 @@ def next_runnable_node_ids(
         for node_id, state in states.items()
         if state is WorkflowNodeLifecycleState.COMPLETED
     }
-    traversed_edges = {
-        event.edge_id
-        for event in event_list
-        if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED
-        and event.edge_id is not None
-    }
+    latest_node_attempts: dict[str, int | None] = {}
+    traversed_edge_attempts: dict[str, set[int | None]] = {}
+    for event in sorted(event_list, key=lambda item: item.timestamp):
+        if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
+            latest_node_attempts[event.node_id] = event.attempt
+        if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED and event.edge_id:
+            traversed_edge_attempts.setdefault(event.edge_id, set()).add(event.attempt)
     nodes_by_id: dict[str, WorkflowNode] = {node.node_id: node for node in spec.nodes}
     incoming: dict[str, list[WorkflowEdge]] = {node_id: [] for node_id in nodes_by_id}
     for edge in spec.edges:
@@ -414,7 +415,15 @@ def next_runnable_node_ids(
 
     def dependency_is_satisfied(edge: WorkflowEdge) -> bool:
         if edge.kind is EdgeKind.CONDITIONAL:
-            return edge.edge_id in traversed_edges
+            if edge.source not in completed:
+                return False
+            edge_attempts = traversed_edge_attempts.get(edge.edge_id)
+            if not edge_attempts:
+                return False
+            source_attempt = latest_node_attempts.get(edge.source)
+            if source_attempt is None:
+                return True
+            return source_attempt in edge_attempts
         return edge.source in completed
 
     runnable: list[str] = []
