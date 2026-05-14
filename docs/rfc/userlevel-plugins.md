@@ -318,10 +318,10 @@ the contract and keeps review scope small.
 |---|---|---|---|---|---|
 | `before_invocation` | After trust/confirmation, before `plugin.invoked` | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin:lifecycle:read` for read-only, stronger scope for policy decisions | **Included** |
 | `after_invocation` | After `plugin.completed` / `plugin.failed` is known, before the wrapper returns to the caller | Observability / summary emission | `fail_open` | `plugin:lifecycle:read` | **Included** |
-| `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin.tool.intercept` | Deferred |
-| `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin.tool.observe` | Deferred |
+| `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin:tool:intercept` | Deferred |
+| `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin:tool:observe` | Deferred |
 | `before_artifact_write` | Before artifact service writes plugin-provided output | Policy / mutation gate | `fail_closed` | artifact-specific write permission | Deferred |
-| `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin.artifact.observe` | Deferred |
+| `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin:artifact:observe` | Deferred |
 | `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | Deferred |
 | `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin:lifecycle:read` or cleanup-specific scope | Deferred |
 
