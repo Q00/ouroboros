@@ -640,6 +640,7 @@ class TestProjectionQueryHandler:
         assert "Run Projection" in result.value.text_content
         assert result.value.meta["execution_id"] == "exec_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_123"
+        assert result.value.meta["seed_id_source"] == "event"
         assert result.value.meta["event_count"] == 3
         assert result.value.meta["run"]["goal"] == "Inspect projection"
         assert len(result.value.meta["stages"]) == 1
@@ -719,6 +720,7 @@ class TestProjectionQueryHandler:
         assert result.is_ok
         assert result.value.meta["session_id"] == "orch_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_456"
+        assert result.value.meta["seed_id_source"] == "event"
         assert result.value.meta["run"]["goal"] == "Project session"
         assert result.value.meta["event_count"] == 3
         assert result.value.meta["run"]["ended_at"] == "2026-01-01T00:00:00.100000Z"
@@ -848,6 +850,7 @@ class TestProjectionQueryHandler:
 
         assert result.is_ok
         assert result.value.meta["seed_id"] == "seed_projection_b"
+        assert result.value.meta["seed_id_source"] == "event"
         assert result.value.meta["run"]["goal"] == "Requested execution"
         assert result.value.meta["event_count"] == 3
         assert [step["name"] for step in result.value.meta["steps"]] == ["Bash", "Read"]
@@ -883,6 +886,156 @@ class TestProjectionQueryHandler:
 
         assert result.is_err
         assert "declares multiple executions" in str(result.error)
+
+    async def test_handle_rejects_metadata_less_session_only_multi_execution_payloads(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Session-only queries must fail closed when payloads imply multiple runs."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_exec_a",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_payload_a",
+                data={
+                    "session_id": "orch_projection_payload_only",
+                    "execution_id": "exec_payload_a",
+                    "call_id": "payload_a",
+                    "tool_name": "Bash",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_exec_b",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_payload_b",
+                data={
+                    "session_id": "orch_projection_payload_only",
+                    "execution_id": "exec_payload_b",
+                    "call_id": "payload_b",
+                    "tool_name": "Read",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "orch_projection_payload_only"})
+
+        assert result.is_err
+        assert "references multiple executions" in str(result.error)
+
+    async def test_handle_narrows_metadata_less_session_only_single_execution_payload(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """A metadata-less session projection may use one payload execution candidate."""
+        from datetime import UTC, datetime, timedelta
+
+        from ouroboros.events.base import BaseEvent
+
+        t0 = datetime(2026, 1, 1, tzinfo=UTC)
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_session_metadata",
+                type="orchestrator.session.started",
+                timestamp=t0,
+                aggregate_type="session",
+                aggregate_id="orch_projection_payload_single",
+                data={
+                    "seed_id": "seed_payload_single",
+                    "seed_goal": "Project metadata-less session",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_single",
+                type="tool.call.started",
+                timestamp=t0 + timedelta(milliseconds=10),
+                aggregate_type="execution",
+                aggregate_id="exec_payload_single",
+                data={
+                    "session_id": "orch_projection_payload_single",
+                    "execution_id": "exec_payload_single",
+                    "call_id": "payload_single",
+                    "tool_name": "Bash",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_child",
+                type="tool.call.started",
+                timestamp=t0 + timedelta(milliseconds=20),
+                aggregate_type="execution",
+                aggregate_id="exec_payload_single_child",
+                data={
+                    "parent_execution_id": "exec_payload_single",
+                    "call_id": "payload_child",
+                    "tool_name": "Read",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_foreign_family",
+                type="tool.call.started",
+                timestamp=t0 + timedelta(milliseconds=30),
+                aggregate_type="lineage",
+                aggregate_id="lineage_payload_single",
+                data={
+                    "session_id": "orch_projection_payload_single",
+                    "execution_id": "exec_payload_single",
+                    "call_id": "payload_foreign",
+                    "tool_name": "Read",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "orch_projection_payload_single"})
+
+        assert result.is_ok
+        assert result.value.meta["event_count"] == 3
+        assert result.value.meta["seed_id"] == "seed_payload_single"
+        assert result.value.meta["seed_id_source"] == "event"
+        assert result.value.meta["run"]["goal"] == "Project metadata-less session"
+        assert result.value.meta["run"]["started_at"] == "2026-01-01T00:00:00Z"
+        assert [step["name"] for step in result.value.meta["steps"]] == ["Bash", "Read"]
+
+    async def test_handle_records_argument_seed_id_provenance(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Caller-provided seed IDs remain visible as argument-sourced labels."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_seed_argument",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_seed_argument",
+                data={"call_id": "seed_argument", "tool_name": "Bash"},
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle(
+            {
+                "execution_id": "exec_seed_argument",
+                "seed_id": "seed_from_argument",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["seed_id"] == "seed_from_argument"
+        assert result.value.meta["seed_id_source"] == "argument"
 
     async def test_handle_limit_is_fail_closed_safety_cap(
         self,

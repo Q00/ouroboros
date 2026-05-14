@@ -163,7 +163,12 @@ class ProjectionQueryHandler:
                         tool_name="ouroboros_query_projection",
                     )
                 )
-            seed_id = seed_id_override or _derive_seed_id(ordered_events, session_id, execution_id)
+            seed_id, seed_id_source = _resolve_seed_id(
+                ordered_events,
+                session_id,
+                execution_id,
+                override=seed_id_override,
+            )
             goal = _derive_goal(ordered_events)
             projection = build_projection(ordered_events, seed_id=seed_id, goal=goal)
 
@@ -181,6 +186,7 @@ class ProjectionQueryHandler:
                         session_id=session_id,
                         execution_id=execution_id,
                         seed_id=seed_id,
+                        seed_id_source=seed_id_source,
                         event_count=len(ordered_events),
                         limit=limit,
                     ),
@@ -232,6 +238,27 @@ async def _load_projection_events(
                     or _is_session_terminal_event(event, session_id)
                     or _event_links_execution(event, declared_execution_id)
                 ]
+            payload_execution_ids = _event_payload_execution_ids(events)
+            if len(payload_execution_ids) > 1:
+                msg = (
+                    f"session_id {session_id!r} references multiple executions; "
+                    "provide execution_id for an unambiguous projection"
+                )
+                raise ValueError(msg)
+            if len(payload_execution_ids) == 1:
+                payload_execution_id = next(iter(payload_execution_ids))
+                scoped_events = await store.query_session_related_events(
+                    session_id=session_id,
+                    execution_id=payload_execution_id,
+                    limit=None,
+                )
+                return [
+                    event
+                    for event in scoped_events
+                    if _is_session_metadata_event(event, session_id)
+                    or _is_session_terminal_event(event, session_id)
+                    or _event_links_execution(event, payload_execution_id)
+                ]
             return events
         if not _session_declares_execution(events, session_id, execution_id):
             msg = f"execution_id {execution_id!r} does not belong to session_id {session_id!r}"
@@ -257,6 +284,7 @@ def _projection_meta(
     session_id: str | None,
     execution_id: str | None,
     seed_id: str,
+    seed_id_source: str,
     event_count: int,
     limit: int | None,
 ) -> dict[str, Any]:
@@ -264,6 +292,7 @@ def _projection_meta(
         "session_id": session_id,
         "execution_id": execution_id,
         "seed_id": seed_id,
+        "seed_id_source": seed_id_source,
         "event_count": event_count,
         "limit": limit,
         "run": projection.run.model_dump(mode="json"),
@@ -293,17 +322,30 @@ def _format_projection_text(projection: ProjectionBuildResult, event_count: int)
     return "\n".join(lines)
 
 
-def _derive_seed_id(
+def _resolve_seed_id(
     events: Sequence[BaseEvent],
     session_id: str | None,
     execution_id: str | None,
-) -> str:
+    *,
+    override: str | None,
+) -> tuple[str, str]:
+    if override is not None:
+        return override, "argument"
+    seed_id = _derive_seed_id(events)
+    if seed_id is not None:
+        return seed_id, "event"
+    fallback = execution_id or session_id or "projection"
+    return fallback.strip() or "projection", "fallback"
+
+
+def _derive_seed_id(
+    events: Sequence[BaseEvent],
+) -> str | None:
     for event in events:
         value = event.data.get("seed_id") if isinstance(event.data, dict) else None
         if isinstance(value, str) and value.strip():
             return value.strip()
-    fallback = execution_id or session_id or "projection"
-    return fallback.strip() or "projection"
+    return None
 
 
 def _ensure_aware_timestamp(event: BaseEvent) -> BaseEvent:
@@ -331,6 +373,18 @@ def _session_execution_ids(events: Sequence[BaseEvent], session_id: str) -> froz
         value = event.data.get("execution_id") if isinstance(event.data, dict) else None
         if isinstance(value, str) and value.strip():
             execution_ids.add(value.strip())
+    return frozenset(execution_ids)
+
+
+def _event_payload_execution_ids(events: Sequence[BaseEvent]) -> frozenset[str]:
+    execution_ids: set[str] = set()
+    for event in events:
+        if not isinstance(event.data, dict):
+            continue
+        for key in ("execution_id", "parent_execution_id"):
+            value = event.data.get(key)
+            if isinstance(value, str) and value.strip():
+                execution_ids.add(value.strip())
     return frozenset(execution_ids)
 
 
