@@ -244,7 +244,6 @@ def test_next_runnable_nodes_are_pure_projection_from_completed_predecessors() -
     assert next_runnable_node_ids(spec, all_done) == ("end",)
 
 
-
 def test_retried_node_becomes_runnable_again_after_failure_history() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
@@ -276,6 +275,7 @@ def test_retried_node_becomes_runnable_again_after_failure_history() -> None:
 
     assert effective_node_states(events)["node_a"] is WorkflowNodeLifecycleState.RETRIED
     assert next_runnable_node_ids(spec, events) == ("node_a",)
+
 
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:
     import ouroboros.orchestrator.workflow_lifecycle as lifecycle
