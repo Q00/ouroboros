@@ -59,6 +59,12 @@ def build_run_snapshot(
     unknown_step_ids = tuple(
         step.step_id for step in step_tuple if step.ended_at is not None and step.ok is None
     )
+    closed_stage_ids = {stage.stage_id for stage in stage_tuple if stage.ended_at is not None}
+    pending_in_closed_stage_ids = tuple(
+        step.step_id
+        for step in step_tuple
+        if step.ended_at is None and step.stage_id in closed_stage_ids
+    )
 
     missing_linked_verdict = run.verdict_id is not None and verdict is None
     unlinked_supplied_verdict = verdict is not None and run.verdict_id is None
@@ -68,6 +74,7 @@ def build_run_snapshot(
         verdict=verdict,
         missing_linked_verdict=missing_linked_verdict,
         unlinked_supplied_verdict=unlinked_supplied_verdict,
+        pending_in_closed_stage_ids=pending_in_closed_stage_ids,
         pending_step_ids=pending_step_ids,
         failed_step_ids=failed_step_ids,
         unknown_step_ids=unknown_step_ids,
@@ -79,6 +86,7 @@ def build_run_snapshot(
         unknown_step_ids,
         missing_linked_verdict=missing_linked_verdict,
         unlinked_supplied_verdict=unlinked_supplied_verdict,
+        pending_in_closed_stage_ids=pending_in_closed_stage_ids,
         has_source_event_ids=bool(derived_source_event_ids),
     )
     safe_resume = status is RunSnapshotStatus.RUNNING and bool(pending_step_ids) and not blockers
@@ -233,6 +241,7 @@ def _derive_status(
     verdict: VerdictRecord | None,
     missing_linked_verdict: bool,
     unlinked_supplied_verdict: bool,
+    pending_in_closed_stage_ids: tuple[str, ...],
     pending_step_ids: tuple[str, ...],
     failed_step_ids: tuple[str, ...],
     unknown_step_ids: tuple[str, ...],
@@ -257,6 +266,8 @@ def _derive_status(
             return RunSnapshotStatus.WAITING
         return RunSnapshotStatus.UNKNOWN
     if missing_linked_verdict:
+        return RunSnapshotStatus.UNKNOWN
+    if pending_in_closed_stage_ids:
         return RunSnapshotStatus.UNKNOWN
     if failed_step_ids:
         return RunSnapshotStatus.FAILED
@@ -295,6 +306,7 @@ def _resume_blockers(
     *,
     missing_linked_verdict: bool,
     unlinked_supplied_verdict: bool,
+    pending_in_closed_stage_ids: tuple[str, ...],
     has_source_event_ids: bool,
 ) -> tuple[str, ...]:
     blockers: list[str] = []
@@ -314,6 +326,8 @@ def _resume_blockers(
         blockers.append("linked_verdict_missing")
     if unlinked_supplied_verdict:
         blockers.append("unlinked_verdict_present")
+    if pending_in_closed_stage_ids:
+        blockers.append("pending_steps_after_stage_end")
     if status is RunSnapshotStatus.RUNNING and pending_step_ids and not has_source_event_ids:
         blockers.append("source_events_missing")
     if failed_step_ids:

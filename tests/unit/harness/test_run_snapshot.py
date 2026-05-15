@@ -406,3 +406,29 @@ def test_legacy_pending_step_without_source_events_blocks_resume() -> None:
     assert snapshot.safe_resume is False
     assert snapshot.source_event_ids == ()
     assert snapshot.resume_blockers == ("source_events_missing",)
+
+
+def test_pending_step_in_closed_stage_is_unknown() -> None:
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    closed_stage = StageRecord(
+        stage_id="stage_1",
+        run_id="run_1",
+        kind=StageKind.EXECUTE,
+        started_at=start,
+        ended_at=start + timedelta(seconds=5),
+        step_ids=("step_pending",),
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[closed_stage],
+        steps=[_step("step_pending", ended=False, ok=None)],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.resume_blockers == (
+        "status_unknown",
+        "pending_steps_present",
+        "pending_steps_after_stage_end",
+    )
