@@ -156,14 +156,48 @@ def _event_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int, str]:
     return (event.timestamp, _EVENT_SORT_ORDER[event.event_type], event.event_type.value)
 
 
-def _run_boundary_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int, str]:
+def _run_boundary_group_order(
+    event: WorkflowLifecycleEvent,
+    *,
+    has_terminal_restart_tie: bool,
+) -> tuple[int, str]:
+    if not has_terminal_restart_tie:
+        return (_EVENT_SORT_ORDER[event.event_type], event.event_type.value)
     if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
-        order = 0
-    elif event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
-        order = 1
-    else:
-        order = 10 + _EVENT_SORT_ORDER[event.event_type]
-    return (event.timestamp, order, event.event_type.value)
+        return (100, event.event_type.value)
+    if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+        return (101, event.event_type.value)
+    return (_EVENT_SORT_ORDER[event.event_type], event.event_type.value)
+
+
+def _sort_run_boundary_events(
+    events: Iterable[WorkflowLifecycleEvent],
+) -> tuple[WorkflowLifecycleEvent, ...]:
+    sorted_events = sorted(events, key=lambda event: event.timestamp)
+    grouped_events: list[list[WorkflowLifecycleEvent]] = []
+    for event in sorted_events:
+        if grouped_events and grouped_events[-1][0].timestamp == event.timestamp:
+            grouped_events[-1].append(event)
+        else:
+            grouped_events.append([event])
+
+    ordered_events: list[WorkflowLifecycleEvent] = []
+    for timestamp_events in grouped_events:
+        has_terminal_restart_tie = any(
+            event.event_type in _TERMINAL_RUN_EVENT_TYPES for event in timestamp_events
+        ) and any(
+            event.event_type is WorkflowLifecycleEventType.RUN_CREATED for event in timestamp_events
+        )
+        ordered_events.extend(
+            sorted(
+                timestamp_events,
+                key=lambda event: _run_boundary_group_order(
+                    event,
+                    has_terminal_restart_tie=has_terminal_restart_tie,
+                ),
+            )
+        )
+    return tuple(ordered_events)
 
 
 def _run_lifecycle_segment(
@@ -173,7 +207,7 @@ def _run_lifecycle_segment(
     terminal_state: WorkflowRunLifecycleState | None = None
     terminal_allows_restart = False
     latest_segment: list[WorkflowLifecycleEvent] = []
-    for event in sorted(events, key=_run_boundary_sort_key):
+    for event in _sort_run_boundary_events(events):
         if terminal_state is not None:
             if (
                 event.event_type is WorkflowLifecycleEventType.RUN_CREATED
@@ -601,7 +635,7 @@ def validate_workflow_lifecycle_conformance(
     terminal_seen = False
     active_run = False
     terminal_allows_restart = False
-    sorted_events = sorted(event_list, key=_run_boundary_sort_key)
+    sorted_events = _sort_run_boundary_events(event_list)
     for event in sorted_events:
         if terminal_seen:
             if (
