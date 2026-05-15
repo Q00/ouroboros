@@ -73,9 +73,10 @@ If the MCP tool is NOT available, fall back to agent-based generation:
 
 1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role.
 2. Recover the interview requirements before drafting; do not invent missing context:
-   - If `session_id` was provided and the runtime can inspect local files, look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID, and use them as the source of truth.
-   - Else, if the current conversation contains the complete interview Q&A, extract structured requirements from that history.
-   - Else, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent transcript.
+   - If `session_id` was provided and the runtime can inspect local files, look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID.
+   - If a matching local artifact is found, use it as the source of truth.
+   - If no matching artifact is found or the artifact is stale/incomplete, fall through to the current conversation when it contains the complete interview Q&A.
+   - If neither local artifacts nor conversation history provide enough requirements, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent transcript.
 3. Generate a Seed YAML specification from the recovered requirements.
 4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
 
@@ -87,7 +88,7 @@ The first generation (Path A `ouroboros_generate_seed` or Path B agent role) run
 
 **Threshold for seed**: `pass_threshold: 0.90` (stricter than default 0.80 — seeds are structural specs and must be precise).
 
-**Max iterations**: 5. Track the highest-scoring seed across all iterations (the "best attempt"). If still not PASS after 5, present that best attempt with its QA verdict and ask the user: accept it as-is, do one more manual edit, or escalate to `ooo interview` / `ooo unstuck`.
+**Max iterations**: 5. Track the highest-scoring seed across all iterations (the "best attempt"). If still not PASS after 5, present that best attempt with its QA verdict and ask the user: accept it as-is, do one more manual edit, or escalate to `ooo interview` / `ooo unstuck`. If the user accepts a below-threshold attempt, present the complete accepted Seed YAML in a fenced `yaml` block before proceeding to "After Seed Generation".
 
 The seed sits inside the **Define** diamond of Double Diamond — where expansion (Wonder) and convergence (Reflect/Refine/Restate) both happen in service of a single sharp specification. Expansion is not the enemy; **unchecked expansion that bypasses the user gate is.** The four-phase cycle plus User Adoption Gate is the workflow's primary safeguard.
 
@@ -160,7 +161,7 @@ From the available evidence, surface 2–4 items neither QA nor lateral personas
 - Are there silent assumptions the user never agreed to?
 - Does wording contradict stated priorities (e.g., "MVP in a week" but 8 acceptance criteria)?
 
-If QA and Socrates conflict, resolve the conflict by preferring the most verifiable user intent from persisted session state and/or conversation evidence. Do not assume the Socratic lens is automatically authoritative; QA can be correct when no user-intent evidence contradicts it.
+If QA and Socrates conflict, do not resolve the conflict silently in Wonder. Carry both candidates into Reflect as a divergent signal, cite the available evidence for each side, and let the Refine user gate choose the resolution. Do not assume the Socratic lens is automatically authoritative; QA can be correct when no user-intent evidence contradicts it.
 
 **Source 3 — `ouroboros_lateral_think` (independent perspectives, MCP-only when available)**
 Attempt to load the MCP tool with the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros lateral"` if needed. If the tool loads, call it through the active runtime's `call_mcp` capability to collect 5 independent MCP personas or isolated perspectives:
@@ -274,7 +275,7 @@ Track all rejected candidates across iterations and pass them as `failed_attempt
 
 Edit the previous seed YAML in place. Apply ONLY user-accepted items. Do not start from scratch. Do not lose fields that were already correct. Do not call `ouroboros_generate_seed` again — that tool runs only at iter-0.
 
-If the user picks "None", exit the loop with the current seed even though it's below threshold — user judgment overrides the threshold.
+If the user picks "None", exit the loop with the current seed even though it's below threshold — user judgment overrides the threshold. Before proceeding to "After Seed Generation", present the complete current Seed YAML in a fenced `yaml` block so the accepted artifact is explicit.
 
 Common edit shapes (both expansion and convergence are legitimate when the user accepted them):
 - Sharpen: replace vague phrase with measurable predicate (`"fast"` → `"p95 latency < 200ms"`)
