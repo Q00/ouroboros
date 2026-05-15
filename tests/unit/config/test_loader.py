@@ -1529,9 +1529,7 @@ def test_get_goose_cli_path_falls_back_to_config() -> None:
         patch.dict(os.environ, {}, clear=True),
         patch(
             "ouroboros.config.loader.load_config",
-            return_value=OuroborosConfig(
-                orchestrator=OrchestratorConfig(goose_cli_path=resolved)
-            ),
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig(goose_cli_path=resolved)),
         ),
         patch("ouroboros.config.loader.shutil.which", return_value=resolved),
     ):
