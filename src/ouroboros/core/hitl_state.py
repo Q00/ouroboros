@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ouroboros.core.hitl_contract import (
+    HumanInputKind,
     HumanInputRequest,
     HumanInputResponse,
     HumanInputResponseKind,
@@ -110,7 +111,7 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputResponse.ANSWERED_EVENT_TYPE:
-            answered_state = _state_from_answered_event(event)
+            answered_state = _state_from_answered_event(event, current)
             if answered_state is None:
                 continue
             snapshots[request_id] = _snapshot_from_terminal(
@@ -122,6 +123,8 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputRequest.TIMED_OUT_EVENT_TYPE:
+            if not _request_has_timeout(current):
+                continue
             snapshots[request_id] = _snapshot_from_terminal(
                 current,
                 event,
@@ -191,8 +194,12 @@ def _snapshot_from_terminal(
     )
 
 
-def _state_from_answered_event(event: BaseEvent) -> HumanInputState | None:
+def _state_from_answered_event(
+    event: BaseEvent, current: HumanInputSnapshot
+) -> HumanInputState | None:
     if _optional_str(event.data.get("actor")) is None:
+        return None
+    if not _answer_context_matches_request(event, current):
         return None
 
     response_kind = event.data.get("response_kind")
@@ -203,25 +210,48 @@ def _state_from_answered_event(event: BaseEvent) -> HumanInputState | None:
     if response_kind == HumanInputResponseKind.CANCEL.value:
         return None if has_text or has_selection or has_approval else HumanInputState.CANCELLED
     if response_kind == HumanInputResponseKind.TIMEOUT.value:
-        return None if has_text or has_selection or has_approval else HumanInputState.TIMED_OUT
+        if has_text or has_selection or has_approval or not _request_has_timeout(current):
+            return None
+        return HumanInputState.TIMED_OUT
     if response_kind == HumanInputResponseKind.TEXT.value:
+        if current.request.get("kind") != HumanInputKind.FREE_TEXT.value:
+            return None
         if has_selection or has_approval:
             return None
         return (
             HumanInputState.ANSWERED if _optional_str(event.data.get("text")) is not None else None
         )
     if response_kind == HumanInputResponseKind.SELECTION.value:
+        if current.request.get("kind") not in {
+            HumanInputKind.SINGLE_SELECT.value,
+            HumanInputKind.MULTI_SELECT.value,
+        }:
+            return None
         if has_text or has_approval:
             return None
         selected_values = event.data.get("selected_values")
-        if (
+        if not (
             isinstance(selected_values, list | tuple)
             and bool(selected_values)
             and all(_optional_str(value) is not None for value in selected_values)
         ):
-            return HumanInputState.ANSWERED
-        return None
+            return None
+        normalized_values = tuple(str(value).strip() for value in selected_values)
+        options = _request_options(current)
+        if any(value not in options for value in normalized_values):
+            return None
+        if (
+            current.request.get("kind") == HumanInputKind.SINGLE_SELECT.value
+            and len(normalized_values) != 1
+        ):
+            return None
+        return HumanInputState.ANSWERED
     if response_kind == HumanInputResponseKind.APPROVAL.value:
+        if current.request.get("kind") not in {
+            HumanInputKind.APPROVAL.value,
+            HumanInputKind.DESTRUCTIVE_CONFIRMATION.value,
+        }:
+            return None
         if has_text or has_selection:
             return None
         return (
@@ -230,6 +260,25 @@ def _state_from_answered_event(event: BaseEvent) -> HumanInputState | None:
             else None
         )
     return None
+
+
+def _answer_context_matches_request(event: BaseEvent, current: HumanInputSnapshot) -> bool:
+    for key in ("session_id", "run_id", "invocation_id"):
+        event_value = _optional_str(event.data.get(key))
+        if event_value is not None and event_value != getattr(current, key):
+            return False
+    return True
+
+
+def _request_has_timeout(current: HumanInputSnapshot) -> bool:
+    return type(current.request.get("timeout_seconds")) is int
+
+
+def _request_options(current: HumanInputSnapshot) -> frozenset[str]:
+    options = current.request.get("options", ())
+    if not isinstance(options, list | tuple):
+        return frozenset()
+    return frozenset(value.strip() for value in options if isinstance(value, str) and value.strip())
 
 
 def _event_request_id(event: BaseEvent) -> str | None:

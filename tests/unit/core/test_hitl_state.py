@@ -195,6 +195,126 @@ def test_malformed_answered_events_do_not_close_pending_request() -> None:
     )
 
 
+def test_incompatible_answered_events_do_not_close_pending_request() -> None:
+    text_request = HumanInputRequest(
+        request_id="hitl-text",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.FREE_TEXT,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Explain?",
+        resume_target="plan:resume",
+    )
+    single_select_request = HumanInputRequest(
+        request_id="hitl-select",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.SINGLE_SELECT,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Choose?",
+        resume_target="plan:resume",
+        options=("Approve", "Reject"),
+    )
+    approval_without_timeout = HumanInputRequest(
+        request_id="hitl-no-timeout",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve?",
+        resume_target="plan:resume",
+    )
+    events = [
+        _with_time(create_hitl_requested_event(text_request), 0, "evt_text_req"),
+        _with_time(create_hitl_requested_event(single_select_request), 1, "evt_select_req"),
+        _with_time(create_hitl_requested_event(approval_without_timeout), 2, "evt_timeout_req"),
+        _with_time(
+            BaseEvent(
+                type="hitl.answered",
+                aggregate_type="hitl",
+                aggregate_id="hitl-text",
+                data={
+                    "request_id": "hitl-text",
+                    "actor": "local-user",
+                    "response_kind": "approval",
+                    "approval_decision": True,
+                },
+            ),
+            3,
+            "evt_wrong_kind",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.answered",
+                aggregate_type="hitl",
+                aggregate_id="hitl-select",
+                data={
+                    "request_id": "hitl-select",
+                    "actor": "local-user",
+                    "response_kind": "selection",
+                    "selected_values": ["Approve", "Reject"],
+                },
+            ),
+            4,
+            "evt_multi_single_select",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.answered",
+                aggregate_type="hitl",
+                aggregate_id="hitl-select",
+                data={
+                    "request_id": "hitl-select",
+                    "actor": "local-user",
+                    "response_kind": "selection",
+                    "selected_values": ["Other"],
+                },
+            ),
+            5,
+            "evt_selection_outside_options",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.answered",
+                aggregate_type="hitl",
+                aggregate_id="hitl-no-timeout",
+                data={
+                    "request_id": "hitl-no-timeout",
+                    "actor": "runtime",
+                    "response_kind": "timeout",
+                },
+            ),
+            6,
+            "evt_timeout_answer_without_timeout",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.timed_out",
+                aggregate_type="hitl",
+                aggregate_id="hitl-no-timeout",
+                data={"request_id": "hitl-no-timeout", "reason": "deadline elapsed"},
+            ),
+            7,
+            "evt_timeout_event_without_timeout",
+        ),
+    ]
+
+    snapshots = project_human_input_state(events)
+
+    assert tuple(snapshot.state for snapshot in snapshots) == (
+        HumanInputState.PENDING,
+        HumanInputState.PENDING,
+        HumanInputState.PENDING,
+    )
+    assert pending_human_input_requests(events) == snapshots
+
+
 def test_answered_cancel_and_timeout_responses_project_terminal_state() -> None:
     cancel_request = _request("hitl-cancel-answer")
     timeout_request = _request("hitl-timeout-answer")
