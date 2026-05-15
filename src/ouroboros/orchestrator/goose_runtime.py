@@ -26,6 +26,16 @@ from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 log = get_logger(__name__)
 
 
+def _has_text_payload(value: dict[str, Any]) -> bool:
+    for key in ("text", "content", "response", "result", "output", "data", "error", "message"):
+        if key not in value:
+            continue
+        payload = value[key]
+        if payload not in (None, "", [], {}):
+            return True
+    return False
+
+
 class GooseCliRuntime(CodexCliRuntime):
     """Agent runtime that executes tasks with the locally installed goose CLI.
 
@@ -274,10 +284,7 @@ class GooseCliRuntime(CodexCliRuntime):
             metadata_only_event_types = {"complete", "completed", "done"}
             if event_type in {"init", "session", "session.started", "session.created"}:
                 return ""
-            if event_type in metadata_only_event_types and not any(
-                isinstance(value.get(key), str) and value.get(key)
-                for key in ("text", "content", "response", "result", "output", "data", "error")
-            ):
+            if event_type in metadata_only_event_types and not _has_text_payload(value):
                 return ""
             for key in ("text", "content"):
                 text_value = value.get(key)
@@ -314,6 +321,17 @@ class GooseCliRuntime(CodexCliRuntime):
                 )
             ]
 
+        if any(marker in event_type for marker in ("error", "failed", "failure")):
+            content = self._extract_text(event) or f"{self._display_name} reported an error"
+            return [
+                AgentMessage(
+                    type="result" if event_type.endswith(("failed", "failure")) else "assistant",
+                    content=content,
+                    data={"subtype": "error", "error_type": "GooseRuntimeError"},
+                    resume_handle=event_handle,
+                )
+            ]
+
         if "tool" in event_type:
             tool_name = self._extract_tool_name_from_event(event) or "tool"
             tool_input = self._extract_tool_input_from_event(event)
@@ -345,17 +363,6 @@ class GooseCliRuntime(CodexCliRuntime):
                     content=f"Calling tool: {tool_name}{': ' + detail if detail else ''}",
                     handle=event_handle,
                     extra_data={"runtime_event_type": event_type},
-                )
-            ]
-
-        if any(marker in event_type for marker in ("error", "failed", "failure")):
-            content = self._extract_text(event) or f"{self._display_name} reported an error"
-            return [
-                AgentMessage(
-                    type="result" if event_type.endswith(("failed", "failure")) else "assistant",
-                    content=content,
-                    data={"subtype": "error", "error_type": "GooseRuntimeError"},
-                    resume_handle=event_handle,
                 )
             ]
 

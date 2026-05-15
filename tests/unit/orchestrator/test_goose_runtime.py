@@ -159,6 +159,43 @@ async def test_goose_runtime_keeps_tool_output_out_of_final_fallback() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_goose_runtime_preserves_nested_completion_payload() -> None:
+    stdout = [
+        json.dumps({"type": "session.started", "session_id": "session-1"}),
+        json.dumps({"type": "completed", "result": {"text": "Done"}}),
+    ]
+    fake_process = _FakeProcess(stdout)
+
+    async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
+        return fake_process
+
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_maybe_dispatch_skill_intercept", return_value=None),
+    ):
+        result = await runtime.execute_task_to_result("finish")
+
+    assert result.is_ok
+    assert result.value.final_message == "Done"
+
+
+def test_goose_runtime_classifies_tool_failed_as_error_result() -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+
+    messages = runtime._convert_event({"type": "tool.failed", "error": "permission denied"}, None)
+
+    assert len(messages) == 1
+    assert messages[0].is_final
+    assert messages[0].is_error
+    assert messages[0].content == "permission denied"
+
+
 def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "goose")
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "goose")

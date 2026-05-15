@@ -28,6 +28,16 @@ from ouroboros.providers.profiles import resolve_completion_profile_result
 log = structlog.get_logger()
 
 
+def _has_text_payload(value: dict[str, Any]) -> bool:
+    for key in ("text", "content", "response", "result", "output", "data", "error", "message"):
+        if key not in value:
+            continue
+        payload = value[key]
+        if payload not in (None, "", [], {}):
+            return True
+    return False
+
+
 class GooseCliLLMAdapter(CodexCliLLMAdapter):
     """LLM adapter backed by ``goose run``.
 
@@ -205,13 +215,23 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
         """
         if isinstance(value, dict):
             event_type = value.get("type")
-            if event_type in {"complete", "init", "session", "session.started", "session.created"}:
+            if event_type in {"init", "session", "session.started", "session.created"}:
+                return ""
+            if event_type in {"complete", "completed", "done"} and not _has_text_payload(value):
                 return ""
             if event_type == "message" and isinstance(value.get("message"), dict):
                 return self._extract_text(value["message"])
             content = value.get("content")
             if isinstance(content, str):
                 return content
+            for key in ("text", "response", "result", "output", "data", "error"):
+                payload = value.get(key)
+                if isinstance(payload, str):
+                    return payload
+                if isinstance(payload, dict | list):
+                    text = self._extract_text(payload)
+                    if text:
+                        return text
             if isinstance(content, list):
                 parts: list[str] = []
                 for item in content:
