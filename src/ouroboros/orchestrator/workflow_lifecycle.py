@@ -122,13 +122,6 @@ _RUN_EVENT_TYPES: Final[frozenset[WorkflowLifecycleEventType]] = frozenset(
         WorkflowLifecycleEventType.RUN_CANCELLED,
     }
 )
-_TERMINAL_RUN_EVENT_TYPES: Final[frozenset[WorkflowLifecycleEventType]] = frozenset(
-    {
-        WorkflowLifecycleEventType.RUN_COMPLETED,
-        WorkflowLifecycleEventType.RUN_FAILED,
-        WorkflowLifecycleEventType.RUN_CANCELLED,
-    }
-)
 _NODE_STATE_BY_EVENT: Final[dict[WorkflowLifecycleEventType, WorkflowNodeLifecycleState]] = {
     WorkflowLifecycleEventType.NODE_SCHEDULED: WorkflowNodeLifecycleState.SCHEDULED,
     WorkflowLifecycleEventType.NODE_STARTED: WorkflowNodeLifecycleState.STARTED,
@@ -556,92 +549,89 @@ def validate_workflow_lifecycle_conformance(
     edge_ids = {edge.edge_id for edge in spec.edges}
     seen_run_created = False
     terminal_seen = False
-    sorted_events = sorted(event_list, key=_event_sort_key)
-    grouped_events: list[list[WorkflowLifecycleEvent]] = []
+    # Conformance reasons about run boundaries, so same-timestamp ties must
+    # preserve replay order instead of reusing ``_event_sort_key``'s event-type
+    # priority. ``workflow_id`` is spec-scoped, and a terminal event followed by
+    # RUN_CREATED at the same timestamp is the only available local signal that
+    # a new run began after the prior one ended.
+    sorted_events = tuple(
+        event
+        for _, event in sorted(enumerate(event_list), key=lambda item: (item[1].timestamp, item[0]))
+    )
     for event in sorted_events:
-        if grouped_events and grouped_events[-1][0].timestamp == event.timestamp:
-            grouped_events[-1].append(event)
-        else:
-            grouped_events.append([event])
+        if terminal_seen:
+            if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+                terminal_seen = False
+                seen_run_created = True
+                continue
+            issues.append(
+                WorkflowConformanceIssue(
+                    severity="error",
+                    code="event_after_terminal_run",
+                    message=(
+                        "Workflow lifecycle event appears after a terminal run event "
+                        "without a new workflow.run.created boundary."
+                    ),
+                    event_type=event.event_type,
+                    node_id=event.node_id,
+                    edge_id=event.edge_id,
+                )
+            )
+            continue
 
-    for timestamp_events in grouped_events:
-        # ``workflow_id`` is spec-scoped, not run-scoped. If timestamp precision
-        # collapses a terminal event and the next run boundary, prefer the valid
-        # multi-run interpretation instead of letting tie-break order invent an
-        # event_after_terminal_run finding.
-        timestamp_has_run_created = any(
-            event.event_type is WorkflowLifecycleEventType.RUN_CREATED for event in timestamp_events
-        )
-        if terminal_seen and timestamp_has_run_created:
-            terminal_seen = False
+        if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
             seen_run_created = True
 
-        for event in timestamp_events:
-            if terminal_seen:
+        if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
+            if event.node_id not in node_ids:
                 issues.append(
                     WorkflowConformanceIssue(
                         severity="error",
-                        code="event_after_terminal_run",
-                        message=(
-                            "Workflow lifecycle event appears after a terminal run event "
-                            "without a new workflow.run.created boundary."
-                        ),
+                        code="unknown_node_id",
+                        message=f"Lifecycle event references unknown node id {event.node_id!r}.",
                         event_type=event.event_type,
                         node_id=event.node_id,
+                    )
+                )
+            if not seen_run_created:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="warning",
+                        code="lifecycle_before_run_created",
+                        message="Node lifecycle event appears before workflow.run.created.",
+                        event_type=event.event_type,
+                        node_id=event.node_id,
+                    )
+                )
+
+        if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED and event.edge_id:
+            if event.edge_id not in edge_ids:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="error",
+                        code="unknown_edge_id",
+                        message=f"Lifecycle event references unknown edge id {event.edge_id!r}.",
+                        event_type=event.event_type,
                         edge_id=event.edge_id,
                     )
                 )
-                continue
-
-            if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
-                seen_run_created = True
-
-            if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
-                if event.node_id not in node_ids:
-                    issues.append(
-                        WorkflowConformanceIssue(
-                            severity="error",
-                            code="unknown_node_id",
-                            message=f"Lifecycle event references unknown node id {event.node_id!r}.",
-                            event_type=event.event_type,
-                            node_id=event.node_id,
-                        )
+            if not seen_run_created:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="warning",
+                        code="lifecycle_before_run_created",
+                        message="Edge traversal event appears before workflow.run.created.",
+                        event_type=event.event_type,
+                        edge_id=event.edge_id,
                     )
-                if not seen_run_created:
-                    issues.append(
-                        WorkflowConformanceIssue(
-                            severity="warning",
-                            code="lifecycle_before_run_created",
-                            message="Node lifecycle event appears before workflow.run.created.",
-                            event_type=event.event_type,
-                            node_id=event.node_id,
-                        )
-                    )
+                )
 
-            if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED and event.edge_id:
-                if event.edge_id not in edge_ids:
-                    issues.append(
-                        WorkflowConformanceIssue(
-                            severity="error",
-                            code="unknown_edge_id",
-                            message=f"Lifecycle event references unknown edge id {event.edge_id!r}.",
-                            event_type=event.event_type,
-                            edge_id=event.edge_id,
-                        )
-                    )
-                if not seen_run_created:
-                    issues.append(
-                        WorkflowConformanceIssue(
-                            severity="warning",
-                            code="lifecycle_before_run_created",
-                            message="Edge traversal event appears before workflow.run.created.",
-                            event_type=event.event_type,
-                            edge_id=event.edge_id,
-                        )
-                    )
-
-        if any(event.event_type in _TERMINAL_RUN_EVENT_TYPES for event in timestamp_events):
-            terminal_seen = not timestamp_has_run_created
+        if event.event_type in {
+            WorkflowLifecycleEventType.RUN_COMPLETED,
+            WorkflowLifecycleEventType.RUN_FAILED,
+            WorkflowLifecycleEventType.RUN_CANCELLED,
+        }:
+            terminal_seen = True
 
     return WorkflowConformanceReport(
         workflow_id=spec.spec_id,
