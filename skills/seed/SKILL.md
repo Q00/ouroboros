@@ -10,6 +10,15 @@ mcp_args:
 
 Generate validated Seed specifications from interview results.
 
+## Required Skill Capabilities
+
+- `ask_user` — ask human-judgment questions through the active runtime's user-question surface.
+- `inspect_code` — read repo-local agent roles and recover exact context from local files before guessing.
+- `call_mcp` — use available Ouroboros MCP tools directly, including runtime tool discovery when a deferred MCP surface must be loaded.
+- `run_shell` — run bounded local commands for audit-trail writes and setup steps.
+- `refine_answer` — confirm free-form user decisions before treating them as accepted seed revisions.
+- `maintain_ledger` — keep QA scores, candidate decisions, rejected proposals, and audit trail keys visible.
+
 ## Usage
 
 ```
@@ -27,25 +36,25 @@ When the user invokes this skill:
 
 The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
 
-1. Use the `ToolSearch` tool to find and load the seed generation MCP tool:
+1. Use the active runtime's `call_mcp` capability to find and load the seed generation MCP tool through runtime tool discovery when needed:
    ```
-   ToolSearch query: "+ouroboros seed"
+   tool discovery query: "+ouroboros seed"
    ```
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
-3. If ToolSearch finds the tool → proceed to **Path A**. If not → proceed to **Path B**.
+2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed` (with a plugin prefix). After runtime tool discovery returns, the tool becomes callable through the active runtime's `call_mcp` capability.
+3. If runtime tool discovery finds the tool → proceed to **Path A**. If not → proceed to **Path B**.
 
 **IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
 ### Path A: MCP Mode (Preferred)
 
-If the `ouroboros_generate_seed` MCP tool is available (loaded via ToolSearch above):
+If the `ouroboros_generate_seed` MCP tool is available (loaded via runtime tool discovery above):
 
 1. Determine the interview session:
    - If `session_id` provided: Use it directly
    - If no session_id: Check conversation for a recent `ouroboros_interview` session ID
    - If none found: Ask the user
 
-2. Call the MCP tool:
+2. Call the MCP tool through the active runtime's `call_mcp` capability:
    ```
    Tool: ouroboros_generate_seed
    Arguments:
@@ -81,9 +90,9 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
 
 **Loop**:
 
-1. Load the QA tool via `ToolSearch query: "+ouroboros qa"` if not already loaded. Fall back to the `ouroboros:qa-judge` agent role (read `src/ouroboros/agents/qa-judge.md`) if MCP is unavailable.
+1. Load the QA tool via the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros qa"` if not already loaded. Fall back to the `ouroboros:qa-judge` agent role (read `src/ouroboros/agents/qa-judge.md`) if MCP is unavailable.
 
-2. Call QA on the generated seed:
+2. Call QA on the generated seed through the active runtime's `call_mcp` capability:
    ```
    Tool: ouroboros_qa
    Arguments:
@@ -97,13 +106,15 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
    ```
 
 3. Branch on verdict:
-   - **PASS (>= 0.90)**: Exit loop. Proceed to "After Seed Generation" below.
+   - **PASS (>= 0.90)**: Exit loop. Present the final validated Seed YAML to the user, then proceed to "After Seed Generation" below.
    - **REVISE (0.40–0.89)**: Run the **Wonder → Reflect → Refine → Restate** cycle below, then loop back to step 2.
    - **FAIL (< 0.40)**: Stop the loop. The seed has fundamental issues that regeneration likely won't fix. Show the full verdict and recommend `ooo interview` to revisit requirements, or `ooo unstuck` to challenge assumptions. Do not proceed to celebration.
 
 4. On iteration N >= 3, briefly tell the user "Refining seed (iteration N/5)..." so they know progress is being made — but do not dump full verdicts each round; only deltas.
 
 5. After PASS, show a one-line summary of the journey: `Seed passed QA at iteration N/5 with score X.XX.`
+
+6. Immediately after that PASS summary, present the complete final validated Seed YAML in a fenced `yaml` block. This must happen before any "After Seed Generation" celebration, star prompt, setup prompt, or next-step text.
 
 #### Wonder → Reflect → Refine → Restate (REVISE branch)
 
@@ -136,8 +147,8 @@ From the available evidence, surface 2–4 items neither QA nor lateral personas
 
 If QA and Socrates conflict, resolve the conflict by preferring the most verifiable user intent from persisted session state and/or conversation evidence. Do not assume the Socratic lens is automatically authoritative; QA can be correct when no user-intent evidence contradicts it.
 
-**Source 3 — `ouroboros_lateral_think` (parallel personas, MCP-only when available)**
-Attempt to load the MCP tool with `ToolSearch query: "+ouroboros lateral"` if needed. If the tool loads, call it to fan out 5 independent perspectives, each running in its own Task pane with no cross-contamination:
+**Source 3 — `ouroboros_lateral_think` (independent perspectives, MCP-only when available)**
+Attempt to load the MCP tool with the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros lateral"` if needed. If the tool loads, call it through the active runtime's `call_mcp` capability to collect 5 independent MCP personas or isolated perspectives:
 
 ```
 Tool: ouroboros_lateral_think
@@ -166,7 +177,7 @@ The 5 personas return distinct revision angles:
 
 **Parsing persona outputs when lateral MCP is available**: Each persona returns free-form prose, not a structured list. After the parallel call returns, read each persona's text and extract its concrete proposals into discrete candidates (one revision per candidate, not bundled). If a persona's output is purely abstract advice with no actionable revision, drop it from the candidate list rather than inventing one. Aim for 1–2 candidates per persona — if a persona produced 5, pick the 2 most concrete and discard the rest.
 
-If `ToolSearch` cannot load `ouroboros_lateral_think`, do not emulate lateral personas or read persona files directly. Record `no lateral proposals: MCP lateral tool unavailable` as Source 3 output and proceed with QA plus Socrates/available sources. The QA refinement loop remains required, and the User Adoption Gate still applies to any proposed revision.
+If runtime tool discovery cannot load `ouroboros_lateral_think`, do not emulate lateral personas or read persona files directly. Record `no lateral proposals: MCP lateral tool unavailable` as Source 3 output and proceed with QA plus Socrates/available sources. The QA refinement loop remains required, and the User Adoption Gate still applies to any proposed revision.
 
 **Phase 2 — Reflect (debate): structure proposals by agreement and conflict**
 
@@ -324,7 +335,7 @@ On successful seed generation, first announce:
 Your seed has been crystallized!
 ```
 
-Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, use the **AskUserQuestion tool** with this single question:
+Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, use the active runtime's `ask_user` capability with this single question:
 
 ```json
 {
