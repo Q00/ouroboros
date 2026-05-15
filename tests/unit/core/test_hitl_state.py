@@ -9,6 +9,7 @@ from ouroboros.core.hitl_contract import (
     HumanInputResponseKind,
     HumanInputRiskClass,
     HumanInputSource,
+    HumanInputTimeoutAction,
 )
 from ouroboros.core.hitl_state import (
     HumanInputState,
@@ -24,7 +25,11 @@ from ouroboros.events.hitl import (
 )
 
 
-def _request(request_id: str = "hitl-1") -> HumanInputRequest:
+def _request(
+    request_id: str = "hitl-1",
+    *,
+    timeout_action: HumanInputTimeoutAction = HumanInputTimeoutAction.STAY_WAITING,
+) -> HumanInputRequest:
     return HumanInputRequest(
         request_id=request_id,
         session_id="session-1",
@@ -37,6 +42,7 @@ def _request(request_id: str = "hitl-1") -> HumanInputRequest:
         question="Approve?",
         resume_target="plan:resume",
         timeout_seconds=30,
+        timeout_action=timeout_action,
         payload={"nested": {"count": 1}},
     )
 
@@ -190,8 +196,62 @@ def test_malformed_answered_events_do_not_close_pending_request() -> None:
     assert pending_human_input_requests(malformed_events) == snapshots
 
 
+def test_malformed_requested_event_does_not_abort_projection() -> None:
+    valid_request = _request("hitl-valid")
+    malformed_request = BaseEvent(
+        type="hitl.requested",
+        aggregate_type="hitl",
+        aggregate_id="hitl-bad",
+        data={"request_id": "hitl-bad", "session_id": "session-1"},
+    )
+
+    snapshots = project_human_input_state(
+        [
+            _with_time(malformed_request, 0, "evt_bad_request"),
+            _with_time(create_hitl_requested_event(valid_request), 1, "evt_valid_request"),
+        ]
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].request_id == "hitl-valid"
+    assert snapshots[0].state is HumanInputState.PENDING
+
+
+def test_stay_waiting_timeout_events_do_not_close_pending_request() -> None:
+    request = _request("hitl-stay-waiting")
+    events = [
+        _with_time(create_hitl_requested_event(request), 0, "evt_requested"),
+        _with_time(
+            create_hitl_timed_out_event(request, reason="deadline elapsed"), 1, "evt_timeout"
+        ),
+        _with_time(
+            create_hitl_answered_event(
+                request,
+                HumanInputResponse(
+                    request_id="hitl-stay-waiting",
+                    session_id="session-1",
+                    run_id="run-1",
+                    actor="runtime",
+                    response_kind=HumanInputResponseKind.TIMEOUT,
+                    payload={"deadline_ms": 30000},
+                ),
+            ),
+            2,
+            "evt_timeout_answer",
+        ),
+    ]
+
+    snapshot = project_human_input_state(events)[0]
+
+    assert snapshot.state is HumanInputState.PENDING
+    assert snapshot.updated_event_id == "evt_requested"
+    assert pending_human_input_requests(events) == (snapshot,)
+
+
 def test_mismatched_timeout_and_cancel_events_do_not_close_pending_request() -> None:
-    timeout_request = _request("hitl-timeout-mismatch")
+    timeout_request = _request(
+        "hitl-timeout-mismatch", timeout_action=HumanInputTimeoutAction.CANCEL
+    )
     cancel_request = _request("hitl-cancel-mismatch")
     events = [
         _with_time(create_hitl_requested_event(timeout_request), 0, "evt_timeout_req"),
@@ -377,7 +437,7 @@ def test_incompatible_answered_events_do_not_close_pending_request() -> None:
 
 def test_answered_cancel_and_timeout_responses_project_terminal_state() -> None:
     cancel_request = _request("hitl-cancel-answer")
-    timeout_request = _request("hitl-timeout-answer")
+    timeout_request = _request("hitl-timeout-answer", timeout_action=HumanInputTimeoutAction.CANCEL)
     events = [
         _with_time(create_hitl_requested_event(cancel_request), 0, "evt_cancel_req"),
         _with_time(create_hitl_requested_event(timeout_request), 1, "evt_timeout_req"),
@@ -430,7 +490,7 @@ def test_answered_cancel_and_timeout_responses_project_terminal_state() -> None:
 
 
 def test_timeout_and_cancel_events_project_terminal_reason() -> None:
-    timeout_request = _request("hitl-timeout")
+    timeout_request = _request("hitl-timeout", timeout_action=HumanInputTimeoutAction.CANCEL)
     cancel_request = _request("hitl-cancel")
     events = [
         _with_time(create_hitl_requested_event(timeout_request), 0, "evt_timeout_req"),

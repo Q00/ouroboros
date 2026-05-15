@@ -21,6 +21,7 @@ from ouroboros.core.hitl_contract import (
     HumanInputRequest,
     HumanInputResponse,
     HumanInputResponseKind,
+    HumanInputTimeoutAction,
 )
 from ouroboros.events.base import BaseEvent
 
@@ -97,7 +98,10 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             current = snapshots.get(request_id)
             if current is not None and current.is_terminal:
                 continue
-            snapshot = _snapshot_from_requested(event, request_id)
+            try:
+                snapshot = _snapshot_from_requested(event, request_id)
+            except ValueError:
+                continue
             if current is not None:
                 snapshot = replace(
                     snapshot,
@@ -130,7 +134,7 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputRequest.TIMED_OUT_EVENT_TYPE:
-            if not _request_has_timeout(current) or not _event_context_matches_request(
+            if not _request_timeout_is_terminal(current) or not _event_context_matches_request(
                 event, current
             ):
                 continue
@@ -221,7 +225,7 @@ def _state_from_answered_event(
     if response_kind == HumanInputResponseKind.CANCEL.value:
         return None if has_text or has_selection or has_approval else HumanInputState.CANCELLED
     if response_kind == HumanInputResponseKind.TIMEOUT.value:
-        if has_text or has_selection or has_approval or not _request_has_timeout(current):
+        if has_text or has_selection or has_approval or not _request_timeout_is_terminal(current):
             return None
         return HumanInputState.TIMED_OUT
     if response_kind == HumanInputResponseKind.TEXT.value:
@@ -283,8 +287,11 @@ def _event_context_matches_request(event: BaseEvent, current: HumanInputSnapshot
     return True
 
 
-def _request_has_timeout(current: HumanInputSnapshot) -> bool:
-    return type(current.request.get("timeout_seconds")) is int
+def _request_timeout_is_terminal(current: HumanInputSnapshot) -> bool:
+    return (
+        type(current.request.get("timeout_seconds")) is int
+        and current.request.get("timeout_action") != HumanInputTimeoutAction.STAY_WAITING.value
+    )
 
 
 def _request_options(current: HumanInputSnapshot) -> frozenset[str]:
