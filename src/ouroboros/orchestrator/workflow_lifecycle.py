@@ -252,6 +252,7 @@ def _run_lifecycle_segment(
                 if active_run:
                     latest_segment.append(event)
                     latest_segment_ambiguous = latest_segment_ambiguous or timestamp_ambiguous
+                    post_terminal_violation = True
                     continue
                 active_run = True
                 latest_segment = [event]

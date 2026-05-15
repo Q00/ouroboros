@@ -713,7 +713,7 @@ def test_next_runnable_refuses_post_terminal_events_before_later_restart() -> No
     assert next_runnable_node_ids(spec, events) == ()
 
 
-def test_next_runnable_ignores_stray_run_created_inside_active_run() -> None:
+def test_next_runnable_refuses_stray_run_created_inside_active_run() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
     events = (
@@ -735,7 +735,7 @@ def test_next_runnable_ignores_stray_run_created_inside_active_run() -> None:
         ),
     )
 
-    assert next_runnable_node_ids(spec, events) == ("node_b",)
+    assert next_runnable_node_ids(spec, events) == ()
 
 
 def test_next_runnable_ignores_historical_ambiguity_after_clean_restart() -> None:
