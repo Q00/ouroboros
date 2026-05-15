@@ -201,13 +201,14 @@ def _has_scheduling_event(events: Iterable[WorkflowLifecycleEvent]) -> bool:
 
 def _run_lifecycle_segment(
     events: Iterable[WorkflowLifecycleEvent],
-) -> tuple[WorkflowRunLifecycleState | None, tuple[WorkflowLifecycleEvent, ...], bool]:
+) -> tuple[WorkflowRunLifecycleState | None, tuple[WorkflowLifecycleEvent, ...], bool, bool]:
     active_run = False
     terminal_state: WorkflowRunLifecycleState | None = None
     terminal_allows_restart = False
     terminal_timestamp: datetime | None = None
     latest_segment: list[WorkflowLifecycleEvent] = []
     latest_segment_ambiguous = False
+    post_terminal_violation = False
     for timestamp_events in _timestamp_groups(events):
         active_run_at_timestamp = active_run
         timestamp_ambiguous = (
@@ -240,6 +241,7 @@ def _run_lifecycle_segment(
                     continue
                 latest_segment.append(event)
                 latest_segment_ambiguous = latest_segment_ambiguous or timestamp_ambiguous
+                post_terminal_violation = True
                 continue
             if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
                 if active_run:
@@ -262,10 +264,20 @@ def _run_lifecycle_segment(
                 terminal_timestamp = event.timestamp
                 active_run = False
     if terminal_state is not None:
-        return terminal_state, tuple(latest_segment), latest_segment_ambiguous
+        return (
+            terminal_state,
+            tuple(latest_segment),
+            latest_segment_ambiguous,
+            post_terminal_violation,
+        )
     if active_run:
-        return WorkflowRunLifecycleState.CREATED, tuple(latest_segment), latest_segment_ambiguous
-    return None, tuple(latest_segment), latest_segment_ambiguous
+        return (
+            WorkflowRunLifecycleState.CREATED,
+            tuple(latest_segment),
+            latest_segment_ambiguous,
+            post_terminal_violation,
+        )
+    return None, tuple(latest_segment), latest_segment_ambiguous, post_terminal_violation
 
 
 def _normalize_non_blank(name: str, value: str) -> str:
@@ -573,8 +585,13 @@ def next_runnable_node_ids(
     dispatch work.
     """
     event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
-    latest_run_state, latest_run_events, latest_run_ambiguous = _run_lifecycle_segment(event_list)
-    if latest_run_ambiguous:
+    (
+        latest_run_state,
+        latest_run_events,
+        latest_run_ambiguous,
+        post_terminal_violation,
+    ) = _run_lifecycle_segment(event_list)
+    if latest_run_ambiguous or post_terminal_violation:
         return ()
     if latest_run_state in {
         WorkflowRunLifecycleState.COMPLETED,
