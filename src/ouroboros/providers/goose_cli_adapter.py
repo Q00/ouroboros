@@ -155,6 +155,10 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
             )
         return None
 
+    def _update_last_content(self, last_content: str, event_content: str) -> str:
+        """Accumulate Goose stream chunks for completion fallback."""
+        return f"{last_content}{event_content}" if event_content else last_content
+
     def _build_output_schema(
         self,
         response_format: dict[str, object] | None,
@@ -201,24 +205,26 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
         """
         if isinstance(value, dict):
             event_type = value.get("type")
-            if event_type == "complete":
+            if event_type in {"complete", "init", "session", "session.started", "session.created"}:
                 return ""
             if event_type == "message" and isinstance(value.get("message"), dict):
                 return self._extract_text(value["message"])
             content = value.get("content")
+            if isinstance(content, str):
+                return content
             if isinstance(content, list):
                 parts: list[str] = []
                 for item in content:
                     if isinstance(item, dict):
                         if item.get("type") == "text" and isinstance(item.get("text"), str):
-                            parts.append(item["text"].strip())
+                            parts.append(item["text"])
                         else:
                             text = self._extract_text(item)
                             if text:
                                 parts.append(text)
-                    elif isinstance(item, str) and item.strip():
-                        parts.append(item.strip())
-                return "\n".join(part for part in parts if part)
+                    elif isinstance(item, str):
+                        parts.append(item)
+                return "".join(parts)
         return super()._extract_text(value)
 
     def _extract_session_id(self, stdout_lines: list[str]) -> str | None:

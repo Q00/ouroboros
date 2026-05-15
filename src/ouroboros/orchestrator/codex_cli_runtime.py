@@ -1166,6 +1166,15 @@ class CodexCliRuntime:
 
         return None
 
+    def _update_last_content(self, last_content: str, message: AgentMessage) -> str:
+        """Return the fallback final content after a streamed message.
+
+        Codex-style events normally carry complete assistant messages, so the
+        latest content remains the fallback.  Delta-oriented runtimes can
+        override this hook to accumulate chunks.
+        """
+        return message.content if message.content else last_content
+
     def _extract_text(self, value: object) -> str:
         """Extract text recursively from a nested JSON-like structure."""
         if isinstance(value, str):
@@ -1687,8 +1696,7 @@ class CodexCliRuntime:
                                 control_state=control_state,
                             )
                             message = replace(message, resume_handle=current_handle)
-                        if message.content:
-                            last_content = message.content
+                        last_content = self._update_last_content(last_content, message)
                         yield message
 
                     for message in self._convert_event(event, current_handle):
@@ -1700,8 +1708,7 @@ class CodexCliRuntime:
                                 control_state=control_state,
                             )
                             message = replace(message, resume_handle=current_handle)
-                        if message.content:
-                            last_content = message.content
+                        last_content = self._update_last_content(last_content, message)
                         if message.is_final:
                             yielded_final = True
                         yield message

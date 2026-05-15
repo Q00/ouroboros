@@ -765,6 +765,15 @@ class CodexCliLLMAdapter:
             shutdown_timeout=self._process_shutdown_timeout_seconds,
         )
 
+    def _update_last_content(self, last_content: str, event_content: str) -> str:
+        """Return the fallback completion content after a streamed event.
+
+        Codex-style events normally contain complete assistant messages, so the
+        latest content remains the fallback.  Delta-oriented adapters can
+        override this hook to accumulate chunks.
+        """
+        return event_content if event_content else last_content
+
     def _read_output_message(self, output_path: Path) -> str:
         """Read the output-last-message file if the backend wrote one."""
         try:
@@ -814,8 +823,7 @@ class CodexCliLLMAdapter:
                 continue
             self._emit_callback_for_event(event)
             event_content = self._extract_text(event.get("item") or event)
-            if event_content:
-                last_content = event_content
+            last_content = self._update_last_content(last_content, event_content)
 
         return stdout_lines, stderr_lines, session_id, last_content
 
@@ -1007,8 +1015,7 @@ class CodexCliLLMAdapter:
 
                 self._emit_callback_for_event(event)
                 event_content = self._extract_text(event.get("item") or event)
-                if event_content:
-                    last_content = event_content
+                last_content = self._update_last_content(last_content, event_content)
 
         stdout_task = asyncio.create_task(_read_stdout())
 

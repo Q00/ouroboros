@@ -196,6 +196,12 @@ class GooseCliRuntime(CodexCliRuntime):
         # as "claude_code" into child Goose processes.
         return env
 
+    def _update_last_content(self, last_content: str, message: AgentMessage) -> str:
+        """Accumulate Goose assistant chunks for final-message fallback."""
+        if not message.content or message.type not in {"assistant", "result"}:
+            return last_content
+        return f"{last_content}{message.content}"
+
     def _extract_event_session_id(self, event: Mapping[str, Any]) -> str | None:
         """Extract only Goose session identifiers from stream events.
 
@@ -258,16 +264,17 @@ class GooseCliRuntime(CodexCliRuntime):
         return {}
 
     def _extract_text(self, value: object) -> str:
-        text = super()._extract_text(value)
-        if text:
-            return text
         if isinstance(value, dict):
+            for key in ("text", "content"):
+                text_value = value.get(key)
+                if isinstance(text_value, str):
+                    return text_value
             for key in ("response", "result", "output", "data", "error"):
                 if key in value:
-                    text = super()._extract_text(value[key])
+                    text = self._extract_text(value[key])
                     if text:
                         return text
-        return ""
+        return super()._extract_text(value)
 
     def _convert_event(
         self,

@@ -100,6 +100,33 @@ async def test_goose_runtime_collects_stream_json_messages() -> None:
     assert messages[-1].content == "Done"
 
 
+@pytest.mark.asyncio
+async def test_goose_runtime_accumulates_stream_chunks_for_final_fallback() -> None:
+    stdout = [
+        json.dumps({"type": "session.started", "session_id": "session-1"}),
+        json.dumps({"type": "assistant.delta", "text": "Hel"}),
+        json.dumps({"type": "assistant.delta", "text": "lo"}),
+    ]
+    fake_process = _FakeProcess(stdout)
+
+    async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
+        return fake_process
+
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_maybe_dispatch_skill_intercept", return_value=None),
+    ):
+        result = await runtime.execute_task_to_result("say hello")
+
+    assert result.is_ok
+    assert result.value.final_message == "Hello"
+
+
 def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "goose")
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "goose")
