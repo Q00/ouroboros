@@ -63,6 +63,11 @@ If the `ouroboros_generate_seed` MCP tool is available (loaded via runtime tool 
 
 3. The tool extracts requirements from persisted interview state, calculates ambiguity score, and generates the Seed YAML.
 
+   **Seed generation response shapes**: Branch only after an actual Seed YAML artifact is available.
+   - If the response has `status: "delegated_to_subagent"` and `dispatch_mode: "plugin"`, keep the returned `session_id`, wait for the plugin-managed subagent result, then extract the Seed YAML from that result. Do not enter the QA loop using the delegation envelope as the artifact.
+   - If the response directly contains Seed YAML, extract that YAML directly.
+   - If neither shape yields Seed YAML, stop and ask the user to resume generation or provide the missing artifact; do not fabricate a seed just to satisfy the QA loop.
+
 4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
 
 **Advantages of MCP mode**: Automated ambiguity scoring (must be <= 0.2), structured extraction from persisted interview state, reproducible.
@@ -96,7 +101,7 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
 
 1. Establish the QA evaluator for this run:
    - **MCP QA mode**: Load the QA tool via the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros qa"` if not already loaded.
-   - **Fallback QA mode**: If MCP is unavailable, read `src/ouroboros/agents/qa-judge.md`, adopt that evaluator role, and produce the same usable verdict fields locally: `verdict` (`PASS`/`REVISE`/`FAIL`), numeric `score`, blocking issues, suggested revisions, concise rationale, and loop action. In this mode there is no MCP-owned `qa_session_id`; track iteration history in the audit block and local loop ledger instead.
+   - **Fallback QA mode**: If MCP is unavailable, read `src/ouroboros/agents/qa-judge.md`, adopt that evaluator role, and return its exact JSON schema: lowercase `verdict` (`pass`/`revise`/`fail`), numeric `score`, `dimensions`, `differences`, `suggestions`, and `reasoning`. In this mode there is no MCP-owned `qa_session_id`; track iteration history in the audit block and local loop ledger instead.
 
 2. Obtain a QA verdict using the available mode:
 
@@ -118,7 +123,7 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
    **QA response shapes**: Branch only after a usable verdict is available.
    - In MCP QA mode, if the response has `status: "delegated_to_subagent"` and no verdict payload, keep the returned `qa_session_id`, wait for the plugin-managed subagent result, then parse that result as the QA verdict. Do not treat the delegation envelope itself as PASS/REVISE/FAIL.
    - In MCP QA mode, if the response already includes a scored verdict, parse that inline verdict directly.
-   - In fallback QA mode, parse the verdict you produced under the QA Judge role as the usable verdict.
+   - In fallback QA mode, parse the exact QA Judge JSON. Normalize `verdict` to uppercase only for the branch labels below (`pass`→PASS, `revise`→REVISE, `fail`→FAIL). Treat `differences` as blocking/revision issues and `suggestions` as proposed fixes; do not add non-schema fields such as `loop_action`.
    - In all modes, append the parsed verdict plus applied/rejected revision decisions to `iteration_history` before the next QA pass.
 
 3. Branch on verdict:
