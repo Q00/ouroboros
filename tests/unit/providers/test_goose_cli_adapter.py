@@ -100,6 +100,7 @@ class TestGooseCliLLMAdapter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "goose")
+        monkeypatch.setenv("OUROBOROS_RUNTIME", "goose")
         adapter = GooseCliLLMAdapter(
             cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="approve"
         )
@@ -110,6 +111,7 @@ class TestGooseCliLLMAdapter:
         assert env["GOOSE_WORKING_DIR"] == "/tmp/project"
         assert env["_OUROBOROS_NESTED"] == "1"
         assert "OUROBOROS_LLM_BACKEND" not in env
+        assert "OUROBOROS_RUNTIME" not in env
 
     @pytest.mark.asyncio
     async def test_complete_success_from_goose_stream_json(self) -> None:

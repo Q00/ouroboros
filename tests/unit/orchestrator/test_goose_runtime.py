@@ -127,9 +127,42 @@ async def test_goose_runtime_accumulates_stream_chunks_for_final_fallback() -> N
     assert result.value.final_message == "Hello"
 
 
+@pytest.mark.asyncio
+async def test_goose_runtime_keeps_tool_output_out_of_final_fallback() -> None:
+    stdout = [
+        json.dumps({"type": "session.started", "session_id": "session-1"}),
+        json.dumps({"type": "assistant.delta", "text": "Answer"}),
+        json.dumps({"type": "tool.output", "name": "Bash", "output": "raw shell output"}),
+        json.dumps({"type": "complete"}),
+    ]
+    fake_process = _FakeProcess(stdout)
+
+    async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
+        return fake_process
+
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        patch.object(runtime, "_maybe_dispatch_skill_intercept", return_value=None),
+    ):
+        result = await runtime.execute_task_to_result("run tool then answer")
+
+    assert result.is_ok
+    assert result.value.final_message == "Answer"
+    assert any(
+        message.type == "tool" and message.content == "raw shell output"
+        for message in result.value.messages
+    )
+
+
 def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "goose")
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "goose")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "goose")
     monkeypatch.setenv("GOOSE_PROVIDER", "anthropic")
     runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="approve")
 
@@ -141,6 +174,7 @@ def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> N
     assert env["GOOSE_PROVIDER"] == "anthropic"
     assert "OUROBOROS_AGENT_RUNTIME" not in env
     assert "OUROBOROS_LLM_BACKEND" not in env
+    assert "OUROBOROS_RUNTIME" not in env
 
 
 def test_goose_child_env_does_not_map_ouroboros_llm_backend_to_provider(

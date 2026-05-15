@@ -182,6 +182,7 @@ class GooseCliRuntime(CodexCliRuntime):
         env = dict(os.environ)
         env.pop("OUROBOROS_AGENT_RUNTIME", None)
         env.pop("OUROBOROS_LLM_BACKEND", None)
+        env.pop("OUROBOROS_RUNTIME", None)
         env.pop("OUROBOROS_MCP_BRIDGE", None)
         env.pop("OUROBOROS_MCP_BRIDGE_CONFIG", None)
         env["_OUROBOROS_NESTED"] = "1"
@@ -198,7 +199,11 @@ class GooseCliRuntime(CodexCliRuntime):
 
     def _update_last_content(self, last_content: str, message: AgentMessage) -> str:
         """Accumulate Goose assistant chunks for final-message fallback."""
-        if not message.content or message.type not in {"assistant", "result"}:
+        if (
+            not message.content
+            or message.type not in {"assistant", "result"}
+            or message.tool_name is not None
+        ):
             return last_content
         return f"{last_content}{message.content}"
 
@@ -265,6 +270,15 @@ class GooseCliRuntime(CodexCliRuntime):
 
     def _extract_text(self, value: object) -> str:
         if isinstance(value, dict):
+            event_type = value.get("type")
+            metadata_only_event_types = {"complete", "completed", "done"}
+            if event_type in {"init", "session", "session.started", "session.created"}:
+                return ""
+            if event_type in metadata_only_event_types and not any(
+                isinstance(value.get(key), str) and value.get(key)
+                for key in ("text", "content", "response", "result", "output", "data", "error")
+            ):
+                return ""
             for key in ("text", "content"):
                 text_value = value.get(key)
                 if isinstance(text_value, str):
@@ -300,11 +314,23 @@ class GooseCliRuntime(CodexCliRuntime):
                 )
             ]
 
-        if "tool" in event_type and not any(
-            marker in event_type for marker in ("result", "output", "completed", "finish")
-        ):
+        if "tool" in event_type:
             tool_name = self._extract_tool_name_from_event(event) or "tool"
             tool_input = self._extract_tool_input_from_event(event)
+            if any(marker in event_type for marker in ("result", "output", "completed", "finish")):
+                content = self._extract_text(event)
+                if not content:
+                    return []
+                return [
+                    AgentMessage(
+                        type="tool",
+                        content=content,
+                        tool_name=tool_name,
+                        data={"subtype": "tool_result", "runtime_event_type": event_type},
+                        resume_handle=event_handle,
+                    )
+                ]
+
             detail = ""
             if tool_name.lower() in {"bash", "shell", "developer.shell"}:
                 command = tool_input.get("command") or tool_input.get("cmd")

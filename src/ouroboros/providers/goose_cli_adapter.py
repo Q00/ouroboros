@@ -269,6 +269,7 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
         for key in (
             "OUROBOROS_AGENT_RUNTIME",
             "OUROBOROS_LLM_BACKEND",
+            "OUROBOROS_RUNTIME",
             "OUROBOROS_MCP_BRIDGE",
             "OUROBOROS_MCP_BRIDGE_CONFIG",
         ):
