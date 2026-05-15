@@ -552,11 +552,18 @@ def validate_workflow_lifecycle_conformance(
     sorted_events = sorted(event_list, key=_event_sort_key)
     for event in sorted_events:
         if terminal_seen:
+            if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+                terminal_seen = False
+                seen_run_created = True
+                continue
             issues.append(
                 WorkflowConformanceIssue(
                     severity="error",
                     code="event_after_terminal_run",
-                    message="Workflow lifecycle event appears after a terminal run event.",
+                    message=(
+                        "Workflow lifecycle event appears after a terminal run event "
+                        "without a new workflow.run.created boundary."
+                    ),
                     event_type=event.event_type,
                     node_id=event.node_id,
                     edge_id=event.edge_id,
