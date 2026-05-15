@@ -89,12 +89,15 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputRequest.REQUESTED_EVENT_TYPE:
+            current = snapshots.get(request_id)
+            if current is not None and current.is_terminal:
+                continue
             snapshot = _snapshot_from_requested(event, request_id)
             if request_id not in snapshots:
                 order.append(request_id)
-            # A request event is the authoritative initial row. Replayed
-            # duplicate request ids keep the latest request payload only while
-            # preserving the original insertion order.
+            # A pre-terminal duplicate request refreshes the request payload
+            # while preserving insertion order. Once terminal, first terminal
+            # state wins so replay cannot reopen an already-resolved wait.
             snapshots[request_id] = snapshot
             continue
 

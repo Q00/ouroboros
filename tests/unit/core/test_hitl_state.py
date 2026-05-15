@@ -132,6 +132,31 @@ def test_timeout_and_cancel_events_project_terminal_reason() -> None:
     assert cancelled.actor == "local-user"
 
 
+def test_duplicate_request_after_terminal_does_not_reopen_wait() -> None:
+    request = _request()
+    requested = _with_time(create_hitl_requested_event(request), 0, "evt_requested")
+    answered = _with_time(
+        create_hitl_answered_event(
+            request,
+            HumanInputResponse(
+                request_id="hitl-1",
+                actor="local-user",
+                response_kind=HumanInputResponseKind.APPROVAL,
+                approval_decision=True,
+            ),
+        ),
+        1,
+        "evt_answered",
+    )
+    duplicate_requested = _with_time(create_hitl_requested_event(request), 2, "evt_requested_again")
+
+    snapshot = project_human_input_state([requested, answered, duplicate_requested])[0]
+
+    assert snapshot.state is HumanInputState.ANSWERED
+    assert snapshot.terminal_event_id == "evt_answered"
+    assert pending_human_input_requests([requested, answered, duplicate_requested]) == ()
+
+
 def test_ignores_orphan_and_late_terminal_events() -> None:
     request = _request()
     requested = _with_time(create_hitl_requested_event(request), 0, "evt_requested")
