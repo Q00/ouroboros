@@ -683,6 +683,16 @@ def validate_workflow_lifecycle_conformance(
                 edge_id=error.edge_id,
             )
         )
+    for warning in validation.warnings:
+        issues.append(
+            WorkflowConformanceIssue(
+                severity="warning",
+                code="invalid_spec",
+                message=warning.message,
+                node_id=warning.node_id,
+                edge_id=warning.edge_id,
+            )
+        )
 
     node_ids = {node.node_id for node in spec.nodes}
     edge_ids = {edge.edge_id for edge in spec.edges}

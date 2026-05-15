@@ -109,6 +109,36 @@ def test_conformance_rejects_unknown_node_and_edge_ids() -> None:
     assert [issue.code for issue in report.errors] == ["unknown_node_id", "unknown_edge_id"]
 
 
+def test_conformance_preserves_spec_validation_warnings() -> None:
+    spec = WorkflowSpec(
+        spec_id="wfspec_conformance_with_warning",
+        source=SourceKind.SYNTHETIC,
+        nodes=(
+            _task("node_a"),
+            _task("isolated"),
+            WorkflowNode(node_id="end", kind=NodeKind.TERMINAL, owner=NodeOwner.HARNESS),
+        ),
+        edges=(
+            WorkflowEdge(
+                edge_id="edge_a_end",
+                source="node_a",
+                target="end",
+                kind=EdgeKind.TERMINAL,
+            ),
+        ),
+    )
+
+    report = validate_workflow_lifecycle_conformance(spec, ())
+
+    assert report.ok is False
+    assert [(issue.code, issue.node_id) for issue in report.errors] == [
+        ("invalid_spec", "isolated")
+    ]
+    assert [(issue.code, issue.node_id) for issue in report.warnings] == [
+        ("invalid_spec", "isolated")
+    ]
+
+
 def test_conformance_allows_new_run_created_after_terminal_boundary() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
