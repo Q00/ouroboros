@@ -219,6 +219,32 @@ def test_resolve_completion_profile_preserves_role_request_sampling_settings() -
     assert resolved.config.top_p == 0.9
 
 
+def test_resolve_completion_profile_uses_goose_cli_provider_alias() -> None:
+    """Goose profile blocks can use the public goose_cli backend alias."""
+    config = OuroborosConfig(
+        llm_profiles={
+            "fast": {
+                "model": "generic-model",
+                "providers": {
+                    "goose_cli": {
+                        "model": "goose-model",
+                        "max_turns": 3,
+                    },
+                },
+            },
+        },
+        llm_role_profiles={"qa": "fast"},
+    )
+    request = CompletionConfig(model="default", role="qa")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(request, backend="goose")
+
+    assert resolved.profile_name == "fast"
+    assert resolved.config.model == "goose-model"
+    assert resolved.config.max_turns == 3
+
+
 def test_resolve_completion_profile_applies_explicit_profile_sampling_settings() -> None:
     """Explicit profile selection opts into the profile's full tuning envelope."""
     config = OuroborosConfig(

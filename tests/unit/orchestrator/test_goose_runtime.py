@@ -101,6 +101,56 @@ async def test_goose_runtime_collects_stream_json_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_goose_runtime_preserves_generated_session_name_without_name_echo() -> None:
+    stdout = [
+        json.dumps({"type": "session.started", "session_id": "opaque-session-id"}),
+        json.dumps({"type": "completed", "text": "Done"}),
+    ]
+    fake_process = _FakeProcess(stdout)
+
+    async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
+        return fake_process
+
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ) as mock_exec,
+        patch.object(runtime, "_maybe_dispatch_skill_intercept", return_value=None),
+    ):
+        messages = [m async for m in runtime.execute_task("do it")]
+
+    command = mock_exec.call_args.args
+    name_index = command.index("-n")
+    session_name = command[name_index + 1]
+
+    assert session_name.startswith("ouroboros-")
+    assert "--resume" not in command
+    assert messages[-1].resume_handle is not None
+    assert messages[-1].resume_handle.native_session_id == session_name
+
+    resumed_process = _FakeProcess([json.dumps({"type": "completed", "text": "Again"})])
+
+    async def fake_resume_exec(*args: object, **kwargs: object) -> _FakeProcess:
+        return resumed_process
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_resume_exec,
+        ) as resume_exec,
+        patch.object(runtime, "_maybe_dispatch_skill_intercept", return_value=None),
+    ):
+        await runtime.execute_task_to_result("again", resume_handle=messages[-1].resume_handle)
+
+    resumed_command = resume_exec.call_args.args
+    assert "--resume" in resumed_command
+    assert resumed_command[resumed_command.index("-n") + 1] == session_name
+
+
+@pytest.mark.asyncio
 async def test_goose_runtime_accumulates_stream_chunks_for_final_fallback() -> None:
     stdout = [
         json.dumps({"type": "session.started", "session": {"name": "session-1"}}),

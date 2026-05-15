@@ -11,6 +11,7 @@ so unknown events are ignored or surfaced as text rather than failing the run.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 import os
 from pathlib import Path
 import shlex
@@ -24,6 +25,9 @@ from ouroboros.orchestrator.adapter import AgentMessage, RuntimeCapabilities, Ru
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 
 log = get_logger(__name__)
+
+
+_GOOSE_OWNED_SESSION_NAME_METADATA_KEY = "goose_owned_session_name"
 
 
 def _has_text_payload(value: dict[str, Any]) -> bool:
@@ -155,9 +159,13 @@ class GooseCliRuntime(CodexCliRuntime):
         Goose does not have an equivalent flag; the base completion path falls
         back to the last streamed assistant/result content.
         """
-        del output_last_message_path, prompt, runtime_handle
+        del output_last_message_path, prompt
 
-        session_name = resume_session_id or f"ouroboros-{uuid4().hex[:12]}"
+        session_name = (
+            resume_session_id
+            or (runtime_handle.native_session_id if runtime_handle is not None else None)
+            or f"ouroboros-{uuid4().hex[:12]}"
+        )
         command = [
             self._cli_path,
             "run",
@@ -179,11 +187,41 @@ class GooseCliRuntime(CodexCliRuntime):
 
         return command
 
+    def _build_runtime_handle(
+        self,
+        session_id: str | None,
+        current_handle: RuntimeHandle | None = None,
+    ) -> RuntimeHandle | None:
+        """Build a handle that preserves Ouroboros's generated Goose session name.
+
+        Goose resume uses the stable ``-n`` session name.  Some stream events
+        only echo opaque ``session_id`` values, so create and persist the name
+        before subprocess startup instead of depending on Goose to echo it.
+        """
+        if session_id is None and current_handle is None:
+            session_id = f"ouroboros-{uuid4().hex[:12]}"
+
+        handle = super()._build_runtime_handle(session_id, current_handle)
+        if handle is None:
+            return None
+
+        if current_handle is None:
+            metadata = dict(handle.metadata)
+            metadata.setdefault(_GOOSE_OWNED_SESSION_NAME_METADATA_KEY, "true")
+            return replace(handle, metadata=metadata)
+
+        return handle
+
     def _resolve_resume_session_id(
         self,
         current_handle: RuntimeHandle | None,
     ) -> str | None:
         if current_handle is None:
+            return None
+        if (
+            current_handle.metadata.get(_GOOSE_OWNED_SESSION_NAME_METADATA_KEY) == "true"
+            and current_handle.runtime_event_type is None
+        ):
             return None
         return current_handle.native_session_id or current_handle.conversation_id
 
