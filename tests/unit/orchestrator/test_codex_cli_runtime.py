@@ -685,6 +685,37 @@ class TestCodexCliRuntime:
         assert message.data["output"] == "1 passed in 0.01s"
         assert message.data["exit_code"] == 0
 
+    def test_convert_command_execution_preserves_nested_output_metadata(self) -> None:
+        """Codex command result fields may arrive under nested output/result objects."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "/bin/zsh -lc 'python -m pytest test_hello.py'",
+                    "output": {
+                        "stdout": "1 passed in 0.01s",
+                        "exit_code": 0,
+                    },
+                    "result": {"status": "completed", "success": True},
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        message = messages[0]
+        assert message.tool_name == "Bash"
+        assert message.data["tool_input"]["command"] == (
+            "/bin/zsh -lc 'python -m pytest test_hello.py'"
+        )
+        assert message.data["stdout"] == "1 passed in 0.01s"
+        assert message.data["exit_code"] == 0
+        assert message.data["status"] == "completed"
+        assert message.data["subtype"] == "success"
+
     def test_convert_file_change_event_emits_each_changed_file(self) -> None:
         """Multi-file Codex changes should create one proof message per path."""
         runtime = CodexCliRuntime(cli_path="codex")

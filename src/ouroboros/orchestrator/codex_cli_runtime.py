@@ -1279,18 +1279,37 @@ class CodexCliRuntime:
     def _extract_command_metadata(self, item: dict[str, Any]) -> dict[str, Any]:
         """Extract command result fields that can support verifier evidence."""
         data: dict[str, Any] = {}
-        for key in ("output", "stdout", "stderr", "result_preview", "status"):
-            value = item.get(key)
-            if isinstance(value, str) and value.strip():
-                data[key] = value.strip()
-        for key in ("exit_code", "exitCode"):
-            value = item.get(key)
-            if isinstance(value, int):
-                data["exit_code"] = value
-                break
-        if item.get("success") is True:
-            data.setdefault("subtype", "success")
+        self._merge_command_metadata(data, item)
+        for container_key in ("output", "result", "metadata", "data"):
+            nested = item.get(container_key)
+            if isinstance(nested, dict):
+                self._merge_command_metadata(data, nested)
         return data
+
+    def _merge_command_metadata(self, data: dict[str, Any], source: dict[str, Any]) -> None:
+        """Merge known command-result fields from one Codex event object."""
+        text_key_map = {
+            "output": "output",
+            "stdout": "stdout",
+            "stderr": "stderr",
+            "result_preview": "result_preview",
+            "resultPreview": "result_preview",
+            "text": "output",
+            "status": "status",
+        }
+        for key, target_key in text_key_map.items():
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                data.setdefault(target_key, value.strip())
+        for key in ("exit_code", "exitCode", "returncode", "return_code"):
+            value = source.get(key)
+            if isinstance(value, int):
+                data.setdefault("exit_code", value)
+                break
+        if source.get("success") is True:
+            data.setdefault("subtype", "success")
+        if source.get("ok") is True:
+            data.setdefault("subtype", "success")
 
     def _build_tool_message(
         self,
