@@ -61,14 +61,22 @@ def build_run_snapshot(
         step.step_id for step in step_tuple if step.ended_at is not None and step.ok is None
     )
 
+    missing_linked_verdict = run.verdict_id is not None and verdict is None
     status = _derive_status(
         run=run,
         verdict=verdict,
+        missing_linked_verdict=missing_linked_verdict,
         pending_step_ids=pending_step_ids,
         failed_step_ids=failed_step_ids,
         unknown_step_ids=unknown_step_ids,
     )
-    blockers = _resume_blockers(status, pending_step_ids, failed_step_ids, unknown_step_ids)
+    blockers = _resume_blockers(
+        status,
+        pending_step_ids,
+        failed_step_ids,
+        unknown_step_ids,
+        missing_linked_verdict=missing_linked_verdict,
+    )
     safe_resume = status is RunSnapshotStatus.RUNNING and bool(pending_step_ids) and not blockers
 
     metadata = {
@@ -139,6 +147,7 @@ def _derive_status(
     *,
     run: RunRecord,
     verdict: VerdictRecord | None,
+    missing_linked_verdict: bool,
     pending_step_ids: tuple[str, ...],
     failed_step_ids: tuple[str, ...],
     unknown_step_ids: tuple[str, ...],
@@ -153,14 +162,18 @@ def _derive_status(
         if verdict.outcome is VerdictOutcome.ESCALATE_HUMAN:
             return RunSnapshotStatus.WAITING
         return RunSnapshotStatus.UNKNOWN
+    if missing_linked_verdict:
+        return RunSnapshotStatus.UNKNOWN
     if failed_step_ids:
         return RunSnapshotStatus.FAILED
+    if run.ended_at is not None:
+        if unknown_step_ids:
+            return RunSnapshotStatus.UNKNOWN
+        return RunSnapshotStatus.COMPLETED
     if pending_step_ids:
         return RunSnapshotStatus.RUNNING
     if unknown_step_ids:
         return RunSnapshotStatus.UNKNOWN
-    if run.ended_at is not None:
-        return RunSnapshotStatus.COMPLETED
     return RunSnapshotStatus.RUNNING
 
 
@@ -169,6 +182,8 @@ def _resume_blockers(
     pending_step_ids: tuple[str, ...],
     failed_step_ids: tuple[str, ...],
     unknown_step_ids: tuple[str, ...],
+    *,
+    missing_linked_verdict: bool,
 ) -> tuple[str, ...]:
     blockers: list[str] = []
     if status in {
@@ -181,6 +196,8 @@ def _resume_blockers(
         blockers.append("human_input_required")
     if status is RunSnapshotStatus.UNKNOWN:
         blockers.append("status_unknown")
+    if missing_linked_verdict:
+        blockers.append("linked_verdict_missing")
     if failed_step_ids:
         blockers.append("failed_steps_present")
     if unknown_step_ids:

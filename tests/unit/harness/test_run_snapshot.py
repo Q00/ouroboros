@@ -182,3 +182,29 @@ def test_rejects_foreign_or_ac_scoped_verdicts() -> None:
     )
     with pytest.raises(ValueError, match="run-scoped"):
         build_run_snapshot(run=_run(), verdict=ac_verdict)
+
+
+def test_ended_run_with_stale_pending_step_is_not_safe_resume() -> None:
+    snapshot = build_run_snapshot(
+        run=_run(ended=True),
+        stages=[_stage()],
+        steps=[_step("step_stale_pending", ended=False, ok=None)],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.COMPLETED
+    assert snapshot.safe_resume is False
+    assert snapshot.pending_step_ids == ("step_stale_pending",)
+    assert snapshot.resume_blockers == ("terminal_status:completed",)
+
+
+def test_missing_linked_run_verdict_blocks_resume_conservatively() -> None:
+    snapshot = build_run_snapshot(
+        run=_run(verdict_id="verdict_missing"),
+        stages=[_stage()],
+        steps=[_step("step_pending", ended=False, ok=None)],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.verdict_id == "verdict_missing"
+    assert snapshot.resume_blockers == ("status_unknown", "linked_verdict_missing")
