@@ -226,34 +226,26 @@ class GooseCliRuntime(CodexCliRuntime):
         session-specific keys at the top level and within explicit ``session``
         objects.
         """
+        event_type = self._extract_event_type(event)
         session = event.get("session")
         if isinstance(session, Mapping):
             # ``goose run --resume`` resumes by session name (the ``-n``
             # value Ouroboros generated), not by an opaque event/session id.
-            # Prefer name even when the event also exposes top-level ids.
+            # Never persist opaque ids as RuntimeHandle.native_session_id.
             for key in ("name", "session_name", "sessionName"):
                 value = session.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
 
-        for key in (
-            "session_name",
-            "sessionName",
-            "session_id",
-            "sessionId",
-            "native_session_id",
-            "conversation_id",
-            "conversationId",
-        ):
+        for key in ("session_name", "sessionName"):
             value = event.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
 
-        if isinstance(session, Mapping):
-            for key in ("session_id", "sessionId", "id"):
-                value = session.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+        if event_type in {"session.created", "session.started", "session", "start", "started"}:
+            value = event.get("name")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
         return None
 
     def _extract_event_type(self, event: Mapping[str, Any]) -> str:
@@ -334,9 +326,16 @@ class GooseCliRuntime(CodexCliRuntime):
 
         if any(marker in event_type for marker in ("error", "failed", "failure")):
             content = self._extract_text(event) or f"{self._display_name} reported an error"
+            message_type = (
+                "assistant"
+                if event_type.startswith("tool.")
+                else "result"
+                if event_type.endswith(("failed", "failure"))
+                else "assistant"
+            )
             return [
                 AgentMessage(
-                    type="result" if event_type.endswith(("failed", "failure")) else "assistant",
+                    type=message_type,
                     content=content,
                     data={"subtype": "error", "error_type": "GooseRuntimeError"},
                     resume_handle=event_handle,

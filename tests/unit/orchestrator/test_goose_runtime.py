@@ -70,7 +70,7 @@ def test_goose_command_uses_run_stream_json_and_stdin() -> None:
 @pytest.mark.asyncio
 async def test_goose_runtime_collects_stream_json_messages() -> None:
     stdout = [
-        json.dumps({"type": "session.started", "session_id": "session-1"}),
+        json.dumps({"type": "session.started", "session": {"name": "session-1"}}),
         json.dumps({"type": "assistant.message", "text": "Working"}),
         json.dumps({"type": "tool.call", "tool_name": "Bash", "input": {"command": "echo hi"}}),
         json.dumps({"type": "completed", "text": "Done"}),
@@ -103,7 +103,7 @@ async def test_goose_runtime_collects_stream_json_messages() -> None:
 @pytest.mark.asyncio
 async def test_goose_runtime_accumulates_stream_chunks_for_final_fallback() -> None:
     stdout = [
-        json.dumps({"type": "session.started", "session_id": "session-1"}),
+        json.dumps({"type": "session.started", "session": {"name": "session-1"}}),
         json.dumps({"type": "assistant.delta", "text": "Hel"}),
         json.dumps({"type": "assistant.delta", "text": "lo"}),
     ]
@@ -130,7 +130,7 @@ async def test_goose_runtime_accumulates_stream_chunks_for_final_fallback() -> N
 @pytest.mark.asyncio
 async def test_goose_runtime_keeps_tool_output_out_of_final_fallback() -> None:
     stdout = [
-        json.dumps({"type": "session.started", "session_id": "session-1"}),
+        json.dumps({"type": "session.started", "session": {"name": "session-1"}}),
         json.dumps({"type": "assistant.delta", "text": "Answer"}),
         json.dumps({"type": "tool.output", "name": "Bash", "output": "raw shell output"}),
         json.dumps({"type": "complete"}),
@@ -162,7 +162,7 @@ async def test_goose_runtime_keeps_tool_output_out_of_final_fallback() -> None:
 @pytest.mark.asyncio
 async def test_goose_runtime_preserves_nested_completion_payload() -> None:
     stdout = [
-        json.dumps({"type": "session.started", "session_id": "session-1"}),
+        json.dumps({"type": "session.started", "session": {"name": "session-1"}}),
         json.dumps({"type": "completed", "result": {"text": "Done"}}),
     ]
     fake_process = _FakeProcess(stdout)
@@ -191,7 +191,7 @@ def test_goose_runtime_classifies_tool_failed_as_error_result() -> None:
     messages = runtime._convert_event({"type": "tool.failed", "error": "permission denied"}, None)
 
     assert len(messages) == 1
-    assert messages[0].is_final
+    assert messages[0].type == "assistant"
     assert messages[0].is_error
     assert messages[0].content == "permission denied"
 
@@ -232,12 +232,11 @@ def test_goose_session_id_extraction_ignores_generic_tool_and_message_ids() -> N
     runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
 
     assert (
-        runtime._extract_event_session_id({"type": "session.started", "session_id": "sess-1"})
+        runtime._extract_event_session_id({"type": "session.started", "session_name": "sess-1"})
         == "sess-1"
     )
     assert (
-        runtime._extract_event_session_id({"type": "session.started", "session": {"id": "sess-2"}})
-        == "sess-2"
+        runtime._extract_event_session_id({"type": "session.started", "name": "sess-2"}) == "sess-2"
     )
     assert (
         runtime._extract_event_session_id(
@@ -254,6 +253,12 @@ def test_goose_session_id_extraction_ignores_generic_tool_and_message_ids() -> N
             }
         )
         == "stable-name"
+    )
+    assert (
+        runtime._extract_event_session_id(
+            {"type": "session.started", "session_id": "opaque-top-level-id"}
+        )
+        is None
     )
     assert runtime._extract_event_session_id({"type": "tool.call", "name": "Bash"}) is None
     assert runtime._extract_event_session_id({"type": "message", "id": "msg-1"}) is None
