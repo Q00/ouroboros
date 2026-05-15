@@ -996,18 +996,26 @@ def get_goose_cli_path() -> str | None:
         2. config.yaml orchestrator.goose_cli_path
         3. None (resolve from PATH at runtime)
 
+    Stale env var / config values that don't point to an executable are
+    treated as missing so callers can fall back to PATH discovery instead
+    of persisting an unusable path.
+
     Returns:
         Path to Goose CLI binary or None.
     """
     env_path = os.environ.get("OUROBOROS_GOOSE_CLI_PATH", "").strip()
     if env_path:
-        return str(Path(env_path).expanduser())
+        resolved = str(Path(env_path).expanduser())
+        if shutil.which(resolved):
+            return resolved
 
     try:
         config = load_config()
         goose_path = getattr(config.orchestrator, "goose_cli_path", None)
         if goose_path:
-            return goose_path
+            resolved = str(Path(goose_path).expanduser())
+            if shutil.which(resolved):
+                return resolved
     except ConfigError:
         pass
 

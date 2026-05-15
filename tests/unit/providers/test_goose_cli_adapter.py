@@ -255,6 +255,7 @@ class TestGooseCliLLMAdapter:
         monkeypatch.setenv("OUROBOROS_GOOSE_CLI_PATH", "/tmp/goose")
         monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
 
-        adapter = GooseCliLLMAdapter()
+        with patch("ouroboros.config.loader.shutil.which", return_value="/tmp/goose"):
+            adapter = GooseCliLLMAdapter()
 
         assert adapter._cli_path == "/tmp/goose"
