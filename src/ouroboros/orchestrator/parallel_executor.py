@@ -3742,16 +3742,32 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         "sibling-status section above."
                     )
                 else:
-                    other_list = "Sibling tasks in progress:\n" + "\n".join(
+                    sibling_heading = (
+                        "Sibling/future ACs that are OUT OF SCOPE for this dispatch:"
+                        if self._fat_harness_mode and self._execution_profile is not None
+                        else "Sibling tasks in progress:"
+                    )
+                    other_list = sibling_heading + "\n" + "\n".join(
                         f"- {ac[:80]}" for ac in other_acs
                     )
-                parallel_section = (
-                    "\n## Parallel Execution Notice\n"
-                    "Other agents are working on sibling tasks concurrently. "
-                    "Avoid modifying files that other agents are likely editing. "
-                    "Focus on files directly related to YOUR task.\n\n"
-                    f"{other_list}\n"
-                )
+                if self._fat_harness_mode and self._execution_profile is not None:
+                    parallel_section = (
+                        "\n## Current AC Scope Boundary\n"
+                        "Sibling/future ACs are listed only to define work that is "
+                        "outside the current dispatch. Do not satisfy those criteria "
+                        "now, and do not pre-create their files, tests, docs, or "
+                        "evidence. Avoid modifying files that sibling/future ACs are "
+                        "likely to own unless the current AC explicitly requires it.\n\n"
+                        f"{other_list}\n"
+                    )
+                else:
+                    parallel_section = (
+                        "\n## Parallel Execution Notice\n"
+                        "Other agents are working on sibling tasks concurrently. "
+                        "Avoid modifying files that other agents are likely editing. "
+                        "Focus on files directly related to YOUR task.\n\n"
+                        f"{other_list}\n"
+                    )
 
         # Scan the requested runtime workspace so prompts stay aligned with the actual task cwd.
         import os
@@ -3768,6 +3784,14 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         if self._fat_harness_mode and self._execution_profile is not None:
             required_fields = ", ".join(self._execution_profile.evidence_schema.required)
             completion_instruction = (
+                "## Current AC Scope Contract\n"
+                "You are responsible only for the current acceptance criterion in "
+                "this dispatch. Do not implement, test, document, or pre-create work "
+                "that belongs only to sibling or future ACs. If another AC mentions "
+                "related files, future functions, tests, or docs, treat that work as "
+                "out of scope unless the current AC explicitly requires it.\n"
+                "Your final evidence JSON must cite only files, commands, and tests "
+                "directly changed or run for this current AC in this runtime session.\n\n"
                 "Use the available tools to accomplish this task. Report progress through "
                 "tool-visible work, not a prose-only completion claim.\n"
                 "When complete, emit exactly ONE fenced JSON evidence record as the "

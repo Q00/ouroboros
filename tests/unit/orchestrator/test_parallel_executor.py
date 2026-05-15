@@ -1366,7 +1366,84 @@ class TestParallelACExecutor:
         assert "files_touched, commands_run, tests_passed" in runtime.last_prompt
         assert "do not emit a generic command_result wrapper" in runtime.last_prompt
         assert "Do not prefix it with [TASK_COMPLETE]" in runtime.last_prompt
+        assert "You are responsible only for the current acceptance criterion" in (
+            runtime.last_prompt
+        )
+        assert "Do not implement, test, document, or pre-create work" in runtime.last_prompt
+        assert "sibling or future ACs" in runtime.last_prompt
+        assert "current AC in this runtime session" in runtime.last_prompt
         assert "explicitly state: [TASK_COMPLETE]" not in runtime.last_prompt
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_sibling_context_marks_siblings_out_of_scope(self) -> None:
+        """Fat-harness sibling context must be a boundary, not an invitation."""
+        event_store, _ = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "```json\n"
+            '{"files_touched":["string_utils.py","test_slugify.py"],'
+            '"commands_run":["python -m pytest test_slugify.py"],'
+            '"tests_passed":["python -m pytest test_slugify.py"]}'
+            "\n```",
+            native_session_id="opencode-session-scope-boundary",
+            support_messages=(
+                AgentMessage(
+                    type="tool",
+                    content="Write string_utils.py",
+                    tool_name="Write",
+                    data={"tool_input": {"file_path": "string_utils.py"}},
+                ),
+                AgentMessage(
+                    type="tool",
+                    content="Write test_slugify.py",
+                    tool_name="Write",
+                    data={"tool_input": {"file_path": "test_slugify.py"}},
+                ),
+                AgentMessage(
+                    type="tool",
+                    content="Bash: python -m pytest test_slugify.py",
+                    tool_name="Bash",
+                    data={"tool_input": {"command": "python -m pytest test_slugify.py"}},
+                ),
+                AgentMessage(
+                    type="result",
+                    content="test_slugify.py passed",
+                    data={"subtype": "success"},
+                ),
+            ),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create string_utils.py with slugify(text) and test_slugify.py.",
+            session_id="orch_123",
+            tools=["Read", "Write", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+            sibling_acs=[
+                (0, "Create string_utils.py with slugify(text) and test_slugify.py."),
+                (1, "Add truncate(text, max_length) and test_truncate.py."),
+                (2, "Document slugify and truncate usage in README.md."),
+            ],
+        )
+
+        assert result.success is True
+        assert runtime.last_prompt is not None
+        assert "## Current AC Scope Boundary" in runtime.last_prompt
+        assert "outside the current dispatch" in runtime.last_prompt
+        assert "Do not satisfy those criteria now" in runtime.last_prompt
+        assert "do not pre-create their files, tests, docs, or evidence" in runtime.last_prompt
+        assert "Sibling tasks in progress:" not in runtime.last_prompt
 
     @pytest.mark.asyncio
     async def test_fat_harness_accepts_validation_evidence_after_code_fence(self) -> None:
