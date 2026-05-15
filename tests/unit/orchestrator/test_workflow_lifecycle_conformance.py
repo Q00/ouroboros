@@ -176,6 +176,28 @@ def test_conformance_accepts_new_run_created_at_terminal_timestamp() -> None:
     assert report.errors == ()
 
 
+def test_conformance_rejects_run_created_before_terminal() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start + timedelta(seconds=1),
+        ),
+    )
+
+    report = validate_workflow_lifecycle_conformance(spec, events)
+
+    assert report.ok is False
+    assert "run_created_before_terminal" in {issue.code for issue in report.errors}
+
+
 def test_conformance_rejects_ambiguous_same_timestamp_restart_node_state() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)

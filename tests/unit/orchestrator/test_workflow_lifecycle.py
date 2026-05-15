@@ -571,6 +571,31 @@ def test_next_runnable_refuses_ambiguous_same_timestamp_restart_node_state() -> 
     assert next_runnable_node_ids(spec, events) == ()
 
 
+def test_next_runnable_ignores_stray_run_created_inside_active_run() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=start + timedelta(seconds=1),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start + timedelta(seconds=2),
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ("node_b",)
+
+
 def test_next_runnable_ignores_historical_ambiguity_after_clean_restart() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)

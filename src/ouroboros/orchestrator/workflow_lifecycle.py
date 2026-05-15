@@ -247,6 +247,10 @@ def _run_lifecycle_segment(
                 latest_segment_ambiguous = latest_segment_ambiguous or timestamp_ambiguous
                 continue
             if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+                if active_run:
+                    latest_segment.append(event)
+                    latest_segment_ambiguous = latest_segment_ambiguous or timestamp_ambiguous
+                    continue
                 active_run = True
                 latest_segment = [event]
                 latest_segment_ambiguous = timestamp_ambiguous
@@ -383,6 +387,7 @@ class WorkflowConformanceIssue(BaseModel, frozen=True):
         "unknown_edge_id",
         "lifecycle_before_run_created",
         "event_after_terminal_run",
+        "run_created_before_terminal",
     ]
     message: str
     event_type: WorkflowLifecycleEventType | None = None
@@ -708,6 +713,19 @@ def validate_workflow_lifecycle_conformance(
             continue
 
         if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+            if active_run:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="error",
+                        code="run_created_before_terminal",
+                        message=(
+                            "workflow.run.created appears before the active run reached "
+                            "a terminal event."
+                        ),
+                        event_type=event.event_type,
+                    )
+                )
+                continue
             seen_run_created = True
             active_run = True
 
