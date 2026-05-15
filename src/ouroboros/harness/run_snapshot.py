@@ -64,6 +64,9 @@ def build_run_snapshot(
     pending_success_step_ids = tuple(
         step.step_id for step in step_tuple if step.ended_at is None and step.ok is True
     )
+    pending_without_source_event_ids = tuple(
+        step.step_id for step in step_tuple if step.ended_at is None and not step.source_event_ids
+    )
     unknown_step_ids = tuple(
         step.step_id for step in step_tuple if step.ended_at is not None and step.ok is None
     )
@@ -99,7 +102,7 @@ def build_run_snapshot(
         pending_in_closed_stage_ids=pending_in_closed_stage_ids,
         pending_failed_step_ids=pending_failed_step_ids,
         pending_success_step_ids=pending_success_step_ids,
-        has_source_event_ids=bool(derived_source_event_ids),
+        pending_without_source_event_ids=pending_without_source_event_ids,
     )
     safe_resume = status is RunSnapshotStatus.RUNNING and bool(pending_step_ids) and not blockers
 
@@ -321,7 +324,7 @@ def _resume_blockers(
     pending_in_closed_stage_ids: tuple[str, ...],
     pending_failed_step_ids: tuple[str, ...],
     pending_success_step_ids: tuple[str, ...],
-    has_source_event_ids: bool,
+    pending_without_source_event_ids: tuple[str, ...],
 ) -> tuple[str, ...]:
     blockers: list[str] = []
     if status in {
@@ -346,8 +349,8 @@ def _resume_blockers(
         blockers.append("pending_failed_steps_present")
     if pending_success_step_ids:
         blockers.append("pending_success_steps_present")
-    if status is RunSnapshotStatus.RUNNING and pending_step_ids and not has_source_event_ids:
-        blockers.append("source_events_missing")
+    if status is RunSnapshotStatus.RUNNING and pending_without_source_event_ids:
+        blockers.append("pending_step_source_events_missing")
     if failed_step_ids:
         blockers.append("failed_steps_present")
     if unknown_step_ids:
