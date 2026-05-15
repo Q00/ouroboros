@@ -103,6 +103,7 @@ async def test_goose_runtime_collects_stream_json_messages() -> None:
 def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "goose")
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "goose")
+    monkeypatch.setenv("GOOSE_PROVIDER", "anthropic")
     runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="approve")
 
     env = runtime._build_child_env()
@@ -110,5 +111,35 @@ def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> N
     assert env["_OUROBOROS_NESTED"] == "1"
     assert env["GOOSE_MODE"] == "approve"
     assert env["GOOSE_WORKING_DIR"] == "/tmp/project"
+    assert env["GOOSE_PROVIDER"] == "anthropic"
     assert "OUROBOROS_AGENT_RUNTIME" not in env
     assert "OUROBOROS_LLM_BACKEND" not in env
+
+
+def test_goose_child_env_does_not_map_ouroboros_llm_backend_to_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GOOSE_PROVIDER", raising=False)
+    runtime = GooseCliRuntime(
+        cli_path="/tmp/goose",
+        cwd="/tmp/project",
+        permission_mode="auto",
+        llm_backend="claude_code",
+    )
+
+    assert "GOOSE_PROVIDER" not in runtime._build_child_env()
+
+
+def test_goose_session_id_extraction_ignores_generic_tool_and_message_ids() -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+
+    assert (
+        runtime._extract_event_session_id({"type": "session.started", "session_id": "sess-1"})
+        == "sess-1"
+    )
+    assert (
+        runtime._extract_event_session_id({"type": "session.started", "session": {"id": "sess-2"}})
+        == "sess-2"
+    )
+    assert runtime._extract_event_session_id({"type": "tool.call", "name": "Bash"}) is None
+    assert runtime._extract_event_session_id({"type": "message", "id": "msg-1"}) is None

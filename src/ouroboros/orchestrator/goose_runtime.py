@@ -188,33 +188,40 @@ class GooseCliRuntime(CodexCliRuntime):
         env["GOOSE_MODE"] = self._permission_mode
         if self._cwd:
             env["GOOSE_WORKING_DIR"] = self._cwd
-        if self._llm_backend and self._llm_backend not in {"goose", "goose_cli"}:
-            # Keep provider selection under user control for native Goose use,
-            # but allow explicit non-goose LLM backends to flow through when a
-            # caller deliberately configures them.
-            env.setdefault("GOOSE_PROVIDER", self._llm_backend)
+        # Do not translate Ouroboros LLM backend names into GOOSE_PROVIDER.
+        # Runtime and LLM backend names live in different namespaces, and
+        # create_agent_runtime() always passes the configured Ouroboros LLM
+        # backend through.  Let Goose's own config / GOOSE_PROVIDER / --provider
+        # selection remain authoritative instead of injecting invalid values such
+        # as "claude_code" into child Goose processes.
         return env
 
     def _extract_event_session_id(self, event: Mapping[str, Any]) -> str | None:
+        """Extract only Goose session identifiers from stream events.
+
+        Goose stream events can also contain generic top-level ``id`` and
+        ``name`` fields for messages, tools, or event payloads.  Treating those
+        as session ids corrupts targeted resume handles, so only accept
+        session-specific keys at the top level and within explicit ``session``
+        objects.
+        """
         for key in (
             "session_id",
             "sessionId",
-            "id",
-            "name",
+            "native_session_id",
             "conversation_id",
             "conversationId",
-            "run_id",
         ):
             value = event.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
 
-        for container_key in ("session", "metadata", "run"):
-            nested = event.get(container_key)
-            if isinstance(nested, Mapping):
-                nested_id = self._extract_event_session_id(nested)
-                if nested_id:
-                    return nested_id
+        session = event.get("session")
+        if isinstance(session, Mapping):
+            for key in ("session_id", "sessionId", "id", "name"):
+                value = session.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         return None
 
     def _extract_event_type(self, event: Mapping[str, Any]) -> str:
