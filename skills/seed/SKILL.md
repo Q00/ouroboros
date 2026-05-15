@@ -52,9 +52,9 @@ If the `ouroboros_generate_seed` MCP tool is available (loaded via ToolSearch ab
      session_id: <interview session ID>
    ```
 
-3. The tool extracts requirements from the interview, calculates ambiguity score, and generates the Seed YAML.
+3. The tool extracts requirements from persisted interview state, calculates ambiguity score, and generates the Seed YAML.
 
-4. Present the generated seed to the user.
+4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
 
 **Advantages of MCP mode**: Automated ambiguity scoring (must be <= 0.2), structured extraction from persisted interview state, reproducible.
 
@@ -65,7 +65,7 @@ If the MCP tool is NOT available, fall back to agent-based generation:
 1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role
 2. Extract structured requirements from the interview Q&A in conversation history
 3. Generate a Seed YAML specification
-4. Present the seed to the user
+4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
 
 ### QA Refinement Loop (Required after generation)
 
@@ -120,15 +120,21 @@ Four explicit phases per iteration:
 **Source 1 — QA Judge** (structural, external)
 The `suggestions` from the QA verdict. These are gaps, contradictions, and quality issues in the YAML itself. QA cannot see the interview.
 
-**Source 2 — Socrates** (dialectical, internal)
-You are Socrates — the same Socratic facilitator who conducted the interview (see `skills/interview/SKILL.md` and `src/ouroboros/agents/socratic-interviewer.md`). You hold the only complete record of the dialectic in conversation memory: what the user actually said, what was agreed, what was explicitly rejected, what scope was carried through the Refine and Restate gates. Silently review the current seed YAML against that record and surface 2–4 items neither QA nor lateral personas can see:
+**Source 2 — Socrates** (dialectical, user-intent evidence)
+You are Socrates — the Socratic facilitator lens from `skills/interview/SKILL.md` and `src/ouroboros/agents/socratic-interviewer.md`. Review the current seed YAML against verifiable interview evidence, in this order:
+
+1. If a `session_id` exists, first use available persisted interview/session state for that session. Path A may run from `ooo seed <session_id>` in a fresh conversation, so persisted state can be the only reliable dialectic record.
+2. Use conversation memory when it is available in the current thread.
+3. If no persisted state or conversation evidence is available for a point, mark Socrates output as `no Socrates-only proposal: dialectic context unavailable` for that point. Do not invent user preferences, rejected scope, or interview nuance.
+
+From the available evidence, surface 2–4 items neither QA nor lateral personas can see:
 - Did the user emphasize a constraint that got softened or dropped?
 - Did something the user explicitly rejected sneak back in?
 - Did the seed flatten nuance the user spent multiple turns clarifying?
 - Are there silent assumptions the user never agreed to?
 - Does wording contradict stated priorities (e.g., "MVP in a week" but 8 acceptance criteria)?
 
-If QA and Socrates conflict, **Socrates wins** — QA does not know what the user actually said in the interview, you do.
+If QA and Socrates conflict, resolve the conflict by preferring the most verifiable user intent from persisted session state and/or conversation evidence. Do not assume the Socratic lens is automatically authoritative; QA can be correct when no user-intent evidence contradicts it.
 
 **Source 3 — `ouroboros_lateral_think` (parallel personas)**
 Call the MCP tool to fan out 5 independent perspectives, each running in its own Task pane with no cross-contamination:
@@ -175,13 +181,22 @@ Output of Reflect: a tagged candidate list with per-item metadata `(sources_back
 
 **Phase 3 — Refine (User Adoption Gate)**
 
-Present the structured list via AskUserQuestion with multi-select. Convergent signals first, conflicts second, singletons last:
+Use only executable single-choice questions. The current runtime supports `multiSelect: false`; do not ask one multi-select question or present options that can be selected contradictorily.
+
+Ask sequential single-choice questions in this order:
+
+1. For each conflict group, ask one question with exactly one option per mutually exclusive resolution plus "Leave unchanged"; handle the runtime's free-form "Other" response if available. Record the chosen option as accepted and mark the other options in that group rejected.
+2. For non-conflicting convergent signals, ask one single-choice batch question: "Apply all strong non-conflicting revisions, review one by one, or skip them?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
+3. For singleton signals, ask one single-choice batch question: "Review singleton revisions one by one, skip all singleton revisions, or other?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
+4. Always include an exit option at the batch level: "None of the above / keep current seed". If selected, exit the loop with the current seed.
+
+Convergent signals still appear first in summaries, conflicts second, singletons last. Conflict questions must be asked before any non-conflicting batch is applied so contradictory revisions cannot both enter the next seed.
 
 ```
 Iteration N/5 — QA score X.XX (REVISE)
 
 Which revisions should enter the next seed?
-(Nothing accepted by default. Multi-select.)
+(Nothing accepted by default. Questions are single-choice and may be sequential.)
 
 Strong (multiple sources agree):
 A. [QA + Simplifier] Criterion 3 "easy to use" — sharpen to measurable predicate
@@ -200,6 +215,23 @@ F. [Hacker] Replace "user authentication" with "device-local key file"
 Other:
 G. None of the above (exit loop with current seed)
 H. Other — describe a different change
+```
+
+Executable gate example:
+
+```json
+{
+  "questions": [{
+    "question": "Conflict: how should the seed handle User in the ontology?",
+    "header": "Conflict C",
+    "options": [
+      {"label": "Add User", "description": "Accept C1 and reject C2/C3"},
+      {"label": "Remove User", "description": "Accept C2 and reject C1/C3"},
+      {"label": "Leave unchanged", "description": "Accept C3 and reject C1/C2"}
+    ],
+    "multiSelect": false
+  }]
+}
 ```
 
 Balance line shown above the question: `Balance: 4 expand / 2 sharpen / 1 remove` (informational, not a warning).
@@ -221,7 +253,12 @@ Common edit shapes (both expansion and convergence are legitimate when the user 
 
 **Audit trail**
 
-After each revision, append a brief audit block to `~/.ouroboros/seed-revisions/<session_id>.md` (create the directory if it doesn't exist) capturing: iteration N, QA score, all candidates with source tag, user's accept/reject decisions, and the resulting diff vs. previous iteration. This makes the convergence path inspectable and lets the user replay decisions later.
+After each revision, append a brief audit block to `~/.ouroboros/seed-revisions/<revision_key>.md` (create the directory if it doesn't exist) capturing: iteration N, QA score, all candidates with source tag, user's accept/reject decisions, and the resulting diff vs. previous iteration. This makes the convergence path inspectable and lets the user replay decisions later.
+
+Choose `revision_key` deterministically:
+- If `session_id` exists, use that exact `session_id`.
+- If no `session_id` exists (common in Path B), derive a stable seed label from the seed goal or project name plus the current UTC timestamp, for example `<slugified-goal>-YYYYMMDDTHHMMSSZ`. Once derived, reuse the same key for every iteration in the current seed run.
+- If the filesystem write is unavailable, include the same audit block in the assistant response instead of silently dropping it.
 
 Format:
 ```markdown
