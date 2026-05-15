@@ -86,7 +86,7 @@ The first generation (Path A `ouroboros_generate_seed` or Path B agent role) run
 
 **Max iterations**: 5. Track the highest-scoring seed across all iterations (the "best attempt"). If still not PASS after 5, present that best attempt with its QA verdict and ask the user: accept it as-is, do one more manual edit, or escalate to `ooo interview` / `ooo unstuck`.
 
-The seed sits inside the **Define** diamond of Double Diamond — where expansion (Wonder) and convergence (Reflect/Refine/Restate) both happen in service of a single sharp specification. Expansion is not the enemy; **unchecked expansion that bypasses the user gate is.** The four-phase cycle plus User Adoption Gate is the only structural safeguard — no separate discipline rules are needed.
+The seed sits inside the **Define** diamond of Double Diamond — where expansion (Wonder) and convergence (Reflect/Refine/Restate) both happen in service of a single sharp specification. Expansion is not the enemy; **unchecked expansion that bypasses the user gate is.** The four-phase cycle plus User Adoption Gate is the workflow's primary safeguard.
 
 **Loop**:
 
@@ -203,7 +203,7 @@ Output of Reflect: a tagged candidate list with per-item metadata `(sources_back
 
 **Phase 3 — Refine (User Adoption Gate)**
 
-Use only executable single-choice questions. The current runtime supports `multiSelect: false`; do not ask one multi-select question or present options that can be selected contradictorily.
+Use the active runtime's `ask_user` capability with executable single-choice questions only. Do not ask one multi-select question or present options that can be selected contradictorily.
 
 Ask sequential single-choice questions in this order:
 
@@ -239,7 +239,7 @@ G. None of the above (exit loop with current seed)
 H. Other — describe a different change
 ```
 
-Executable gate example:
+Portable gate example:
 
 ```json
 {
