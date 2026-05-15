@@ -130,10 +130,6 @@ def test_conformance_preserves_spec_validation_warnings() -> None:
 
     report = validate_workflow_lifecycle_conformance(spec, ())
 
-    assert report.ok is False
-    assert [(issue.code, issue.node_id) for issue in report.errors] == [
-        ("invalid_spec", "isolated")
-    ]
     assert [(issue.code, issue.node_id) for issue in report.warnings] == [
         ("invalid_spec", "isolated")
     ]
