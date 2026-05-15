@@ -524,3 +524,15 @@ def test_mixed_legacy_pending_step_without_source_events_blocks_resume() -> None
     assert snapshot.safe_resume is False
     assert snapshot.source_event_ids == ("evt_step_done",)
     assert snapshot.resume_blockers == ("pending_step_source_events_missing",)
+
+
+def test_open_run_without_pending_or_verdict_is_unknown() -> None:
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage("step_done")],
+        steps=[_step("step_done", ended=True, ok=True)],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.resume_blockers == ("status_unknown",)

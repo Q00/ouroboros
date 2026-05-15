@@ -294,7 +294,7 @@ def _derive_status(
         return RunSnapshotStatus.RUNNING
     if unknown_step_ids:
         return RunSnapshotStatus.UNKNOWN
-    return RunSnapshotStatus.RUNNING
+    return RunSnapshotStatus.UNKNOWN
 
 
 def _verdict_conflicts_with_steps(
