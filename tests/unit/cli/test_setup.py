@@ -2473,6 +2473,42 @@ class TestSetupJsoncDetection:
         assert not (config_dir / "opencode.json").exists()
 
 
+class TestGooseSetup:
+    """Tests for Goose-specific setup behavior."""
+
+    def test_detect_runtimes_honors_config_goose_path(self) -> None:
+        """Explicit Goose path takes precedence over PATH-only discovery."""
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda name: "/custom/goose" if name == "/custom/goose" else None,
+            ),
+            patch("ouroboros.config.get_gemini_cli_path", return_value=None),
+            patch("ouroboros.config.get_goose_cli_path", return_value="/custom/goose"),
+            patch("ouroboros.config.get_kiro_cli_path", return_value=None),
+            patch("ouroboros.config.get_copilot_cli_path", return_value=None),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["goose"] == "/custom/goose"
+
+    def test_setup_runtime_goose_uses_detected_explicit_path(self) -> None:
+        chosen: dict[str, str] = {}
+
+        def _goose(path: str) -> None:
+            chosen["path"] = path
+
+        runner = CliRunner()
+        with (
+            patch.object(setup_cmd, "_detect_runtimes", return_value={"goose": "/custom/goose"}),
+            patch.object(setup_cmd, "_setup_goose", side_effect=_goose),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--runtime", "goose", "--non-interactive"])
+
+        assert result.exit_code == 0, result.output
+        assert chosen["path"] == "/custom/goose"
+
+
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 

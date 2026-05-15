@@ -177,6 +177,19 @@ class TestConfigBackend:
         assert result.exit_code == 0
         mock_setup.assert_called_once_with("/usr/bin/hermes")
 
+    def test_switch_to_goose_honors_configured_cli_path(self, config_dir: Path) -> None:
+        """config backend goose should honor explicit env/config path helpers."""
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.get_goose_cli_path", return_value="/opt/goose/bin/goose"),
+            patch("shutil.which", return_value=None),
+            patch("ouroboros.cli.commands.setup._setup_goose") as mock_setup,
+        ):
+            result = runner.invoke(app, ["backend", "goose"])
+
+        assert result.exit_code == 0
+        mock_setup.assert_called_once_with("/opt/goose/bin/goose")
+
     def test_switch_warns_on_setup_print_error(self, config_dir: Path) -> None:
         """config backend should warn when setup emits print_error (non-exception failure)."""
         from ouroboros.cli.commands import setup as setup_mod
