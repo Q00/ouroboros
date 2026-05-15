@@ -509,7 +509,7 @@ def test_next_runnable_allows_new_run_at_terminal_timestamp_after_active_run() -
     assert next_runnable_node_ids(spec, tuple(reversed(events))) == ("node_a",)
 
 
-def test_next_runnable_allows_same_timestamp_restart_from_truncated_terminal_slice() -> None:
+def test_next_runnable_refuses_same_timestamp_restart_from_truncated_terminal_slice() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
     events = (

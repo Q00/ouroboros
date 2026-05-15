@@ -210,10 +210,9 @@ def _run_lifecycle_segment(
     latest_segment_ambiguous = False
     post_terminal_violation = False
     timestamp_group_list = _timestamp_groups(events)
-    for group_index, timestamp_events in enumerate(timestamp_group_list):
+    for timestamp_events in timestamp_group_list:
         active_run_at_timestamp = active_run
-        has_later_events = group_index < len(timestamp_group_list) - 1
-        prefer_restart_tie = active_run_at_timestamp or has_later_events
+        prefer_restart_tie = active_run_at_timestamp
         timestamp_ambiguous = (
             prefer_restart_tie
             and _has_terminal_restart_tie(timestamp_events)
@@ -691,10 +690,9 @@ def validate_workflow_lifecycle_conformance(
     active_run = False
     terminal_allows_restart = False
     timestamp_group_list = _timestamp_groups(event_list)
-    for group_index, timestamp_events in enumerate(timestamp_group_list):
+    for timestamp_events in timestamp_group_list:
         active_run_at_timestamp = active_run
-        has_later_events = group_index < len(timestamp_group_list) - 1
-        prefer_restart_tie = active_run_at_timestamp or has_later_events
+        prefer_restart_tie = active_run_at_timestamp
         if (
             prefer_restart_tie
             and _has_terminal_restart_tie(timestamp_events)

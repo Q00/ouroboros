@@ -176,7 +176,7 @@ def test_conformance_accepts_new_run_created_at_terminal_timestamp() -> None:
     assert report.errors == ()
 
 
-def test_conformance_allows_same_timestamp_restart_from_truncated_terminal_slice() -> None:
+def test_conformance_rejects_same_timestamp_restart_from_truncated_terminal_slice() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
     events = (
@@ -200,8 +200,8 @@ def test_conformance_allows_same_timestamp_restart_from_truncated_terminal_slice
 
     report = validate_workflow_lifecycle_conformance(spec, events)
 
-    assert report.ok is True
-    assert report.errors == ()
+    assert report.ok is False
+    assert "event_after_terminal_run" in {issue.code for issue in report.errors}
 
 
 def test_conformance_allows_clean_restart_after_truncated_terminal_slice() -> None:
