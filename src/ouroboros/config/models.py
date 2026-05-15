@@ -357,6 +357,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "kiro_cli",
         "copilot",
         "copilot_cli",
+        "goose",
+        "goose_cli",
     }
 )
 

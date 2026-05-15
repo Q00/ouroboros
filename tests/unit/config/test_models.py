@@ -687,6 +687,14 @@ class TestRuntimeProfileConfig:
         profile = RuntimeProfileConfig(stages={"execute": "kiro", "reflect": "kiro_cli"})
         assert profile.stages == {"execute": "kiro", "reflect": "kiro_cli"}
 
+    def test_runtime_profile_default_accepts_goose_backends(self) -> None:
+        assert RuntimeProfileConfig(default="goose").default == "goose"
+        assert RuntimeProfileConfig(default="goose_cli").default == "goose_cli"
+
+    def test_runtime_profile_stages_accept_goose_backends(self) -> None:
+        profile = RuntimeProfileConfig(stages={"execute": "goose", "reflect": "goose_cli"})
+        assert profile.stages == {"execute": "goose", "reflect": "goose_cli"}
+
     def test_orchestrator_runtime_profile_string_shorthand(self) -> None:
         config = OrchestratorConfig(runtime_profile="worker")
         assert config.runtime_profile is not None
