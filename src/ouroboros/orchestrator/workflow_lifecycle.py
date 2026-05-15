@@ -122,6 +122,13 @@ _RUN_EVENT_TYPES: Final[frozenset[WorkflowLifecycleEventType]] = frozenset(
         WorkflowLifecycleEventType.RUN_CANCELLED,
     }
 )
+_TERMINAL_RUN_EVENT_TYPES: Final[frozenset[WorkflowLifecycleEventType]] = frozenset(
+    {
+        WorkflowLifecycleEventType.RUN_COMPLETED,
+        WorkflowLifecycleEventType.RUN_FAILED,
+        WorkflowLifecycleEventType.RUN_CANCELLED,
+    }
+)
 _NODE_STATE_BY_EVENT: Final[dict[WorkflowLifecycleEventType, WorkflowNodeLifecycleState]] = {
     WorkflowLifecycleEventType.NODE_SCHEDULED: WorkflowNodeLifecycleState.SCHEDULED,
     WorkflowLifecycleEventType.NODE_STARTED: WorkflowNodeLifecycleState.STARTED,
@@ -147,6 +154,50 @@ _EVENT_SORT_ORDER: Final[dict[WorkflowLifecycleEventType, int]] = {
 
 def _event_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int, str]:
     return (event.timestamp, _EVENT_SORT_ORDER[event.event_type], event.event_type.value)
+
+
+def _run_boundary_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int, str]:
+    if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
+        order = 0
+    elif event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+        order = 1
+    else:
+        order = 10 + _EVENT_SORT_ORDER[event.event_type]
+    return (event.timestamp, order, event.event_type.value)
+
+
+def _run_lifecycle_state(
+    events: Iterable[WorkflowLifecycleEvent],
+) -> WorkflowRunLifecycleState | None:
+    active_run = False
+    terminal_state: WorkflowRunLifecycleState | None = None
+    terminal_allows_restart = False
+    for event in sorted(events, key=_run_boundary_sort_key):
+        if terminal_state is not None:
+            if (
+                event.event_type is WorkflowLifecycleEventType.RUN_CREATED
+                and terminal_allows_restart
+            ):
+                active_run = True
+                terminal_state = None
+                terminal_allows_restart = False
+            continue
+        if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+            active_run = True
+            continue
+        if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
+            terminal_state = {
+                WorkflowLifecycleEventType.RUN_COMPLETED: WorkflowRunLifecycleState.COMPLETED,
+                WorkflowLifecycleEventType.RUN_FAILED: WorkflowRunLifecycleState.FAILED,
+                WorkflowLifecycleEventType.RUN_CANCELLED: WorkflowRunLifecycleState.CANCELLED,
+            }[event.event_type]
+            terminal_allows_restart = active_run
+            active_run = False
+    if terminal_state is not None:
+        return terminal_state
+    if active_run:
+        return WorkflowRunLifecycleState.CREATED
+    return None
 
 
 def _normalize_non_blank(name: str, value: str) -> str:
@@ -452,18 +503,11 @@ def next_runnable_node_ids(
     dispatch work.
     """
     event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
-    latest_run_event = next(
-        (
-            event
-            for event in sorted(event_list, key=_event_sort_key, reverse=True)
-            if event.event_type in _RUN_EVENT_TYPES
-        ),
-        None,
-    )
-    if latest_run_event is not None and latest_run_event.event_type in {
-        WorkflowLifecycleEventType.RUN_COMPLETED,
-        WorkflowLifecycleEventType.RUN_FAILED,
-        WorkflowLifecycleEventType.RUN_CANCELLED,
+    latest_run_state = _run_lifecycle_state(event_list)
+    if latest_run_state in {
+        WorkflowRunLifecycleState.COMPLETED,
+        WorkflowRunLifecycleState.FAILED,
+        WorkflowRunLifecycleState.CANCELLED,
     }:
         return ()
 
@@ -549,19 +593,18 @@ def validate_workflow_lifecycle_conformance(
     edge_ids = {edge.edge_id for edge in spec.edges}
     seen_run_created = False
     terminal_seen = False
-    # Conformance reasons about run boundaries, so same-timestamp ties must
-    # preserve replay order instead of reusing ``_event_sort_key``'s event-type
-    # priority. ``workflow_id`` is spec-scoped, and a terminal event followed by
-    # RUN_CREATED at the same timestamp is the only available local signal that
-    # a new run began after the prior one ended.
-    sorted_events = tuple(
-        event
-        for _, event in sorted(enumerate(event_list), key=lambda item: (item[1].timestamp, item[0]))
-    )
+    active_run = False
+    terminal_allows_restart = False
+    sorted_events = sorted(event_list, key=_run_boundary_sort_key)
     for event in sorted_events:
         if terminal_seen:
-            if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+            if (
+                event.event_type is WorkflowLifecycleEventType.RUN_CREATED
+                and terminal_allows_restart
+            ):
                 terminal_seen = False
+                terminal_allows_restart = False
+                active_run = True
                 seen_run_created = True
                 continue
             issues.append(
@@ -581,6 +624,7 @@ def validate_workflow_lifecycle_conformance(
 
         if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
             seen_run_created = True
+            active_run = True
 
         if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
             if event.node_id not in node_ids:
@@ -626,12 +670,10 @@ def validate_workflow_lifecycle_conformance(
                     )
                 )
 
-        if event.event_type in {
-            WorkflowLifecycleEventType.RUN_COMPLETED,
-            WorkflowLifecycleEventType.RUN_FAILED,
-            WorkflowLifecycleEventType.RUN_CANCELLED,
-        }:
+        if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
             terminal_seen = True
+            terminal_allows_restart = active_run
+            active_run = False
 
     return WorkflowConformanceReport(
         workflow_id=spec.spec_id,

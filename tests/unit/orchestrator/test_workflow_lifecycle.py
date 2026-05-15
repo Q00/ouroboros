@@ -484,6 +484,31 @@ def test_lifecycle_projection_uses_deterministic_tie_breakers() -> None:
     assert next_runnable_node_ids(spec, tuple(reversed(tied_run_events))) == ()
 
 
+def test_next_runnable_allows_new_run_at_terminal_timestamp_after_active_run() -> None:
+    spec = _spec()
+    timestamp = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=timestamp - timedelta(seconds=1),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=timestamp,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=timestamp,
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ("node_a",)
+    assert next_runnable_node_ids(spec, tuple(reversed(events))) == ("node_a",)
+
+
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:
     import ouroboros.orchestrator.workflow_lifecycle as lifecycle
 
