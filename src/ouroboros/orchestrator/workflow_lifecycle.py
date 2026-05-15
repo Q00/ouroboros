@@ -193,7 +193,9 @@ def _has_terminal_restart_tie(events: Iterable[WorkflowLifecycleEvent]) -> bool:
 def _has_ambiguous_restart_tie(events: Iterable[WorkflowLifecycleEvent]) -> bool:
     event_tuple = tuple(events)
     return _has_terminal_restart_tie(event_tuple) and any(
-        event.event_type not in _RUN_EVENT_TYPES for event in event_tuple
+        event.event_type in _NODE_EVENT_TYPES
+        or event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED
+        for event in event_tuple
     )
 
 

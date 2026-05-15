@@ -509,6 +509,37 @@ def test_next_runnable_allows_new_run_at_terminal_timestamp_after_active_run() -
     assert next_runnable_node_ids(spec, tuple(reversed(events))) == ("node_a",)
 
 
+def test_next_runnable_allows_checkpoint_at_restart_timestamp() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    boundary = start + timedelta(seconds=1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.CHECKPOINT_SAVED,
+            workflow_id=spec.spec_id,
+            refs=("checkpoint://run-1",),
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ("node_a",)
+
+
 def test_next_runnable_refuses_ambiguous_same_timestamp_restart_completion() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
