@@ -6061,6 +6061,47 @@ class TestParallelACExecutor:
 
 
 @pytest.mark.asyncio
+async def test_try_decompose_ac_replaces_goose_chunks_with_final_result() -> None:
+    """Goose can emit deltas plus a final full answer; decomposition should not duplicate."""
+
+    class _GooseChunkAndFinalRuntime:
+        runtime_backend = "goose"
+
+        async def execute_task(
+            self,
+            prompt: str,
+            tools: list[str] | None = None,
+            system_prompt: str | None = None,
+            resume_handle: RuntimeHandle | None = None,
+            resume_session_id: str | None = None,
+        ):
+            del prompt, tools, system_prompt, resume_handle, resume_session_id
+            yield AgentMessage(type="assistant", content='["Sub-AC 1: inspect", ')
+            yield AgentMessage(type="assistant", content='"Sub-AC 2: test"]')
+            yield AgentMessage(
+                type="result",
+                content='["Sub-AC 1: inspect", "Sub-AC 2: test"]',
+            )
+
+    executor = ParallelACExecutor(
+        adapter=_GooseChunkAndFinalRuntime(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+    )
+
+    result = await executor._try_decompose_ac(
+        ac_content="Investigate and test sub-AC behavior.",
+        ac_index=0,
+        seed_goal="Verify Goose final result handling",
+        tools=[],
+        system_prompt="system",
+    )
+
+    assert result == ["Sub-AC 1: inspect", "Sub-AC 2: test"]
+
+
+@pytest.mark.asyncio
 async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
     """Goose stream-json emits token chunks; decomposition must parse accumulated output."""
 

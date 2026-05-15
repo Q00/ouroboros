@@ -245,5 +245,15 @@ def test_goose_session_id_extraction_ignores_generic_tool_and_message_ids() -> N
         )
         == "stable-name"
     )
+    assert (
+        runtime._extract_event_session_id(
+            {
+                "type": "session.started",
+                "session_id": "opaque-top-level-id",
+                "session": {"id": "opaque-id", "name": "stable-name"},
+            }
+        )
+        == "stable-name"
+    )
     assert runtime._extract_event_session_id({"type": "tool.call", "name": "Bash"}) is None
     assert runtime._extract_event_session_id({"type": "message", "id": "msg-1"}) is None
