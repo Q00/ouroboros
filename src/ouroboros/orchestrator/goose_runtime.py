@@ -239,7 +239,10 @@ class GooseCliRuntime(CodexCliRuntime):
 
         session = event.get("session")
         if isinstance(session, Mapping):
-            for key in ("session_id", "sessionId", "id", "name"):
+            # ``goose run --resume`` resumes by session name (the ``-n``
+            # value Ouroboros generated), not by an opaque event/session id.
+            # Prefer name when Goose emits both.
+            for key in ("name", "session_name", "sessionName", "session_id", "sessionId", "id"):
                 value = session.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
