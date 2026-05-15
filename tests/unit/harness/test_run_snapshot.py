@@ -383,3 +383,26 @@ def test_rejects_missing_verdict_evidence_artifact() -> None:
 
     with pytest.raises(ValueError, match="VerdictRecord 'verdict_1'.evidence_artifact_ids"):
         build_run_snapshot(run=_run(verdict_id="verdict_1"), stages=[_stage()], verdict=verdict)
+
+
+def test_legacy_pending_step_without_source_events_blocks_resume() -> None:
+    legacy_pending = StepRecord(
+        step_id="step_legacy_pending",
+        run_id="run_1",
+        stage_id="stage_1",
+        kind=StepKind.TOOL_CALL,
+        ended_at=None,
+        ok=None,
+        legacy_inferred=True,
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage("step_legacy_pending")],
+        steps=[legacy_pending],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.RUNNING
+    assert snapshot.safe_resume is False
+    assert snapshot.source_event_ids == ()
+    assert snapshot.resume_blockers == ("source_events_missing",)
