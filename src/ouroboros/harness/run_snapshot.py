@@ -30,7 +30,6 @@ def build_run_snapshot(
     steps: Iterable[StepRecord] = (),
     artifacts: Iterable[ArtifactRecord] = (),
     verdict: VerdictRecord | None = None,
-    source_event_ids: Iterable[str] = (),
     recorded_at: datetime | None = None,
 ) -> RunSnapshotRecord:
     """Build a safe-resume snapshot from projection records.
@@ -103,7 +102,10 @@ def build_run_snapshot(
             if verdict is not None and not unlinked_supplied_verdict
             else run.verdict_id
         ),
-        source_event_ids=tuple(source_event_ids),
+        source_event_ids=_snapshot_source_event_ids(
+            steps=step_tuple,
+            verdict=verdict if not unlinked_supplied_verdict else None,
+        ),
         recorded_at=recorded_at or datetime.now(UTC),
         metadata=MappingProxyType(metadata),
     )
@@ -189,6 +191,31 @@ def _validate_projection_bundle(
         if run.verdict_id is not None and run.verdict_id != verdict.verdict_id:
             msg = "RunRecord.verdict_id must match the supplied VerdictRecord"
             raise ValueError(msg)
+        missing_evidence_artifact_ids = sorted(
+            set(verdict.evidence_artifact_ids) - {artifact.artifact_id for artifact in artifacts}
+        )
+        if missing_evidence_artifact_ids:
+            msg = _format_bundle_mismatch(
+                f"VerdictRecord {verdict.verdict_id!r}.evidence_artifact_ids",
+                missing=missing_evidence_artifact_ids,
+                extra=[],
+            )
+            raise ValueError(msg)
+
+
+def _snapshot_source_event_ids(
+    *, steps: tuple[StepRecord, ...], verdict: VerdictRecord | None
+) -> tuple[str, ...]:
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+    for event_id in (
+        *(event_id for step in steps for event_id in step.source_event_ids),
+        *((verdict.evidence_event_ids) if verdict is not None else ()),
+    ):
+        if event_id not in seen:
+            ordered_ids.append(event_id)
+            seen.add(event_id)
+    return tuple(ordered_ids)
 
 
 def _format_bundle_mismatch(owner: str, *, missing: list[str], extra: list[str]) -> str:

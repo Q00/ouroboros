@@ -68,7 +68,6 @@ def test_running_snapshot_with_pending_work_is_safe_to_resume() -> None:
         stages=[_stage("step_done", "step_pending")],
         steps=[completed, pending],
         artifacts=[artifact],
-        source_event_ids=("evt_step_done", "evt_step_pending"),
         recorded_at=datetime(2026, 5, 15, tzinfo=UTC),
     )
 
@@ -350,3 +349,35 @@ def test_pass_verdict_with_failed_step_is_unknown() -> None:
     assert snapshot.status is RunSnapshotStatus.UNKNOWN
     assert snapshot.safe_resume is False
     assert snapshot.resume_blockers == ("status_unknown", "failed_steps_present")
+
+
+def test_snapshot_source_event_ids_are_derived_from_records() -> None:
+    verdict = VerdictRecord(
+        verdict_id="verdict_1",
+        run_id="run_1",
+        scope="run",
+        outcome=VerdictOutcome.FAIL,
+        evidence_event_ids=("evt_verdict", "evt_step_failed"),
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(verdict_id="verdict_1"),
+        stages=[_stage("step_failed")],
+        steps=[_step("step_failed", ended=True, ok=False)],
+        verdict=verdict,
+    )
+
+    assert snapshot.source_event_ids == ("evt_step_failed", "evt_verdict")
+
+
+def test_rejects_missing_verdict_evidence_artifact() -> None:
+    verdict = VerdictRecord(
+        verdict_id="verdict_1",
+        run_id="run_1",
+        scope="run",
+        outcome=VerdictOutcome.PASS,
+        evidence_artifact_ids=("artifact_missing",),
+    )
+
+    with pytest.raises(ValueError, match="VerdictRecord 'verdict_1'.evidence_artifact_ids"):
+        build_run_snapshot(run=_run(verdict_id="verdict_1"), stages=[_stage()], verdict=verdict)
