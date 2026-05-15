@@ -251,6 +251,8 @@ class GooseCliRuntime(CodexCliRuntime):
             or message.tool_name is not None
         ):
             return last_content
+        if message.data.get("subtype") == "completion":
+            return message.content
         return f"{last_content}{message.content}"
 
     def _extract_event_session_id(self, event: Mapping[str, Any]) -> str | None:
@@ -425,9 +427,9 @@ class GooseCliRuntime(CodexCliRuntime):
                 return []
             return [
                 AgentMessage(
-                    type="result",
+                    type="assistant",
                     content=content,
-                    data={"subtype": "success"},
+                    data={"subtype": "completion", "runtime_event_type": event_type},
                     resume_handle=event_handle,
                 )
             ]
