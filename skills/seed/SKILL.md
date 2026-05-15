@@ -115,7 +115,7 @@ Four explicit phases per iteration:
 - **Refine** — user gate: human picks which proposals enter the next seed
 - **Restate** — apply: edit YAML in place with accepted items only
 
-**Phase 1 — Wonder (diverge): collect raw proposals from three sources**
+**Phase 1 — Wonder (diverge): collect raw proposals from available sources**
 
 **Source 1 — QA Judge** (structural, external)
 The `suggestions` from the QA verdict. These are gaps, contradictions, and quality issues in the YAML itself. QA cannot see the interview.
@@ -136,8 +136,8 @@ From the available evidence, surface 2–4 items neither QA nor lateral personas
 
 If QA and Socrates conflict, resolve the conflict by preferring the most verifiable user intent from persisted session state and/or conversation evidence. Do not assume the Socratic lens is automatically authoritative; QA can be correct when no user-intent evidence contradicts it.
 
-**Source 3 — `ouroboros_lateral_think` (parallel personas)**
-Call the MCP tool to fan out 5 independent perspectives, each running in its own Task pane with no cross-contamination:
+**Source 3 — `ouroboros_lateral_think` (parallel personas, MCP-only when available)**
+Attempt to load the MCP tool with `ToolSearch query: "+ouroboros lateral"` if needed. If the tool loads, call it to fan out 5 independent perspectives, each running in its own Task pane with no cross-contamination:
 
 ```
 Tool: ouroboros_lateral_think
@@ -164,13 +164,13 @@ The 5 personas return distinct revision angles:
 - **architect**: structural reorganization without expansion
 - **contrarian**: challenges to assumptions the seed treats as settled
 
-Load via `ToolSearch query: "+ouroboros lateral_think"` if needed.
+**Parsing persona outputs when lateral MCP is available**: Each persona returns free-form prose, not a structured list. After the parallel call returns, read each persona's text and extract its concrete proposals into discrete candidates (one revision per candidate, not bundled). If a persona's output is purely abstract advice with no actionable revision, drop it from the candidate list rather than inventing one. Aim for 1–2 candidates per persona — if a persona produced 5, pick the 2 most concrete and discard the rest.
 
-**Parsing persona outputs**: Each persona returns free-form prose, not a structured list. After the parallel call returns, read each persona's text and extract its concrete proposals into discrete candidates (one revision per candidate, not bundled). If a persona's output is purely abstract advice with no actionable revision, drop it from the candidate list rather than inventing one. Aim for 1–2 candidates per persona — if a persona produced 5, pick the 2 most concrete and discard the rest.
+If `ToolSearch` cannot load `ouroboros_lateral_think`, do not emulate lateral personas or read persona files directly. Record `no lateral proposals: MCP lateral tool unavailable` as Source 3 output and proceed with QA plus Socrates/available sources. The QA refinement loop remains required, and the User Adoption Gate still applies to any proposed revision.
 
 **Phase 2 — Reflect (debate): structure proposals by agreement and conflict**
 
-Do not just dedupe. Read all proposals from Sources 1–3 and surface the *structure of the debate*:
+Do not just dedupe. Read all proposals from the available Wonder sources (Sources 1–2, plus Source 3 only when `ouroboros_lateral_think` loaded successfully) and surface the *structure of the debate*:
 
 - **Convergent signals (strong)**: same revision proposed by ≥2 independent sources. Example: QA says "criterion 3 is unmeasurable" AND simplifier says "drop criterion 3 or sharpen it" → strong signal to act on criterion 3.
 - **Divergent signals (decisions)**: sources conflict. Example: researcher says "add User entity to ontology" but simplifier says "remove the User reference from goal — single-user implied". This is a decision the *user* must resolve, not the main session.
@@ -236,7 +236,7 @@ Executable gate example:
 
 Balance line shown above the question: `Balance: 4 expand / 2 sharpen / 1 remove` (informational, not a warning).
 
-Track all rejected candidates across iterations and pass them as `failed_attempts` to subsequent `ouroboros_lateral_think` calls so personas don't re-propose them.
+Track all rejected candidates across iterations and pass them as `failed_attempts` to subsequent `ouroboros_lateral_think` calls when the MCP lateral tool is available, so personas don't re-propose them.
 
 **Phase 4 — Restate (apply accepted only)**
 
