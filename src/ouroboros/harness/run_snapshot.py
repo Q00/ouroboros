@@ -44,6 +44,13 @@ def build_run_snapshot(
     stage_tuple = tuple(stages)
     step_tuple = tuple(steps)
     artifact_tuple = tuple(artifacts)
+    _validate_projection_bundle(
+        run=run,
+        stages=stage_tuple,
+        steps=step_tuple,
+        artifacts=artifact_tuple,
+        verdict=verdict,
+    )
 
     completed_step_ids = tuple(
         step.step_id for step in step_tuple if step.ended_at and step.ok is True
@@ -85,6 +92,47 @@ def build_run_snapshot(
         recorded_at=recorded_at or datetime.now(UTC),
         metadata=MappingProxyType(metadata),
     )
+
+
+def _validate_projection_bundle(
+    *,
+    run: RunRecord,
+    stages: tuple[StageRecord, ...],
+    steps: tuple[StepRecord, ...],
+    artifacts: tuple[ArtifactRecord, ...],
+    verdict: VerdictRecord | None,
+) -> None:
+    stage_ids = {stage.stage_id for stage in stages}
+    step_ids = {step.step_id for step in steps}
+
+    for stage in stages:
+        if stage.run_id != run.run_id:
+            msg = f"StageRecord {stage.stage_id!r} belongs to run {stage.run_id!r}, not {run.run_id!r}"
+            raise ValueError(msg)
+
+    for step in steps:
+        if step.run_id != run.run_id:
+            msg = f"StepRecord {step.step_id!r} belongs to run {step.run_id!r}, not {run.run_id!r}"
+            raise ValueError(msg)
+        if stage_ids and step.stage_id not in stage_ids:
+            msg = f"StepRecord {step.step_id!r} references unknown stage {step.stage_id!r}"
+            raise ValueError(msg)
+
+    for artifact in artifacts:
+        if artifact.step_id not in step_ids:
+            msg = f"ArtifactRecord {artifact.artifact_id!r} references unknown step {artifact.step_id!r}"
+            raise ValueError(msg)
+
+    if verdict is not None:
+        if verdict.run_id != run.run_id:
+            msg = f"VerdictRecord {verdict.verdict_id!r} belongs to run {verdict.run_id!r}, not {run.run_id!r}"
+            raise ValueError(msg)
+        if verdict.scope != "run":
+            msg = "build_run_snapshot requires a run-scoped VerdictRecord"
+            raise ValueError(msg)
+        if run.verdict_id is not None and run.verdict_id != verdict.verdict_id:
+            msg = "RunRecord.verdict_id must match the supplied VerdictRecord"
+            raise ValueError(msg)
 
 
 def _derive_status(

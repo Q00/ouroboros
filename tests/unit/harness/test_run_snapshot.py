@@ -136,3 +136,49 @@ def test_snapshot_metadata_is_read_only() -> None:
     snapshot = build_run_snapshot(run=_run(), steps=[_step("step_pending", ended=False, ok=None)])
     with pytest.raises(TypeError):
         snapshot.metadata["new"] = "value"  # type: ignore[index]
+
+
+def test_rejects_foreign_projection_records() -> None:
+    foreign_stage = StageRecord(
+        stage_id="stage_foreign", run_id="run_other", kind=StageKind.EXECUTE
+    )
+    with pytest.raises(ValueError, match="belongs to run"):
+        build_run_snapshot(run=_run(), stages=[foreign_stage])
+
+    foreign_step = StepRecord(
+        step_id="step_foreign",
+        run_id="run_other",
+        stage_id="stage_1",
+        kind=StepKind.TOOL_CALL,
+        legacy_inferred=True,
+    )
+    with pytest.raises(ValueError, match="belongs to run"):
+        build_run_snapshot(run=_run(), stages=[_stage()], steps=[foreign_step])
+
+
+def test_rejects_artifacts_not_owned_by_snapshot_steps() -> None:
+    artifact = ArtifactRecord(artifact_id="artifact_orphan", step_id="step_missing", kind="log")
+
+    with pytest.raises(ValueError, match="unknown step"):
+        build_run_snapshot(run=_run(), artifacts=[artifact])
+
+
+def test_rejects_foreign_or_ac_scoped_verdicts() -> None:
+    foreign = VerdictRecord(
+        verdict_id="verdict_foreign",
+        run_id="run_other",
+        scope="run",
+        outcome=VerdictOutcome.PASS,
+    )
+    with pytest.raises(ValueError, match="belongs to run"):
+        build_run_snapshot(run=_run(), verdict=foreign)
+
+    ac_verdict = VerdictRecord(
+        verdict_id="verdict_ac",
+        run_id="run_1",
+        scope="ac",
+        ac_id="ac_1",
+        outcome=VerdictOutcome.PASS,
+    )
+    with pytest.raises(ValueError, match="run-scoped"):
+        build_run_snapshot(run=_run(), verdict=ac_verdict)
