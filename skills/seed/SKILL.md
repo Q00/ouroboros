@@ -105,6 +105,11 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
      iteration_history: <accumulated>
    ```
 
+   **QA response shapes**: Branch only after a usable verdict is available.
+   - If the response has `status: "delegated_to_subagent"` and no verdict payload, keep the returned `qa_session_id`, wait for the plugin-managed subagent result, then parse that result as the QA verdict. Do not treat the delegation envelope itself as PASS/REVISE/FAIL.
+   - If the response already includes a scored verdict, parse that inline verdict directly.
+   - In both shapes, preserve the same `qa_session_id` and append the parsed verdict plus applied/rejected revision decisions to `iteration_history` before the next QA call.
+
 3. Branch on verdict:
    - **PASS (>= 0.90)**: Exit loop. Present the final validated Seed YAML to the user, then proceed to "After Seed Generation" below.
    - **REVISE (0.40–0.89)**: Run the **Wonder → Reflect → Refine → Restate** cycle below, then loop back to step 2.
@@ -176,6 +181,12 @@ The 5 personas return distinct revision angles:
 - **contrarian**: challenges to assumptions the seed treats as settled
 
 **Parsing persona outputs when lateral MCP is available**: Each persona returns free-form prose, not a structured list. After the parallel call returns, read each persona's text and extract its concrete proposals into discrete candidates (one revision per candidate, not bundled). If a persona's output is purely abstract advice with no actionable revision, drop it from the candidate list rather than inventing one. Aim for 1–2 candidates per persona — if a persona produced 5, pick the 2 most concrete and discard the rest.
+
+**Lateral response shapes**: `ouroboros_lateral_think` does not have one universal synchronous shape. After calling it with all personas, branch on the returned shape before extracting candidates:
+
+- **Plugin delegation**: If the response has `status: "delegated_to_subagent"`, `dispatch_mode: "plugin"`, and an `_subagents` array, wait for every plugin-managed subagent result. Extract concrete revision candidates from those returned persona texts. Do not attempt to parse candidates from the envelope prompts themselves.
+- **Inline fallback with dispatch block**: If the response returns markdown `content` plus the hidden sentinel `<!-- ouroboros-lateral-inline-dispatch-v1 base64 ... -->`, keep the visible markdown as the lateral scaffold. If the active runtime can dispatch isolated subagents, decode the sentinel JSON (`dispatch_mode`, `persona_count`, `payloads`) and send each `payload.prompt` + `payload.context` through that isolated subagent surface, then extract candidates from the returned persona texts. If the runtime cannot dispatch subagents, synthesize candidates directly from the visible inline persona sections.
+- **Inline fallback without dispatch block**: Treat the returned markdown as the complete lateral output and synthesize candidates directly from the visible persona sections. Do not split solely on `---` if doing so would corrupt user-provided content; prefer section headers and visible persona boundaries.
 
 If runtime tool discovery cannot load `ouroboros_lateral_think`, do not emulate lateral personas or read persona files directly. Record `no lateral proposals: MCP lateral tool unavailable` as Source 3 output and proceed with QA plus Socrates/available sources. The QA refinement loop remains required, and the User Adoption Gate still applies to any proposed revision.
 
