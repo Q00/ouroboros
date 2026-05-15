@@ -663,6 +663,39 @@ def test_timeout_and_cancel_events_project_terminal_reason() -> None:
     assert cancelled.actor == "local-user"
 
 
+def test_conflicting_duplicate_pending_request_is_ignored() -> None:
+    request = _request()
+    conflicting_duplicate = HumanInputRequest(
+        request_id=request.request_id,
+        session_id="other-session",
+        run_id=request.run_id,
+        invocation_id=request.invocation_id,
+        created_by=request.created_by,
+        kind=request.kind,
+        source=request.source,
+        risk_class=request.risk_class,
+        question="Approve the conflicting plan?",
+        resume_target="other:resume",
+        timeout_seconds=request.timeout_seconds,
+        timeout_action=request.timeout_action,
+        payload={"nested": {"count": 99}},
+    )
+    requested = _with_time(create_hitl_requested_event(request), 0, "evt_requested")
+    duplicate_requested = _with_time(
+        create_hitl_requested_event(conflicting_duplicate), 1, "evt_conflicting_request"
+    )
+
+    snapshot = project_human_input_state([requested, duplicate_requested])[0]
+
+    assert snapshot.state is HumanInputState.PENDING
+    assert snapshot.session_id == "session-1"
+    assert snapshot.resume_target == "plan:resume"
+    assert snapshot.request_event_id == "evt_requested"
+    assert snapshot.updated_event_id == "evt_requested"
+    assert snapshot.request["question"] == "Approve?"
+    assert snapshot.request["payload"] == {"nested": {"count": 1}}
+
+
 def test_duplicate_pending_request_preserves_original_request_provenance() -> None:
     request = _request()
     duplicate_request = HumanInputRequest(

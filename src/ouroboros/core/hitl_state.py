@@ -103,6 +103,8 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             except ValueError:
                 continue
             if current is not None:
+                if not _duplicate_request_context_matches(snapshot, current):
+                    continue
                 snapshot = replace(
                     snapshot,
                     request_event_id=current.request_event_id,
@@ -210,6 +212,17 @@ def _snapshot_from_terminal(
         actor=actor if actor is not None else _optional_str(event.data.get("actor")),
         reason=reason,
         response=response,
+    )
+
+
+def _duplicate_request_context_matches(
+    snapshot: HumanInputSnapshot, current: HumanInputSnapshot
+) -> bool:
+    return (
+        snapshot.session_id == current.session_id
+        and snapshot.run_id == current.run_id
+        and snapshot.invocation_id == current.invocation_id
+        and snapshot.resume_target == current.resume_target
     )
 
 
