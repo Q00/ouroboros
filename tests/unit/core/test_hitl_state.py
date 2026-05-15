@@ -187,12 +187,57 @@ def test_malformed_answered_events_do_not_close_pending_request() -> None:
     assert len(snapshots) == 1
     assert snapshots[0].state is HumanInputState.PENDING
     assert snapshots[0].updated_event_id == "evt_requested"
-    assert (
-        pending_human_input_requests(
-            [requested, missing_kind, unknown_kind, missing_answer_content]
-        )
-        == snapshots
+    assert pending_human_input_requests(malformed_events) == snapshots
+
+
+def test_mismatched_timeout_and_cancel_events_do_not_close_pending_request() -> None:
+    timeout_request = _request("hitl-timeout-mismatch")
+    cancel_request = _request("hitl-cancel-mismatch")
+    events = [
+        _with_time(create_hitl_requested_event(timeout_request), 0, "evt_timeout_req"),
+        _with_time(create_hitl_requested_event(cancel_request), 1, "evt_cancel_req"),
+        _with_time(
+            BaseEvent(
+                type="hitl.timed_out",
+                aggregate_type="hitl",
+                aggregate_id="hitl-timeout-mismatch",
+                data={
+                    "request_id": "hitl-timeout-mismatch",
+                    "session_id": "other-session",
+                    "run_id": "run-1",
+                    "invocation_id": "invoke-1",
+                    "reason": "deadline elapsed",
+                },
+            ),
+            2,
+            "evt_timeout_mismatch",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.cancelled",
+                aggregate_type="hitl",
+                aggregate_id="hitl-cancel-mismatch",
+                data={
+                    "request_id": "hitl-cancel-mismatch",
+                    "session_id": "session-1",
+                    "run_id": "other-run",
+                    "invocation_id": "invoke-1",
+                    "reason": "user aborted",
+                    "actor": "local-user",
+                },
+            ),
+            3,
+            "evt_cancel_mismatch",
+        ),
+    ]
+
+    snapshots = project_human_input_state(events)
+
+    assert tuple(snapshot.state for snapshot in snapshots) == (
+        HumanInputState.PENDING,
+        HumanInputState.PENDING,
     )
+    assert pending_human_input_requests(events) == snapshots
 
 
 def test_incompatible_answered_events_do_not_close_pending_request() -> None:
@@ -398,6 +443,38 @@ def test_timeout_and_cancel_events_project_terminal_reason() -> None:
     assert cancelled.state is HumanInputState.CANCELLED
     assert cancelled.reason == "user aborted"
     assert cancelled.actor == "local-user"
+
+
+def test_duplicate_pending_request_preserves_original_request_provenance() -> None:
+    request = _request()
+    duplicate_request = HumanInputRequest(
+        request_id=request.request_id,
+        session_id=request.session_id,
+        run_id=request.run_id,
+        invocation_id=request.invocation_id,
+        created_by=request.created_by,
+        kind=request.kind,
+        source=request.source,
+        risk_class=request.risk_class,
+        question="Approve the refreshed plan?",
+        resume_target=request.resume_target,
+        timeout_seconds=request.timeout_seconds,
+        payload={"nested": {"count": 2}},
+    )
+    requested = _with_time(create_hitl_requested_event(request), 0, "evt_requested")
+    duplicate_requested = _with_time(
+        create_hitl_requested_event(duplicate_request), 1, "evt_requested_again"
+    )
+
+    snapshot = project_human_input_state([requested, duplicate_requested])[0]
+
+    assert snapshot.state is HumanInputState.PENDING
+    assert snapshot.request_event_id == "evt_requested"
+    assert snapshot.created_at == requested.timestamp
+    assert snapshot.updated_event_id == "evt_requested_again"
+    assert snapshot.updated_at == duplicate_requested.timestamp
+    assert snapshot.request["question"] == "Approve the refreshed plan?"
+    assert snapshot.request["payload"] == {"nested": {"count": 2}}
 
 
 def test_duplicate_request_after_terminal_does_not_reopen_wait() -> None:

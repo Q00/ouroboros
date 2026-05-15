@@ -98,11 +98,18 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             if current is not None and current.is_terminal:
                 continue
             snapshot = _snapshot_from_requested(event, request_id)
+            if current is not None:
+                snapshot = replace(
+                    snapshot,
+                    request_event_id=current.request_event_id,
+                    created_at=current.created_at,
+                )
             if request_id not in snapshots:
                 order.append(request_id)
             # A pre-terminal duplicate request refreshes the request payload
-            # while preserving insertion order. Once terminal, first terminal
-            # state wins so replay cannot reopen an already-resolved wait.
+            # while preserving insertion order and original request provenance.
+            # Once terminal, first terminal state wins so replay cannot reopen
+            # an already-resolved wait.
             snapshots[request_id] = snapshot
             continue
 
@@ -123,7 +130,9 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputRequest.TIMED_OUT_EVENT_TYPE:
-            if not _request_has_timeout(current):
+            if not _request_has_timeout(current) or not _event_context_matches_request(
+                event, current
+            ):
                 continue
             snapshots[request_id] = _snapshot_from_terminal(
                 current,
@@ -134,6 +143,8 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputRequest.CANCELLED_EVENT_TYPE:
+            if not _event_context_matches_request(event, current):
+                continue
             snapshots[request_id] = _snapshot_from_terminal(
                 current,
                 event,
@@ -199,7 +210,7 @@ def _state_from_answered_event(
 ) -> HumanInputState | None:
     if _optional_str(event.data.get("actor")) is None:
         return None
-    if not _answer_context_matches_request(event, current):
+    if not _event_context_matches_request(event, current):
         return None
 
     response_kind = event.data.get("response_kind")
@@ -262,7 +273,7 @@ def _state_from_answered_event(
     return None
 
 
-def _answer_context_matches_request(event: BaseEvent, current: HumanInputSnapshot) -> bool:
+def _event_context_matches_request(event: BaseEvent, current: HumanInputSnapshot) -> bool:
     for key in ("session_id", "run_id", "invocation_id"):
         event_value = _optional_str(event.data.get(key))
         if event_value is not None and event_value != getattr(current, key):
