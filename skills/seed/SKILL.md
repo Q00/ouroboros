@@ -71,12 +71,12 @@ If the `ouroboros_generate_seed` MCP tool is available (loaded via runtime tool 
 
 If the MCP tool is NOT available, fall back to agent-based generation:
 
-1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role
-2. Recover the interview requirements before drafting:
-   - If `session_id` was provided and the runtime can inspect local files, look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`) and use them as the source of truth.
+1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role.
+2. Recover the interview requirements before drafting; do not invent missing context:
+   - If `session_id` was provided and the runtime can inspect local files, look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID, and use them as the source of truth.
    - Else, if the current conversation contains the complete interview Q&A, extract structured requirements from that history.
-   - Else, ask the user for either the missing interview transcript/summary or permission to run/resume `ooo interview`. Do not guess requirements from an absent transcript.
-3. Generate a Seed YAML specification
+   - Else, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent transcript.
+3. Generate a Seed YAML specification from the recovered requirements.
 4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
 
 ### QA Refinement Loop (Required after generation)
@@ -94,10 +94,12 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
 **Loop**:
 
 1. Establish the QA evaluator for this run:
-   - **MCP available**: Load the QA tool via the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros qa"` if not already loaded.
-   - **MCP unavailable**: Read `src/ouroboros/agents/qa-judge.md`, adopt that evaluator role, and produce the same usable verdict fields locally: `verdict` (`PASS`/`REVISE`/`FAIL`), numeric `score`, blocking issues, suggested revisions, and concise rationale. In this mode there is no `qa_session_id`; track iteration history in the audit block and local loop state instead.
+   - **MCP QA mode**: Load the QA tool via the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros qa"` if not already loaded.
+   - **Fallback QA mode**: If MCP is unavailable, read `src/ouroboros/agents/qa-judge.md`, adopt that evaluator role, and produce the same usable verdict fields locally: `verdict` (`PASS`/`REVISE`/`FAIL`), numeric `score`, blocking issues, suggested revisions, concise rationale, and loop action. In this mode there is no MCP-owned `qa_session_id`; track iteration history in the audit block and local loop ledger instead.
 
-2. If MCP QA is available, call QA on the generated seed through the active runtime's `call_mcp` capability:
+2. Obtain a QA verdict using the available mode:
+
+   **MCP QA mode** — call QA on the generated seed through the active runtime's `call_mcp` capability:
    ```
    Tool: ouroboros_qa
    Arguments:
@@ -110,12 +112,13 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
      iteration_history: <accumulated>
    ```
 
-   If MCP QA is unavailable, skip the tool call and apply the `qa-judge` role from step 1 to the current seed text instead. Treat its locally produced verdict exactly like the MCP verdict for the PASS/REVISE/FAIL branch below.
+   **Fallback QA mode** — skip the tool call and evaluate the current seed text under the QA Judge role from step 1, using the same quality bar and threshold. Treat the locally produced verdict exactly like the MCP verdict for the PASS/REVISE/FAIL branch below.
 
    **QA response shapes**: Branch only after a usable verdict is available.
-   - If the response has `status: "delegated_to_subagent"` and no verdict payload, keep the returned `qa_session_id`, wait for the plugin-managed subagent result, then parse that result as the QA verdict. Do not treat the delegation envelope itself as PASS/REVISE/FAIL.
-   - If the response already includes a scored verdict, parse that inline verdict directly.
-   - In both shapes, preserve the same `qa_session_id` and append the parsed verdict plus applied/rejected revision decisions to `iteration_history` before the next QA call.
+   - In MCP QA mode, if the response has `status: "delegated_to_subagent"` and no verdict payload, keep the returned `qa_session_id`, wait for the plugin-managed subagent result, then parse that result as the QA verdict. Do not treat the delegation envelope itself as PASS/REVISE/FAIL.
+   - In MCP QA mode, if the response already includes a scored verdict, parse that inline verdict directly.
+   - In fallback QA mode, parse the verdict you produced under the QA Judge role as the usable verdict.
+   - In all modes, append the parsed verdict plus applied/rejected revision decisions to `iteration_history` before the next QA pass.
 
 3. Branch on verdict:
    - **PASS (>= 0.90)**: Exit loop. Present the final validated Seed YAML to the user, then proceed to "After Seed Generation" below.
