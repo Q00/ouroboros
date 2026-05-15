@@ -223,6 +223,7 @@ def _run_lifecycle_segment(
     active_run = False
     terminal_state: WorkflowRunLifecycleState | None = None
     terminal_allows_restart = False
+    terminal_timestamp: datetime | None = None
     latest_segment: list[WorkflowLifecycleEvent] = []
     latest_segment_ambiguous = False
     for timestamp_events in _timestamp_groups(events):
@@ -235,13 +236,17 @@ def _run_lifecycle_segment(
             ),
         ):
             if terminal_state is not None:
+                can_restart_after_terminal = terminal_allows_restart or (
+                    terminal_timestamp is not None and event.timestamp > terminal_timestamp
+                )
                 if (
                     event.event_type is WorkflowLifecycleEventType.RUN_CREATED
-                    and terminal_allows_restart
+                    and can_restart_after_terminal
                 ):
                     active_run = True
                     terminal_state = None
                     terminal_allows_restart = False
+                    terminal_timestamp = None
                     latest_segment = [event]
                     latest_segment_ambiguous = timestamp_ambiguous
                     continue
@@ -266,6 +271,7 @@ def _run_lifecycle_segment(
                     WorkflowLifecycleEventType.RUN_CANCELLED: WorkflowRunLifecycleState.CANCELLED,
                 }[event.event_type]
                 terminal_allows_restart = active_run
+                terminal_timestamp = event.timestamp
                 active_run = False
     if terminal_state is not None:
         return terminal_state, tuple(latest_segment), latest_segment_ambiguous
@@ -685,16 +691,21 @@ def validate_workflow_lifecycle_conformance(
     edge_ids = {edge.edge_id for edge in spec.edges}
     seen_run_created = False
     terminal_seen = False
+    terminal_seen_at: datetime | None = None
     active_run = False
     terminal_allows_restart = False
     sorted_events = _sort_run_boundary_events(event_list)
     for event in sorted_events:
         if terminal_seen:
+            can_restart_after_terminal = terminal_allows_restart or (
+                terminal_seen_at is not None and event.timestamp > terminal_seen_at
+            )
             if (
                 event.event_type is WorkflowLifecycleEventType.RUN_CREATED
-                and terminal_allows_restart
+                and can_restart_after_terminal
             ):
                 terminal_seen = False
+                terminal_seen_at = None
                 terminal_allows_restart = False
                 active_run = True
                 seen_run_created = True
@@ -777,6 +788,7 @@ def validate_workflow_lifecycle_conformance(
 
         if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
             terminal_seen = True
+            terminal_seen_at = event.timestamp
             terminal_allows_restart = active_run
             active_run = False
 
