@@ -571,6 +571,49 @@ def test_next_runnable_refuses_ambiguous_same_timestamp_restart_node_state() -> 
     assert next_runnable_node_ids(spec, events) == ()
 
 
+def test_next_runnable_ignores_historical_ambiguity_after_clean_restart() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    ambiguous_boundary = start + timedelta(seconds=1)
+    clean_restart = start + timedelta(seconds=3)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=ambiguous_boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=ambiguous_boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=ambiguous_boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_FAILED,
+            workflow_id=spec.spec_id,
+            reason_code="bad_boundary",
+            timestamp=start + timedelta(seconds=2),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=clean_restart,
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ("node_a",)
+
+
 def test_next_runnable_scopes_node_state_to_latest_run_after_restart() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)

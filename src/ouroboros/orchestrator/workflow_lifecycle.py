@@ -217,42 +217,55 @@ def _sort_run_boundary_events(
 
 def _run_lifecycle_segment(
     events: Iterable[WorkflowLifecycleEvent],
-) -> tuple[WorkflowRunLifecycleState | None, tuple[WorkflowLifecycleEvent, ...]]:
+) -> tuple[WorkflowRunLifecycleState | None, tuple[WorkflowLifecycleEvent, ...], bool]:
     active_run = False
     terminal_state: WorkflowRunLifecycleState | None = None
     terminal_allows_restart = False
     latest_segment: list[WorkflowLifecycleEvent] = []
-    for event in _sort_run_boundary_events(events):
-        if terminal_state is not None:
-            if (
-                event.event_type is WorkflowLifecycleEventType.RUN_CREATED
-                and terminal_allows_restart
-            ):
+    latest_segment_ambiguous = False
+    for timestamp_events in _timestamp_groups(events):
+        timestamp_ambiguous = _has_ambiguous_restart_tie(timestamp_events)
+        for event in sorted(
+            timestamp_events,
+            key=lambda item: _run_boundary_group_order(
+                item,
+                has_terminal_restart_tie=_has_terminal_restart_tie(timestamp_events),
+            ),
+        ):
+            if terminal_state is not None:
+                if (
+                    event.event_type is WorkflowLifecycleEventType.RUN_CREATED
+                    and terminal_allows_restart
+                ):
+                    active_run = True
+                    terminal_state = None
+                    terminal_allows_restart = False
+                    latest_segment = [event]
+                    latest_segment_ambiguous = timestamp_ambiguous
+                    continue
+                latest_segment.append(event)
+                latest_segment_ambiguous = latest_segment_ambiguous or timestamp_ambiguous
+                continue
+            if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
                 active_run = True
-                terminal_state = None
-                terminal_allows_restart = False
                 latest_segment = [event]
+                latest_segment_ambiguous = timestamp_ambiguous
                 continue
             latest_segment.append(event)
-            continue
-        if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
-            active_run = True
-            latest_segment = [event]
-            continue
-        latest_segment.append(event)
-        if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
-            terminal_state = {
-                WorkflowLifecycleEventType.RUN_COMPLETED: WorkflowRunLifecycleState.COMPLETED,
-                WorkflowLifecycleEventType.RUN_FAILED: WorkflowRunLifecycleState.FAILED,
-                WorkflowLifecycleEventType.RUN_CANCELLED: WorkflowRunLifecycleState.CANCELLED,
-            }[event.event_type]
-            terminal_allows_restart = active_run
-            active_run = False
+            latest_segment_ambiguous = latest_segment_ambiguous or timestamp_ambiguous
+            if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
+                terminal_state = {
+                    WorkflowLifecycleEventType.RUN_COMPLETED: WorkflowRunLifecycleState.COMPLETED,
+                    WorkflowLifecycleEventType.RUN_FAILED: WorkflowRunLifecycleState.FAILED,
+                    WorkflowLifecycleEventType.RUN_CANCELLED: WorkflowRunLifecycleState.CANCELLED,
+                }[event.event_type]
+                terminal_allows_restart = active_run
+                active_run = False
     if terminal_state is not None:
-        return terminal_state, tuple(latest_segment)
+        return terminal_state, tuple(latest_segment), latest_segment_ambiguous
     if active_run:
-        return WorkflowRunLifecycleState.CREATED, tuple(latest_segment)
-    return None, tuple(latest_segment)
+        return WorkflowRunLifecycleState.CREATED, tuple(latest_segment), latest_segment_ambiguous
+    return None, tuple(latest_segment), latest_segment_ambiguous
 
 
 def _normalize_non_blank(name: str, value: str) -> str:
@@ -559,9 +572,9 @@ def next_runnable_node_ids(
     dispatch work.
     """
     event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
-    if any(_has_ambiguous_restart_tie(group) for group in _timestamp_groups(event_list)):
+    latest_run_state, latest_run_events, latest_run_ambiguous = _run_lifecycle_segment(event_list)
+    if latest_run_ambiguous:
         return ()
-    latest_run_state, latest_run_events = _run_lifecycle_segment(event_list)
     if latest_run_state in {
         WorkflowRunLifecycleState.COMPLETED,
         WorkflowRunLifecycleState.FAILED,
