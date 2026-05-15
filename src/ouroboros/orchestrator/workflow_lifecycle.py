@@ -13,12 +13,18 @@ from datetime import UTC, datetime
 from enum import StrEnum
 import json
 from types import MappingProxyType
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.workflow_ir import EdgeKind, WorkflowEdge, WorkflowNode, WorkflowSpec
+from ouroboros.orchestrator.workflow_ir import (
+    EdgeKind,
+    WorkflowEdge,
+    WorkflowNode,
+    WorkflowSpec,
+    validate_workflow,
+)
 
 WORKFLOW_LIFECYCLE_SCHEMA_VERSION: Final[int] = 1
 MAX_WORKFLOW_LIFECYCLE_DATA_BYTES: Final[int] = 8192
@@ -245,6 +251,40 @@ def _normalize_refs(values: Iterable[str]) -> tuple[str, ...]:
         seen.add(ref)
         normalized.append(ref)
     return tuple(normalized)
+
+
+class WorkflowConformanceIssue(BaseModel, frozen=True):
+    """One lifecycle/spec conformance finding."""
+
+    severity: Literal["error", "warning"]
+    code: Literal[
+        "invalid_spec",
+        "unknown_node_id",
+        "unknown_edge_id",
+        "lifecycle_before_run_created",
+        "event_after_terminal_run",
+    ]
+    message: str
+    event_type: WorkflowLifecycleEventType | None = None
+    node_id: str | None = None
+    edge_id: str | None = None
+
+
+class WorkflowConformanceReport(BaseModel, frozen=True):
+    """Validation report connecting a WorkflowSpec with lifecycle history."""
+
+    workflow_id: str
+    ok: bool
+    issues: tuple[WorkflowConformanceIssue, ...] = Field(default_factory=tuple)
+    event_count: int = 0
+
+    @property
+    def errors(self) -> tuple[WorkflowConformanceIssue, ...]:
+        return tuple(issue for issue in self.issues if issue.severity == "error")
+
+    @property
+    def warnings(self) -> tuple[WorkflowConformanceIssue, ...]:
+        return tuple(issue for issue in self.issues if issue.severity == "warning")
 
 
 class WorkflowLifecycleEvent(BaseModel, frozen=True):
@@ -477,9 +517,122 @@ def next_runnable_node_ids(
     return tuple(runnable)
 
 
+def validate_workflow_lifecycle_conformance(
+    spec: WorkflowSpec,
+    events: Iterable[WorkflowLifecycleEvent],
+) -> WorkflowConformanceReport:
+    """Validate lifecycle events against the Workflow IR graph.
+
+    This is a pure conformance read: it does not dispatch nodes, mutate the
+    workflow, or persist state. It rejects lifecycle rows that point at unknown
+    node/edge ids, flags node events before ``workflow.run.created``, and flags
+    history appended after a terminal run event. Foreign workflow ids are ignored
+    so callers may pass a mixed EventStore replay safely.
+    """
+
+    event_list = tuple(
+        event for event in events if event.workflow_id == spec.spec_id
+    )
+    issues: list[WorkflowConformanceIssue] = []
+
+    validation = validate_workflow(spec)
+    for error in validation.errors:
+        issues.append(
+            WorkflowConformanceIssue(
+                severity="error",
+                code="invalid_spec",
+                message=error.message,
+                node_id=error.node_id,
+                edge_id=error.edge_id,
+            )
+        )
+
+    node_ids = {node.node_id for node in spec.nodes}
+    edge_ids = {edge.edge_id for edge in spec.edges}
+    seen_run_created = False
+    terminal_seen = False
+    sorted_events = sorted(event_list, key=_event_sort_key)
+    for event in sorted_events:
+        if terminal_seen:
+            issues.append(
+                WorkflowConformanceIssue(
+                    severity="error",
+                    code="event_after_terminal_run",
+                    message="Workflow lifecycle event appears after a terminal run event.",
+                    event_type=event.event_type,
+                    node_id=event.node_id,
+                    edge_id=event.edge_id,
+                )
+            )
+            continue
+
+        if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+            seen_run_created = True
+
+        if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
+            if event.node_id not in node_ids:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="error",
+                        code="unknown_node_id",
+                        message=f"Lifecycle event references unknown node id {event.node_id!r}.",
+                        event_type=event.event_type,
+                        node_id=event.node_id,
+                    )
+                )
+            if not seen_run_created:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="warning",
+                        code="lifecycle_before_run_created",
+                        message="Node lifecycle event appears before workflow.run.created.",
+                        event_type=event.event_type,
+                        node_id=event.node_id,
+                    )
+                )
+
+        if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED and event.edge_id:
+            if event.edge_id not in edge_ids:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="error",
+                        code="unknown_edge_id",
+                        message=f"Lifecycle event references unknown edge id {event.edge_id!r}.",
+                        event_type=event.event_type,
+                        edge_id=event.edge_id,
+                    )
+                )
+            if not seen_run_created:
+                issues.append(
+                    WorkflowConformanceIssue(
+                        severity="warning",
+                        code="lifecycle_before_run_created",
+                        message="Edge traversal event appears before workflow.run.created.",
+                        event_type=event.event_type,
+                        edge_id=event.edge_id,
+                    )
+                )
+
+        if event.event_type in {
+            WorkflowLifecycleEventType.RUN_COMPLETED,
+            WorkflowLifecycleEventType.RUN_FAILED,
+            WorkflowLifecycleEventType.RUN_CANCELLED,
+        }:
+            terminal_seen = True
+
+    return WorkflowConformanceReport(
+        workflow_id=spec.spec_id,
+        ok=not any(issue.severity == "error" for issue in issues),
+        issues=tuple(issues),
+        event_count=len(event_list),
+    )
+
+
 __all__ = [
     "MAX_WORKFLOW_LIFECYCLE_DATA_BYTES",
     "WORKFLOW_LIFECYCLE_SCHEMA_VERSION",
+    "WorkflowConformanceIssue",
+    "WorkflowConformanceReport",
     "WorkflowLifecycleEvent",
     "WorkflowLifecycleEventType",
     "WorkflowNodeLifecycleState",
@@ -488,4 +641,5 @@ __all__ = [
     "effective_node_states",
     "lifecycle_event_for_spec",
     "next_runnable_node_ids",
+    "validate_workflow_lifecycle_conformance",
 ]
