@@ -191,6 +191,31 @@ class TestGooseCliLLMAdapter:
         assert result.value.content == "Done"
 
     @pytest.mark.asyncio
+    async def test_complete_replaces_chunks_with_final_full_completion(self) -> None:
+        adapter = GooseCliLLMAdapter(cli_path="/tmp/goose", cwd="/tmp/project")
+
+        async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(
+                stdout=_jsonl(
+                    {"type": "message", "role": "assistant", "content": '{"ok":'},
+                    {"type": "message", "role": "assistant", "content": " true}"},
+                    {"type": "complete", "result": {"text": '{"ok": true}'}},
+                )
+            )
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return JSON.")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert result.value.content == '{"ok": true}'
+
+    @pytest.mark.asyncio
     async def test_complete_extracts_json_when_response_format_requested(self) -> None:
         adapter = GooseCliLLMAdapter(cli_path="/tmp/goose")
 

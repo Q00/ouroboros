@@ -167,7 +167,11 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
 
     def _update_last_content(self, last_content: str, event_content: str) -> str:
         """Accumulate Goose stream chunks for completion fallback."""
-        return f"{last_content}{event_content}" if event_content else last_content
+        if not event_content:
+            return last_content
+        if last_content and event_content.startswith(last_content):
+            return event_content
+        return f"{last_content}{event_content}"
 
     def _build_output_schema(
         self,

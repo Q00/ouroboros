@@ -151,6 +151,29 @@ async def test_goose_runtime_preserves_generated_session_name_without_name_echo(
 
 
 @pytest.mark.asyncio
+async def test_goose_runtime_honors_explicit_resume_session_id() -> None:
+    fake_process = _FakeProcess([json.dumps({"type": "completed", "text": "Done"})])
+
+    async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
+        return fake_process
+
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+
+    with (
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ) as mock_exec,
+        patch.object(runtime, "_maybe_dispatch_skill_intercept", return_value=None),
+    ):
+        await runtime.execute_task_to_result("do it", resume_session_id="existing-session")
+
+    command = mock_exec.call_args.args
+    assert "--resume" in command
+    assert command[command.index("-n") + 1] == "existing-session"
+
+
+@pytest.mark.asyncio
 async def test_goose_runtime_accumulates_stream_chunks_for_final_fallback() -> None:
     stdout = [
         json.dumps({"type": "session.started", "session": {"name": "session-1"}}),

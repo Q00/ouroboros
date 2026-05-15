@@ -198,14 +198,15 @@ class GooseCliRuntime(CodexCliRuntime):
         only echo opaque ``session_id`` values, so create and persist the name
         before subprocess startup instead of depending on Goose to echo it.
         """
-        if session_id is None and current_handle is None:
+        generated_session_name = session_id is None and current_handle is None
+        if generated_session_name:
             session_id = f"ouroboros-{uuid4().hex[:12]}"
 
         handle = super()._build_runtime_handle(session_id, current_handle)
         if handle is None:
             return None
 
-        if current_handle is None:
+        if generated_session_name:
             metadata = dict(handle.metadata)
             metadata.setdefault(_GOOSE_OWNED_SESSION_NAME_METADATA_KEY, "true")
             return replace(handle, metadata=metadata)
