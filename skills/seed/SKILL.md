@@ -78,10 +78,11 @@ If the MCP tool is NOT available, fall back to agent-based generation:
 
 1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role.
 2. Recover the interview requirements before drafting; do not invent missing context:
-   - If the current conversation contains the complete interview Q&A or accepted post-interview corrections, use that conversation context as the freshest source of truth.
-   - If conversation context is incomplete and `session_id` was provided, use the active runtime's `inspect_code` / `run_shell` capabilities to look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID.
-   - If both conversation context and a persisted artifact are available, merge them conservatively: keep the persisted transcript as evidence, but let explicit in-thread user corrections or clarifications supersede older persisted wording.
-   - If no matching artifact is found, or if local artifacts plus conversation history still do not provide enough requirements, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent transcript.
+   - If `session_id` was provided, first identify context for that same session: use current-thread interview Q&A only when it clearly belongs to that `session_id`, and use current-thread corrections only when they explicitly amend that same interview or seed request.
+   - If same-session conversation context is incomplete, use the active runtime's `inspect_code` / `run_shell` capabilities to look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID.
+   - If both same-session conversation context and a persisted artifact are available, merge them conservatively: keep the persisted transcript as evidence, but let explicit same-thread user corrections or clarifications supersede older persisted wording.
+   - If no `session_id` was provided, use current-thread interview Q&A only when it is complete enough to identify one coherent interview; otherwise ask which interview or requirements summary should be seeded.
+   - If no matching artifact is found, or if local artifacts plus matching conversation history still do not provide enough requirements, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent or mismatched transcript.
 3. Generate a Seed YAML specification from the recovered requirements.
 4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
 
@@ -226,7 +227,7 @@ Ask sequential single-choice questions in this order:
 1. For each conflict group, ask one question with exactly one option per mutually exclusive resolution plus "Leave unchanged"; handle the runtime's free-form "Other" response if available. Record the chosen option as accepted and mark the other options in that group rejected.
 2. For non-conflicting convergent signals, ask one single-choice batch question: "Apply all strong non-conflicting revisions, review one by one, or skip them?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
 3. For singleton signals, ask one single-choice batch question: "Review singleton revisions one by one, skip all singleton revisions, or other?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
-4. Always include an exit option at the batch level: "None of the above / keep current seed". If selected, exit the loop with the current seed.
+4. Always include a skip option at the batch level: "None of the above / keep current seed for now". If selected during a REVISE iteration, skip applying this candidate batch and return to QA or the max-iteration boundary; do not treat it as below-threshold acceptance unless the user separately chooses an explicit "accept current seed below threshold" option at the loop boundary.
 
 Convergent signals still appear first in summaries, conflicts second, singletons last. Conflict questions must be asked before any non-conflicting batch is applied so contradictory revisions cannot both enter the next seed.
 
@@ -280,7 +281,7 @@ Track all rejected candidates across iterations and pass them as `failed_attempt
 
 Edit the previous seed YAML in place. Apply ONLY user-accepted items. Do not start from scratch. Do not lose fields that were already correct. Do not call `ouroboros_generate_seed` again — that tool runs only at iter-0.
 
-If the user picks "None", exit the loop with the current seed even though it's below threshold — user judgment overrides the threshold. Before proceeding to "After Seed Generation", present the complete current Seed YAML in a fenced `yaml` block so the accepted artifact is explicit.
+If the user skips all proposed revisions for a REVISE iteration, keep the current seed unchanged for that iteration and continue the loop or max-iteration boundary. Exit below threshold only after an explicit loop-boundary acceptance choice such as "accept current seed below threshold"; before proceeding to "After Seed Generation", present the complete accepted Seed YAML in a fenced `yaml` block so the accepted artifact is explicit.
 
 Common edit shapes (both expansion and convergence are legitimate when the user accepted them):
 - Sharpen: replace vague phrase with measurable predicate (`"fast"` → `"p95 latency < 200ms"`)
