@@ -21,6 +21,8 @@ from ouroboros.core.hitl_contract import (
     HumanInputRequest,
     HumanInputResponse,
     HumanInputResponseKind,
+    HumanInputRiskClass,
+    HumanInputSource,
     HumanInputTimeoutAction,
 )
 from ouroboros.events.base import BaseEvent
@@ -177,6 +179,9 @@ def pending_human_input_requests(events: Iterable[BaseEvent]) -> tuple[HumanInpu
 
 
 def _snapshot_from_requested(event: BaseEvent, request_id: str) -> HumanInputSnapshot:
+    if not _requested_event_matches_contract(event, request_id):
+        msg = f"HITL requested event {event.id} has malformed contract payload"
+        raise ValueError(msg)
     session_id = _required_str(event.data, "session_id", event.id)
     resume_target = _required_str(event.data, "resume_target", event.id)
     return HumanInputSnapshot(
@@ -192,6 +197,42 @@ def _snapshot_from_requested(event: BaseEvent, request_id: str) -> HumanInputSna
         invocation_id=_optional_str(event.data.get("invocation_id")),
         request=_frozen_payload(event.data),
     )
+
+
+def _requested_event_matches_contract(event: BaseEvent, request_id: str) -> bool:
+    try:
+        options = event.data.get("options", ())
+        if not isinstance(options, list | tuple):
+            return False
+        payload = event.data.get("payload", {})
+        if not isinstance(payload, Mapping):
+            return False
+        timeout_seconds = event.data.get("timeout_seconds")
+        HumanInputRequest(
+            request_id=request_id,
+            session_id=_required_str(event.data, "session_id", event.id),
+            run_id=_optional_str(event.data.get("run_id")),
+            invocation_id=_optional_str(event.data.get("invocation_id")),
+            created_by=_required_str(event.data, "created_by", event.id),
+            kind=HumanInputKind(event.data.get("kind")),
+            source=HumanInputSource(event.data.get("source")),
+            risk_class=HumanInputRiskClass(event.data.get("risk_class")),
+            question=_required_str(event.data, "question", event.id),
+            resume_target=_required_str(event.data, "resume_target", event.id),
+            title=_optional_str(event.data.get("title")),
+            body=_optional_str(event.data.get("body")),
+            options=tuple(options),
+            required_permission=_optional_str(event.data.get("required_permission")),
+            timeout_seconds=timeout_seconds if timeout_seconds is not None else None,
+            timeout_action=HumanInputTimeoutAction(
+                event.data.get("timeout_action", HumanInputTimeoutAction.STAY_WAITING.value)
+            ),
+            surface=_optional_str(event.data.get("surface")),
+            payload=payload,
+        )
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _snapshot_from_terminal(

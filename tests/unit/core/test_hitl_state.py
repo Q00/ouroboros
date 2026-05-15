@@ -107,6 +107,80 @@ def test_answered_event_closes_request_with_response_payload() -> None:
     assert pending_human_input_requests(events) == ()
 
 
+def test_text_and_selection_answers_close_compatible_requests() -> None:
+    text_request = HumanInputRequest(
+        request_id="hitl-text-answer",
+        session_id="session-1",
+        run_id="run-1",
+        invocation_id="invoke-1",
+        created_by="plan",
+        kind=HumanInputKind.FREE_TEXT,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Explain?",
+        resume_target="plan:resume",
+    )
+    selection_request = HumanInputRequest(
+        request_id="hitl-selection-answer",
+        session_id="session-1",
+        run_id="run-1",
+        invocation_id="invoke-1",
+        created_by="plan",
+        kind=HumanInputKind.MULTI_SELECT,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Pick options",
+        resume_target="plan:resume",
+        options=("A", "B", "C"),
+    )
+    events = [
+        _with_time(create_hitl_requested_event(text_request), 0, "evt_text_req"),
+        _with_time(create_hitl_requested_event(selection_request), 1, "evt_selection_req"),
+        _with_time(
+            create_hitl_answered_event(
+                text_request,
+                HumanInputResponse(
+                    request_id="hitl-text-answer",
+                    session_id="session-1",
+                    run_id="run-1",
+                    invocation_id="invoke-1",
+                    actor="local-user",
+                    response_kind=HumanInputResponseKind.TEXT,
+                    text="Looks good",
+                ),
+            ),
+            2,
+            "evt_text_answer",
+        ),
+        _with_time(
+            create_hitl_answered_event(
+                selection_request,
+                HumanInputResponse(
+                    request_id="hitl-selection-answer",
+                    session_id="session-1",
+                    run_id="run-1",
+                    invocation_id="invoke-1",
+                    actor="local-user",
+                    response_kind=HumanInputResponseKind.SELECTION,
+                    selected_values=("A", "C"),
+                ),
+            ),
+            3,
+            "evt_selection_answer",
+        ),
+    ]
+
+    text_snapshot, selection_snapshot = project_human_input_state(events)
+
+    assert text_snapshot.state is HumanInputState.ANSWERED
+    assert text_snapshot.response is not None
+    assert text_snapshot.response["text"] == "Looks good"
+    assert selection_snapshot.state is HumanInputState.ANSWERED
+    assert selection_snapshot.response is not None
+    assert selection_snapshot.response["selected_values"] == ("A", "C")
+    assert pending_human_input_requests(events) == ()
+
+
 def test_malformed_answered_events_do_not_close_pending_request() -> None:
     request = _request()
     requested = _with_time(create_hitl_requested_event(request), 0, "evt_requested")
@@ -243,17 +317,32 @@ def test_mismatched_event_request_identifiers_are_ignored() -> None:
 
 def test_malformed_requested_event_does_not_abort_projection() -> None:
     valid_request = _request("hitl-valid")
-    malformed_request = BaseEvent(
+    missing_resume_target = BaseEvent(
         type="hitl.requested",
         aggregate_type="hitl",
         aggregate_id="hitl-bad",
         data={"request_id": "hitl-bad", "session_id": "session-1"},
     )
+    missing_kind = BaseEvent(
+        type="hitl.requested",
+        aggregate_type="hitl",
+        aggregate_id="hitl-bad-kind",
+        data={
+            "request_id": "hitl-bad-kind",
+            "session_id": "session-1",
+            "created_by": "plan",
+            "source": "plan_approval",
+            "risk_class": "material_branch",
+            "question": "Approve?",
+            "resume_target": "plan:resume",
+        },
+    )
 
     snapshots = project_human_input_state(
         [
-            _with_time(malformed_request, 0, "evt_bad_request"),
-            _with_time(create_hitl_requested_event(valid_request), 1, "evt_valid_request"),
+            _with_time(missing_resume_target, 0, "evt_bad_request"),
+            _with_time(missing_kind, 1, "evt_bad_kind_request"),
+            _with_time(create_hitl_requested_event(valid_request), 2, "evt_valid_request"),
         ]
     )
 
