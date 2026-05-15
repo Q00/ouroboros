@@ -3018,6 +3018,8 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         # the previous last-message behavior for runtimes that emit
                         # complete assistant messages.
                         if getattr(self._adapter, "runtime_backend", "") == "goose":
+                            if message.type not in {"assistant", "result"}:
+                                continue
                             if message.is_final:
                                 response_text = message.content
                             else:

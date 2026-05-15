@@ -6117,6 +6117,7 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
             resume_session_id: str | None = None,
         ):
             del prompt, tools, system_prompt, resume_handle, resume_session_id
+            yield AgentMessage(type="system", content="Session initialized: sess-1")
             for chunk in (
                 '["Sub-AC 1: inspect the implementation", ',
                 '"Sub-AC 2: write a focused regression test", ',
