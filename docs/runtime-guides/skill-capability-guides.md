@@ -16,6 +16,16 @@ consume the rendered guide through the instruction surface they actually own.
 | Kiro | Not yet a setup-owned prompt/rule artifact | Fallback: use the generic guide from `backends.capabilities`; setup currently registers MCP and backend config only. |
 | Copilot | Not yet a setup-owned prompt/rule artifact | Fallback: use the generic guide from `backends.capabilities`; setup currently registers MCP and model/runtime config only. |
 
+## Seed generation client-gate enforcement
+
+`ouroboros_generate_seed` always reports `required_client_gates`,
+`accepted_client_gates`, and `missing_client_gates` metadata so runtimes can
+confirm that the Seed-ready Acceptance Guard and Restate gate ran before seed
+generation. By default, missing gates remain warnings for compatibility with
+existing clients. Set `OUROBOROS_REQUIRE_CLIENT_GATES=1` to promote missing
+gates to a hard MCP precondition while migrating maintained clients to pass the
+`client_gates` acknowledgements.
+
 ## Fallback behavior for runtimes without generated artifacts
 
 Until a runtime has a durable instruction surface owned by `ouroboros setup`,
