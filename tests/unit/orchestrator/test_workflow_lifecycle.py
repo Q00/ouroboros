@@ -646,6 +646,43 @@ def test_next_runnable_refuses_ambiguous_same_timestamp_restart_node_state() -> 
     assert next_runnable_node_ids(spec, events) == ()
 
 
+def test_next_runnable_refuses_ambiguous_same_timestamp_restart_edge_traversal() -> None:
+    spec = _conditional_spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    boundary = start + timedelta(seconds=1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="decide",
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_yes",
+            timestamp=boundary,
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ()
+
+
 def test_next_runnable_refuses_post_terminal_events_before_later_restart() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
@@ -772,6 +809,42 @@ def test_next_runnable_scopes_node_state_to_latest_run_after_restart() -> None:
     )
 
     assert next_runnable_node_ids(spec, events) == ("node_a",)
+
+
+def test_next_runnable_scopes_edge_traversals_to_latest_run_after_restart() -> None:
+    spec = _conditional_spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="decide",
+            timestamp=start + timedelta(seconds=1),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_yes",
+            timestamp=start + timedelta(seconds=2),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=start + timedelta(seconds=3),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start + timedelta(seconds=4),
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ("decide",)
 
 
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:

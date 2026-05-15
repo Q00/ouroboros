@@ -322,6 +322,46 @@ def test_conformance_rejects_ambiguous_same_timestamp_restart_node_state() -> No
     assert "ambiguous_run_boundary_timestamp" in {issue.code for issue in report.errors}
 
 
+def test_conformance_rejects_ambiguous_same_timestamp_restart_edge_traversal() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    boundary = start + timedelta(seconds=1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_a_end",
+            timestamp=boundary,
+        ),
+    )
+
+    report = validate_workflow_lifecycle_conformance(spec, events)
+
+    assert report.ok is False
+    assert "ambiguous_run_boundary_timestamp" in {issue.code for issue in report.errors}
+
+
 def test_conformance_accepts_zero_duration_run_without_later_events() -> None:
     spec = _spec()
     timestamp = datetime(2026, 5, 15, tzinfo=UTC)
