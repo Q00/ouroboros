@@ -726,6 +726,29 @@ def validate_workflow_lifecycle_conformance(
                     active_run = True
                     seen_run_created = True
                     continue
+                if event.event_type in _NODE_EVENT_TYPES and event.node_id not in node_ids:
+                    issues.append(
+                        WorkflowConformanceIssue(
+                            severity="error",
+                            code="unknown_node_id",
+                            message=f"Lifecycle event references unknown node id {event.node_id!r}.",
+                            event_type=event.event_type,
+                            node_id=event.node_id,
+                        )
+                    )
+                if (
+                    event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED
+                    and event.edge_id not in edge_ids
+                ):
+                    issues.append(
+                        WorkflowConformanceIssue(
+                            severity="error",
+                            code="unknown_edge_id",
+                            message=f"Lifecycle event references unknown edge id {event.edge_id!r}.",
+                            event_type=event.event_type,
+                            edge_id=event.edge_id,
+                        )
+                    )
                 issues.append(
                     WorkflowConformanceIssue(
                         severity="error",

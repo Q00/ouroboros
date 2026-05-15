@@ -379,6 +379,37 @@ def test_conformance_still_flags_later_event_after_same_timestamp_terminal_group
     assert "event_after_terminal_run" in {issue.code for issue in report.errors}
 
 
+def test_conformance_reports_unknown_node_after_terminal_run() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=start + timedelta(seconds=1),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="missing_node",
+            timestamp=start + timedelta(seconds=2),
+        ),
+    )
+
+    report = validate_workflow_lifecycle_conformance(spec, events)
+
+    assert report.ok is False
+    assert {issue.code for issue in report.errors} == {
+        "event_after_terminal_run",
+        "unknown_node_id",
+    }
+
+
 def test_conformance_flags_events_after_terminal_run() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
