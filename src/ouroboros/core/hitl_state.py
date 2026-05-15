@@ -134,8 +134,10 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputRequest.TIMED_OUT_EVENT_TYPE:
-            if not _request_timeout_is_terminal(current) or not _event_context_matches_request(
-                event, current
+            if (
+                _optional_str(event.data.get("reason")) is None
+                or not _request_timeout_is_terminal(current)
+                or not _event_context_matches_request(event, current)
             ):
                 continue
             snapshots[request_id] = _snapshot_from_terminal(
@@ -147,7 +149,9 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputRequest.CANCELLED_EVENT_TYPE:
-            if not _event_context_matches_request(event, current):
+            if _optional_str(
+                event.data.get("reason")
+            ) is None or not _event_context_matches_request(event, current):
                 continue
             snapshots[request_id] = _snapshot_from_terminal(
                 current,

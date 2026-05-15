@@ -248,6 +248,57 @@ def test_stay_waiting_timeout_events_do_not_close_pending_request() -> None:
     assert pending_human_input_requests(events) == (snapshot,)
 
 
+def test_malformed_timeout_and_cancel_events_do_not_close_pending_request() -> None:
+    timeout_request = _request(
+        "hitl-timeout-malformed", timeout_action=HumanInputTimeoutAction.CANCEL
+    )
+    cancel_request = _request("hitl-cancel-malformed")
+    events = [
+        _with_time(create_hitl_requested_event(timeout_request), 0, "evt_timeout_req"),
+        _with_time(create_hitl_requested_event(cancel_request), 1, "evt_cancel_req"),
+        _with_time(
+            BaseEvent(
+                type="hitl.timed_out",
+                aggregate_type="hitl",
+                aggregate_id="hitl-timeout-malformed",
+                data={
+                    "request_id": "hitl-timeout-malformed",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "invocation_id": "invoke-1",
+                },
+            ),
+            2,
+            "evt_timeout_missing_reason",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.cancelled",
+                aggregate_type="hitl",
+                aggregate_id="hitl-cancel-malformed",
+                data={
+                    "request_id": "hitl-cancel-malformed",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "invocation_id": "invoke-1",
+                    "reason": "   ",
+                    "actor": "local-user",
+                },
+            ),
+            3,
+            "evt_cancel_blank_reason",
+        ),
+    ]
+
+    snapshots = project_human_input_state(events)
+
+    assert tuple(snapshot.state for snapshot in snapshots) == (
+        HumanInputState.PENDING,
+        HumanInputState.PENDING,
+    )
+    assert pending_human_input_requests(events) == snapshots
+
+
 def test_mismatched_timeout_and_cancel_events_do_not_close_pending_request() -> None:
     timeout_request = _request(
         "hitl-timeout-mismatch", timeout_action=HumanInputTimeoutAction.CANCEL
