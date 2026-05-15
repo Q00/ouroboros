@@ -16,7 +16,11 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-from ouroboros.core.hitl_contract import HumanInputRequest, HumanInputResponse
+from ouroboros.core.hitl_contract import (
+    HumanInputRequest,
+    HumanInputResponse,
+    HumanInputResponseKind,
+)
 from ouroboros.events.base import BaseEvent
 
 
@@ -109,7 +113,7 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             snapshots[request_id] = _snapshot_from_terminal(
                 current,
                 event,
-                state=HumanInputState.ANSWERED,
+                state=_state_from_answered_event(event),
                 response=_frozen_payload(event.data),
             )
             continue
@@ -182,6 +186,15 @@ def _snapshot_from_terminal(
         reason=reason,
         response=response,
     )
+
+
+def _state_from_answered_event(event: BaseEvent) -> HumanInputState:
+    response_kind = event.data.get("response_kind")
+    if response_kind == HumanInputResponseKind.CANCEL.value:
+        return HumanInputState.CANCELLED
+    if response_kind == HumanInputResponseKind.TIMEOUT.value:
+        return HumanInputState.TIMED_OUT
+    return HumanInputState.ANSWERED
 
 
 def _event_request_id(event: BaseEvent) -> str | None:

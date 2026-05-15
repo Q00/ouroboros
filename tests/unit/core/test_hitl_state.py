@@ -101,6 +101,60 @@ def test_answered_event_closes_request_with_response_payload() -> None:
     assert pending_human_input_requests(events) == ()
 
 
+def test_answered_cancel_and_timeout_responses_project_terminal_state() -> None:
+    cancel_request = _request("hitl-cancel-answer")
+    timeout_request = _request("hitl-timeout-answer")
+    events = [
+        _with_time(create_hitl_requested_event(cancel_request), 0, "evt_cancel_req"),
+        _with_time(create_hitl_requested_event(timeout_request), 1, "evt_timeout_req"),
+        _with_time(
+            create_hitl_answered_event(
+                cancel_request,
+                HumanInputResponse(
+                    request_id="hitl-cancel-answer",
+                    session_id="session-1",
+                    run_id="run-1",
+                    actor="local-user",
+                    response_kind=HumanInputResponseKind.CANCEL,
+                    payload={"reason_code": "user_abort"},
+                ),
+            ),
+            2,
+            "evt_cancel_answer",
+        ),
+        _with_time(
+            create_hitl_answered_event(
+                timeout_request,
+                HumanInputResponse(
+                    request_id="hitl-timeout-answer",
+                    session_id="session-1",
+                    run_id="run-1",
+                    actor="runtime",
+                    response_kind=HumanInputResponseKind.TIMEOUT,
+                    payload={"deadline_ms": 30000},
+                ),
+            ),
+            3,
+            "evt_timeout_answer",
+        ),
+    ]
+
+    cancelled, timed_out = project_human_input_state(events)
+
+    assert cancelled.state is HumanInputState.CANCELLED
+    assert cancelled.terminal_event_id == "evt_cancel_answer"
+    assert cancelled.actor == "local-user"
+    assert cancelled.response is not None
+    assert cancelled.response["response_kind"] == "cancel"
+    assert cancelled.response["payload"] == {"reason_code": "user_abort"}
+    assert timed_out.state is HumanInputState.TIMED_OUT
+    assert timed_out.terminal_event_id == "evt_timeout_answer"
+    assert timed_out.actor == "runtime"
+    assert timed_out.response is not None
+    assert timed_out.response["response_kind"] == "timeout"
+    assert pending_human_input_requests(events) == ()
+
+
 def test_timeout_and_cancel_events_project_terminal_reason() -> None:
     timeout_request = _request("hitl-timeout")
     cancel_request = _request("hitl-cancel")
