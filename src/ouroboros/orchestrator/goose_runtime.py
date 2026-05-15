@@ -27,7 +27,7 @@ from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 log = get_logger(__name__)
 
 
-_GOOSE_OWNED_SESSION_NAME_METADATA_KEY = "goose_owned_session_name"
+_GOOSE_INITIAL_LAUNCH_METADATA_KEY = "goose_initial_launch"
 
 
 def _has_text_payload(value: dict[str, Any]) -> bool:
@@ -208,7 +208,7 @@ class GooseCliRuntime(CodexCliRuntime):
 
         if generated_session_name:
             metadata = dict(handle.metadata)
-            metadata.setdefault(_GOOSE_OWNED_SESSION_NAME_METADATA_KEY, "true")
+            metadata.setdefault(_GOOSE_INITIAL_LAUNCH_METADATA_KEY, "pending")
             return replace(handle, metadata=metadata)
 
         return handle
@@ -219,10 +219,7 @@ class GooseCliRuntime(CodexCliRuntime):
     ) -> str | None:
         if current_handle is None:
             return None
-        if (
-            current_handle.metadata.get(_GOOSE_OWNED_SESSION_NAME_METADATA_KEY) == "true"
-            and current_handle.runtime_event_type is None
-        ):
+        if current_handle.metadata.get(_GOOSE_INITIAL_LAUNCH_METADATA_KEY) == "pending":
             return None
         return current_handle.native_session_id or current_handle.conversation_id
 
@@ -350,6 +347,13 @@ class GooseCliRuntime(CodexCliRuntime):
         event_handle = (
             self._build_runtime_handle(session_id, current_handle) if session_id else current_handle
         )
+        if (
+            event_handle is not None
+            and event_handle.metadata.get(_GOOSE_INITIAL_LAUNCH_METADATA_KEY) == "pending"
+        ):
+            metadata = dict(event_handle.metadata)
+            metadata.pop(_GOOSE_INITIAL_LAUNCH_METADATA_KEY, None)
+            event_handle = replace(event_handle, metadata=metadata)
 
         if event_type in {"session.created", "session.started", "session", "start", "started"}:
             if event_handle is None:

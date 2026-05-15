@@ -252,6 +252,73 @@ class TestGooseCliLLMAdapter:
         assert result.value.content == '{"approved": true}'
 
     @pytest.mark.asyncio
+    async def test_complete_rejects_json_object_response_format_array(self) -> None:
+        adapter = GooseCliLLMAdapter(cli_path="/tmp/goose", max_retries=1)
+
+        async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(
+                stdout=_jsonl(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": '[{"approved": true}]',
+                    }
+                )
+            )
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return a verdict.")],
+                CompletionConfig(
+                    model="default",
+                    response_format={"type": "json_object"},
+                ),
+            )
+
+        assert result.is_err
+        assert result.error.provider == "goose_cli"
+
+    @pytest.mark.asyncio
+    async def test_complete_rejects_json_schema_mismatch(self) -> None:
+        adapter = GooseCliLLMAdapter(cli_path="/tmp/goose", max_retries=1)
+
+        async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(
+                stdout=_jsonl(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": '{"approved": "yes"}',
+                    }
+                )
+            )
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return a verdict.")],
+                CompletionConfig(
+                    model="default",
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {"approved": {"type": "boolean"}},
+                            "required": ["approved"],
+                        },
+                    },
+                ),
+            )
+
+        assert result.is_err
+        assert result.error.provider == "goose_cli"
+
+    @pytest.mark.asyncio
     async def test_complete_reports_goose_errors(self) -> None:
         adapter = GooseCliLLMAdapter(cli_path="/tmp/goose")
 

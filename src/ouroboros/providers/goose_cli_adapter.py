@@ -15,6 +15,8 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 import structlog
 
 from ouroboros.config import get_goose_cli_path
@@ -163,6 +165,36 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
                 "Respond with ONLY a valid JSON object. Do not use markdown fences, "
                 "headers, or explanatory text."
             )
+        return None
+
+    def _validate_response_format_payload(
+        self,
+        payload: str,
+        response_format: dict[str, object],
+    ) -> str | None:
+        """Validate extracted JSON against the requested response_format."""
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            return f"invalid JSON: {exc}"
+
+        fmt_type = response_format.get("type")
+        if fmt_type == "json_object":
+            if not isinstance(parsed, dict):
+                return "expected a JSON object"
+            return None
+
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema")
+            if not isinstance(schema, dict):
+                return "json_schema response_format is missing a schema object"
+            schema_payload = (
+                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            )
+            try:
+                Draft202012Validator(schema_payload).validate(parsed)
+            except JsonSchemaValidationError as exc:
+                return exc.message
         return None
 
     def _update_last_content(self, last_content: str, event_content: str) -> str:
@@ -356,14 +388,27 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
                 return result
             extracted = extract_json_payload(result.value.content)
             if extracted:
-                return Result.ok(replace(result.value, content=extracted))
+                validation_error = self._validate_response_format_payload(
+                    extracted,
+                    effective_config.response_format,
+                )
+                if validation_error is None:
+                    return Result.ok(replace(result.value, content=extracted))
+                log.warning(
+                    "goose_cli_adapter.response_format_validation_failed",
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    validation_error=validation_error,
+                    response_preview=result.value.content[:160],
+                )
+            else:
+                log.warning(
+                    "goose_cli_adapter.json_extraction_failed",
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    response_preview=result.value.content[:160],
+                )
             last_result = result
-            log.warning(
-                "goose_cli_adapter.json_extraction_failed",
-                attempt=attempt + 1,
-                max_attempts=attempts,
-                response_preview=result.value.content[:160],
-            )
 
         assert last_result is not None
         return Result.err(

@@ -67,6 +67,25 @@ def test_goose_command_uses_run_stream_json_and_stdin() -> None:
     assert "session-1" in command
 
 
+def test_goose_runtime_makes_streamed_generated_handle_resumable() -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    initial_handle = runtime._build_runtime_handle(None)
+
+    assert initial_handle is not None
+    assert runtime._resolve_resume_session_id(initial_handle) is None
+
+    messages = runtime._convert_event(
+        {"type": "assistant.message", "text": "Working"},
+        initial_handle,
+    )
+
+    assert messages[0].resume_handle is not None
+    assert messages[0].resume_handle.native_session_id == initial_handle.native_session_id
+    assert runtime._resolve_resume_session_id(messages[0].resume_handle) == (
+        initial_handle.native_session_id
+    )
+
+
 @pytest.mark.asyncio
 async def test_goose_runtime_collects_stream_json_messages() -> None:
     stdout = [
