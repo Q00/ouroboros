@@ -45,7 +45,9 @@ def build_run_snapshot(
     step_tuple = tuple(steps)
     artifact_tuple = tuple(artifacts)
 
-    completed_step_ids = tuple(step.step_id for step in step_tuple if step.ended_at and step.ok is True)
+    completed_step_ids = tuple(
+        step.step_id for step in step_tuple if step.ended_at and step.ok is True
+    )
     pending_step_ids = tuple(step.step_id for step in step_tuple if step.ended_at is None)
     failed_step_ids = tuple(step.step_id for step in step_tuple if step.ok is False)
     unknown_step_ids = tuple(
@@ -121,7 +123,11 @@ def _resume_blockers(
     unknown_step_ids: tuple[str, ...],
 ) -> tuple[str, ...]:
     blockers: list[str] = []
-    if status in {RunSnapshotStatus.COMPLETED, RunSnapshotStatus.FAILED, RunSnapshotStatus.CANCELLED}:
+    if status in {
+        RunSnapshotStatus.COMPLETED,
+        RunSnapshotStatus.FAILED,
+        RunSnapshotStatus.CANCELLED,
+    }:
         blockers.append(f"terminal_status:{status.value}")
     if status is RunSnapshotStatus.WAITING:
         blockers.append("human_input_required")

@@ -561,13 +561,20 @@ class RunSnapshotRecord(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _validate_safe_resume_contract(self) -> RunSnapshotRecord:
-        if self.safe_resume and self.status not in {RunSnapshotStatus.RUNNING, RunSnapshotStatus.WAITING}:
+        if self.safe_resume and self.status not in {
+            RunSnapshotStatus.RUNNING,
+            RunSnapshotStatus.WAITING,
+        }:
             msg = "RunSnapshotRecord.safe_resume is only valid for running or waiting runs"
             raise ValueError(msg)
         if self.safe_resume and self.resume_blockers:
             msg = "RunSnapshotRecord.safe_resume cannot include resume_blockers"
             raise ValueError(msg)
-        if not self.safe_resume and self.status in {RunSnapshotStatus.RUNNING, RunSnapshotStatus.WAITING} and not self.resume_blockers:
+        if (
+            not self.safe_resume
+            and self.status in {RunSnapshotStatus.RUNNING, RunSnapshotStatus.WAITING}
+            and not self.resume_blockers
+        ):
             msg = "unsafe non-terminal RunSnapshotRecord must explain resume_blockers"
             raise ValueError(msg)
         return self
