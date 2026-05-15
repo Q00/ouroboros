@@ -78,9 +78,9 @@ If the MCP tool is NOT available, fall back to agent-based generation:
 
 1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role.
 2. Recover the interview requirements before drafting; do not invent missing context:
-   - If `session_id` was provided and the runtime can inspect local files, look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID.
-   - If a matching local artifact is found, use it as the source of truth.
-   - If no matching artifact is found or the artifact is stale/incomplete, fall through to the current conversation when it contains the complete interview Q&A.
+   - If the current conversation contains the complete interview Q&A or accepted post-interview corrections, use that conversation context as the freshest source of truth.
+   - If conversation context is incomplete and `session_id` was provided, use the active runtime's `inspect_code` / `run_shell` capabilities to look for persisted interview artifacts under the Ouroboros data directory (for example `~/.ouroboros/data/`), exported session artifacts, or other exact local records for that ID.
+   - If both conversation context and a persisted artifact are available, merge them conservatively: keep the persisted transcript as evidence, but let explicit in-thread user corrections or clarifications supersede older persisted wording.
    - If neither local artifacts nor conversation history provide enough requirements, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent transcript.
 3. Generate a Seed YAML specification from the recovered requirements.
 4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
@@ -93,7 +93,7 @@ The first generation (Path A `ouroboros_generate_seed` or Path B agent role) run
 
 **Threshold for seed**: `pass_threshold: 0.90` (stricter than default 0.80 — seeds are structural specs and must be precise).
 
-**Max iterations**: 5. Track the highest-scoring seed across all iterations (the "best attempt"). If still not PASS after 5, present that best attempt with its QA verdict and ask the user: accept it as-is, do one more manual edit, or escalate to `ooo interview` / `ooo unstuck`. If the user accepts a below-threshold attempt, present the complete accepted Seed YAML in a fenced `yaml` block before proceeding to "After Seed Generation".
+**Max iterations**: 5. Track the highest-scoring seed across all iterations (the "best attempt"). If still not PASS after 5, present that best attempt with its QA verdict and ask the user: accept it as-is, request one final manual edit, or escalate to `ooo interview` / `ooo unstuck`. If the user accepts a below-threshold attempt, present the complete accepted Seed YAML in a fenced `yaml` block before proceeding to "After Seed Generation". If the user requests one final manual edit, apply exactly that edit, present the edited Seed YAML, ask for explicit accept/escalate, and do not start a sixth QA iteration unless the user explicitly asks to rerun QA despite the max-iteration cap.
 
 The seed sits inside the **Define** diamond of Double Diamond — where expansion (Wonder) and convergence (Reflect/Refine/Restate) both happen in service of a single sharp specification. Expansion is not the enemy; **unchecked expansion that bypasses the user gate is.** The four-phase cycle plus User Adoption Gate is the workflow's primary safeguard.
 
