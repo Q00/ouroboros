@@ -320,6 +320,77 @@ class TestCodexDoctor:
 
         assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
 
+    def test_list_stdio_mcp_tool_names_preserves_content_length_fallback(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        server_path = tmp_path / "fake_header_mcp_server.py"
+        server_path.write_text(
+            textwrap.dedent(
+                r"""
+                import json
+                import sys
+
+                first_line = sys.stdin.buffer.readline()
+                if first_line and first_line.lstrip().startswith(b"{"):
+                    raise SystemExit(2)
+
+                def read_message():
+                    headers = {}
+                    line = first_line
+                    while True:
+                        if not line:
+                            raise SystemExit(0)
+                        stripped = line.strip()
+                        if not stripped:
+                            break
+                        name, value = stripped.decode("ascii").split(":", 1)
+                        headers[name.lower()] = value.strip()
+                        line = sys.stdin.buffer.readline()
+                    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+
+                def write_message(message):
+                    body = json.dumps(message).encode("utf-8")
+                    sys.stdout.buffer.write(
+                        f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+                    )
+                    sys.stdout.buffer.flush()
+
+                initialize = read_message()
+                write_message({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": initialize["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fake", "version": "1.0.0"},
+                    },
+                })
+                read_message()
+                tools_list = read_message()
+                write_message({
+                    "jsonrpc": "2.0",
+                    "id": tools_list["id"],
+                    "result": {
+                        "tools": [
+                            {"name": "ouroboros_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_start_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_interview", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_generate_seed", "inputSchema": {"type": "object"}},
+                        ]
+                    },
+                })
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        tool_names = asyncio.run(
+            _list_stdio_mcp_tool_names(sys.executable, (str(server_path),), {})
+        )
+
+        assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
+
     def test_check_auto_dispatch_surface_live_mcp_accepts_uvx_mcp_extra_without_local_mcp(
         self,
         tmp_path: Path,

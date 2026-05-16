@@ -271,6 +271,22 @@ async def _list_stdio_mcp_tool_names(
     setup must not first require the current ``ouroboros codex doctor``
     interpreter to have installed the optional local ``mcp`` extra.
     """
+    try:
+        return await _list_stdio_mcp_tool_names_with_framing(command, args, env, framing="jsonl")
+    except (json.JSONDecodeError, RuntimeError, TimeoutError):
+        return await _list_stdio_mcp_tool_names_with_framing(
+            command, args, env, framing="content-length"
+        )
+
+
+async def _list_stdio_mcp_tool_names_with_framing(
+    command: str,
+    args: tuple[str, ...],
+    env: dict[str, str],
+    *,
+    framing: str,
+) -> frozenset[str]:
+    """Launch a stdio MCP server with one wire framing and return tool names."""
     process_env = os.environ.copy()
     process_env.update(env)
     proc = await asyncio.create_subprocess_exec(
@@ -303,20 +319,31 @@ async def _list_stdio_mcp_tool_names(
                     },
                 },
             },
+            framing=framing,
         )
         await _read_stdio_mcp_response(
-            proc, request_id=1, timeout=30.0, stderr_buffer=stderr_buffer
+            proc,
+            request_id=1,
+            timeout=30.0,
+            stderr_buffer=stderr_buffer,
+            framing=framing,
         )
         await _send_stdio_mcp_message(
             proc,
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            framing=framing,
         )
         await _send_stdio_mcp_message(
             proc,
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            framing=framing,
         )
         response = await _read_stdio_mcp_response(
-            proc, request_id=2, timeout=30.0, stderr_buffer=stderr_buffer
+            proc,
+            request_id=2,
+            timeout=30.0,
+            stderr_buffer=stderr_buffer,
+            framing=framing,
         )
         result = response.get("result")
         if not isinstance(result, Mapping):
@@ -340,12 +367,18 @@ async def _list_stdio_mcp_tool_names(
 
 
 async def _send_stdio_mcp_message(
-    proc: asyncio.subprocess.Process, message: Mapping[str, Any]
+    proc: asyncio.subprocess.Process, message: Mapping[str, Any], *, framing: str
 ) -> None:
     if proc.stdin is None:
         raise RuntimeError("MCP stdio process has no stdin")
     body = json.dumps(message, separators=(",", ":")).encode("utf-8")
-    proc.stdin.write(body + b"\n")
+    if framing == "jsonl":
+        proc.stdin.write(body + b"\n")
+    elif framing == "content-length":
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+        proc.stdin.write(header + body)
+    else:  # pragma: no cover - internal defensive guard
+        raise RuntimeError(f"unsupported MCP stdio framing: {framing}")
     await proc.stdin.drain()
 
 
@@ -355,6 +388,7 @@ async def _read_stdio_mcp_response(
     request_id: int,
     timeout: float,
     stderr_buffer: bytearray,
+    framing: str,
 ) -> Mapping[str, Any]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -363,7 +397,8 @@ async def _read_stdio_mcp_response(
         if remaining <= 0:
             raise TimeoutError(f"timed out waiting for MCP stdio response id {request_id}")
         message = await asyncio.wait_for(
-            _read_stdio_mcp_message(proc, stderr_buffer=stderr_buffer), timeout=remaining
+            _read_stdio_mcp_message(proc, stderr_buffer=stderr_buffer, framing=framing),
+            timeout=remaining,
         )
         if message.get("id") != request_id:
             continue
@@ -374,10 +409,15 @@ async def _read_stdio_mcp_response(
 
 
 async def _read_stdio_mcp_message(
-    proc: asyncio.subprocess.Process, *, stderr_buffer: bytearray
+    proc: asyncio.subprocess.Process, *, stderr_buffer: bytearray, framing: str
 ) -> Mapping[str, Any]:
     if proc.stdout is None:
         raise RuntimeError("MCP stdio process has no stdout")
+
+    if framing == "content-length":
+        return await _read_content_length_stdio_mcp_message(proc, stderr_buffer=stderr_buffer)
+    if framing != "jsonl":  # pragma: no cover - internal defensive guard
+        raise RuntimeError(f"unsupported MCP stdio framing: {framing}")
 
     while True:
         line = await proc.stdout.readline()
@@ -389,6 +429,38 @@ async def _read_stdio_mcp_message(
         if not stripped:
             continue
         decoded = json.loads(stripped.decode("utf-8"))
+        if not isinstance(decoded, Mapping):
+            raise RuntimeError("MCP stdio response was not a JSON object")
+        return decoded
+
+
+async def _read_content_length_stdio_mcp_message(
+    proc: asyncio.subprocess.Process, *, stderr_buffer: bytearray
+) -> Mapping[str, Any]:
+    if proc.stdout is None:
+        raise RuntimeError("MCP stdio process has no stdout")
+
+    while True:
+        headers: dict[str, str] = {}
+        while True:
+            line = await proc.stdout.readline()
+            if line == b"":
+                stderr = _format_stdio_mcp_stderr(stderr_buffer)
+                detail = f": {stderr}" if stderr else ""
+                raise RuntimeError(f"MCP stdio process exited before response{detail}")
+            stripped = line.strip()
+            if not stripped:
+                break
+            name, separator, value = stripped.decode("ascii", errors="replace").partition(":")
+            if not separator:
+                raise RuntimeError("MCP stdio response header was malformed")
+            headers[name.lower()] = value.strip()
+
+        content_length = headers.get("content-length")
+        if content_length is None:
+            continue
+        body = await proc.stdout.readexactly(int(content_length))
+        decoded = json.loads(body.decode("utf-8"))
         if not isinstance(decoded, Mapping):
             raise RuntimeError("MCP stdio response was not a JSON object")
         return decoded
