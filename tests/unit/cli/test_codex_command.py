@@ -106,6 +106,57 @@ class TestCodexDoctor:
 
         assert _check_auto_dispatch_surface(codex_dir) == []
 
+    def test_check_auto_dispatch_surface_reports_uvx_without_mcp_extra(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any("without the `mcp` extra" in failure for failure in failures)
+
+    def test_check_auto_dispatch_surface_reports_direct_ouroboros_without_mcp_import(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "/home/user/.local/bin/ouroboros"\n'
+            'args = ["mcp", "serve", "--runtime", "codex"]\n',
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=None):
+            failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any("cannot import `mcp`" in failure for failure in failures)
+
+    def test_check_auto_dispatch_surface_accepts_direct_ouroboros_with_mcp_import(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "ouroboros"\n'
+            'args = ["mcp", "serve", "--runtime", "codex"]\n',
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=object()):
+            assert _check_auto_dispatch_surface(codex_dir) == []
+
     def test_packaged_codex_artifacts_satisfy_doctor_contract(
         self,
         tmp_path: Path,

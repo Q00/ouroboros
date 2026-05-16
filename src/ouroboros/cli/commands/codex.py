@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 import tomllib
 from typing import Annotated
@@ -131,6 +132,11 @@ def _check_auto_dispatch_surface(codex_dir: Path) -> list[str]:
     command = ouroboros_entry.get("command")
     if not isinstance(command, str) or not command.strip():
         failures.append("[mcp_servers.ouroboros] is missing `command` or `url`")
+    else:
+        args = ouroboros_entry.get("args")
+        if not isinstance(args, list):
+            args = []
+        _check_mcp_runtime_dependency_surface(command, args, failures)
 
     if failures:
         print_warning(
@@ -139,6 +145,38 @@ def _check_auto_dispatch_surface(codex_dir: Path) -> list[str]:
         )
 
     return failures
+
+
+def _check_mcp_runtime_dependency_surface(
+    command: str, args: list[object], failures: list[str]
+) -> None:
+    """Detect Codex MCP server entries that cannot import the MCP runtime.
+
+    ``ouroboros codex doctor`` used to validate only rules, skill metadata, and
+    config presence. A direct ``ouroboros mcp serve`` entry can pass those checks
+    while the installed ``ouroboros-ai`` environment lacks the optional ``mcp``
+    extra, causing Codex's real stdio handshake to close before tools are listed.
+    """
+    command_name = Path(command).name
+    string_args = [arg for arg in args if isinstance(arg, str)]
+
+    if command_name in {"uvx", "uv"}:
+        joined_args = " ".join(string_args)
+        if "ouroboros-ai" in joined_args and "ouroboros-ai[mcp]" not in joined_args:
+            failures.append(
+                "Codex MCP command installs `ouroboros-ai` without the `mcp` extra; "
+                "use `ouroboros-ai[mcp]` so stdio initialize/list_tools can start"
+            )
+        return
+
+    if command_name != "ouroboros":
+        return
+
+    if importlib.util.find_spec("mcp") is None:
+        failures.append(
+            "current `ouroboros` environment cannot import `mcp`; reinstall for Codex MCP "
+            "usage with `uv tool install --force 'ouroboros-ai[mcp]'`"
+        )
 
 
 def _read_codex_text(path: Path, label: str, failures: list[str]) -> str | None:
