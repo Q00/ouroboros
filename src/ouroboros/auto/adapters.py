@@ -110,9 +110,14 @@ class HandlerInterviewBackend(InterviewBackend):
         result = _unwrap(outcome, tool_name="ouroboros_interview")
         return _turn_from_result(result)
 
-    async def answer(self, session_id: str, answer: str) -> InterviewTurn:
+    async def answer(
+        self, session_id: str, answer: str, *, last_question: str | None = None
+    ) -> InterviewTurn:
+        arguments = {"session_id": session_id, "answer": answer}
+        if last_question:
+            arguments["last_question"] = last_question
         result = _unwrap(
-            await self.handler.handle({"session_id": session_id, "answer": answer}),
+            await self.handler.handle(arguments),
             tool_name="ouroboros_interview",
         )
         return _turn_from_result(result, fallback_session_id=session_id)

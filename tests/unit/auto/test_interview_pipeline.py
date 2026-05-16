@@ -2651,6 +2651,51 @@ async def test_interview_driver_accepts_initial_completed_turn_without_answering
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_supplies_last_question_for_seed_ready_gap_reopen(tmp_path) -> None:
+    """A backend-completed interview can be reopened by a driver gap probe.
+
+    The MCP interview handler rejects answers against an already-answered
+    seed-ready transcript unless the caller supplies the fresh probe text as
+    ``last_question``. Pin the auto-driver contract so `ooo auto` can fill a
+    remaining ledger gap after backend completion instead of blocking before
+    Seed generation.
+    """
+
+    observed_last_questions: list[str | None] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("already complete", "interview_done", seed_ready=True, completed=True)
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        observed_last_questions.append(last_question)
+        if not last_question:
+            raise RuntimeError("missing last_question for reopened seed-ready interview")
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["non_goals"].entries.clear()
+    assert ledger.open_gaps() == ["non_goals"]
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=2,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert observed_last_questions == [
+        "[driver gap-reopen 'non_goals': backend_completed=True ledger_done=False]"
+    ]
+    assert ledger.is_seed_ready()
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_does_not_replace_specific_verification_answer_with_gap_prompt(
     tmp_path,
 ) -> None:

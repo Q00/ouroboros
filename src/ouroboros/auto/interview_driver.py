@@ -56,8 +56,17 @@ class InterviewBackend(Protocol):
         an id that disagrees with the on-disk interview file.
         """
 
-    async def answer(self, session_id: str, answer: str) -> InterviewTurn:
-        """Record an answer and return the next question or completion metadata."""
+    async def answer(
+        self, session_id: str, answer: str, *, last_question: str | None = None
+    ) -> InterviewTurn:
+        """Record an answer and return the next question or completion metadata.
+
+        ``last_question`` is supplied when the driver is answering a
+        driver-originated probe rather than an unanswered backend turn. The
+        MCP interview handler requires it when reopening an already-answered
+        seed-ready interview so the transcript is not bound to stale question
+        text.
+        """
 
     async def resume(self, session_id: str) -> InterviewTurn:
         """Return the outstanding question for a persisted interview session."""
@@ -293,7 +302,11 @@ class AutoInterviewDriver:
             try:
                 turn = _validate_turn(
                     await self._with_timeout(
-                        self.backend.answer(turn.session_id, answer.prefixed_text),
+                        self.backend.answer(
+                            turn.session_id,
+                            answer.prefixed_text,
+                            last_question=question_for_record,
+                        ),
                         state,
                         tool_name="interview.answer",
                     )
@@ -533,7 +546,7 @@ class FunctionInterviewBackend:
     def __init__(
         self,
         start: Callable[[str, str], Awaitable[InterviewTurn]],
-        answer: Callable[[str, str], Awaitable[InterviewTurn]],
+        answer: Callable[..., Awaitable[InterviewTurn]],
         resume: Callable[[str], Awaitable[InterviewTurn]] | None = None,
         is_session_persisted: Callable[[str], bool] | None = None,
     ) -> None:
@@ -549,7 +562,14 @@ class FunctionInterviewBackend:
             return await self._start(goal, cwd, interview_id=interview_id)  # type: ignore[call-arg]
         return await self._start(goal, cwd)
 
-    async def answer(self, session_id: str, answer: str) -> InterviewTurn:
+    async def answer(
+        self, session_id: str, answer: str, *, last_question: str | None = None
+    ) -> InterviewTurn:
+        # Forward ``last_question`` only to callables that opt into the
+        # reopened-interview contract; legacy ``(session_id, answer)`` test
+        # callables remain compatible.
+        if "last_question" in inspect.signature(self._answer).parameters:
+            return await self._answer(session_id, answer, last_question=last_question)
         return await self._answer(session_id, answer)
 
     async def resume(self, session_id: str) -> InterviewTurn:
