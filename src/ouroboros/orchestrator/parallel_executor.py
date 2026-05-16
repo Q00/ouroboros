@@ -35,6 +35,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import subprocess
 import time
 from typing import TYPE_CHECKING, Any
@@ -612,23 +613,71 @@ def _looks_like_test_command(command: str) -> bool:
     normalized = command.strip().lower()
     if not normalized:
         return False
+    if _unittest_command_invocation(normalized) is not None:
+        return True
     return bool(
         re.search(
             r"(^|[\s;&|])("
             r"pytest|py\.test|tox|nox|npm\s+test|pnpm\s+test|yarn\s+test|"
-            r"uv\s+run\s+pytest|python\s+-m\s+pytest|python\s+-m\s+unittest"
+            r"uv\s+run\s+pytest|python\s+-m\s+pytest"
             r")($|[\s;&|])",
             normalized,
         )
     )
 
 
-def _looks_like_unittest_command(command: str) -> bool:
-    """Return True when a shell command invokes stdlib unittest."""
+def _unittest_command_invocation(command: str) -> str | None:
+    """Return the embedded ``python -m unittest`` invocation, if present."""
     normalized = command.strip().lower()
     if not normalized:
-        return False
-    return bool(re.search(r"(^|[\s;&|])python\s+-m\s+unittest($|[\s;&|])", normalized))
+        return None
+
+    direct = _unittest_invocation_from_prefix(normalized)
+    if direct is not None:
+        return direct
+
+    shell_match = re.search(
+        r"^(?:[\w./-]+/)?(?:bash|zsh|sh)\s+-(?:l?c|c)\s+"
+        r"(?P<quote>['\"])(?P<body>.*?)(?P=quote)"
+        r"(?=$|[\s;&|])",
+        normalized,
+    )
+    if shell_match is None:
+        return None
+    return _unittest_invocation_from_prefix(shell_match.group("body").strip())
+
+
+def _unittest_invocation_from_prefix(command: str) -> str | None:
+    """Return a normalized unittest invocation only when it starts the command text."""
+    match = re.search(
+        r"^"
+        r"(python\s+-m\s+unittest"
+        r"(?:\s+(?:\"[^\"]+\"|'[^']+'|[^\s;&|'\"]+))*)"
+        r"(?=$|[\s;&|'\"])",
+        command,
+    )
+    if match is None:
+        return None
+    try:
+        parts = shlex.split(match.group(1))
+    except ValueError:
+        parts = match.group(1).replace('"', "").replace("'", "").split()
+    return _normalized_evidence_text(" ".join(parts))
+
+
+def _looks_like_unittest_command(command: str) -> bool:
+    """Return True when a shell command invokes stdlib unittest."""
+    return _unittest_command_invocation(command) is not None
+
+
+def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
+    """Return normalized command forms that a concise evidence claim may use."""
+    normalized = _normalized_evidence_text(command)
+    aliases = [normalized] if normalized else []
+    unittest_invocation = _unittest_command_invocation(command)
+    if unittest_invocation and unittest_invocation not in aliases:
+        aliases.append(unittest_invocation)
+    return tuple(aliases)
 
 
 def _text_contains_unittest_success(text: str) -> bool:
@@ -727,12 +776,13 @@ def _claim_summary_matches_runtime_chunk(
     command and a unittest-style success summary, but the summary itself must
     also appear in the runtime chunk. The claim text alone is never proof.
     """
-    normalized_command = _normalized_evidence_text(command)
     normalized_claim = _normalized_evidence_text(claim)
     normalized_chunk = _normalized_evidence_text(chunk_text)
-    if not normalized_command or normalized_command not in normalized_claim:
-        return False
-    summary = normalized_claim.split(normalized_command, 1)[1].strip(" :-")
+    summary = ""
+    for normalized_command in _normalized_command_claim_aliases(command):
+        if normalized_command in normalized_claim:
+            summary = normalized_claim.split(normalized_command, 1)[1].strip(" :-")
+            break
     if not summary or summary not in normalized_chunk:
         return False
     if (
@@ -746,12 +796,12 @@ def _claim_summary_matches_runtime_chunk(
 
 def _claim_contains_command_success_summary(*, command: str, claim: str) -> bool:
     """Return True when a test claim appends a success summary to a command."""
-    normalized_command = _normalized_evidence_text(command)
     normalized_claim = _normalized_evidence_text(claim)
-    if not normalized_command or normalized_command not in normalized_claim:
-        return False
-    summary = normalized_claim.split(normalized_command, 1)[1].strip(" :-")
-    return bool(summary) and _text_contains_test_success(summary)
+    for normalized_command in _normalized_command_claim_aliases(command):
+        if normalized_command in normalized_claim:
+            summary = normalized_claim.split(normalized_command, 1)[1].strip(" :-")
+            return bool(summary) and _text_contains_test_success(summary)
+    return False
 
 
 def _test_command_targets_claim(

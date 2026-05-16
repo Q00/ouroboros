@@ -3449,6 +3449,184 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
+    async def test_fat_harness_verifier_accepts_shell_wrapped_unittest_bare_ok_claim(
+        self, tmp_path
+    ) -> None:
+        """Shell-wrapped unittest commands can back concise unittest claims."""
+        source_file = tmp_path / "string_utils.py"
+        test_file = tmp_path / "test_slugify.py"
+        source_file.write_text(
+            "def slugify(text):\n    return text.lower().replace(' ', '-')\n",
+            encoding="utf-8",
+        )
+        test_file.write_text(
+            "import unittest\n\n"
+            "from string_utils import slugify\n\n"
+            "class SlugifyTest(unittest.TestCase):\n"
+            "    def test_slugify_spaces(self):\n"
+            "        self.assertEqual(slugify('Hello World'), 'hello-world')\n"
+            "    def test_slugify_lowercase(self):\n"
+            "        self.assertEqual(slugify('Already Lower'), 'already-lower')\n"
+            "    def test_slugify_empty(self):\n"
+            "        self.assertEqual(slugify(''), '')\n"
+            "    def test_slugify_one_word(self):\n"
+            "        self.assertEqual(slugify('Hello'), 'hello')\n\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n",
+            encoding="utf-8",
+        )
+
+        shell_command = "/bin/zsh -lc 'python -m unittest \"test_slugify.py\"'"
+        escaped_shell_command = shell_command.replace('"', '\\"')
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["string_utils.py", "test_slugify.py"],\n'
+                f'  "commands_run": ["{escaped_shell_command}"],\n'
+                '  "tests_passed": ["python -m unittest test_slugify.py: OK"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-shell-wrapped-unittest-bare-ok",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {source_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(source_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {test_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(test_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Bash: {shell_command}",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": shell_command},
+                            "output": "Ran 4 tests in 0.000s\n\nOK",
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create slugify and unittest coverage.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_shell_wrapped_unittest_summary_missing_from_runtime(
+        self, tmp_path
+    ) -> None:
+        """Shell wrappers must not let assistant prose prove a unittest summary."""
+        source_file = tmp_path / "string_utils.py"
+        test_file = tmp_path / "test_slugify.py"
+        source_file.write_text("def slugify(text):\n    return text\n", encoding="utf-8")
+        test_file.write_text("import unittest\n", encoding="utf-8")
+
+        shell_command = "/bin/zsh -lc 'python -m unittest \"test_slugify.py\"'"
+        escaped_shell_command = shell_command.replace('"', '\\"')
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["string_utils.py", "test_slugify.py"],\n'
+                f'  "commands_run": ["{escaped_shell_command}"],\n'
+                '  "tests_passed": ["python -m unittest test_slugify.py: Ran 4 tests in 0.000s OK"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-shell-wrapped-unittest-invented-summary",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {source_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(source_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {test_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(test_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Bash: {shell_command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": shell_command}, "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=(
+                            "Tests passed: python -m unittest test_slugify.py: "
+                            "Ran 4 tests in 0.000s OK"
+                        ),
+                        data={},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create slugify and unittest coverage.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "tests_passed:" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+
+    @pytest.mark.asyncio
     async def test_fat_harness_verifier_rejects_unittest_summary_missing_from_runtime(
         self, tmp_path
     ) -> None:
@@ -3596,6 +3774,146 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error is not None
         assert "tests_passed: unittest docs" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_echoed_unittest_command_as_test_command(
+        self, tmp_path
+    ) -> None:
+        """Echoing a unittest command string must not count as running unittest."""
+        source_file = tmp_path / "string_utils.py"
+        source_file.write_text("def slugify(text):\n    return text\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["string_utils.py"],\n'
+                '  "commands_run": ["echo python -m unittest test_slugify.py"],\n'
+                '  "tests_passed": ["python -m unittest test_slugify.py: OK"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-echoed-unittest-command",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {source_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(source_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content="Calling tool: Bash: echo python -m unittest test_slugify.py",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": "echo python -m unittest test_slugify.py"},
+                            "output": "python -m unittest test_slugify.py\nsuccess\nRan 4 tests in 0.000s\n\nOK",
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create slugify and unittest coverage.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "tests_passed:" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_echoed_shell_wrapped_unittest_command(
+        self, tmp_path
+    ) -> None:
+        """Echoing a shell-wrapped unittest command must not count as running it."""
+        source_file = tmp_path / "string_utils.py"
+        source_file.write_text("def slugify(text):\n    return text\n", encoding="utf-8")
+
+        shell_command = "echo /bin/zsh -lc 'python -m unittest \"test_slugify.py\"'"
+        escaped_shell_command = shell_command.replace('"', '\\"')
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["string_utils.py"],\n'
+                f'  "commands_run": ["{escaped_shell_command}"],\n'
+                '  "tests_passed": ["python -m unittest test_slugify.py: OK"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-echoed-shell-wrapped-unittest-command",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {source_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(source_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Bash: {shell_command}",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": shell_command},
+                            "output": "/bin/zsh -lc 'python -m unittest \"test_slugify.py\"'\nsuccess\nRan 4 tests in 0.000s\n\nOK",
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create slugify and unittest coverage.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "tests_passed:" in result.error
         evidence_event = next(
             event
             for event in appended_events
