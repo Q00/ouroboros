@@ -623,6 +623,21 @@ def _looks_like_test_command(command: str) -> bool:
     )
 
 
+def _looks_like_unittest_command(command: str) -> bool:
+    """Return True when a shell command invokes stdlib unittest."""
+    normalized = command.strip().lower()
+    if not normalized:
+        return False
+    return bool(re.search(r"(^|[\s;&|])python\s+-m\s+unittest($|[\s;&|])", normalized))
+
+
+def _text_contains_unittest_success(text: str) -> bool:
+    """Return True for real unittest success output."""
+    return _text_contains_test_success(text) and bool(
+        re.search(r"\bran\s+[1-9]\d*\s+tests?\b[\s\S]*\bok\b", text.lower())
+    )
+
+
 def _text_contains_test_success(text: str) -> bool:
     """Return True when text contains a conservative test-success signal."""
     text = text.lower()
@@ -720,6 +735,12 @@ def _claim_summary_matches_runtime_chunk(
     summary = normalized_claim.split(normalized_command, 1)[1].strip(" :-")
     if not summary or summary not in normalized_chunk:
         return False
+    if (
+        summary == "ok"
+        and _looks_like_unittest_command(command)
+        and _text_contains_unittest_success(chunk_text)
+    ):
+        return True
     return _text_contains_test_success(summary)
 
 
