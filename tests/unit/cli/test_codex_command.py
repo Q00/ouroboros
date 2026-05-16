@@ -236,6 +236,9 @@ class TestCodexDoctor:
                 import json
                 import sys
 
+                sys.stderr.buffer.write(b"startup noise\\n" * 20000)
+                sys.stderr.buffer.flush()
+
                 def read_message():
                     content_length = None
                     while True:

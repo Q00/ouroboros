@@ -32,6 +32,7 @@ _REQUIRED_CODEX_AUTO_TOOLS = frozenset(
     }
 )
 _MCP_PROTOCOL_VERSION = "2024-11-05"
+_MCP_STDERR_TAIL_BYTES = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +280,12 @@ async def _list_stdio_mcp_tool_names(
         stderr=asyncio.subprocess.PIPE,
         env=process_env,
     )
+    stderr_buffer = bytearray()
+    stderr_task = (
+        asyncio.create_task(_drain_stdio_mcp_stderr(proc.stderr, stderr_buffer))
+        if proc.stderr is not None
+        else None
+    )
     try:
         await _send_stdio_mcp_message(
             proc,
@@ -296,7 +303,9 @@ async def _list_stdio_mcp_tool_names(
                 },
             },
         )
-        await _read_stdio_mcp_response(proc, request_id=1, timeout=30.0)
+        await _read_stdio_mcp_response(
+            proc, request_id=1, timeout=30.0, stderr_buffer=stderr_buffer
+        )
         await _send_stdio_mcp_message(
             proc,
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
@@ -305,7 +314,9 @@ async def _list_stdio_mcp_tool_names(
             proc,
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )
-        response = await _read_stdio_mcp_response(proc, request_id=2, timeout=30.0)
+        response = await _read_stdio_mcp_response(
+            proc, request_id=2, timeout=30.0, stderr_buffer=stderr_buffer
+        )
         result = response.get("result")
         if not isinstance(result, Mapping):
             raise RuntimeError("tools/list response did not contain an object result")
@@ -319,6 +330,12 @@ async def _list_stdio_mcp_tool_names(
         )
     finally:
         await _terminate_stdio_mcp_process(proc)
+        if stderr_task is not None:
+            try:
+                await asyncio.wait_for(stderr_task, timeout=0.2)
+            except TimeoutError:
+                stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
 
 
 async def _send_stdio_mcp_message(
@@ -332,7 +349,11 @@ async def _send_stdio_mcp_message(
 
 
 async def _read_stdio_mcp_response(
-    proc: asyncio.subprocess.Process, *, request_id: int, timeout: float
+    proc: asyncio.subprocess.Process,
+    *,
+    request_id: int,
+    timeout: float,
+    stderr_buffer: bytearray,
 ) -> Mapping[str, Any]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -340,7 +361,9 @@ async def _read_stdio_mcp_response(
         remaining = deadline - loop.time()
         if remaining <= 0:
             raise TimeoutError(f"timed out waiting for MCP stdio response id {request_id}")
-        message = await asyncio.wait_for(_read_stdio_mcp_message(proc), timeout=remaining)
+        message = await asyncio.wait_for(
+            _read_stdio_mcp_message(proc, stderr_buffer=stderr_buffer), timeout=remaining
+        )
         if message.get("id") != request_id:
             continue
         error = message.get("error")
@@ -349,7 +372,9 @@ async def _read_stdio_mcp_response(
         return message
 
 
-async def _read_stdio_mcp_message(proc: asyncio.subprocess.Process) -> Mapping[str, Any]:
+async def _read_stdio_mcp_message(
+    proc: asyncio.subprocess.Process, *, stderr_buffer: bytearray
+) -> Mapping[str, Any]:
     if proc.stdout is None:
         raise RuntimeError("MCP stdio process has no stdout")
 
@@ -357,7 +382,7 @@ async def _read_stdio_mcp_message(proc: asyncio.subprocess.Process) -> Mapping[s
     while True:
         line = await proc.stdout.readline()
         if line == b"":
-            stderr = await _read_stdio_mcp_stderr(proc)
+            stderr = _format_stdio_mcp_stderr(stderr_buffer)
             detail = f": {stderr}" if stderr else ""
             raise RuntimeError(f"MCP stdio process exited before response{detail}")
         stripped = line.strip()
@@ -381,14 +406,18 @@ async def _read_stdio_mcp_message(proc: asyncio.subprocess.Process) -> Mapping[s
     return decoded
 
 
-async def _read_stdio_mcp_stderr(proc: asyncio.subprocess.Process) -> str:
-    if proc.stderr is None:
-        return ""
-    try:
-        data = await asyncio.wait_for(proc.stderr.read(), timeout=0.2)
-    except TimeoutError:
-        return ""
-    return data.decode("utf-8", errors="replace").strip()
+async def _drain_stdio_mcp_stderr(stderr: asyncio.StreamReader, stderr_buffer: bytearray) -> None:
+    while True:
+        chunk = await stderr.read(4096)
+        if not chunk:
+            return
+        stderr_buffer.extend(chunk)
+        if len(stderr_buffer) > _MCP_STDERR_TAIL_BYTES:
+            del stderr_buffer[: len(stderr_buffer) - _MCP_STDERR_TAIL_BYTES]
+
+
+def _format_stdio_mcp_stderr(stderr_buffer: bytearray) -> str:
+    return bytes(stderr_buffer).decode("utf-8", errors="replace").strip()
 
 
 async def _terminate_stdio_mcp_process(proc: asyncio.subprocess.Process) -> None:
