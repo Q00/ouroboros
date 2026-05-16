@@ -426,6 +426,39 @@ class TestCodexDoctor:
         )
         assert not _should_retry_stdio_mcp_framing(RuntimeError("initialize rejected"))
 
+    def test_list_stdio_mcp_tool_names_does_not_retry_after_initialize_response(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        server_path = tmp_path / "fake_post_initialize_exit_mcp_server.py"
+        server_path.write_text(
+            textwrap.dedent(
+                r"""
+                import json
+                import sys
+
+                initialize = json.loads(sys.stdin.buffer.readline())
+                sys.stdout.buffer.write(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": initialize["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fake", "version": "1.0.0"},
+                    },
+                }).encode("utf-8") + b"\n")
+                sys.stdout.buffer.flush()
+                sys.stdin.buffer.readline()  # notifications/initialized
+                sys.stdin.buffer.readline()  # tools/list
+                raise SystemExit(3)
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(RuntimeError, match="exited before response"):
+            asyncio.run(_list_stdio_mcp_tool_names(sys.executable, (str(server_path),), {}))
+
     def test_check_auto_dispatch_surface_live_mcp_accepts_uvx_mcp_extra_without_local_mcp(
         self,
         tmp_path: Path,

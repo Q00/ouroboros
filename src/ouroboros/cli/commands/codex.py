@@ -39,6 +39,10 @@ class _StdioMcpFramingMismatch(RuntimeError):
     """Raised when a stdio MCP response clearly uses another wire framing."""
 
 
+class _StdioMcpFramingProbeFailed(RuntimeError):
+    """Raised when the initialize response failed before framing was established."""
+
+
 @dataclass(frozen=True, slots=True)
 class _CodexMCPCommandEntry:
     command: str
@@ -277,13 +281,7 @@ async def _list_stdio_mcp_tool_names(
     """
     try:
         return await _list_stdio_mcp_tool_names_with_framing(command, args, env, framing="jsonl")
-    except (json.JSONDecodeError, _StdioMcpFramingMismatch):
-        return await _list_stdio_mcp_tool_names_with_framing(
-            command, args, env, framing="content-length"
-        )
-    except (RuntimeError, TimeoutError) as exc:
-        if not _should_retry_stdio_mcp_framing(exc):
-            raise
+    except _StdioMcpFramingProbeFailed:
         return await _list_stdio_mcp_tool_names_with_framing(
             command, args, env, framing="content-length"
         )
@@ -331,13 +329,23 @@ async def _list_stdio_mcp_tool_names_with_framing(
             },
             framing=framing,
         )
-        await _read_stdio_mcp_response(
-            proc,
-            request_id=1,
-            timeout=30.0,
-            stderr_buffer=stderr_buffer,
-            framing=framing,
-        )
+        try:
+            await _read_stdio_mcp_response(
+                proc,
+                request_id=1,
+                timeout=30.0,
+                stderr_buffer=stderr_buffer,
+                framing=framing,
+            )
+        except (
+            json.JSONDecodeError,
+            _StdioMcpFramingMismatch,
+            RuntimeError,
+            TimeoutError,
+        ) as exc:
+            if framing == "jsonl" and _should_retry_stdio_mcp_framing(exc):
+                raise _StdioMcpFramingProbeFailed(str(exc)) from exc
+            raise
         await _send_stdio_mcp_message(
             proc,
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
@@ -379,6 +387,8 @@ async def _list_stdio_mcp_tool_names_with_framing(
 def _should_retry_stdio_mcp_framing(exc: BaseException) -> bool:
     """Return True when JSONL failed before a valid initialize response existed."""
     if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, (json.JSONDecodeError, _StdioMcpFramingMismatch)):
         return True
     return isinstance(exc, RuntimeError) and "exited before response" in str(exc)
 
