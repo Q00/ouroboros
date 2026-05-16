@@ -1630,6 +1630,9 @@ class TestParallelACExecutor:
             "Write docs/api.md and add endpoint validation.",
             "Document README.md, then create parser.py.",
             "Run pytest and update README.md.",
+            "Add docs command to CLI.",
+            "Create docs endpoint.",
+            "Fix docs parser bug.",
         ],
     )
     @pytest.mark.asyncio

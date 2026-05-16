@@ -137,7 +137,7 @@ _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 
 
 _DOC_ONLY_TARGET_RE = re.compile(
-    r"\b(readme(?:\.md)?|docs?/|docs?|documentation|guide|manual|changelog)\b",
+    r"\b(readme(?:\.md)?|docs?/|docs?\.[a-z0-9_-]+|documentation|guide|manual|changelog)\b",
     re.IGNORECASE,
 )
 _DOC_ONLY_ACTION_RE = re.compile(
