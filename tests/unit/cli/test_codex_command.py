@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import patch
+import sys
+import textwrap
+from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.codex import _check_auto_dispatch_surface, app
+from ouroboros.cli.commands.codex import (
+    _MCP_PROTOCOL_VERSION,
+    _check_auto_dispatch_surface,
+    _list_stdio_mcp_tool_names,
+    app,
+)
 from ouroboros.codex import CodexArtifactInstallResult, install_codex_artifacts
 
 runner = CliRunner()
+_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST = {
+    "ouroboros_auto",
+    "ouroboros_start_auto",
+    "ouroboros_interview",
+    "ouroboros_generate_seed",
+}
 
 
 class TestCodexRefresh:
@@ -156,6 +170,163 @@ class TestCodexDoctor:
 
         with patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=object()):
             assert _check_auto_dispatch_surface(codex_dir) == []
+
+    def test_check_auto_dispatch_surface_live_mcp_verifies_required_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "ouroboros"\n'
+            'args = ["mcp", "serve", "--runtime", "codex"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n',
+            encoding="utf-8",
+        )
+
+        live_probe = AsyncMock(
+            return_value={
+                "ouroboros_auto",
+                "ouroboros_start_auto",
+                "ouroboros_interview",
+                "ouroboros_generate_seed",
+            }
+        )
+        with (
+            patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=object()),
+            patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe),
+        ):
+            assert _check_auto_dispatch_surface(codex_dir, live_mcp=True) == []
+
+        live_probe.assert_awaited_once_with(
+            "ouroboros",
+            ("mcp", "serve", "--runtime", "codex"),
+            {"OUROBOROS_AGENT_RUNTIME": "codex"},
+        )
+
+    def test_list_stdio_mcp_tool_names_uses_protocol_without_local_mcp_import(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        assert _MCP_PROTOCOL_VERSION == "2024-11-05"
+        server_path = tmp_path / "fake_mcp_server.py"
+        server_path.write_text(
+            textwrap.dedent(
+                r"""
+                import json
+                import sys
+
+                def read_message():
+                    content_length = None
+                    while True:
+                        line = sys.stdin.buffer.readline()
+                        if not line:
+                            raise SystemExit(0)
+                        line = line.strip()
+                        if not line:
+                            break
+                        key, _, value = line.partition(b":")
+                        if key.lower() == b"content-length":
+                            content_length = int(value.strip())
+                    return json.loads(sys.stdin.buffer.read(content_length))
+
+                def write_message(message):
+                    body = json.dumps(message).encode("utf-8")
+                    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+                    sys.stdout.buffer.flush()
+
+                initialize = read_message()
+                if initialize["params"]["protocolVersion"] != "2024-11-05":
+                    raise SystemExit(
+                        f"unsupported protocol {initialize['params']['protocolVersion']}"
+                    )
+                write_message({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": initialize["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fake", "version": "1.0.0"},
+                    },
+                })
+                read_message()  # notifications/initialized
+                tools_list = read_message()
+                write_message({
+                    "jsonrpc": "2.0",
+                    "id": tools_list["id"],
+                    "result": {
+                        "tools": [
+                            {"name": "ouroboros_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_start_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_interview", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_generate_seed", "inputSchema": {"type": "object"}},
+                        ]
+                    },
+                })
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        tool_names = asyncio.run(
+            _list_stdio_mcp_tool_names(sys.executable, (str(server_path),), {})
+        )
+
+        assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
+
+    def test_check_auto_dispatch_surface_live_mcp_accepts_uvx_mcp_extra_without_local_mcp(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with (
+            patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=None),
+            patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe),
+        ):
+            assert _check_auto_dispatch_surface(codex_dir, live_mcp=True) == []
+
+        live_probe.assert_awaited_once_with(
+            "uvx",
+            ("--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
+            {},
+        )
+
+    def test_check_auto_dispatch_surface_live_mcp_reports_missing_auto_tool(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+
+        with patch(
+            "ouroboros.cli.commands.codex._list_stdio_mcp_tool_names",
+            AsyncMock(return_value={"ouroboros_interview", "ouroboros_generate_seed"}),
+        ):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=True)
+
+        assert any("missing required auto tools" in failure for failure in failures)
+        assert any("ouroboros_auto" in failure for failure in failures)
+
+    def test_check_auto_dispatch_surface_live_mcp_reports_handshake_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+
+        with patch(
+            "ouroboros.cli.commands.codex._list_stdio_mcp_tool_names",
+            AsyncMock(side_effect=RuntimeError("connection closed during initialize")),
+        ):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=True)
+
+        assert any("initialize/list_tools failed" in failure for failure in failures)
+        assert any("connection closed during initialize" in failure for failure in failures)
 
     def test_packaged_codex_artifacts_satisfy_doctor_contract(
         self,
