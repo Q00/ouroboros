@@ -189,6 +189,32 @@ class TestCodexDoctor:
         with patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=object()):
             assert _check_auto_dispatch_surface(codex_dir) == []
 
+    def test_check_auto_dispatch_surface_live_mcp_uses_configured_direct_command_without_local_mcp(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "ouroboros"\n'
+            'args = ["mcp", "serve", "--runtime", "codex"]\n',
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with (
+            patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=None),
+            patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe),
+        ):
+            assert _check_auto_dispatch_surface(codex_dir, live_mcp=True) == []
+
+        live_probe.assert_awaited_once_with(
+            "ouroboros",
+            ("mcp", "serve", "--runtime", "codex"),
+            {},
+        )
+
     def test_check_auto_dispatch_surface_live_mcp_verifies_required_tools(
         self,
         tmp_path: Path,

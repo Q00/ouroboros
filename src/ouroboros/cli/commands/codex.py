@@ -189,7 +189,8 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
             else {}
         )
         command_entry = _CodexMCPCommandEntry(command=command, args=args, env=env)
-        _check_mcp_runtime_dependency_surface(command, list(args), failures)
+        if not live_mcp:
+            _check_mcp_runtime_dependency_surface(command, list(args), failures)
 
     if live_mcp and command_entry is not None and not failures:
         _check_live_mcp_tool_exposure(command_entry, failures)
