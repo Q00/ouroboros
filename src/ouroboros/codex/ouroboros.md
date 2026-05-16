@@ -42,6 +42,12 @@ If a user input starts with `ooo auto`, call `ouroboros_auto`. If that MCP tool
 is unavailable, stop and report that `ouroboros_auto` is unavailable instead of
 continuing as a normal Codex task.
 
+If `ouroboros_auto` is invoked and returns an auto-session outcome such as
+`blocked`, `failed`, or `complete`, report that outcome as the auto session
+result. Do not call a `blocked` or `failed` auto-session result a dispatch
+failure; dispatch failure is reserved for cases where the MCP tool could not be
+invoked.
+
 ## Setup & Update
 
 - `ooo setup` → write Ouroboros config (`~/.ouroboros/config.yaml`) and register the MCP server

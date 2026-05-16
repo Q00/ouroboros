@@ -26,6 +26,11 @@ otherwise emulate the auto pipeline as a substitute.
 If `ouroboros_auto` is unavailable, stop and report that the required MCP tool
 is unavailable. A manual fallback is not an `ooo auto` run.
 
+If `ouroboros_auto` is invoked successfully but returns `blocked`, `failed`, or
+another terminal auto-session status, report that auto-session status and the
+tool's blocker. Do not label that outcome as MCP dispatch failure; dispatch
+failure means the MCP tool could not be invoked.
+
 ## Usage
 
 ```text

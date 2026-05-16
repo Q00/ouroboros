@@ -122,6 +122,7 @@ class TestInstallCodexRules:
         assert "| `ooo auto ...` | `ouroboros_auto`" in rules
         assert "Do not emulate it with manual" in rules
         assert "If that MCP tool\nis unavailable" in rules
+        assert "Do not call a `blocked` or `failed` auto-session result a dispatch" in rules
 
     def test_packaged_rules_include_rendered_skill_capability_guide(self) -> None:
         """Codex rules should include the generated runtime skill capability guide."""
@@ -188,6 +189,7 @@ class TestLoadPackagedCodexSkills:
 
         assert "must be executed by invoking MCP tool `ouroboros_auto`" in skill
         assert "manual fallback is not an `ooo auto` run" in skill
+        assert "Do not label that outcome as MCP dispatch failure" in skill
 
     def test_packaged_interview_skill_uses_runtime_capability_terms(self) -> None:
         """Runtime skill instructions should not hardcode Claude-only tool surfaces."""
