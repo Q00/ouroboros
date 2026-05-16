@@ -15,6 +15,7 @@ from ouroboros.cli.commands.codex import (
     _MCP_PROTOCOL_VERSION,
     _check_auto_dispatch_surface,
     _list_stdio_mcp_tool_names,
+    _should_retry_stdio_mcp_framing,
     app,
 )
 from ouroboros.codex import CodexArtifactInstallResult, install_codex_artifacts
@@ -334,9 +335,7 @@ class TestCodexDoctor:
 
                 first_line = sys.stdin.buffer.readline()
                 if first_line and first_line.lstrip().startswith(b"{"):
-                    sys.stdout.buffer.write(b"Content-Length: 2\r\n\r\n{}")
-                    sys.stdout.buffer.flush()
-                    raise SystemExit(0)
+                    raise SystemExit(2)
 
                 def read_message():
                     headers = {}
@@ -419,6 +418,13 @@ class TestCodexDoctor:
 
         with pytest.raises(RuntimeError, match="initialize rejected"):
             asyncio.run(_list_stdio_mcp_tool_names(sys.executable, (str(server_path),), {}))
+
+    def test_stdio_mcp_framing_retry_policy_distinguishes_probe_failures(self) -> None:
+        assert _should_retry_stdio_mcp_framing(TimeoutError("timed out waiting"))
+        assert _should_retry_stdio_mcp_framing(
+            RuntimeError("MCP stdio process exited before response")
+        )
+        assert not _should_retry_stdio_mcp_framing(RuntimeError("initialize rejected"))
 
     def test_check_auto_dispatch_surface_live_mcp_accepts_uvx_mcp_extra_without_local_mcp(
         self,

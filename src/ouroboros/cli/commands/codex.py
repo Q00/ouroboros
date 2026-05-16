@@ -281,6 +281,12 @@ async def _list_stdio_mcp_tool_names(
         return await _list_stdio_mcp_tool_names_with_framing(
             command, args, env, framing="content-length"
         )
+    except (RuntimeError, TimeoutError) as exc:
+        if not _should_retry_stdio_mcp_framing(exc):
+            raise
+        return await _list_stdio_mcp_tool_names_with_framing(
+            command, args, env, framing="content-length"
+        )
 
 
 async def _list_stdio_mcp_tool_names_with_framing(
@@ -368,6 +374,13 @@ async def _list_stdio_mcp_tool_names_with_framing(
             except TimeoutError:
                 stderr_task.cancel()
                 await asyncio.gather(stderr_task, return_exceptions=True)
+
+
+def _should_retry_stdio_mcp_framing(exc: BaseException) -> bool:
+    """Return True when JSONL failed before a valid initialize response existed."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, RuntimeError) and "exited before response" in str(exc)
 
 
 async def _send_stdio_mcp_message(
