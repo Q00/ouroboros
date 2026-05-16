@@ -148,6 +148,7 @@ _CODE_IMPLEMENTATION_ACTION_RE = re.compile(
     r"\b(implement|build|develop|ship)\b",
     re.IGNORECASE,
 )
+_CODE_MUTATION_ACTION_RE = re.compile(r"\b(add|fix|create|update)\b", re.IGNORECASE)
 _CODE_WORK_SIGNAL_RE = re.compile(
     r"("
     r"\b[a-zA-Z_][a-zA-Z0-9_]*\s*\("
@@ -165,6 +166,20 @@ _TEST_EVIDENCE_RE = re.compile(
 )
 
 
+def _has_mixed_code_and_documentation_work(ac_content: str) -> bool:
+    """Return True when one AC appears to combine code mutation and docs work."""
+    for connector in re.finditer(r"\b(?:and|then)\b|,", ac_content, re.IGNORECASE):
+        before = ac_content[: connector.start()]
+        after = ac_content[connector.end() :]
+        if not _DOC_ONLY_TARGET_RE.search(after):
+            continue
+        if _DOC_ONLY_TARGET_RE.search(before):
+            continue
+        if _CODE_MUTATION_ACTION_RE.search(before) and _CODE_WORK_SIGNAL_RE.search(before):
+            return True
+    return False
+
+
 def _is_documentation_only_ac(ac_content: str) -> bool:
     """Return True when an AC asks only for documentation/README work.
 
@@ -180,9 +195,7 @@ def _is_documentation_only_ac(ac_content: str) -> bool:
         return False
     if _CODE_IMPLEMENTATION_ACTION_RE.search(normalized):
         return False
-    if _CODE_WORK_SIGNAL_RE.search(normalized):
-        return False
-    if len(_DOC_ONLY_ACTION_RE.findall(normalized)) > 1:
+    if _has_mixed_code_and_documentation_work(normalized):
         return False
     return bool(_DOC_ONLY_TARGET_RE.search(normalized)) and bool(
         _DOC_ONLY_ACTION_RE.search(normalized)

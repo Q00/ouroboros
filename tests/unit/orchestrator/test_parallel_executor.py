@@ -1452,6 +1452,87 @@ class TestParallelACExecutor:
         assert evidence_event.data["required_fields"] == ["files_touched", "commands_run"]
         assert evidence_event.data["verifier_passed"] is True
 
+    @pytest.mark.parametrize(
+        ("ac_content", "doc_path"),
+        [
+            ("Document the API in docs/api.md.", "docs/api.md"),
+            ("Write a CLI flag guide in README.md.", "README.md"),
+            ("Update the changelog for the parser bug.", "CHANGELOG.md"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_fat_harness_docs_only_ac_allows_code_subject_documentation(
+        self, tmp_path, ac_content: str, doc_path: str
+    ) -> None:
+        """Docs about code subjects are still docs-only when they do not mutate code."""
+        doc_file = tmp_path / doc_path
+        doc_file.parent.mkdir(parents=True, exist_ok=True)
+        doc_file.write_text("Documentation\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "```json\n"
+            "{\n"
+            f'  "files_touched": ["{doc_path}"],\n'
+            f'  "commands_run": ["grep -n Documentation {doc_path}"]\n'
+            "}\n"
+            "```",
+            native_session_id="codex-session-docs-only-code-subject",
+            support_messages=(
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Edit: {doc_file}",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": str(doc_file)}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Bash: grep -n Documentation {doc_path}",
+                    tool_name="Bash",
+                    data={
+                        "tool_input": {"command": f"grep -n Documentation {doc_path}"},
+                        "output": "1:Documentation",
+                        "exit_code": 0,
+                    },
+                ),
+            ),
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content=ac_content,
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship docs",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert runtime.last_prompt is not None
+        assert "documentation-only current AC" in runtime.last_prompt
+        assert "files_touched, commands_run" in runtime.last_prompt
+        assert "files_touched, commands_run, tests_passed" not in runtime.last_prompt
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["files_touched", "commands_run"]
+        assert evidence_event.data["verifier_passed"] is True
+
     @pytest.mark.asyncio
     async def test_fat_harness_markdown_code_ac_keeps_test_evidence_required(
         self, tmp_path
