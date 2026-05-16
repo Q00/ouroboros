@@ -107,6 +107,24 @@ class TestCodexDoctor:
 
         assert _check_auto_dispatch_surface(codex_dir) == []
 
+    def test_check_auto_dispatch_surface_live_mcp_rejects_url_mcp_server_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n',
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names") as live_probe:
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=True)
+
+        live_probe.assert_not_called()
+        assert any("uses `url`" in failure for failure in failures)
+        assert any("verifies only stdio `command` entries" in failure for failure in failures)
+
     def test_check_auto_dispatch_surface_accepts_custom_command_mcp_entry(
         self,
         tmp_path: Path,
@@ -399,3 +417,23 @@ class TestCodexDoctor:
 
         assert cli_result.exit_code == 0
         assert "Codex ooo auto dispatch: OK" in cli_result.output
+
+    def test_doctor_live_mcp_url_config_fails_without_stdio_success_claim(
+        self, tmp_path: Path
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n',
+            encoding="utf-8",
+        )
+
+        cli_result = runner.invoke(app, ["doctor", "--codex-dir", str(codex_dir), "--live-mcp"])
+
+        assert cli_result.exit_code == 1
+        assert "Codex ooo auto dispatch: BROKEN" in cli_result.output
+        assert "currently verifies only" in cli_result.output
+        assert "stdio `command` entries" in cli_result.output
+        assert (
+            "live stdio initialize/list_tools exposes required auto tools" not in cli_result.output
+        )

@@ -160,6 +160,12 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
 
     url = ouroboros_entry.get("url")
     if isinstance(url, str) and url.strip():
+        if live_mcp:
+            failures.append(
+                "Codex MCP server uses `url`, but `--live-mcp` currently verifies only "
+                "stdio `command` entries; use a stdio command config or run without "
+                "`--live-mcp`"
+            )
         return failures
 
     command_entry: _CodexMCPCommandEntry | None = None
