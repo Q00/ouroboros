@@ -616,24 +616,16 @@ def _looks_like_test_command(command: str) -> bool:
         re.search(
             r"(^|[\s;&|])("
             r"pytest|py\.test|tox|nox|npm\s+test|pnpm\s+test|yarn\s+test|"
-            r"uv\s+run\s+pytest|python\s+-m\s+pytest"
+            r"uv\s+run\s+pytest|python\s+-m\s+pytest|python\s+-m\s+unittest"
             r")($|[\s;&|])",
             normalized,
         )
     )
 
 
-def _message_contains_test_success(message: AgentMessage) -> bool:
-    """Return True when one message says a test command passed."""
-    parts = [message.content]
-    for key in ("result_preview", "output", "stdout", "status", "subtype"):
-        value = message.data.get(key)
-        if isinstance(value, str):
-            parts.append(value)
-    exit_code = message.data.get("exit_code")
-    if type(exit_code) is int:
-        parts.append(f"exit code {exit_code}")
-    text = "\n".join(parts).lower()
+def _text_contains_test_success(text: str) -> bool:
+    """Return True when text contains a conservative test-success signal."""
+    text = text.lower()
     zero_failure_pattern = (
         r"\b(0\s+(failed|failures?|errors?)|no\s+(tests?\s+)?(failed|failures?|errors?))\b"
     )
@@ -649,7 +641,21 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
         return False
     return bool(
         re.search(r"\b([1-9]\d*\s+passed|passed|pass|success|succeeded)\b|exit\s*code\s*0", text)
+        or re.search(r"\bran\s+[1-9]\d*\s+tests?\b[\s\S]*\bok\b", text)
     )
+
+
+def _message_contains_test_success(message: AgentMessage) -> bool:
+    """Return True when one message says a test command passed."""
+    parts = [message.content]
+    for key in ("result_preview", "output", "stdout", "status", "subtype"):
+        value = message.data.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    exit_code = message.data.get("exit_code")
+    if type(exit_code) is int:
+        parts.append(f"exit code {exit_code}")
+    return _text_contains_test_success("\n".join(parts))
 
 
 def _test_claim_file_part(value: str) -> str | None:
@@ -659,6 +665,34 @@ def _test_claim_file_part(value: str) -> str | None:
         return None
     file_part = stripped.split("::", 1)[0].strip()
     return file_part or None
+
+
+def _normalized_evidence_text(text: str) -> str:
+    """Normalize transcript/claim text for conservative containment checks."""
+    return " ".join(text.lower().split())
+
+
+def _claim_summary_matches_runtime_chunk(
+    *,
+    command: str,
+    claim: str,
+    chunk_text: str,
+) -> bool:
+    """Return True when a command+summary claim is present in runtime output.
+
+    This keeps the verifier transcript-driven: the claim may combine the backed
+    command and a unittest-style success summary, but the summary itself must
+    also appear in the runtime chunk. The claim text alone is never proof.
+    """
+    normalized_command = _normalized_evidence_text(command)
+    normalized_claim = _normalized_evidence_text(claim)
+    normalized_chunk = _normalized_evidence_text(chunk_text)
+    if not normalized_command or normalized_command not in normalized_claim:
+        return False
+    summary = normalized_claim.split(normalized_command, 1)[1].strip(" :-")
+    if not summary or summary not in normalized_chunk:
+        return False
+    return _text_contains_test_success(summary)
 
 
 def _test_command_targets_claim(
@@ -680,6 +714,8 @@ def _test_command_targets_claim(
     normalized_file = file_part.lower()
     normalized_command = command.lower()
     if normalized_file in chunk_text or normalized_file in normalized_command:
+        return True
+    if _claim_summary_matches_runtime_chunk(command=command, claim=claim, chunk_text=chunk_text):
         return True
 
     # A broad suite command such as ``pytest`` can cover a node-id claim when
