@@ -395,6 +395,38 @@ def _runtime_messages_support_claim(value: str, messages: tuple[AgentMessage, ..
     )
 
 
+def _runtime_message_supports_command_claim(value: str, message: AgentMessage) -> bool:
+    """Return True when one runtime message backs a command claim.
+
+    Codex commonly records the executed Bash command as a shell wrapper such as
+    ``/bin/zsh -lc 'cd /workspace && python -m unittest "test_hello.py"'``
+    while typed evidence may claim the inner test command.  Treat those as
+    equivalent only through the structured Bash command field; arbitrary output
+    text or assistant narration must not create command aliases.
+    """
+    if _runtime_messages_support_claim(value, (message,)):
+        return True
+    if message.tool_name != "Bash":
+        return False
+    tool_input = message.data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return False
+    runtime_command = tool_input.get("command")
+    if not isinstance(runtime_command, str):
+        return False
+    claim_aliases = set(_normalized_command_claim_aliases(value))
+    runtime_aliases = set(_normalized_command_claim_aliases(runtime_command))
+    return bool(claim_aliases and runtime_aliases and claim_aliases.intersection(runtime_aliases))
+
+
+def _runtime_messages_support_command_claim(
+    value: str,
+    messages: tuple[AgentMessage, ...],
+) -> bool:
+    """Return True when runtime messages back a command claim."""
+    return any(_runtime_message_supports_command_claim(value, message) for message in messages)
+
+
 def _runtime_messages_support_file_claim(
     value: str,
     messages: tuple[AgentMessage, ...],
@@ -610,59 +642,128 @@ def _runtime_message_file_proof_text(message: AgentMessage) -> str:
 
 def _looks_like_test_command(command: str) -> bool:
     """Return True for common whole-suite or targeted test invocations."""
+    return _test_command_invocation(command) is not None
+
+
+def _test_command_invocation(command: str) -> str | None:
+    """Return the backed inner test invocation for a direct or wrapped command."""
     normalized = command.strip().lower()
     if not normalized:
-        return False
-    if _unittest_command_invocation(normalized) is not None:
-        return True
-    return bool(
-        re.search(
-            r"(^|[\s;&|])("
-            r"pytest|py\.test|tox|nox|npm\s+test|pnpm\s+test|yarn\s+test|"
-            r"uv\s+run\s+pytest|python\s+-m\s+pytest"
-            r")($|[\s;&|])",
-            normalized,
-        )
+        return None
+
+    direct = _test_invocation_from_prefix(normalized)
+    if direct is not None:
+        return direct
+
+    body = _shell_command_body(normalized)
+    if body is None:
+        return None
+    return _test_invocation_from_shell_body(body)
+
+
+def _shell_command_body(command: str) -> str | None:
+    """Return the ``-c`` body when the command starts with a shell wrapper."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    if len(parts) < 3:
+        return None
+    shell_name = Path(parts[0]).name
+    if shell_name not in {"bash", "zsh", "sh"}:
+        return None
+    option_index = next(
+        (index for index, part in enumerate(parts[1:], start=1) if part in {"-c", "-lc", "-cl"}),
+        None,
     )
+    if option_index is None or option_index + 1 >= len(parts):
+        return None
+    return parts[option_index + 1].strip()
+
+
+def _test_invocation_from_shell_body(body: str) -> str | None:
+    """Return a test invocation after conservative shell setup preambles."""
+    for segment in re.split(r"\s*&&\s*", body.strip()):
+        normalized_segment = segment.strip()
+        if not normalized_segment:
+            continue
+        invocation = _test_invocation_from_prefix(normalized_segment)
+        if invocation is not None:
+            return invocation
+        if _is_safe_test_command_preamble(normalized_segment):
+            continue
+        return None
+    return None
+
+
+def _is_safe_test_command_preamble(segment: str) -> bool:
+    """Return True for shell setup segments that do not execute tests themselves."""
+    try:
+        parts = shlex.split(segment)
+    except ValueError:
+        return False
+    if not parts:
+        return True
+    if parts[0] == "cd" and len(parts) == 2:
+        return True
+    if parts[0] == "export" and len(parts) > 1:
+        return all(_is_env_assignment(part) for part in parts[1:])
+    return all(_is_env_assignment(part) for part in parts)
+
+
+def _is_env_assignment(value: str) -> bool:
+    """Return True for a simple shell environment assignment token."""
+    return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", value))
+
+
+def _strip_env_prefix(parts: list[str]) -> list[str]:
+    """Remove leading env assignment tokens before command recognition."""
+    index = 0
+    if parts and parts[0] == "env":
+        index = 1
+    while index < len(parts) and _is_env_assignment(parts[index]):
+        index += 1
+    return parts[index:]
+
+
+def _test_invocation_from_prefix(command: str) -> str | None:
+    """Return a normalized test invocation only when it starts the command text."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.replace('"', "").replace("'", "").split()
+    parts = _strip_env_prefix(parts)
+    if not parts:
+        return None
+
+    if parts[0] in {"pytest", "py.test", "tox", "nox"}:
+        return _normalized_evidence_text(" ".join(parts))
+    if len(parts) >= 2 and parts[0] in {"npm", "pnpm", "yarn"} and parts[1] == "test":
+        return _normalized_evidence_text(" ".join(parts))
+    if len(parts) >= 3 and parts[:3] == ["uv", "run", "pytest"]:
+        return _normalized_evidence_text(" ".join(parts))
+    if (
+        len(parts) >= 3
+        and parts[:2] == ["python", "-m"]
+        and parts[2]
+        in {
+            "pytest",
+            "unittest",
+        }
+    ):
+        return _normalized_evidence_text(" ".join(parts))
+    return None
 
 
 def _unittest_command_invocation(command: str) -> str | None:
     """Return the embedded ``python -m unittest`` invocation, if present."""
-    normalized = command.strip().lower()
-    if not normalized:
+    invocation = _test_command_invocation(command)
+    if invocation is None:
         return None
-
-    direct = _unittest_invocation_from_prefix(normalized)
-    if direct is not None:
-        return direct
-
-    shell_match = re.search(
-        r"^(?:[\w./-]+/)?(?:bash|zsh|sh)\s+-(?:l?c|c)\s+"
-        r"(?P<quote>['\"])(?P<body>.*?)(?P=quote)"
-        r"(?=$|[\s;&|])",
-        normalized,
-    )
-    if shell_match is None:
-        return None
-    return _unittest_invocation_from_prefix(shell_match.group("body").strip())
-
-
-def _unittest_invocation_from_prefix(command: str) -> str | None:
-    """Return a normalized unittest invocation only when it starts the command text."""
-    match = re.search(
-        r"^"
-        r"(python\s+-m\s+unittest"
-        r"(?:\s+(?:\"[^\"]+\"|'[^']+'|[^\s;&|'\"]+))*)"
-        r"(?=$|[\s;&|'\"])",
-        command,
-    )
-    if match is None:
-        return None
-    try:
-        parts = shlex.split(match.group(1))
-    except ValueError:
-        parts = match.group(1).replace('"', "").replace("'", "").split()
-    return _normalized_evidence_text(" ".join(parts))
+    parts = invocation.split()
+    if len(parts) >= 3 and parts[:3] == ["python", "-m", "unittest"]:
+        return invocation
+    return None
 
 
 def _looks_like_unittest_command(command: str) -> bool:
@@ -674,9 +775,9 @@ def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
     """Return normalized command forms that a concise evidence claim may use."""
     normalized = _normalized_evidence_text(command)
     aliases = [normalized] if normalized else []
-    unittest_invocation = _unittest_command_invocation(command)
-    if unittest_invocation and unittest_invocation not in aliases:
-        aliases.append(unittest_invocation)
+    test_invocation = _test_command_invocation(command)
+    if test_invocation and test_invocation not in aliases:
+        aliases.append(test_invocation)
     return tuple(aliases)
 
 
@@ -842,7 +943,7 @@ def _test_command_targets_claim(
     # the claimed test file is also backed by current-run mutation evidence.
     # Existence alone is deliberately insufficient: otherwise a transcript with
     # unrelated ``pytest`` output could prove any stale test file in the tree.
-    command_parts = normalized_command.split()
+    command_parts = (_test_command_invocation(command) or normalized_command).split()
     broad_pytest = command_parts in (["pytest"], ["py.test"]) or command_parts[-3:] == [
         "python",
         "-m",
@@ -871,7 +972,7 @@ def _runtime_messages_support_test_claim(
             candidate
             for candidate in backed_commands
             if _looks_like_test_command(candidate)
-            and _runtime_messages_support_claim(candidate, (message,))
+            and _runtime_message_supports_command_claim(candidate, message)
         )
         if not matching_commands:
             continue
@@ -4703,7 +4804,7 @@ Files present:
         backed_commands = tuple(
             command
             for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
-            if _runtime_messages_support_claim(
+            if _runtime_messages_support_command_claim(
                 command,
                 _runtime_support_messages_for_field("commands_run", support_messages),
             )
@@ -4725,6 +4826,11 @@ Files present:
                 continue
             field_messages = _runtime_support_messages_for_field(field_name, support_messages)
             for value in values:
+                if field_name == "commands_run":
+                    if _runtime_messages_support_command_claim(value, field_messages):
+                        continue
+                    unsupported.append(f"{field_name}: {value}")
+                    continue
                 if field_name == "files_touched":
                     if _runtime_messages_support_file_claim(
                         value,
