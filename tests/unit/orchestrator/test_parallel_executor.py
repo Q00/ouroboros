@@ -1458,6 +1458,8 @@ class TestParallelACExecutor:
             ("Document the API in docs/api.md.", "docs/api.md"),
             ("Write a CLI flag guide in README.md.", "README.md"),
             ("Update the changelog for the parser bug.", "CHANGELOG.md"),
+            ("Document test setup in README.md.", "README.md"),
+            ("Write a unit test guide in docs/testing.md.", "docs/testing.md"),
         ],
     )
     @pytest.mark.asyncio
@@ -1627,6 +1629,7 @@ class TestParallelACExecutor:
             "Update README.md and fix parser bug.",
             "Write docs/api.md and add endpoint validation.",
             "Document README.md, then create parser.py.",
+            "Run pytest and update README.md.",
         ],
     )
     @pytest.mark.asyncio

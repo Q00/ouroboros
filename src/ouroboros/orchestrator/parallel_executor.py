@@ -163,8 +163,16 @@ _CODE_WORK_SIGNAL_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_TEST_EVIDENCE_RE = re.compile(
-    r"\b(test|tests?|pytest|unit\s+test|integration\s+test)\b",
+_TEST_WORK_RE = re.compile(
+    r"("
+    r"\b(?:run|execute|pass|validate|verify)\b.{0,40}\b(?:pytest|tests?|unit\s+tests?|integration\s+tests?)\b"
+    r"|"
+    r"\b(?:add|write|create|implement|fix|update)\b.{0,40}\b"
+    r"(?:tests?|unit\s+tests?|integration\s+tests?)\b"
+    r"(?!\s+(?:guide|docs?|documentation|setup))"
+    r"|"
+    r"\b(?:pytest|tests_passed|test\s+command)\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -200,7 +208,7 @@ def _is_documentation_only_ac(ac_content: str) -> bool:
     normalized = " ".join(ac_content.split())
     if not normalized:
         return False
-    if _TEST_EVIDENCE_RE.search(normalized):
+    if _TEST_WORK_RE.search(normalized):
         return False
     if _CODE_IMPLEMENTATION_ACTION_RE.search(normalized):
         return False
