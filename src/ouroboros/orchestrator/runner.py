@@ -36,7 +36,10 @@ from rich.text import Text
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.seed_contract import SeedContract
-from ouroboros.core.seed_contract_prompt import render_seed_contract_for_execution
+from ouroboros.core.seed_contract_prompt import (
+    render_auto_recursion_guard,
+    render_seed_contract_for_execution,
+)
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, heartbeat_lock, release_lock
 from ouroboros.observability.drift import DriftMeasurement
@@ -338,12 +341,7 @@ def build_task_prompt(
 ## Acceptance Criteria
 {ac_list}
 
-## Auto Recursion Guard
-Do not invoke `ooo auto`, `ouroboros_auto`, `ouroboros_start_auto`, or any MCP auto
-tool while executing this Seed. This execution is already downstream of any auto
-authoring step. Implement the concrete Seed requirements directly; if evidence
-about a prior auto run is needed, inspect existing artifacts/logs only and never
-start a nested auto session.
+{render_auto_recursion_guard()}
 
 {suffix}
 """

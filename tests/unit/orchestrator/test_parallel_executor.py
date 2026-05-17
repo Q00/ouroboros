@@ -1467,6 +1467,9 @@ class TestParallelACExecutor:
         assert "never absolute paths" in runtime.last_prompt
         assert "omit exploratory" in runtime.last_prompt
         assert "rg, grep, sed, cat, ls, find, or pwd" in runtime.last_prompt
+        assert "Auto Recursion Guard" in runtime.last_prompt
+        assert "ouroboros_auto" in runtime.last_prompt
+        assert "nested auto session" in runtime.last_prompt
         assert "explicitly state: [TASK_COMPLETE]" not in runtime.last_prompt
 
     @pytest.mark.asyncio

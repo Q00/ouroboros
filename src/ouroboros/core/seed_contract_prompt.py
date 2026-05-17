@@ -4,6 +4,18 @@ from __future__ import annotations
 
 from ouroboros.core.seed_contract import OntologyLens, SeedContract
 
+AUTO_RECURSION_GUARD = """## Auto Recursion Guard
+Do not invoke `ooo auto`, `ouroboros_auto`, `ouroboros_start_auto`, or any MCP auto
+tool while executing this Seed. This execution is already downstream of any auto
+authoring step. Implement the concrete Seed requirements directly; if evidence
+about a prior auto run is needed, inspect existing artifacts/logs only and never
+start a nested auto session."""
+
+
+def render_auto_recursion_guard() -> str:
+    """Render the execution-session guard that prevents nested auto dispatch."""
+    return AUTO_RECURSION_GUARD
+
 
 def render_constraints_section(contract: SeedContract) -> str:
     """Render hard boundaries from the Seed contract."""
@@ -160,6 +172,8 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
 
 
 __all__ = [
+    "AUTO_RECURSION_GUARD",
+    "render_auto_recursion_guard",
     "render_brownfield_section",
     "render_acceptance_criteria_section",
     "render_constraints_section",
