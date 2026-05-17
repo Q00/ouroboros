@@ -72,7 +72,14 @@ class SeedRepairer:
         ledger: SeedDraftLedger | None = None,
     ) -> RepairResult:
         """Apply one deterministic repair pass."""
-        if review.grade_result.blockers:
+        repairable_blocker_codes = set()
+        unrepaired_blockers = []
+        for blocker in review.grade_result.blockers:
+            if blocker.code == "seed_goal_mismatch" and ledger is not None:
+                repairable_blocker_codes.add(blocker.code)
+            else:
+                unrepaired_blockers.append(blocker)
+        if unrepaired_blockers:
             return RepairResult(
                 changed=False,
                 seed=seed,
@@ -82,11 +89,20 @@ class SeedRepairer:
 
         constraints = list(seed.constraints)
         acceptance = list(seed.acceptance_criteria)
+        goal = seed.goal
         applied: list[str] = []
         unresolved: list[ReviewFinding] = []
         repaired_acceptance_indices: set[int] = set()
 
+        for blocker_code in repairable_blocker_codes:
+            ledger_goal = _latest_resolved_goal(ledger)
+            if ledger_goal:
+                goal = ledger_goal
+                applied.append(_finding_fingerprint(review, blocker_code))
+
         for finding in review.findings:
+            if finding.code in repairable_blocker_codes:
+                continue
             if finding.code in {"vague_acceptance_criteria", "untestable_acceptance_criteria"}:
                 index = _target_index(finding.target)
                 if index is not None and index < len(acceptance):
@@ -131,6 +147,7 @@ class SeedRepairer:
         if changed:
             updated_seed = seed.model_copy(
                 update={
+                    "goal": goal,
                     "constraints": tuple(dict.fromkeys(constraints)),
                     "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
                     "metadata": seed.metadata.model_copy(
@@ -245,6 +262,13 @@ def _target_index(target: str) -> int | None:
         return int(target.split("[", 1)[1].split("]", 1)[0])
     except ValueError:
         return None
+
+
+def _finding_fingerprint(review: SeedReview, code: str) -> str:
+    for finding in review.findings:
+        if finding.code == code:
+            return finding.fingerprint
+    return code
 
 
 def _safe_auto_mvp_non_goal(ledger: SeedDraftLedger) -> str:
