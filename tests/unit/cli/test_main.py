@@ -416,6 +416,35 @@ class TestWorkflowIRCommands:
         assert '"ok": true' in result.output
         assert '"acceptance_criteria_count": 2' in result.output
 
+    def test_workflow_ir_inspect_plain_text_reports_valid_projection(self, tmp_path: Path) -> None:
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text(
+            "\n".join(
+                [
+                    "goal: Inspect Workflow IR",
+                    "acceptance_criteria:",
+                    "  - Confirm plain-text inspection remains read-only",
+                    "ontology_schema:",
+                    "  name: WorkflowIR",
+                    "  description: Workflow IR ontology",
+                    "  fields: []",
+                    "metadata:",
+                    "  seed_id: seed_cli_plain_ir",
+                    "  version: 1.0.0",
+                    "  ambiguity_score: 0.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file)])
+
+        assert result.exit_code == 0
+        assert "WorkflowSpec: wfspec_seed_cli_plain_ir" in result.output
+        assert "Nodes: 3" in result.output
+        assert "Edges: 2" in result.output
+        assert "Validation: ok" in result.output
+
     def test_workflow_ir_inspect_rejects_blank_ac(self, tmp_path: Path) -> None:
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text(
