@@ -1242,7 +1242,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
 
 
 async def _reconcile_execution_job_snapshot(result: AutoPipelineResult) -> AutoPipelineResult:
-    """Surface terminal execution job failures/cancellations on auto resume."""
+    """Project the linked execution job lifecycle onto the auto resume result."""
     if not result.job_id:
         return result
     try:

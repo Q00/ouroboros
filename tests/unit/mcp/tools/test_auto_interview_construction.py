@@ -132,33 +132,39 @@ def _job_snapshot(status: JobStatus, *, error: str | None = None) -> JobSnapshot
     )
 
 
+def test_non_terminal_execution_job_keeps_auto_result_pollable(monkeypatch) -> None:
+    snapshots = {
+        "job_queued": JobStatus.QUEUED,
+        "job_running": JobStatus.RUNNING,
+        "job_cancel_requested": JobStatus.CANCEL_REQUESTED,
+    }
 
-def test_execution_job_running_keeps_auto_result_pollable(monkeypatch) -> None:
     class FakeJobManager:
         async def get_snapshot(self, job_id: str) -> JobSnapshot:
-            assert job_id == "job_running"
-            return _job_snapshot(JobStatus.RUNNING)
+            return _job_snapshot(snapshots[job_id])
 
     monkeypatch.setattr(
         "ouroboros.mcp.tools.auto_handler.JobManager",
         lambda: FakeJobManager(),
     )
-    result = AutoPipelineResult(
-        status="complete",
-        auto_session_id="auto_1",
-        phase="complete",
-        job_id="job_running",
-        run_handoff_status="started",
-        resume_capability=AutoResumeCapability.NONE,
-    )
 
-    reconciled = asyncio.run(_reconcile_execution_job_snapshot(result))
+    for job_id, expected_status in snapshots.items():
+        result = AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_1",
+            phase="complete",
+            job_id=job_id,
+            run_handoff_status="started",
+            resume_capability=AutoResumeCapability.NONE,
+        )
 
-    assert reconciled.status == "running"
-    assert reconciled.phase == "complete"
-    assert reconciled.execution_job_status == "running"
-    assert reconciled.blocker is None
-    assert reconciled.resume_capability is AutoResumeCapability.RESUME
+        reconciled = asyncio.run(_reconcile_execution_job_snapshot(result))
+
+        assert reconciled.status == expected_status.value
+        assert reconciled.phase == "complete"
+        assert reconciled.execution_job_status == expected_status.value
+        assert reconciled.blocker is None
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
 
 
 def test_execution_job_completed_keeps_auto_complete(monkeypatch) -> None:
@@ -184,6 +190,7 @@ def test_execution_job_completed_keeps_auto_complete(monkeypatch) -> None:
     assert reconciled.status == "complete"
     assert reconciled.execution_job_status == "completed"
     assert reconciled.resume_capability is AutoResumeCapability.NONE
+
 
 def test_execution_job_failure_rewrites_complete_auto_result(monkeypatch) -> None:
     class FakeJobManager:
