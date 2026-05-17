@@ -2167,7 +2167,9 @@ def test_auto_save_seed_accepts_default_seed_id_inside_seed_dir(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_auto_handler_complete_product_uses_injected_configured_ralph_handler(monkeypatch, tmp_path) -> None:
+async def test_auto_handler_complete_product_uses_configured_ralph_factory(
+    monkeypatch, tmp_path
+) -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.auto.state import AutoStore
     from ouroboros.mcp.tools import auto_handler as auto_module
@@ -2175,8 +2177,13 @@ async def test_auto_handler_complete_product_uses_injected_configured_ralph_hand
     class FakeRalphHandler:
         pass
 
-    injected_ralph = FakeRalphHandler()
+    configured_ralph = FakeRalphHandler()
     captured: dict[str, object] = {}
+
+    def build_ralph(runtime_backend, opencode_mode):  # noqa: ANN001
+        captured["factory_runtime_backend"] = runtime_backend
+        captured["factory_opencode_mode"] = opencode_mode
+        return configured_ralph
 
     class FakePipeline:
         def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003, ARG002
@@ -2193,11 +2200,14 @@ async def test_auto_handler_complete_product_uses_injected_configured_ralph_hand
     monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
     monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
 
-    result = await AutoHandler(ralph_handler=injected_ralph).handle(
-        {"goal": "Build a CLI", "cwd": str(tmp_path), "complete_product": True}
-    )
+    result = await AutoHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        ralph_handler_factory=build_ralph,
+    ).handle({"goal": "Build a CLI", "cwd": str(tmp_path), "complete_product": True})
 
     assert result.is_ok
-    assert captured["ralph_starter_handler"] is injected_ralph
-    assert captured["ralph_resumer_handler"] is injected_ralph
-
+    assert captured["factory_runtime_backend"] == "opencode"
+    assert captured["factory_opencode_mode"] == "plugin"
+    assert captured["ralph_starter_handler"] is configured_ralph
+    assert captured["ralph_resumer_handler"] is configured_ralph

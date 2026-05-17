@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import difflib
@@ -99,7 +100,9 @@ class AutoHandler:
     opencode_mode: str | None = field(default=None, repr=False)
     mcp_manager: object | None = field(default=None, repr=False)
     mcp_tool_prefix: str = ""
-    ralph_handler: RalphHandler | None = field(default=None, repr=False)
+    ralph_handler_factory: Callable[[str | None, str | None], RalphHandler] | None = field(
+        default=None, repr=False
+    )
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -420,9 +423,13 @@ class AutoHandler:
         ralph_opencode_mode = state.ralph_opencode_mode or opencode_mode
         ralph_handler = None
         if complete_product:
-            ralph_handler = self.ralph_handler or RalphHandler(
-                agent_runtime_backend=runtime_backend,
-                opencode_mode=ralph_opencode_mode,
+            ralph_handler = (
+                self.ralph_handler_factory(runtime_backend, ralph_opencode_mode)
+                if self.ralph_handler_factory is not None
+                else RalphHandler(
+                    agent_runtime_backend=runtime_backend,
+                    opencode_mode=ralph_opencode_mode,
+                )
             )
         ralph_starter = HandlerRalphStarter(ralph_handler) if ralph_handler is not None else None
         # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
@@ -521,7 +528,9 @@ class StartAutoHandler:
     mcp_tool_prefix: str = ""
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
-    ralph_handler: RalphHandler | None = field(default=None, repr=False)
+    ralph_handler_factory: Callable[[str | None, str | None], RalphHandler] | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -537,7 +546,7 @@ class StartAutoHandler:
             opencode_mode=self.opencode_mode,
             mcp_manager=self.mcp_manager,
             mcp_tool_prefix=self.mcp_tool_prefix,
-            ralph_handler=self.ralph_handler,
+            ralph_handler_factory=self.ralph_handler_factory,
         )
 
     @property

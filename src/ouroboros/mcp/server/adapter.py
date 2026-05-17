@@ -1665,13 +1665,20 @@ def create_ouroboros_server(
         agent_runtime_backend=resolved_runtime_backend,
         opencode_mode=opencode_mode,
     )
-    ralph_handler = RalphHandler(
-        evolve_handler=evolve_step,
-        event_store=event_store,
-        job_manager=job_manager,
-        agent_runtime_backend=resolved_runtime_backend,
-        opencode_mode=opencode_mode,
-    )
+
+    def build_ralph_handler(
+        runtime_backend: str | None,
+        ralph_opencode_mode: str | None,
+    ) -> RalphHandler:
+        return RalphHandler(
+            evolve_handler=evolve_step,
+            event_store=event_store,
+            job_manager=job_manager,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=ralph_opencode_mode,
+        )
+
+    ralph_handler = build_ralph_handler(resolved_runtime_backend, opencode_mode)
     interview = InterviewHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
@@ -1699,7 +1706,7 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             mcp_manager=auto_mcp_manager,
             mcp_tool_prefix=auto_mcp_prefix,
-            ralph_handler=ralph_handler,
+            ralph_handler_factory=build_ralph_handler,
         ),
         StartAutoHandler(
             interview_handler=interview,
@@ -1712,7 +1719,7 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             mcp_manager=auto_mcp_manager,
             mcp_tool_prefix=auto_mcp_prefix,
-            ralph_handler=ralph_handler,
+            ralph_handler_factory=build_ralph_handler,
         ),
         SessionStatusHandler(
             event_store=event_store,

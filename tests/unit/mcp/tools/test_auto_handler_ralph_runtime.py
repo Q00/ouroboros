@@ -96,3 +96,57 @@ def test_mcp_resume_passes_undemoted_ralph_opencode_mode_to_ralph_handler(
     # The fix: Ralph must see the un-demoted plugin mode, NOT the demoted
     # ``state.opencode_mode == "subprocess"`` used for authoring/run handlers.
     assert captured["kwargs"]["opencode_mode"] == "plugin"
+
+
+def test_mcp_resume_configured_ralph_factory_preserves_session_runtime_and_mode(
+    tmp_path,
+) -> None:
+    """Configured MCP Ralph factories must keep resume-specific dispatch settings."""
+    state = AutoPipelineState(goal="ralph factory resume", cwd=str(tmp_path))
+    state.runtime_backend = "opencode"
+    state.opencode_mode = "subprocess"
+    state.ralph_opencode_mode = "plugin"
+    state.complete_product = True
+    state.skip_run = True
+    state.max_interview_rounds = 2
+    state.max_repair_rounds = 1
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    captured: dict[str, Any] = {}
+
+    class _ConfiguredRalphHandler:
+        def __init__(self, runtime_backend: str | None, opencode_mode: str | None) -> None:
+            captured["runtime_backend"] = runtime_backend
+            captured["opencode_mode"] = opencode_mode
+
+    def _build_ralph_handler(
+        runtime_backend: str | None,
+        opencode_mode: str | None,
+    ) -> _ConfiguredRalphHandler:
+        return _ConfiguredRalphHandler(runtime_backend, opencode_mode)
+
+    async def _noop_run(self, state):  # noqa: ARG001
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+            runtime_backend=state.runtime_backend,
+            opencode_mode=state.opencode_mode,
+        )
+
+    handler = AutoHandler(
+        store=store,
+        agent_runtime_backend="subprocess",
+        ralph_handler_factory=_build_ralph_handler,
+    )
+
+    with patch(
+        "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+        new=_noop_run,
+    ):
+        asyncio.run(handler.handle({"resume": state.auto_session_id}))
+
+    assert captured == {"runtime_backend": "opencode", "opencode_mode": "plugin"}
