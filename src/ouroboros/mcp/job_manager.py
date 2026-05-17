@@ -83,6 +83,37 @@ _JOB_TTL = timedelta(hours=1)
 logger = logging.getLogger(__name__)
 
 
+def _latest_job_terminal_event(events: list[BaseEvent]) -> BaseEvent | None:
+    """Return the latest persisted terminal job event from a job stream."""
+    terminal_types = {
+        "mcp.job.completed",
+        "mcp.job.failed",
+        "mcp.job.cancelled",
+        "mcp.job.interrupted",
+    }
+    return next((event for event in reversed(events) if event.type in terminal_types), None)
+
+
+def _snapshot_with_terminal_event(
+    snapshot: JobSnapshot,
+    event: BaseEvent,
+    cursor: int,
+) -> JobSnapshot:
+    """Project a terminal job event onto an existing reconstructed snapshot."""
+    data = event.data
+    status = JobStatus(data.get("status", snapshot.status.value))
+    return replace(
+        snapshot,
+        status=status,
+        message=data.get("message", snapshot.message),
+        updated_at=event.timestamp,
+        cursor=cursor,
+        result_text=data.get("result_text", snapshot.result_text),
+        result_meta=data.get("result_meta") if isinstance(data.get("result_meta"), dict) else {},
+        error=data.get("error"),
+    )
+
+
 class JobManager:
     """Owns background MCP jobs and persists their state as events."""
 
@@ -94,6 +125,7 @@ class JobManager:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._monitors: dict[str, asyncio.Task[None]] = {}
+        self._recovery_locks: dict[str, asyncio.Lock] = {}
         self._initialized = False
         self._known_job_ids: set[str] = set()
         self._reserved_job_ids: set[str] = set()
@@ -566,27 +598,26 @@ class JobManager:
         completed_result = await self._derive_completed_execution_result(snapshot)
         if completed_result is None:
             return snapshot
-        completed = await self._append_execution_completed_event(
-            snapshot.job_id,
-            completed_result,
-            check_current=False,
-        )
-        if not completed:
-            return snapshot
-        events, cursor = await self._event_store.get_events_after(
-            "job", snapshot.job_id, last_row_id=0
-        )
-        latest = events[-1]
-        return replace(
-            snapshot,
-            status=JobStatus.COMPLETED,
-            message=latest.data.get("message", "Job complete"),
-            updated_at=latest.timestamp,
-            cursor=cursor,
-            result_text=latest.data.get("result_text"),
-            result_meta=latest.data.get("result_meta") or {},
-            error=None,
-        )
+        lock = self._recovery_locks.setdefault(snapshot.job_id, asyncio.Lock())
+        async with lock:
+            events, cursor = await self._event_store.get_events_after(
+                "job", snapshot.job_id, last_row_id=0
+            )
+            existing_terminal = _latest_job_terminal_event(events)
+            if existing_terminal is not None:
+                return _snapshot_with_terminal_event(snapshot, existing_terminal, cursor)
+            completed = await self._append_execution_completed_event(
+                snapshot.job_id,
+                completed_result,
+                check_current=False,
+            )
+            if not completed:
+                return snapshot
+            events, cursor = await self._event_store.get_events_after(
+                "job", snapshot.job_id, last_row_id=0
+            )
+            latest = events[-1]
+        return _snapshot_with_terminal_event(snapshot, latest, cursor)
 
     async def wait_for_change(
         self,

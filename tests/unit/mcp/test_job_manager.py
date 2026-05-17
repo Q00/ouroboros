@@ -371,6 +371,63 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_completed_execution_recovery_writes_single_terminal_event_with_concurrent_readers(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            await store.initialize()
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.created",
+                    aggregate_type="job",
+                    aggregate_id="job_recover_race",
+                    data={
+                        "job_type": "execute_seed",
+                        "status": JobStatus.RUNNING.value,
+                        "message": "Running execute_seed",
+                        "links": {
+                            "session_id": "orch_recover_race",
+                            "execution_id": "exec_recover_race",
+                            "lineage_id": None,
+                        },
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_race",
+                    data={"session_id": "orch_recover_race", "status": "completed"},
+                )
+            )
+
+            first, second = await asyncio.gather(
+                manager.get_snapshot("job_recover_race"),
+                manager.get_snapshot("job_recover_race"),
+            )
+
+            assert first.status is JobStatus.COMPLETED
+            assert second.status is JobStatus.COMPLETED
+            events, _ = await store.get_events_after("job", "job_recover_race", last_row_id=0)
+            terminal_events = [
+                event.type
+                for event in events
+                if event.type
+                in {
+                    "mcp.job.completed",
+                    "mcp.job.failed",
+                    "mcp.job.cancelled",
+                    "mcp.job.interrupted",
+                }
+            ]
+            assert terminal_events == ["mcp.job.completed"]
+        finally:
+            await store.close()
+
     async def test_complete_workflow_progress_without_terminal_event_does_not_complete_job(
         self, tmp_path
     ) -> None:
