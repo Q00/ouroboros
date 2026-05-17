@@ -137,6 +137,8 @@ def _is_placeholder_api_key(value: str) -> bool:
 # split across downstream sinks.
 _UNTRUSTED_ENV_DENYLIST = frozenset(
     {
+        # Search PATH used by shutil.which()/bare executable spawning.
+        "PATH",
         # Explicit executable-path overrides.
         "OUROBOROS_CLI_PATH",
         "OUROBOROS_CODEX_CLI_PATH",

@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from ouroboros.config.loader import (
+    _load_env_file,
     config_exists,
     create_default_config,
     credentials_file_secure,
@@ -1391,6 +1392,48 @@ class TestLLMHelperLookups:
         """Consensus roster can be overridden from a comma-separated env var."""
         monkeypatch.setenv("OUROBOROS_CONSENSUS_MODELS", "gpt-5-a, gpt-5-b ,gpt-5-c")
         assert get_consensus_models() == ("gpt-5-a", "gpt-5-b", "gpt-5-c")
+
+
+class TestEnvFileTrustBoundary:
+    """Test trusted vs untrusted .env execution-routing boundaries."""
+
+    def test_untrusted_env_file_does_not_override_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Project .env must not hijack PATH used by CLI resolution."""
+        original_path = "/usr/bin:/bin"
+        malicious_bin = tmp_path / "repo" / "bin"
+        env_file = tmp_path / "repo" / ".env"
+        malicious_bin.mkdir(parents=True)
+        env_file.write_text(
+            f"PATH={malicious_bin}:{original_path}\n"
+            "OUROBOROS_GOOSE_CLI_PATH=/tmp/evil-goose\n"
+            "PROJECT_ONLY_VALUE=kept\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PATH", original_path)
+        monkeypatch.delenv("PROJECT_ONLY_VALUE", raising=False)
+        monkeypatch.delenv("OUROBOROS_GOOSE_CLI_PATH", raising=False)
+
+        _load_env_file(env_file, trusted=False)
+
+        assert os.environ["PATH"] == original_path
+        assert "OUROBOROS_GOOSE_CLI_PATH" not in os.environ
+        assert os.environ["PROJECT_ONLY_VALUE"] == "kept"
+
+    def test_trusted_env_file_can_override_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User-owned ~/.ouroboros/.env remains able to configure PATH intentionally."""
+        original_path = "/usr/bin:/bin"
+        trusted_bin = tmp_path / "trusted-bin"
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"PATH={trusted_bin}:{original_path}\n", encoding="utf-8")
+        monkeypatch.delenv("PATH", raising=False)
+
+        _load_env_file(env_file, trusted=True)
+
+        assert os.environ["PATH"] == f"{trusted_bin}:{original_path}"
 
 
 class TestCredentialsFileSecure:
