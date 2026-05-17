@@ -706,6 +706,34 @@ def test_print_result_complete_product_completion_suppresses_stale_handoff_statu
     assert "Product status: not verified complete" not in output
 
 
+def test_print_result_plugin_ralph_completion_remains_external_pending() -> None:
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_plugin_complete_product",
+        phase="complete",
+        run_handoff_status="started",
+        run_handoff_guidance=(
+            "Ralph loop delegated to the OpenCode plugin child session. "
+            "Track progress through the OpenCode Task widget."
+        ),
+        job_id="job_123",
+        execution_id="exec_123",
+        run_session_id="orch_123",
+        ralph_lineage_id="lineage_123",
+        ralph_dispatch_mode="plugin",
+        resume_capability=AutoResumeCapability.NONE,
+    )
+
+    output = _capture_result(result)
+
+    assert "Auto pipeline completed" in output
+    assert "Status: complete" in output
+    assert "Product status: not verified complete; Ralph loop is external/pending" in output
+    assert "Product status: completed by Ralph loop" not in output
+    assert "Run handoff status: started" in output
+    assert "Run handoff guidance: Ralph loop delegated to the OpenCode plugin" in output
+
+
 def test_print_result_attached_completion_remains_product_complete() -> None:
     result = AutoPipelineResult(
         status="complete",

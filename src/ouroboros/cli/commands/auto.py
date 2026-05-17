@@ -670,14 +670,22 @@ def _is_run_handoff_only_completion(result: AutoPipelineResult) -> bool:
 
 def _is_completed_ralph_product(result: AutoPipelineResult) -> bool:
     """True when ``--complete-product`` reached a terminal Ralph completion."""
-    return result.status == "complete" and bool(
-        result.ralph_job_id or result.ralph_lineage_id or result.ralph_dispatch_mode
+    return (
+        result.status == "complete"
+        and result.ralph_dispatch_mode != "plugin"
+        and bool(result.ralph_job_id or result.ralph_lineage_id)
     )
+
+
+def _is_external_ralph_plugin_completion(result: AutoPipelineResult) -> bool:
+    """True when auto is complete but product work lives in an OpenCode child."""
+    return result.status == "complete" and result.ralph_dispatch_mode == "plugin"
 
 
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     handoff_only = _is_run_handoff_only_completion(result)
     completed_ralph_product = _is_completed_ralph_product(result)
+    external_ralph_plugin = _is_external_ralph_plugin_completion(result)
     if handoff_only:
         print_info("Auto run handoff started")
     elif result.status == "complete":
@@ -695,6 +703,10 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         )
     elif completed_ralph_product:
         console.print("Product status: [green]completed by Ralph loop[/]")
+    elif external_ralph_plugin:
+        console.print(
+            "Product status: [yellow]not verified complete; Ralph loop is external/pending[/]"
+        )
     authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
