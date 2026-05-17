@@ -20,7 +20,7 @@ from ouroboros.auto.adapters import HandlerInterviewBackend
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipelineResult
-from ouroboros.auto.state import AutoStore
+from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
@@ -28,6 +28,7 @@ from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.auto_handler import (
     AutoHandler,
     _derive_goal_user_preferences,
+    _reseed_preference_ledger,
     _seed_initial_ledger_from_user_preferences,
 )
 from ouroboros.mcp.types import ContentType
@@ -148,6 +149,27 @@ Success criteria:
     assert "acceptance_criteria" not in ledger.summary()["evidence_backed_sections"]
 
 
+def test_resume_preference_override_reseeds_stale_preconfirmed_ledger() -> None:
+    """Resume preference overrides must update persisted ledger source of truth."""
+    original_preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)
+    original_ledger = _seed_initial_ledger_from_user_preferences(
+        _OBSERVATION_GOAL, original_preferences
+    )
+
+    refreshed = _reseed_preference_ledger(
+        _OBSERVATION_GOAL,
+        original_ledger.to_dict(),
+        {
+            **original_preferences,
+            "constraints": "Keep only the corrected local reversible constraint.",
+        },
+    )
+
+    constraints = refreshed.sections["constraints"].entries
+    active_constraints = [entry.value for entry in constraints if entry.status == "confirmed"]
+    assert active_constraints == ["Keep only the corrected local reversible constraint."]
+
+
 def test_auto_handler_fresh_session_persists_goal_derived_ledger_preferences(
     tmp_path: Path,
 ) -> None:
@@ -177,6 +199,57 @@ def test_auto_handler_fresh_session_persists_goal_derived_ledger_preferences(
     assert "non_goals" in state.user_preferences
     ledger = SeedDraftLedger.from_dict(state.ledger)
     assert ledger.open_gaps() == []
+
+
+def test_auto_handler_resume_preference_override_updates_persisted_ledger(
+    tmp_path: Path,
+) -> None:
+    store = AutoStore(tmp_path)
+    original_preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)
+    state = AutoPipelineState(goal=_OBSERVATION_GOAL, cwd=str(tmp_path))
+    state.user_preferences = dict(original_preferences)
+    state.ledger = _seed_initial_ledger_from_user_preferences(
+        _OBSERVATION_GOAL, original_preferences
+    ).to_dict()
+    store.save(state)
+    captured: dict[str, Any] = {}
+
+    async def _capture_state(self, state):  # type: ignore[no-untyped-def]
+        captured["state"] = state
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+        )
+
+    with patch(
+        "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+        new=_capture_state,
+    ):
+        result = asyncio.run(
+            AutoHandler(store=store).handle(
+                {
+                    "resume": state.auto_session_id,
+                    "user_preferences": {
+                        "constraints": "Keep only the corrected local reversible constraint."
+                    },
+                }
+            )
+        )
+
+    assert result.is_ok, result.error
+    resumed = captured["state"]
+    assert "runtime_context" in resumed.user_preferences
+    assert resumed.user_preferences["constraints"] == (
+        "Keep only the corrected local reversible constraint."
+    )
+    ledger = SeedDraftLedger.from_dict(resumed.ledger)
+    active_constraints = [
+        entry.value
+        for entry in ledger.sections["constraints"].entries
+        if entry.status == "confirmed"
+    ]
+    assert active_constraints == ["Keep only the corrected local reversible constraint."]
 
 
 def _call_names(node: ast.AST) -> set[str]:

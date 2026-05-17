@@ -315,7 +315,14 @@ class AutoHandler:
             # ones; otherwise the original session's preferences are reused so
             # the same input converges to the same Seed.
             if user_preferences_supplied:
-                state.user_preferences = dict(supplied_user_preferences)
+                state.user_preferences = _merge_goal_user_preferences(
+                    state.goal, supplied_user_preferences
+                )
+                state.ledger = _reseed_preference_ledger(
+                    state.goal,
+                    state.ledger,
+                    state.user_preferences,
+                ).to_dict()
             # Q00/ouroboros#773 (review-3): ``complete_product`` is durable
             # session intent, not a per-invocation flag. Honor the persisted
             # value so MCP callers that omit ``complete_product`` on resume
@@ -1354,6 +1361,38 @@ def _seed_initial_ledger_from_user_preferences(
             ),
         )
     return ledger
+
+
+def _reseed_preference_ledger(
+    goal: str,
+    existing_ledger: dict[str, Any] | None,
+    user_preferences: dict[str, str],
+) -> SeedDraftLedger:
+    """Refresh preference-derived ledger entries after a resume override.
+
+    The auto pipeline treats a persisted ledger as the Seed source of truth.
+    Therefore a resume call that overrides ``state.user_preferences`` must also
+    refresh the preconfirmed preference entries; otherwise stale values from a
+    preallocated start_auto request can survive even though the preference map
+    was corrected. Non-preference interview facts are preserved.
+    """
+    refreshed = _seed_initial_ledger_from_user_preferences(goal, user_preferences)
+    if not existing_ledger:
+        return refreshed
+    existing = SeedDraftLedger.from_dict(existing_ledger)
+    refreshed.question_history = list(existing.question_history)
+    for section_name, section in existing.sections.items():
+        for entry in section.entries:
+            if (
+                entry.source == LedgerSource.USER_PREFERENCE
+                or entry.key.endswith(".goal_prompt")
+                or entry.key.endswith(".user_preference")
+            ):
+                continue
+            if section_name == "goal" and entry.key == "goal.primary":
+                continue
+            refreshed.add_entry(section_name, entry)
+    return refreshed
 
 
 def _user_preference_would_bypass_risky_gate(goal: str, value: str) -> bool:
