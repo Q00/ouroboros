@@ -115,6 +115,21 @@ class TestInstallCodexRules:
         assert not stale_namespaced_rule.exists()
         assert unrelated_rule.read_text(encoding="utf-8") == "keep me"
 
+    def test_refuses_symlinked_rules_root(self, tmp_path: Path) -> None:
+        """Rule install must not follow a symlinked managed rules directory."""
+        codex_dir = tmp_path / ".codex"
+        outside_dir = tmp_path / "outside-rules"
+        packaged_rules_dir = tmp_path / "packaged-rules"
+        outside_dir.mkdir()
+        (codex_dir).mkdir()
+        (codex_dir / "rules").symlink_to(outside_dir, target_is_directory=True)
+        self._write_rule(packaged_rules_dir, CODEX_RULE_FILENAME, "# fresh rules\n")
+
+        with pytest.raises(OSError, match="symlinked directory"):
+            install_codex_rules(codex_dir=codex_dir, rules_dir=packaged_rules_dir)
+
+        assert not (outside_dir / CODEX_RULE_FILENAME).exists()
+
     def test_packaged_rules_fail_closed_for_ooo_auto(self) -> None:
         """Codex rules must route ``ooo auto`` to the real MCP tool, not manual work."""
         rules = load_packaged_codex_rules()
@@ -424,6 +439,26 @@ class TestInstallCodexSkills:
         assert installed_skill_dir.joinpath("SKILL.md").read_text(encoding="utf-8") == (
             "installed status"
         )
+
+    def test_refuses_symlinked_skills_root(self, tmp_path: Path) -> None:
+        """Skill install must not copy or prune through a symlinked managed root."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "status", body="fresh status skill")
+
+        codex_dir = tmp_path / ".codex"
+        outside_dir = tmp_path / "outside-skills"
+        outside_dir.mkdir()
+        codex_dir.mkdir()
+        (codex_dir / "skills").symlink_to(outside_dir, target_is_directory=True)
+        legacy_skill = outside_dir / f"{CODEX_SKILL_NAMESPACE}legacy"
+        legacy_skill.mkdir()
+        legacy_skill.joinpath("SKILL.md").write_text("outside stale", encoding="utf-8")
+
+        with pytest.raises(OSError, match="symlinked directory"):
+            install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir, prune=True)
+
+        assert legacy_skill.joinpath("SKILL.md").read_text(encoding="utf-8") == "outside stale"
+        assert not outside_dir.joinpath(f"{CODEX_SKILL_NAMESPACE}status").exists()
 
 
 class TestResolvePackagedCodexAssets:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ouroboros.hermes.artifacts import (
     HERMES_SKILL_CAPABILITY_GUIDE_FILENAME,
     install_hermes_skills,
@@ -159,3 +161,50 @@ class TestInstallHermesSkills:
         assert not stale_skill_dir.exists()
         assert target_dir.joinpath("run", "SKILL.md").is_file()
         assert target_dir.joinpath("notes.txt").read_text(encoding="utf-8") == "keep me"
+
+    def test_replaces_symlinked_capability_guide_without_following_it(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Hermes install should replace a guide symlink without writing through it."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+
+        target_dir = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        outside_file = tmp_path / "outside-guide.md"
+        outside_file.write_text("outside content", encoding="utf-8")
+        target_dir.mkdir(parents=True)
+        target_dir.joinpath(HERMES_SKILL_CAPABILITY_GUIDE_FILENAME).symlink_to(outside_file)
+
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        guide_path = target_dir / HERMES_SKILL_CAPABILITY_GUIDE_FILENAME
+        assert not guide_path.is_symlink()
+        assert guide_path.read_text(encoding="utf-8").startswith(
+            "## Ouroboros Skill Capability Guide: Hermes\n"
+        )
+        assert outside_file.read_text(encoding="utf-8") == "outside content"
+
+    def test_refuses_symlinked_hermes_skill_root(self, tmp_path: Path, monkeypatch) -> None:
+        """Hermes install must not write or prune through a symlinked managed root."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+
+        target_dir = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        outside_dir = tmp_path / "outside-hermes"
+        outside_dir.mkdir()
+        target_dir.parent.mkdir(parents=True)
+        target_dir.symlink_to(outside_dir, target_is_directory=True)
+
+        with pytest.raises(OSError, match="symlinked directory"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes", prune=True)
+
+        assert not outside_dir.joinpath(HERMES_SKILL_CAPABILITY_GUIDE_FILENAME).exists()
+        assert not outside_dir.joinpath("run").exists()

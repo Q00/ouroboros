@@ -54,6 +54,17 @@ def _remove_target_path(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def _prepare_hermes_install_root(path: Path) -> None:
+    """Create the Hermes skill root without following symlinked managed dirs."""
+    if path.is_symlink():
+        msg = f"Refusing to install Hermes skills into symlinked directory: {path}"
+        raise OSError(msg)
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        msg = f"Refusing to install Hermes skills into symlinked directory: {path}"
+        raise OSError(msg)
+
+
 def install_hermes_skills(
     *,
     hermes_dir: str | Path | None = None,
@@ -66,15 +77,20 @@ def install_hermes_skills(
 
     target_dir = resolved_hermes_dir / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
 
+    if target_dir.is_symlink():
+        msg = f"Refusing to install Hermes skills into symlinked directory: {target_dir}"
+        raise OSError(msg)
     if target_dir.exists() and not target_dir.is_dir():
         _remove_target_path(target_dir)
 
     with _packaged_skills_dir() as source_root:
-        target_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_hermes_install_root(target_dir)
         source_skill_dirs = collect_skill_bundle_dirs(source_root)
         desired_skill_names = {skill_dir.name for skill_dir in source_skill_dirs}
 
-        (target_dir / HERMES_SKILL_CAPABILITY_GUIDE_FILENAME).write_text(
+        capability_guide_path = target_dir / HERMES_SKILL_CAPABILITY_GUIDE_FILENAME
+        _remove_target_path(capability_guide_path)
+        capability_guide_path.write_text(
             render_backend_skill_capability_guide("hermes"),
             encoding="utf-8",
         )
