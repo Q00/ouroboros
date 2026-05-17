@@ -440,6 +440,87 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_progress_accounting_failure_detaches_runner_after_cancel_grace_timeout(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            cleanup_started = asyncio.Event()
+            cleanup_release = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cleanup_started.set()
+                    await cleanup_release.wait()
+                    raise
+                raise AssertionError("runner should only exit through cancellation")
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(
+                    session_id="orch_cleanup_timeout", execution_id="exec_cleanup_timeout"
+                ),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cleanup_timeout",
+                    data={
+                        "session_id": "orch_cleanup_timeout",
+                        "completed_count": 0,
+                        "total_count": 1,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.completed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cleanup_timeout_ac_1",
+                    data={
+                        "execution_id": "exec_cleanup_timeout",
+                        "session_id": "child_1",
+                        "session_scope_id": "exec_cleanup_timeout_ac_1",
+                        "success": True,
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cleanup_timeout",
+                    data={"session_id": "orch_cleanup_timeout", "status": "failed"},
+                )
+            )
+
+            with patch.object(
+                job_manager_module,
+                "_COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS",
+                0.05,
+            ):
+                await asyncio.wait_for(cleanup_started.wait(), timeout=2.0)
+                await _wait_for_job_status(manager, started.job_id, JobStatus.FAILED, timeout=2.0)
+                deadline = asyncio.get_running_loop().time() + 1.0
+                while started.job_id in manager._runner_tasks:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise AssertionError("runner task was not detached after grace timeout")
+                    await asyncio.sleep(0.01)
+
+            assert started.job_id not in manager._runner_tasks
+        finally:
+            cleanup_release.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_snapshot_recovers_progress_accounting_failed_terminal_after_restart(
         self, tmp_path
     ) -> None:
