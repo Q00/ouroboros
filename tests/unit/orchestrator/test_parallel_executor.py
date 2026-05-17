@@ -79,6 +79,11 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
     assert _criterion_satisfied_by_evidence("`tests/test_hello_auto.py` exists.", files, commands)
     assert not _criterion_satisfied_by_evidence("`src/hello_auto.py` exists.", files, commands)
     assert not _criterion_satisfied_by_evidence(
+        "`tests/test_hello_auto.py` exists and imports `hello_auto`.",
+        files,
+        commands,
+    )
+    assert not _criterion_satisfied_by_evidence(
         "`hello_auto.py` is created with exact content.",
         files,
         commands,
@@ -302,6 +307,46 @@ def test_complete_sibling_acs_does_not_rewrite_blocked_results() -> None:
     assert [result.outcome for result in results] == [
         ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.BLOCKED,
+    ]
+
+
+def test_complete_sibling_acs_does_not_use_bare_write_call_as_file_proof() -> None:
+    success_with_write_call_only = ACExecutionResult(
+        ac_index=0,
+        ac_content="Attempt a file write.",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool_use",
+                content="write file",
+                tool_name="Write",
+                data={"tool_input": {"file_path": "hello_auto.py"}},
+            ),
+        ),
+    )
+    failed_file_presence = ACExecutionResult(
+        ac_index=1,
+        ac_content="`hello_auto.py` exists.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_write_call_only, failed_file_presence],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
     ]
 
 

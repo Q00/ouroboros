@@ -1517,12 +1517,6 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
                 _add_command_evidence(run_commands, command)
             continue
 
-        if message.tool_name in ("Write", "Edit", "NotebookEdit"):
-            path_key = "notebook_path" if message.tool_name == "NotebookEdit" else "file_path"
-            file_path = tool_input.get(path_key)
-            if isinstance(file_path, str) and file_path.strip():
-                files.add(file_path.strip())
-
     passed_commands.update(_successful_runtime_test_commands(result.messages))
     return files, run_commands, passed_commands
 
@@ -1543,13 +1537,8 @@ def _criterion_satisfied_by_evidence(
         _normalize_command(command).casefold() for command in (passed_commands or set()) if command
     }
 
-    existential_file_markers = (" exists", " is present", " are present")
     for file_path in files:
-        if (
-            file_path
-            and _criterion_mentions_exact_file_path(criterion, file_path)
-            and any(marker in lowered for marker in existential_file_markers)
-        ):
+        if file_path and _criterion_is_exact_file_presence_ac(criterion, file_path):
             return True
 
     command_success_markers = (
@@ -1578,8 +1567,8 @@ def _criterion_satisfied_by_evidence(
     return False
 
 
-def _criterion_mentions_exact_file_path(criterion: str, file_path: str) -> bool:
-    """Return True when a criterion cites the exact evidence path."""
+def _criterion_is_exact_file_presence_ac(criterion: str, file_path: str) -> bool:
+    """Return True when the criterion is only an exact file-presence AC."""
     normalized_path = Path(file_path.strip()).as_posix().casefold()
     if (
         not normalized_path
@@ -1587,12 +1576,23 @@ def _criterion_mentions_exact_file_path(criterion: str, file_path: str) -> bool:
         or ".." in Path(normalized_path).parts
     ):
         return False
-    inline_code_paths = {
+    inline_code_paths = [
         Path(match.group(1).strip()).as_posix().casefold()
         for match in re.finditer(r"`([^`]+)`", criterion)
         if match.group(1).strip()
+    ]
+    if inline_code_paths != [normalized_path]:
+        return False
+
+    normalized = _normalized_evidence_text(
+        re.sub(r"`[^`]+`", "<path>", criterion).strip().rstrip(".")
+    )
+    return normalized in {
+        "<path> exists",
+        "<path> is present",
+        "the file <path> exists",
+        "the file <path> is present",
     }
-    return normalized_path in inline_code_paths
 
 
 def _complete_sibling_acs_from_evidence(
