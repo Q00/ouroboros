@@ -168,6 +168,11 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
 )
 
 
+def _is_untrusted_env_denied_key(key: str) -> bool:
+    """Return whether an untrusted .env key may alter execution routing."""
+    return key.upper() in _UNTRUSTED_ENV_DENYLIST
+
+
 def _load_env_file(path: Path, *, trusted: bool = False) -> None:
     if not path.is_file():
         return
@@ -186,7 +191,7 @@ def _load_env_file(path: Path, *, trusted: bool = False) -> None:
         if not key or any(ch.isspace() for ch in key):
             continue
 
-        if not trusted and key in _UNTRUSTED_ENV_DENYLIST:
+        if not trusted and _is_untrusted_env_denied_key(key):
             # Untrusted project-directory .env must not redirect which
             # binary Ouroboros executes (remote code execution guard).
             continue

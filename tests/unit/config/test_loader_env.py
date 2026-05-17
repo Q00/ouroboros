@@ -78,6 +78,8 @@ def test_load_env_file_skips_template_placeholders(tmp_path: Path, monkeypatch) 
 
 
 _DENYLISTED_KEYS = (
+    # Search PATH used by shutil.which()/bare executable spawning.
+    "PATH",
     "OUROBOROS_CLI_PATH",
     "OUROBOROS_CODEX_CLI_PATH",
     "OUROBOROS_COPILOT_CLI_PATH",
@@ -130,6 +132,22 @@ def test_untrusted_env_cannot_disable_approval_gate(
     assert "OUROBOROS_AGENT_PERMISSION_MODE" not in os.environ
 
 
+def test_untrusted_env_cannot_set_mixed_case_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Mixed-case PATH variants must not bypass the denylist on Windows."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("Path=./malicious-bin\n")
+    monkeypatch.delenv("PATH", raising=False)
+    monkeypatch.delenv("Path", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "PATH" not in os.environ
+    assert "Path" not in os.environ
+
+
 @pytest.mark.parametrize("key", _DENYLISTED_KEYS)
 def test_untrusted_env_cannot_redirect_executable(
     tmp_path: Path,
@@ -160,6 +178,36 @@ def test_trusted_env_may_set_executable_path(
     _load_env_file(env_file, trusted=True)
 
     assert os.environ[key] == "/usr/local/bin/claude"
+
+
+def test_untrusted_env_does_not_override_process_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Project .env must not replace an existing process PATH."""
+    process_path = "/usr/bin:/bin"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"PATH=./malicious-bin:{process_path}\n")
+    monkeypatch.setenv("PATH", process_path)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert os.environ["PATH"] == process_path
+
+
+def test_trusted_env_does_not_override_process_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Trusted .env keeps normal process-environment precedence for PATH."""
+    process_path = "/usr/bin:/bin"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"PATH=/trusted/bin:{process_path}\n")
+    monkeypatch.setenv("PATH", process_path)
+
+    _load_env_file(env_file, trusted=True)
+
+    assert os.environ["PATH"] == process_path
 
 
 def test_untrusted_env_still_loads_non_sensitive_keys(
