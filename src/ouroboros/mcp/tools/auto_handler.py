@@ -1242,7 +1242,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
 
 
 async def _reconcile_execution_job_snapshot(result: AutoPipelineResult) -> AutoPipelineResult:
-    """Surface terminal execution job failures/cancellations on auto resume."""
+    """Project the linked execution job lifecycle onto the auto resume result."""
     if not result.job_id:
         return result
     try:
@@ -1251,7 +1251,16 @@ async def _reconcile_execution_job_snapshot(result: AutoPipelineResult) -> AutoP
         return result
     blocker = result.blocker
     status = result.status
-    if snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
+    resume_capability = result.resume_capability
+    if snapshot.status in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.CANCEL_REQUESTED}:
+        # A started execution handoff is not the same as product completion.
+        # AutoPipeline persists COMPLETE after returning a durable run handle so
+        # it does not start duplicate work on resume; the MCP surface should
+        # still report the linked job as non-terminal and keep resume polling
+        # discoverable until the background job reaches a terminal state.
+        status = snapshot.status.value
+        resume_capability = AutoResumeCapability.RESUME
+    elif snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
         detail = snapshot.error or snapshot.result_text or snapshot.message
         blocker = (
             f"execution job {snapshot.status.value}: {detail}"
@@ -1259,10 +1268,15 @@ async def _reconcile_execution_job_snapshot(result: AutoPipelineResult) -> AutoP
             else f"execution job {snapshot.status.value}"
         )
         status = "failed" if snapshot.status is JobStatus.FAILED else "blocked"
+        resume_capability = AutoResumeCapability.NONE
+    elif snapshot.status is JobStatus.COMPLETED:
+        status = "complete"
+        resume_capability = AutoResumeCapability.NONE
     return replace(
         result,
         status=status,
         blocker=blocker,
+        resume_capability=resume_capability,
         execution_job_status=snapshot.status.value,
         execution_job_error=snapshot.error,
         execution_job_message=snapshot.message,
