@@ -37,6 +37,7 @@ from ouroboros.cli.commands import (
     status,
     tui,
     uninstall,
+    workflow_ir,
 )
 from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
 from ouroboros.cli.formatters import console
@@ -92,6 +93,7 @@ app.add_typer(pm.app, name="pm")
 app.add_typer(plugin.app, name="plugin")
 app.add_typer(resume.app, name="resume")
 app.add_typer(uninstall.app, name="uninstall")
+app.add_typer(workflow_ir.app, name="workflow-ir")
 
 
 # Top-level convenience aliases

@@ -371,3 +371,73 @@ class TestStatusRunProjectionCommand:
 
         assert result.exit_code == 1
         assert "session_id or execution_id is required" in result.output
+
+
+class TestWorkflowIRCommands:
+    def test_workflow_ir_inspect_json_projects_seed(self, tmp_path: Path) -> None:
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text(
+            "\n".join(
+                [
+                    "goal: Inspect Workflow IR",
+                    "task_type: code",
+                    "constraints:",
+                    "  - Keep read-only",
+                    "acceptance_criteria:",
+                    "  - First criterion",
+                    "  - criterion: Second criterion",
+                    "ontology_schema:",
+                    "  name: WorkflowIR",
+                    "  description: Workflow IR ontology",
+                    "  fields:",
+                    "    - name: workflow",
+                    "      field_type: object",
+                    "      description: Workflow graph",
+                    "evaluation_principles:",
+                    "  - name: correctness",
+                    "    description: Correct output",
+                    "exit_conditions:",
+                    "  - name: all_ac_met",
+                    "    description: Done",
+                    "    evaluation_criteria: All ACs pass",
+                    "metadata:",
+                    "  seed_id: seed_cli_ir",
+                    "  version: 1.0.0",
+                    "  ambiguity_score: 0.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
+
+        assert result.exit_code == 0
+        assert '"spec_id": "wfspec_seed_cli_ir"' in result.output
+        assert '"ok": true' in result.output
+        assert '"acceptance_criteria_count": 2' in result.output
+
+    def test_workflow_ir_inspect_rejects_blank_ac(self, tmp_path: Path) -> None:
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text(
+            "\n".join(
+                [
+                    "goal: Inspect Workflow IR",
+                    "acceptance_criteria:",
+                    "  - ''",
+                    "ontology_schema:",
+                    "  name: WorkflowIR",
+                    "  description: Workflow IR ontology",
+                    "  fields: []",
+                    "metadata:",
+                    "  seed_id: seed_cli_ir",
+                    "  version: 1.0.0",
+                    "  ambiguity_score: 0.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
+
+        assert result.exit_code == 1
+        assert "must be non-blank" in result.output
