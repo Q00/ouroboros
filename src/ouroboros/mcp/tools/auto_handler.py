@@ -315,8 +315,10 @@ class AutoHandler:
             # ones; otherwise the original session's preferences are reused so
             # the same input converges to the same Seed.
             if user_preferences_supplied:
-                state.user_preferences = _merge_goal_user_preferences(
-                    state.goal, supplied_user_preferences
+                state.user_preferences = _merge_resume_user_preferences(
+                    state.goal,
+                    state.user_preferences,
+                    supplied_user_preferences,
                 )
                 state.ledger = _reseed_preference_ledger(
                     state.goal,
@@ -1334,6 +1336,18 @@ def _merge_goal_user_preferences(goal: str, supplied: dict[str, str]) -> dict[st
     return merged
 
 
+def _merge_resume_user_preferences(
+    goal: str,
+    persisted: dict[str, str],
+    supplied: dict[str, str],
+) -> dict[str, str]:
+    """Merge resume preferences without dropping previously persisted facts."""
+    merged = _derive_goal_user_preferences(goal)
+    merged.update(persisted)
+    merged.update(supplied)
+    return merged
+
+
 def _seed_initial_ledger_from_user_preferences(
     goal: str, user_preferences: dict[str, str]
 ) -> SeedDraftLedger:
@@ -1429,6 +1443,14 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
     if non_goals:
         preferences["non_goals"] = non_goals
 
+    actors = _section_text(sections, "actors", "actor")
+    if actors:
+        preferences["actors"] = actors
+
+    inputs = _section_text(sections, "inputs", "input")
+    if inputs:
+        preferences["inputs"] = inputs
+
     success = _section_text(sections, "success criteria", "acceptance criteria")
     if success:
         preferences["acceptance_criteria"] = success
@@ -1436,10 +1458,6 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
     implementation = _section_text(sections, "implementation", "task")
     if implementation:
         preferences["outputs"] = implementation
-        preferences["inputs"] = (
-            "Inputs are the local repository state, the requested implementation contract, "
-            "and the verification commands described in the goal prompt."
-        )
 
     constraint_lines = _matching_lines(
         goal,
@@ -1481,11 +1499,6 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
     )
     if failure_lines:
         preferences["failure_modes"] = "\n".join(failure_lines)
-
-    if _looks_like_local_operator_goal(goal):
-        preferences["actors"] = (
-            "A single local developer/operator using Codex and Ouroboros in the local repository."
-        )
 
     return preferences
 
@@ -1531,15 +1544,6 @@ def _matching_lines(text: str, needles: tuple[str, ...]) -> list[str]:
 
 def _clean_prompt_line(line: str) -> str:
     return re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
-
-
-def _looks_like_local_operator_goal(goal: str) -> bool:
-    lowered = goal.casefold()
-    return (
-        "local development repository" in lowered
-        or "local repository" in lowered
-        or "local file edits are allowed" in lowered
-    )
 
 
 def _build_context_provider(user_preferences: dict[str, str]):

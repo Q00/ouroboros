@@ -75,6 +75,12 @@ Runtime context:
 - Network access is not required.
 - No credentials are required.
 
+Actors:
+- A single local developer/operator using Codex and Ouroboros in the local repository.
+
+Inputs:
+- The local repository state, the requested implementation contract, and the verification commands described in this goal prompt.
+
 Non-goals:
 - Do not refactor existing code.
 - Do not add dependencies.
@@ -149,6 +155,22 @@ Success criteria:
     assert "acceptance_criteria" not in ledger.summary()["evidence_backed_sections"]
 
 
+def test_implementation_section_does_not_fabricate_inputs_preference() -> None:
+    """Only explicitly authored Inputs sections may seed required inputs."""
+    goal = """
+Goal:
+Create a hello world file.
+
+Implementation:
+- Create `hello.py`.
+"""
+
+    preferences = _derive_goal_user_preferences(goal)
+
+    assert preferences["outputs"] == "Create `hello.py`."
+    assert "inputs" not in preferences
+
+
 def test_resume_preference_override_reseeds_stale_preconfirmed_ledger() -> None:
     """Resume preference overrides must update persisted ledger source of truth."""
     original_preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)
@@ -208,8 +230,9 @@ def test_auto_handler_resume_preference_override_updates_persisted_ledger(
     original_preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)
     state = AutoPipelineState(goal=_OBSERVATION_GOAL, cwd=str(tmp_path))
     state.user_preferences = dict(original_preferences)
+    state.user_preferences["runtime_context"] = "Persisted explicit runtime context."
     state.ledger = _seed_initial_ledger_from_user_preferences(
-        _OBSERVATION_GOAL, original_preferences
+        _OBSERVATION_GOAL, state.user_preferences
     ).to_dict()
     store.save(state)
     captured: dict[str, Any] = {}
@@ -239,7 +262,7 @@ def test_auto_handler_resume_preference_override_updates_persisted_ledger(
 
     assert result.is_ok, result.error
     resumed = captured["state"]
-    assert "runtime_context" in resumed.user_preferences
+    assert resumed.user_preferences["runtime_context"] == "Persisted explicit runtime context."
     assert resumed.user_preferences["constraints"] == (
         "Keep only the corrected local reversible constraint."
     )

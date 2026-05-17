@@ -41,6 +41,12 @@ Runtime context:
 - Network access is not required.
 - No credentials are required.
 
+Actors:
+- A single local developer/operator using Codex and Ouroboros in the local repository.
+
+Inputs:
+- The local repository state, the requested implementation contract, and the verification commands described in this goal prompt.
+
 Non-goals:
 - Do not refactor existing code.
 - Do not add dependencies.
