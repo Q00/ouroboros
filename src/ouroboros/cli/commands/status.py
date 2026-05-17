@@ -3,13 +3,16 @@
 Check system status and execution history.
 """
 
-from typing import Annotated
+import asyncio
+import json
+from typing import Annotated, Any
 
 import typer
 
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import create_status_table, print_table
+from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 
 app = typer.Typer(
     name="status",
@@ -101,6 +104,53 @@ def auto(
         print_error(f"Auto status failed: {exc}")
         raise typer.Exit(1) from exc
     typer.echo(_format_auto_status(state), nl=False)
+
+
+@app.command(name="run")
+def run_projection(
+    session_id: Annotated[
+        str | None,
+        typer.Option("--session-id", help="Optional orchestrator session ID to project."),
+    ] = None,
+    execution_id: Annotated[
+        str | None,
+        typer.Option("--execution-id", help="Optional execution aggregate ID to project."),
+    ] = None,
+    seed_id: Annotated[
+        str | None,
+        typer.Option("--seed-id", help="Optional seed ID override for projection labels."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="Optional event count safety cap."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit machine-readable projection JSON."),
+    ] = False,
+) -> None:
+    """Build a read-only Run/Stage/Step projection from persisted events."""
+
+    arguments: dict[str, Any] = {}
+    if session_id is not None:
+        arguments["session_id"] = session_id
+    if execution_id is not None:
+        arguments["execution_id"] = execution_id
+    if seed_id is not None:
+        arguments["seed_id"] = seed_id
+    if limit is not None:
+        arguments["limit"] = limit
+
+    result = asyncio.run(ProjectionQueryHandler().handle(arguments))
+    if result.is_err:
+        print_error(f"Run projection failed: {result.error}")
+        raise typer.Exit(1)
+
+    tool_result = result.value
+    if json_output:
+        typer.echo(json.dumps(tool_result.meta, indent=2, sort_keys=True))
+        return
+    typer.echo(tool_result.text_content, nl=False)
 
 
 @app.command()

@@ -302,3 +302,48 @@ class TestShorthandCommands:
 
         # _run_orchestrator should be awaited by the default orchestrator path
         mock_run_orchestrator.assert_awaited_once()
+
+
+class TestStatusRunProjectionCommand:
+    def test_status_run_json_uses_projection_handler(self) -> None:
+        async def fake_handle(self, arguments):
+            from ouroboros.core.types import Result
+            from ouroboros.mcp.types import MCPToolResult
+
+            assert arguments == {"execution_id": "exec_123", "limit": 20}
+            return Result.ok(
+                MCPToolResult(
+                    content=(),
+                    meta={
+                        "execution_id": "exec_123",
+                        "run": {"run_id": "run_123"},
+                        "stages": [],
+                        "steps": [],
+                        "artifacts": [],
+                        "verdicts": [],
+                    },
+                )
+            )
+
+        with patch("ouroboros.cli.commands.status.ProjectionQueryHandler.handle", fake_handle):
+            result = runner.invoke(
+                app,
+                ["status", "run", "--execution-id", "exec_123", "--limit", "20", "--json"],
+            )
+
+        assert result.exit_code == 0
+        assert '"execution_id": "exec_123"' in result.output
+        assert '"run_id": "run_123"' in result.output
+
+    def test_status_run_reports_projection_errors(self) -> None:
+        async def fake_handle(self, arguments):
+            from ouroboros.core.types import Result
+            from ouroboros.mcp.errors import MCPToolError
+
+            return Result.err(MCPToolError("session_id or execution_id is required"))
+
+        with patch("ouroboros.cli.commands.status.ProjectionQueryHandler.handle", fake_handle):
+            result = runner.invoke(app, ["status", "run", "--json"])
+
+        assert result.exit_code == 1
+        assert "session_id or execution_id is required" in result.output
