@@ -69,10 +69,7 @@ def normalize_observation_execution_criteria(
     if not _has_auto_wrapper_context(context_text, criteria):
         return criteria
 
-    keep_return = False
-    keep_test_file = False
-    keep_pytest = False
-    passthrough: list[str] = []
+    normalized: list[str] = []
     for criterion in criteria:
         stripped = criterion.strip()
         if not stripped:
@@ -82,30 +79,9 @@ def normalize_observation_execution_criteria(
             lowered
         ):
             continue
-        if "uv run pytest" in lowered and "tests/test_hello_auto.py" in lowered:
-            keep_pytest = True
-            continue
-        if "tests/test_hello_auto.py" in lowered:
-            keep_test_file = True
-            continue
-        if "hello_auto.py" in lowered:
-            keep_return = True
-            continue
-        passthrough.append(stripped)
+        normalized.append(_normalize_known_observation_execution_line(stripped))
 
-    canonical: list[str] = []
-    if keep_return:
-        canonical.append(
-            "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
-        )
-    if keep_test_file:
-        canonical.append(
-            "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value."
-        )
-    if keep_pytest:
-        canonical.append("The exact command `uv run pytest tests/test_hello_auto.py` passes.")
-
-    return tuple(dict.fromkeys((*canonical, *passthrough)))
+    return tuple(dict.fromkeys(normalized))
 
 
 def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
@@ -134,6 +110,36 @@ def _has_auto_wrapper_context(goal: str, criteria: tuple[str, ...]) -> bool:
 
 def _criterion_key(criterion: str) -> str:
     return " ".join(criterion.casefold().strip().rstrip(".").split())
+
+
+def _normalize_known_observation_execution_line(criterion: str) -> str:
+    """Canonicalize only known-equivalent hello_auto execution AC phrasings."""
+    key = _criterion_key(criterion)
+    hello_return_equivalents = {
+        "`hello_auto.py` defines `hello_auto()` returning exactly `hello from ooo auto`",
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`",
+        "hello_auto.py defines hello_auto() returning exactly hello from ooo auto",
+        "hello_auto.py defines hello_auto() -> str returning exactly hello from ooo auto",
+    }
+    test_file_equivalents = {
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value",
+        "tests/test_hello_auto.py imports hello_auto and asserts the exact return value",
+    }
+    pytest_equivalents = {
+        "`uv run pytest tests/test_hello_auto.py` passes",
+        "uv run pytest tests/test_hello_auto.py passes",
+        "the exact command `uv run pytest tests/test_hello_auto.py` passes",
+        "the targeted test command `uv run pytest tests/test_hello_auto.py` passes",
+    }
+    if key in hello_return_equivalents:
+        return (
+            "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
+        )
+    if key in test_file_equivalents:
+        return "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value."
+    if key in pytest_equivalents:
+        return "The exact command `uv run pytest tests/test_hello_auto.py` passes."
+    return criterion
 
 
 def _is_observation_report_only_line(lowered: str) -> bool:

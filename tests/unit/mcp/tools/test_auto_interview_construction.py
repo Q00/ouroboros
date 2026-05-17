@@ -298,7 +298,7 @@ def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
     assert "constraints" in summary["evidence_backed_sections"]
     assert "non_goals" in summary["evidence_backed_sections"]
     assert "Final report" not in preferences["acceptance_criteria"]
-    assert "`hello_auto.py` defines `hello_auto() -> str`" in preferences["acceptance_criteria"]
+    assert "`hello_auto.py` exists" in preferences["acceptance_criteria"]
 
 
 def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
@@ -372,8 +372,8 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.\n"
+        "`hello_auto.py` exists.\n"
+        "`tests/test_hello_auto.py` exists.\n"
         "The exact command `uv run pytest tests/test_hello_auto.py` passes."
     )
     assert "Previous last_question" in preferences["failure_modes"]
@@ -407,8 +407,8 @@ After auto finishes, report:
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.\n"
+        "`hello_auto.py` exists.\n"
+        "`tests/test_hello_auto.py` exists.\n"
         "The exact command `uv run pytest tests/test_hello_auto.py` passes."
     )
     assert "auto session id" not in preferences["acceptance_criteria"].casefold()
@@ -451,8 +451,8 @@ After auto finishes, report:
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.\n"
+        "`hello_auto.py` exists.\n"
+        "`tests/test_hello_auto.py` exists.\n"
         "The exact command `uv run pytest tests/test_hello_auto.py` passes."
     )
     assert "execution job" not in preferences["acceptance_criteria"].casefold()
@@ -502,8 +502,8 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value."
+        "`hello_auto.py` exists.\n"
+        "`tests/test_hello_auto.py` exists."
     )
 
 

@@ -82,7 +82,7 @@ def test_normalize_execution_acceptance_drops_observation_report_metadata() -> N
     )
 
 
-def test_normalize_execution_acceptance_canonicalizes_latest_observation_prompt() -> None:
+def test_normalize_execution_acceptance_filters_latest_observation_prompt_metadata() -> None:
     seed = _seed(
         "`ooo auto` is dispatched through the installed Ouroboros MCP tool, not interpreted as plain text.",
         "Seed reaches grade A.",
@@ -101,9 +101,30 @@ def test_normalize_execution_acceptance_canonicalizes_latest_observation_prompt(
     normalized = normalize_execution_acceptance(seed)
 
     assert normalized.acceptance_criteria == (
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        "`hello_auto.py` exists.",
+        "`tests/test_hello_auto.py` exists.",
         "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    )
+
+
+def test_normalize_execution_acceptance_preserves_non_equivalent_file_criteria() -> None:
+    seed = _seed(
+        "`ooo auto` is dispatched through the installed Ouroboros MCP tool, not interpreted as plain text.",
+        "`hello_auto.py` contains a module-level docstring.",
+        "`tests/test_hello_auto.py` uses pytest.mark.smoke.",
+        "pytest tests/test_hello_auto.py -q passes.",
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "`hello_auto.py` contains a module-level docstring.",
+        "`tests/test_hello_auto.py` uses pytest.mark.smoke.",
+        "pytest tests/test_hello_auto.py -q passes.",
     )
 
 
