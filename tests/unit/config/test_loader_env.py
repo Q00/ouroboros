@@ -10,6 +10,22 @@ import pytest
 from ouroboros.config.loader import _load_env_file
 
 
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """`_load_env_file` writes os.environ directly, bypassing monkeypatch.
+
+    Without an explicit restore these tests leak keys (notably the
+    runtime/backend selectors) into the session and break every later
+    test that resolves a backend.
+    """
+    saved = os.environ.copy()
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 def test_load_env_file_sets_missing_values(tmp_path: Path, monkeypatch) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("export FIRST=value\nSECOND='two words'\nTHIRD=three # trailing comment\n")
