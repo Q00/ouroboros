@@ -204,8 +204,27 @@ def _normalize_interview_answer(answer: str) -> str:
 
 
 def _is_interview_completion_signal(answer: str | None) -> bool:
-    """Return True when the answer explicitly asks to end the interview."""
+    """Return True when the answer explicitly asks to end the interview.
+
+    Only ``[from-user]`` and prefix-less answers represent human intent to close.
+    The auto driver's ``_feature_acceptance_answer`` echoes the LLM question into
+    its answer text, which can accidentally include phrases like "no remaining
+    ambiguity" and trip the shortfall branch. Gate the heuristic by prefix so
+    ``[from-auto]`` / ``[from-code]`` / ``[from-research]`` answers — which carry
+    facts or auto-generated fillers, not user intent — never enter completion.
+
+    If a new ``[from-<source>]`` prefix is introduced in
+    ``skills/interview/SKILL.md`` (or the LLM-facing prompt at
+    ``bigbang/interview.py``), audit whether that source represents direct human
+    intent and update the guard below — otherwise it is silently default-denied,
+    which is safe (the user can still close with a prefix-less ``"done"``) but
+    may surprise callers.
+    """
     if answer is None:
+        return False
+
+    stripped = answer.lstrip().lower()
+    if stripped.startswith("[from-") and not stripped.startswith("[from-user]"):
         return False
 
     normalized = _normalize_interview_answer(answer)
