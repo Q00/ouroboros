@@ -303,12 +303,20 @@ def _remove_installed_artifact(path: Path) -> None:
 
 def _prepare_managed_install_root(path: Path) -> None:
     """Create an artifact root without following attacker-controlled symlinks."""
-    if path.is_symlink():
-        msg = f"Refusing to install Codex artifacts into symlinked directory: {path}"
-        raise OSError(msg)
+    _refuse_symlinked_path_component(path)
     path.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        msg = f"Refusing to install Codex artifacts into symlinked directory: {path}"
+    _refuse_symlinked_path_component(path)
+
+
+def _refuse_symlinked_path_component(path: Path) -> None:
+    """Fail closed when any existing component in an install root is a symlink."""
+    for component in (*reversed(path.parents), path):
+        if not component.is_symlink():
+            continue
+        msg = (
+            "Refusing to install Codex artifacts into a path with a symlinked "
+            f"directory component: {component}"
+        )
         raise OSError(msg)
 
 

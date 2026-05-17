@@ -208,3 +208,27 @@ class TestInstallHermesSkills:
 
         assert not outside_dir.joinpath(HERMES_SKILL_CAPABILITY_GUIDE_FILENAME).exists()
         assert not outside_dir.joinpath("run").exists()
+
+    def test_refuses_symlinked_hermes_dir_ancestor(self, tmp_path: Path, monkeypatch) -> None:
+        """Hermes install must not write or prune through a symlinked Hermes root."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+
+        hermes_dir = tmp_path / ".hermes"
+        outside_hermes_dir = tmp_path / "outside-hermes"
+        outside_skill_root = outside_hermes_dir / "skills" / "autonomous-ai-agents" / "ouroboros"
+        outside_skill_root.mkdir(parents=True)
+        stale_skill = outside_skill_root / "status"
+        stale_skill.mkdir()
+        stale_skill.joinpath("SKILL.md").write_text("outside stale", encoding="utf-8")
+        hermes_dir.symlink_to(outside_hermes_dir, target_is_directory=True)
+
+        with pytest.raises(OSError, match="symlinked"):
+            install_hermes_skills(hermes_dir=hermes_dir, prune=True)
+
+        assert stale_skill.joinpath("SKILL.md").read_text(encoding="utf-8") == "outside stale"
+        assert not outside_skill_root.joinpath("run").exists()
