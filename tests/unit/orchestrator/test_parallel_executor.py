@@ -267,6 +267,92 @@ def test_complete_sibling_acs_requires_runtime_test_success_for_pass_claim() -> 
     ]
 
 
+def test_complete_sibling_acs_does_not_use_later_tool_success_as_test_proof() -> None:
+    success_with_unrelated_tool_success = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run pytest and edit a file.",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool_use",
+                content="run pytest",
+                tool_name="Bash",
+                data={"tool_input": {"command": "uv run pytest tests/test_hello_auto.py"}},
+            ),
+            AgentMessage(
+                type="tool_use",
+                content="write file",
+                tool_name="Write",
+                data={"tool_input": {"file_path": "hello_auto.py"}},
+            ),
+            AgentMessage(
+                type="tool_result",
+                content="success",
+                data={"subtype": "tool_result", "stdout": "success"},
+            ),
+        ),
+    )
+    failed_pytest = ACExecutionResult(
+        ac_index=1,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_unrelated_tool_success, failed_pytest],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
+    ]
+
+
+def test_complete_sibling_acs_keeps_exact_command_case_sensitive() -> None:
+    success = ACExecutionResult(
+        ac_index=0,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=True,
+        typed_evidence=EvidenceRecord(
+            data={"tests_passed": ["uv run pytest tests/test_hello_auto.py"]}
+        ),
+    )
+    failed_wrong_case_pytest = ACExecutionResult(
+        ac_index=1,
+        ac_content="The exact command `uv run pytest Tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success, failed_wrong_case_pytest],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
+    ]
+
+
 def test_complete_sibling_acs_normalizes_absolute_typed_file_evidence(tmp_path: Any) -> None:
     test_file = tmp_path / "tests" / "test_hello_auto.py"
     success = ACExecutionResult(

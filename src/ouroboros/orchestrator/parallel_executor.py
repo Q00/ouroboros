@@ -1181,7 +1181,7 @@ def _runtime_messages_support_test_claim(
             continue
         chunk = [message]
         for following in messages[index + 1 :]:
-            if following.tool_name == "Bash":
+            if following.tool_name:
                 break
             chunk.append(following)
         if not any(_message_contains_test_success(item) for item in chunk):
@@ -1401,6 +1401,11 @@ def _normalize_command(command: str) -> str:
     return " ".join(command.split())
 
 
+def _normalize_exact_command(command: str) -> str:
+    """Normalize command whitespace while preserving case-sensitive exactness."""
+    return " ".join(command.split())
+
+
 def _truncate_text(text: str, limit: int = _MAX_LEAF_RESULT_CHARS) -> str:
     """Truncate long evidence blocks while preserving their beginning."""
     stripped = text.strip()
@@ -1467,7 +1472,7 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
             continue
         chunk = [message]
         for following in messages[index + 1 :]:
-            if following.tool_name == "Bash":
+            if following.tool_name:
                 break
             chunk.append(following)
         if any(
@@ -1486,7 +1491,7 @@ def _add_runtime_command_evidence(commands: set[str], command: str) -> None:
 
 def _runtime_command_evidence_aliases(command: str) -> tuple[str, ...]:
     """Return exact runtime command aliases for sibling reconciliation."""
-    aliases = [_normalize_command(command)]
+    aliases = [_normalize_exact_command(command)]
     single_inner_command = _single_exact_command_after_safe_shell_preamble(command)
     if single_inner_command and single_inner_command not in aliases:
         aliases.append(single_inner_command)
@@ -1501,7 +1506,7 @@ def _single_exact_command_after_safe_shell_preamble(command: str) -> str | None:
     segments = tuple(_segments_after_safe_shell_preamble(body))
     if len(segments) != 1:
         return None
-    return _normalize_command(segments[0])
+    return _normalize_exact_command(segments[0])
 
 
 def _typed_evidence_is_usable_for_sibling_reconciliation(result: ACExecutionResult) -> bool:
@@ -1560,9 +1565,11 @@ def _criterion_satisfied_by_evidence(
     passed_commands: set[str] | None = None,
 ) -> bool:
     """Conservatively decide whether evidence satisfies a sibling criterion."""
-    normalized_run_commands = {_normalize_command(command) for command in run_commands if command}
+    normalized_run_commands = {
+        _normalize_exact_command(command) for command in run_commands if command
+    }
     normalized_passed_commands = {
-        _normalize_command(command) for command in (passed_commands or set()) if command
+        _normalize_exact_command(command) for command in (passed_commands or set()) if command
     }
 
     for file_path in files:
@@ -1611,7 +1618,7 @@ def _criterion_is_exact_file_presence_ac(criterion: str, file_path: str) -> bool
 def _criterion_inline_code_values(criterion: str) -> list[str]:
     """Return normalized inline-code fragments from a criterion."""
     return [
-        _normalize_command(match.group(1).strip())
+        _normalize_exact_command(match.group(1).strip())
         for match in re.finditer(r"`([^`]+)`", criterion)
         if match.group(1).strip()
     ]
@@ -1619,7 +1626,7 @@ def _criterion_inline_code_values(criterion: str) -> list[str]:
 
 def _criterion_is_exact_command_pass_ac(criterion: str, command: str) -> bool:
     """Return True when the criterion is only an exact command-pass AC."""
-    normalized_command = _normalize_command(command)
+    normalized_command = _normalize_exact_command(command)
     if not normalized_command or _criterion_inline_code_values(criterion) != [normalized_command]:
         return False
     normalized = _normalized_evidence_text(
@@ -1642,7 +1649,7 @@ def _criterion_is_exact_command_pass_ac(criterion: str, command: str) -> bool:
 
 def _criterion_is_exact_command_run_ac(criterion: str, command: str) -> bool:
     """Return True when the criterion is only an exact command-run AC."""
-    normalized_command = _normalize_command(command)
+    normalized_command = _normalize_exact_command(command)
     if not normalized_command or _criterion_inline_code_values(criterion) != [normalized_command]:
         return False
     normalized = _normalized_evidence_text(
