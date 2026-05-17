@@ -81,8 +81,19 @@ def _safe_meta(value: Any) -> Any:
 
 
 _JOB_TTL = timedelta(hours=1)
+_COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS = 5.0
 _RECOVERED_COMPLETION_EVENT_ID_PREFIX = "mcp-job-recovered-completed-"
 logger = logging.getLogger(__name__)
+
+
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    """Drain a detached task result so forced cleanup does not log noise."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.debug("Detached job task finished with error", exc_info=True)
 
 
 def _latest_job_terminal_event(events: list[BaseEvent]) -> BaseEvent | None:
@@ -372,8 +383,30 @@ class JobManager:
                 completed_result = await self._derive_completed_execution_result(snapshot)
                 if completed_result is not None:
                     runner = self._runner_tasks.get(job_id)
-                    if runner is not None and not runner.done():
-                        runner.cancel()
+                    if runner is None or runner.done():
+                        return
+                    runner.cancel()
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(runner),
+                            timeout=_COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS,
+                        )
+                    except TimeoutError:
+                        current = await self.get_snapshot(job_id)
+                        if current.is_terminal or current.status == JobStatus.CANCEL_REQUESTED:
+                            return
+                        if await self._append_execution_completed_event(job_id, completed_result):
+                            self._runner_tasks.pop(job_id, None)
+                            runner.add_done_callback(_consume_task_result)
+                            job_task = self._tasks.pop(job_id, None)
+                            if job_task is not None and not job_task.done():
+                                job_task.cancel()
+                                job_task.add_done_callback(_consume_task_result)
+                        return
+                    except asyncio.CancelledError:
+                        return
+                    except Exception:
+                        return
                     return
 
             message = await self._derive_status_message(snapshot)

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_watchdog_decision
+from ouroboros.mcp import job_manager as job_manager_module
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.job_handlers import (
     JobStatusHandler,
@@ -303,6 +304,74 @@ class TestJobManager:
             ].count("mcp.job.completed") == 1
         finally:
             release.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_completed_execution_force_completes_noncooperative_live_runner(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        stop = asyncio.Event()
+        cancel_seen = asyncio.Event()
+
+        async def _runner() -> MCPToolResult:
+            while not stop.is_set():
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    cancel_seen.set()
+                    continue
+            return MCPToolResult(content=(MCPContentItem(type=ContentType.TEXT, text="late"),))
+
+        runner_task = asyncio.create_task(_runner())
+        try:
+            with patch.object(
+                job_manager_module,
+                "_COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS",
+                0.05,
+            ):
+                started = await manager.start_job(
+                    job_type="execute_seed",
+                    initial_message="queued",
+                    runner=runner_task,
+                    links=JobLinks(session_id="orch_stubborn", execution_id="exec_stubborn"),
+                )
+                await store.append(
+                    BaseEvent(
+                        type="workflow.progress.updated",
+                        aggregate_type="execution",
+                        aggregate_id="exec_stubborn",
+                        data={"completed_count": 1, "total_count": 1},
+                    )
+                )
+                await store.append(
+                    BaseEvent(
+                        type="execution.terminal",
+                        aggregate_type="execution",
+                        aggregate_id="exec_stubborn",
+                        data={"session_id": "orch_stubborn", "status": "completed"},
+                    )
+                )
+
+                await asyncio.wait_for(cancel_seen.wait(), timeout=2)
+                snapshot = await _wait_for_job_status(
+                    manager, started.job_id, JobStatus.COMPLETED, timeout=2.0
+                )
+
+                assert snapshot.result_text == "Execution complete: 1/1 ACs completed"
+                assert snapshot.result_meta["completed_from_execution_terminal"] is True
+                assert manager.has_live_job_task(started.job_id) is False
+                events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
+                assert [
+                    event.type
+                    for event in events
+                    if event.type.startswith("mcp.job.") and event.type != "mcp.job.updated"
+                ].count("mcp.job.completed") == 1
+        finally:
+            stop.set()
+            runner_task.cancel()
+            await asyncio.gather(runner_task, return_exceptions=True)
             await _cancel_manager_tasks(manager)
             await store.close()
 
