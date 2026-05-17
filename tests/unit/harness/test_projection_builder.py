@@ -21,12 +21,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.harness.projection import StageKind, StepKind
+from ouroboros.harness.projection import StageKind, StepKind, VerdictOutcome
 from ouroboros.harness.projection_builder import (
     ProjectionBuilder,
     ProjectionBuildResult,
     build_projection,
 )
+from ouroboros.harness.run_snapshot import build_run_snapshot
 
 
 def _tool_started(
@@ -521,7 +522,7 @@ class TestArtifactAndVerdictProjection:
         assert result.steps == ()
         assert result.artifacts == ()
 
-    def test_verdict_preserves_missing_artifact_references(self) -> None:
+    def test_verdict_marks_missing_artifact_references_unknown(self) -> None:
         t0 = datetime.now(UTC)
         event = BaseEvent(
             id="evt_verdict",
@@ -541,7 +542,51 @@ class TestArtifactAndVerdictProjection:
 
         assert len(result.verdicts) == 1
         assert result.artifacts == ()
-        assert result.verdicts[0].evidence_artifact_ids == ("missing_artifact",)
+        verdict = result.verdicts[0]
+        assert verdict.outcome is VerdictOutcome.UNKNOWN
+        assert verdict.evidence_artifact_ids == ()
+        assert verdict.metadata["missing_evidence_artifact_ids"] == ("missing_artifact",)
+        assert verdict.metadata["recorded_evidence_artifact_ids"] == ("missing_artifact",)
+        build_run_snapshot(
+            run=result.run,
+            stages=result.stages,
+            steps=result.steps,
+            artifacts=result.artifacts,
+            verdict=verdict,
+        )
+
+    def test_latest_run_verdict_wins(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            BaseEvent(
+                id="evt_verdict_escalate",
+                type="harness.verdict.recorded",
+                timestamp=t0,
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "verdict_id": "verdict_escalate",
+                    "scope": "run",
+                    "outcome": "escalate_human",
+                },
+            ),
+            BaseEvent(
+                id="evt_verdict_pass",
+                type="harness.verdict.recorded",
+                timestamp=t0 + timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={"verdict_id": "verdict_pass", "scope": "run", "outcome": "pass"},
+            ),
+        ]
+
+        result = build_projection(events, seed_id="seed_abc")
+
+        assert [verdict.verdict_id for verdict in result.verdicts] == [
+            "verdict_escalate",
+            "verdict_pass",
+        ]
+        assert result.run.verdict_id == "verdict_pass"
 
     def test_ac_verdict_requires_ac_id(self) -> None:
         event = BaseEvent(

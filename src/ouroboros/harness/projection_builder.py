@@ -224,6 +224,7 @@ class ProjectionBuilder:
             for slot_key, step in self._steps.items()
         )
 
+        artifact_ids = frozenset(artifact.artifact_id for artifact in artifacts)
         verdicts = tuple(
             verdict
             for event in self._verdict_events
@@ -232,12 +233,14 @@ class ProjectionBuilder:
                     event,
                     source_key=source_key,
                     run_id=run_id,
+                    artifact_ids=artifact_ids,
                 )
             )
             is not None
         )
         run_verdict_id = next(
-            (verdict.verdict_id for verdict in verdicts if verdict.scope == "run"), None
+            (verdict.verdict_id for verdict in reversed(verdicts) if verdict.scope == "run"),
+            None,
         )
 
         stage = StageRecord(
@@ -606,6 +609,7 @@ def _verdict_from_event(
     *,
     source_key: str,
     run_id: str,
+    artifact_ids: frozenset[str],
 ) -> VerdictRecord | None:
     if not isinstance(event.data, dict):
         return None
@@ -618,7 +622,18 @@ def _verdict_from_event(
     ac_id = _optional_str(event.data.get("ac_id")) if scope == "ac" else None
     if scope == "ac" and ac_id is None:
         return None
-    artifact_ids = _string_tuple(event.data.get("evidence_artifact_ids"))
+    recorded_artifact_ids = _string_tuple(event.data.get("evidence_artifact_ids"))
+    linked_artifact_ids = tuple(
+        artifact_id for artifact_id in recorded_artifact_ids if artifact_id in artifact_ids
+    )
+    missing_artifact_ids = tuple(
+        artifact_id for artifact_id in recorded_artifact_ids if artifact_id not in artifact_ids
+    )
+    metadata: dict[str, Any] = {"source_event_id": event.id, "event_type": event.type}
+    if missing_artifact_ids:
+        metadata["missing_evidence_artifact_ids"] = missing_artifact_ids
+        metadata["recorded_evidence_artifact_ids"] = recorded_artifact_ids
+        outcome = VerdictOutcome.UNKNOWN
     return VerdictRecord(
         verdict_id=_optional_str(event.data.get("verdict_id"))
         or _stable_verdict_id(source_key, event.id),
@@ -628,9 +643,9 @@ def _verdict_from_event(
         outcome=outcome,
         rationale=_optional_str(event.data.get("rationale")) or "",
         evidence_event_ids=(event.id, *_string_tuple(event.data.get("evidence_event_ids"))),
-        evidence_artifact_ids=artifact_ids,
+        evidence_artifact_ids=linked_artifact_ids,
         recorded_at=event.timestamp,
-        metadata={"source_event_id": event.id, "event_type": event.type},
+        metadata=metadata,
     )
 
 
