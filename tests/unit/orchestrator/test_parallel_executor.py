@@ -1463,6 +1463,8 @@ class TestParallelACExecutor:
         assert "Do not implement, test, document, or pre-create work" in runtime.last_prompt
         assert "sibling or future ACs" in runtime.last_prompt
         assert "current AC in this runtime session" in runtime.last_prompt
+        assert "workspace-relative paths only" in runtime.last_prompt
+        assert "never absolute paths" in runtime.last_prompt
         assert "omit exploratory" in runtime.last_prompt
         assert "rg, grep, sed, cat, ls, find, or pwd" in runtime.last_prompt
         assert "explicitly state: [TASK_COMPLETE]" not in runtime.last_prompt
@@ -2665,6 +2667,74 @@ class TestParallelACExecutor:
                             "0 failed, 0 errors, 1 passed"
                         ),
                         data={"subtype": "success"},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_normalizes_workspace_absolute_file_claim(
+        self, tmp_path
+    ) -> None:
+        """Absolute files_touched claims under task_cwd are normalized before matching."""
+        touched_file = tmp_path / "test_todo.py"
+        touched_file.write_text("import unittest\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                f'{{"files_touched":["{touched_file}"],'
+                '"commands_run":["python -m unittest test_todo.py"],'
+                '"tests_passed":["python -m unittest test_todo.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Edit {touched_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(touched_file)}},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: python -m unittest test_todo.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "python -m unittest test_todo.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="Ran 1 test in 0.001s\n\nOK",
+                        data={"subtype": "success", "exit_code": 0},
                     ),
                 ),
                 cwd=str(tmp_path),

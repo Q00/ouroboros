@@ -117,6 +117,8 @@ class TestPostBlock:
         self, code_profile: ExecutionProfile
     ) -> None:
         block = build_post_block(code_profile)
+        assert "workspace-relative paths only" in block
+        assert "never absolute paths" in block
         assert "docs verification commands" in block
         assert "Do not include exploratory discovery commands" in block
         assert "rg, grep, sed, cat, ls, find, or pwd" in block

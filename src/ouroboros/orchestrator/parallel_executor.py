@@ -404,6 +404,35 @@ def _file_claim_matches_runtime_path(
     )
 
 
+def _workspace_relative_file_claim(value: str, *, task_cwd: str | None) -> str | None:
+    """Normalize a files_touched claim to a workspace-relative path.
+
+    The evidence producer should emit workspace-relative paths, but live Codex
+    runs may still report absolute files under the disposable target repo.  Treat
+    those as the same claim only after proving they resolve inside ``task_cwd``.
+    Paths outside the workspace, empty paths, and relative traversal remain
+    unsupported evidence claims.
+    """
+    raw_value = value.strip()
+    if not raw_value or task_cwd is None:
+        return None
+
+    base = Path(task_cwd).resolve()
+    candidate = Path(raw_value)
+    if not candidate.is_absolute() and ".." in candidate.parts:
+        return None
+
+    resolved = (candidate if candidate.is_absolute() else base / candidate).resolve()
+    try:
+        relative = resolved.relative_to(base)
+    except ValueError:
+        return None
+
+    if not relative.parts or ".." in relative.parts:
+        return None
+    return relative.as_posix()
+
+
 def _runtime_support_messages_for_field(
     field_name: str,
     messages: tuple[AgentMessage, ...],
@@ -482,20 +511,15 @@ def _runtime_messages_support_file_claim(
     claimed relative path resolves inside the active workspace, which covers
     tool outputs that report ``generated.py`` instead of ``src/generated.py``.
     """
-    if task_cwd is None:
+    relative_claim = _workspace_relative_file_claim(value, task_cwd=task_cwd)
+    if relative_claim is None:
         return False
-    candidate = Path(value)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
+    candidate = Path(relative_claim)
     base = Path(task_cwd).resolve()
     resolved = (base / candidate).resolve()
-    try:
-        resolved.relative_to(base)
-    except ValueError:
-        return False
     if any(
         _runtime_message_supports_file_reference(
-            value,
+            relative_claim,
             message,
             messages=messages,
             index=index,
@@ -4271,6 +4295,9 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 "out of scope unless the current AC explicitly requires it.\n"
                 "Your final evidence JSON must cite only files, commands, and tests "
                 "directly changed or run for this current AC in this runtime session. "
+                "For files_touched, cite workspace-relative paths only, never absolute "
+                "paths such as /tmp/... or /private/tmp/..., and never paths outside "
+                "the working directory. "
                 "For commands_run, include only validation/production commands such "
                 "as test, build, lint, generation, or docs verification commands; omit "
                 "exploratory discovery commands such as rg, grep, sed, cat, ls, find, "

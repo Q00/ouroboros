@@ -233,6 +233,8 @@ class TestRunnerPromptIntegration:
         for required in profile.evidence_schema.required:
             assert required in prompt, f"{required!r} missing from build_system_prompt output"
         assert "tests_passed == []" in prompt
+        assert "workspace-relative paths only" in prompt
+        assert "never absolute paths" in prompt
         assert "docs verification commands" in prompt
         assert "Do not include exploratory discovery commands" in prompt
         assert "rg, grep, sed, cat, ls, find, or pwd" in prompt
