@@ -117,6 +117,24 @@ def _snapshot_with_status_event(
     )
 
 
+def _execution_completed_job_event(job_id: str, result_text: str) -> BaseEvent:
+    """Build the synthetic/persisted job-completion event for execution recovery."""
+    return BaseEvent(
+        id=f"{_RECOVERED_COMPLETION_EVENT_ID_PREFIX}{job_id}",
+        type="mcp.job.completed",
+        aggregate_type="job",
+        aggregate_id=job_id,
+        data={
+            "status": JobStatus.COMPLETED.value,
+            "message": "Job complete",
+            "result_text": result_text,
+            "result_meta": {"completed_from_execution_terminal": True},
+            "is_error": False,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def _snapshot_with_terminal_event(
     snapshot: JobSnapshot,
     event: BaseEvent,
@@ -627,6 +645,12 @@ class JobManager:
         completed_result = await self._derive_completed_execution_result(snapshot)
         if completed_result is None:
             return snapshot
+        if getattr(self._event_store, "_read_only", False):
+            return _snapshot_with_terminal_event(
+                snapshot,
+                _execution_completed_job_event(snapshot.job_id, completed_result),
+                snapshot.cursor,
+            )
         lock = self._recovery_locks.setdefault(snapshot.job_id, asyncio.Lock())
         async with lock:
             events, cursor = await self._event_store.get_events_after(
