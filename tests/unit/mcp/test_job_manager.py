@@ -1370,6 +1370,46 @@ class TestJobManager:
         assert "**Status**: running" in result.value.text_content
         assert "job_default_full | running" not in result.value.text_content
 
+    async def test_job_status_full_view_renders_raw_links_without_session_row(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_auto_links",
+            job_type="auto",
+            status=JobStatus.RUNNING,
+            message="Running auto",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=4,
+            links=JobLinks(
+                session_id="auto_session_links",
+                execution_id="exec_links",
+                lineage_id="lin_links",
+            ),
+        )
+
+        class StaticJobManager:
+            async def get_snapshot(self, job_id: str) -> JobSnapshot:
+                assert job_id == snapshot.job_id
+                return snapshot
+
+        handler = JobStatusHandler(event_store=store, job_manager=StaticJobManager())
+        await store.initialize()
+        try:
+            result = await handler.handle({"job_id": "job_auto_links"})
+        finally:
+            await store.close()
+
+        assert result.is_ok
+        assert "### Links" in result.value.text_content
+        assert "**Session ID**: auto_session_links" in result.value.text_content
+        assert "**Execution ID**: exec_links" in result.value.text_content
+        assert "**Lineage ID**: lin_links" in result.value.text_content
+        assert result.value.meta["session_id"] == "auto_session_links"
+        assert result.value.meta["execution_id"] == "exec_links"
+        assert result.value.meta["lineage_id"] == "lin_links"
+
     async def test_job_wait_omitted_view_preserves_full_unchanged_snapshot(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         snapshot = JobSnapshot(

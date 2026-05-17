@@ -359,6 +359,10 @@ async def _render_job_snapshot_inner(
         f"**Cursor**: {snapshot.cursor}",
     ]
 
+    link_lines = _render_job_link_lines(snapshot)
+    if link_lines:
+        lines.extend(["", "### Links", *link_lines])
+
     if snapshot.links.execution_id:
         workflow_event = await _query_latest_workflow_event(
             event_store, snapshot.links.execution_id
@@ -490,6 +494,26 @@ async def _render_job_snapshot_inner(
         lines.extend(["", f"**Error**: {snapshot.error}"])
 
     return "\n".join(lines), progress
+
+
+def _render_job_link_lines(snapshot: JobSnapshot) -> list[str]:
+    """Return stable job cross-reference lines for every linked job surface.
+
+    Some long-running flows, notably ``ouroboros_start_auto``, use
+    ``links.session_id`` as their durable resume handle without necessarily
+    having a matching orchestrator session row. Render the raw links before
+    optional rich session/execution/lineage sections so callers always see the
+    identifiers they need to poll, resume, or diagnose the job.
+    """
+
+    lines: list[str] = []
+    if snapshot.links.session_id:
+        lines.append(f"**Session ID**: {snapshot.links.session_id}")
+    if snapshot.links.execution_id:
+        lines.append(f"**Execution ID**: {snapshot.links.execution_id}")
+    if snapshot.links.lineage_id:
+        lines.append(f"**Lineage ID**: {snapshot.links.lineage_id}")
+    return lines
 
 
 @dataclass
