@@ -198,6 +198,10 @@ class JobManager:
             snapshot = await self.get_snapshot(job_id)
             if snapshot.is_terminal:
                 return
+            completed_result = await self._derive_completed_execution_result(snapshot)
+            if completed_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
+                await self._append_execution_completed_event(job_id, completed_result)
+                return
             if not runner.done():
                 runner.cancel()
                 try:
@@ -290,12 +294,6 @@ class JobManager:
             if snapshot.status != JobStatus.CANCEL_REQUESTED:
                 completed_result = await self._derive_completed_execution_result(snapshot)
                 if completed_result is not None:
-                    completed = await self._append_execution_completed_event(
-                        job_id,
-                        completed_result,
-                    )
-                    if not completed:
-                        return
                     runner = self._runner_tasks.get(job_id)
                     if runner is not None and not runner.done():
                         runner.cancel()
@@ -313,11 +311,18 @@ class JobManager:
             else:
                 interval = min(interval * 1.5, 5.0)  # Backoff up to 5s
 
-    async def _append_execution_completed_event(self, job_id: str, result_text: str) -> bool:
+    async def _append_execution_completed_event(
+        self,
+        job_id: str,
+        result_text: str,
+        *,
+        check_current: bool = True,
+    ) -> bool:
         """Persist durable job completion derived from terminal execution evidence."""
-        snapshot = await self.get_snapshot(job_id)
-        if snapshot.is_terminal or snapshot.status == JobStatus.CANCEL_REQUESTED:
-            return False
+        if check_current:
+            snapshot = await self.get_snapshot(job_id)
+            if snapshot.is_terminal or snapshot.status == JobStatus.CANCEL_REQUESTED:
+                return False
         await self._append_event(
             "mcp.job.completed",
             job_id,
@@ -526,7 +531,7 @@ class JobManager:
             if "error" in data:
                 error = data["error"]
 
-        return JobSnapshot(
+        snapshot = JobSnapshot(
             job_id=job_id,
             job_type=created.data.get("job_type", "unknown"),
             status=status,
@@ -538,6 +543,49 @@ class JobManager:
             result_text=result_text,
             result_meta=result_meta,
             error=error,
+        )
+        return await self._recover_completed_execution_snapshot(snapshot)
+
+    async def _recover_completed_execution_snapshot(self, snapshot: JobSnapshot) -> JobSnapshot:
+        """Recover completed linked execution jobs when no live runner remains.
+
+        Live jobs keep the existing JobManager invariant: terminal job state is
+        emitted by the runner-owned path after the runner exits or cooperates
+        with cancellation. After process restart, however, there is no live
+        runner left to write that event; if the linked execution already has
+        authoritative completed terminal evidence, materialize the job terminal
+        event from that durable evidence.
+        """
+        if (
+            snapshot.is_terminal
+            or snapshot.status == JobStatus.CANCEL_REQUESTED
+            or snapshot.job_id in self._tasks
+            or snapshot.job_id in self._runner_tasks
+        ):
+            return snapshot
+        completed_result = await self._derive_completed_execution_result(snapshot)
+        if completed_result is None:
+            return snapshot
+        completed = await self._append_execution_completed_event(
+            snapshot.job_id,
+            completed_result,
+            check_current=False,
+        )
+        if not completed:
+            return snapshot
+        events, cursor = await self._event_store.get_events_after(
+            "job", snapshot.job_id, last_row_id=0
+        )
+        latest = events[-1]
+        return replace(
+            snapshot,
+            status=JobStatus.COMPLETED,
+            message=latest.data.get("message", "Job complete"),
+            updated_at=latest.timestamp,
+            cursor=cursor,
+            result_text=latest.data.get("result_text"),
+            result_meta=latest.data.get("result_meta") or {},
+            error=None,
         )
 
     async def wait_for_change(
