@@ -262,6 +262,14 @@ class TestJobManager:
                     },
                 )
             )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_stalled",
+                    data={"session_id": "orch_stalled", "status": "failed"},
+                )
+            )
 
             snapshot = await _wait_for_job_status(
                 manager, started.job_id, JobStatus.FAILED, timeout=2.0
@@ -274,7 +282,9 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_progress_accounting_blocker_waits_for_active_ac_sessions(self, tmp_path) -> None:
+    async def test_progress_accounting_blocker_requires_failed_execution_terminal(
+        self, tmp_path
+    ) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
         await store.initialize()
@@ -315,39 +325,22 @@ class TestJobManager:
                     },
                 )
             )
-            await store.append(
-                BaseEvent(
-                    type="execution.session.started",
-                    aggregate_type="execution",
-                    aggregate_id="exec_parallel_ac_2",
-                    data={
-                        "execution_id": "exec_parallel",
-                        "session_id": "child_2",
-                        "session_scope_id": "exec_parallel_ac_2",
-                    },
-                )
-            )
 
             assert await manager._derive_progress_accounting_blocker(snapshot) is None
 
             await store.append(
                 BaseEvent(
-                    type="execution.session.failed",
+                    type="execution.terminal",
                     aggregate_type="execution",
-                    aggregate_id="exec_parallel_ac_2",
-                    data={
-                        "execution_id": "exec_parallel",
-                        "session_id": "child_2",
-                        "session_scope_id": "exec_parallel_ac_2",
-                        "success": False,
-                    },
+                    aggregate_id="exec_parallel",
+                    data={"session_id": "orch_parallel", "status": "failed"},
                 )
             )
 
             blocker = await manager._derive_progress_accounting_blocker(snapshot)
 
             assert blocker is not None
-            assert "all known AC runtime sessions reached a terminal state" in blocker
+            assert "execution reached terminal failed state" in blocker
         finally:
             await store.close()
 
