@@ -113,6 +113,13 @@ class TestPostBlock:
         block = build_post_block(code_profile)
         assert "tests_passed == []" in block
 
+    def test_scopes_commands_run_to_validation_commands(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        block = build_post_block(code_profile)
+        assert "Do not include exploratory discovery commands" in block
+        assert "rg, grep, sed, cat, ls, find, or pwd" in block
+
     def test_forbids_self_declared_done(self, code_profile: ExecutionProfile) -> None:
         block = build_post_block(code_profile)
         assert "Do not declare" in block

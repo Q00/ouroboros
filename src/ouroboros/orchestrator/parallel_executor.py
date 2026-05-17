@@ -338,6 +338,19 @@ def _runtime_message_file_path_values(message: AgentMessage) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _runtime_message_command_values(message: AgentMessage) -> tuple[str, ...]:
+    """Return explicit command strings carried by a runtime message."""
+    values: list[str] = []
+    for container_key in ("tool_input", "input", "arguments", "args"):
+        container = message.data.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        command = container.get("command")
+        if isinstance(command, str) and command.strip():
+            values.append(command.strip())
+    return tuple(values)
+
+
 def _file_claim_matches_runtime_path(
     claim: str,
     runtime_path: str,
@@ -404,19 +417,26 @@ def _runtime_message_supports_command_claim(value: str, message: AgentMessage) -
     equivalent only through the structured Bash command field; arbitrary output
     text or assistant narration must not create command aliases.
     """
-    if _runtime_messages_support_claim(value, (message,)):
-        return True
     if message.tool_name != "Bash":
-        return False
-    tool_input = message.data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        return False
-    runtime_command = tool_input.get("command")
-    if not isinstance(runtime_command, str):
-        return False
+        return _runtime_messages_support_claim(value, (message,))
     claim_aliases = set(_normalized_command_claim_aliases(value))
-    runtime_aliases = set(_normalized_command_claim_aliases(runtime_command))
-    return bool(claim_aliases and runtime_aliases and claim_aliases.intersection(runtime_aliases))
+    claim_test_invocation = _test_command_invocation(value)
+    for runtime_command in _runtime_message_command_values(message):
+        runtime_aliases = set(_normalized_command_claim_aliases(runtime_command))
+        if claim_aliases and runtime_aliases and claim_aliases.intersection(runtime_aliases):
+            return True
+
+        runtime_test_invocation = _test_command_invocation(runtime_command)
+        if (
+            claim_test_invocation
+            and runtime_test_invocation
+            and (
+                runtime_test_invocation == claim_test_invocation
+                or runtime_test_invocation.startswith(claim_test_invocation + " ")
+            )
+        ):
+            return True
+    return False
 
 
 def _runtime_messages_support_command_claim(
@@ -772,9 +792,21 @@ def _looks_like_unittest_command(command: str) -> bool:
 
 
 def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
-    """Return normalized command forms that a concise evidence claim may use."""
+    """Return normalized command forms that a concise evidence claim may use.
+
+    Structured Bash tool inputs may wrap the user command as
+    ``/bin/zsh -lc '<body>'``.  The wrapper itself is runtime-backed, so an
+    evidence claim may cite the exact shell body without re-stating the wrapper.
+    Keep this alias exact: test-command-specific helpers handle conservative
+    setup preambles, while generic ``commands_run`` claims should not be proven
+    by partial substrings of arbitrary shell scripts.
+    """
     normalized = _normalized_evidence_text(command)
     aliases = [normalized] if normalized else []
+    shell_body = _shell_command_body(command)
+    normalized_shell_body = _normalized_evidence_text(shell_body) if shell_body else None
+    if normalized_shell_body and normalized_shell_body not in aliases:
+        aliases.append(normalized_shell_body)
     test_invocation = _test_command_invocation(command)
     if test_invocation and test_invocation not in aliases:
         aliases.append(test_invocation)
@@ -4191,7 +4223,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 "related files, future functions, tests, or docs, treat that work as "
                 "out of scope unless the current AC explicitly requires it.\n"
                 "Your final evidence JSON must cite only files, commands, and tests "
-                "directly changed or run for this current AC in this runtime session.\n"
+                "directly changed or run for this current AC in this runtime session. "
+                "For commands_run, include only validation/production commands such "
+                "as test, build, lint, or generation commands; omit exploratory "
+                "discovery commands such as rg, grep, sed, cat, ls, find, or pwd "
+                "unless the current AC explicitly requires that command as validation.\n"
                 f"{doc_only_note}\n"
                 "Use the available tools to accomplish this task. Report progress through "
                 "tool-visible work, not a prose-only completion claim.\n"

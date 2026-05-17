@@ -29,6 +29,7 @@ from ouroboros.orchestrator.parallel_executor import (
     StageExecutionOutcome,
     _build_governed_parent_summary,
     _message_contains_test_success,
+    _runtime_messages_support_command_claim,
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
@@ -219,6 +220,35 @@ class _FinalMessageRuntime:
                 metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
             ),
         )
+
+
+def test_command_claim_supports_exact_structured_shell_body() -> None:
+    """Regression for #978 broader observation: read-only command claims may be shell-wrapped."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "/bin/zsh -lc \"rg --files -g 'AGENTS.md' -g '!**/.git/**'\""}
+        },
+    )
+
+    assert _runtime_messages_support_command_claim(
+        "rg --files -g 'AGENTS.md' -g '!**/.git/**'",
+        (message,),
+    )
+
+
+def test_command_claim_does_not_support_partial_shell_body() -> None:
+    """Generic commands_run aliases stay exact; partial shell scripts are not proof."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": "/bin/zsh -lc 'pwd && rg --files'"}},
+    )
+
+    assert not _runtime_messages_support_command_claim("rg --files", (message,))
 
 
 class TestProfileAwareDecompositionAudit:
@@ -1375,6 +1405,8 @@ class TestParallelACExecutor:
         assert "Do not implement, test, document, or pre-create work" in runtime.last_prompt
         assert "sibling or future ACs" in runtime.last_prompt
         assert "current AC in this runtime session" in runtime.last_prompt
+        assert "omit exploratory" in runtime.last_prompt
+        assert "rg, grep, sed, cat, ls, find, or pwd" in runtime.last_prompt
         assert "explicitly state: [TASK_COMPLETE]" not in runtime.last_prompt
 
     @pytest.mark.asyncio

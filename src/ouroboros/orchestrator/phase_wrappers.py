@@ -117,7 +117,12 @@ def build_post_block(profile: ExecutionProfile) -> str:
         "When you finish, emit a single fenced JSON block on its own "
         "line, then stop. Required fields for this profile: "
         f"{_format_required(schema)}.\n"
-        f"Automatic rejection rules: {_format_rejected(schema)}.\n\n"
+        f"Automatic rejection rules: {_format_rejected(schema)}.\n"
+        "For commands_run, cite only commands that directly validate or "
+        "produce the claimed deliverable, such as test, build, lint, or "
+        "generation commands. Do not include exploratory discovery commands "
+        "such as rg, grep, sed, cat, ls, find, or pwd unless that command "
+        "is itself the validation required by the current AC.\n\n"
         "If a required precondition is unavailable, emit this typed "
         "terminal blocker shape instead of prose or partial evidence: "
         '{"status":"blocked","blocker":{"code":"<one of: '

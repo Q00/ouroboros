@@ -233,6 +233,8 @@ class TestRunnerPromptIntegration:
         for required in profile.evidence_schema.required:
             assert required in prompt, f"{required!r} missing from build_system_prompt output"
         assert "tests_passed == []" in prompt
+        assert "Do not include exploratory discovery commands" in prompt
+        assert "rg, grep, sed, cat, ls, find, or pwd" in prompt
 
     def test_task_prompt_includes_pre_gate(self) -> None:
         prompt = build_task_prompt(
