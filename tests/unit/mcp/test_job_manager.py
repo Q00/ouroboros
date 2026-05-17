@@ -200,6 +200,65 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+
+    async def test_monitor_fails_job_when_deliver_progress_stays_zero_after_ac_success(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            stop = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                await stop.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late done"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_stalled", execution_id="exec_stalled"),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_stalled",
+                    data={
+                        "completed_count": 0,
+                        "total_count": 23,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.completed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_stalled_ac_1",
+                    data={
+                        "execution_id": "exec_stalled",
+                        "session_id": "child_1",
+                        "success": True,
+                    },
+                )
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            assert "workflow progress accounting stalled" in (snapshot.error or "")
+            assert snapshot.result_meta["failed_from_progress_accounting_stall"] is True
+        finally:
+            stop.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_cancel_requested_wins_over_complete_execution_terminal(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)

@@ -177,6 +177,7 @@ class JobManager:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._monitors: dict[str, asyncio.Task[None]] = {}
+        self._monitor_terminalized_jobs: set[str] = set()
         self._recovery_locks: dict[str, asyncio.Lock] = {}
         self._initialized = False
         self._known_job_ids: set[str] = set()
@@ -280,7 +281,7 @@ class JobManager:
             result = await runner
         except asyncio.CancelledError:
             snapshot = await self.get_snapshot(job_id)
-            if snapshot.is_terminal:
+            if snapshot.is_terminal or job_id in self._monitor_terminalized_jobs:
                 return
             completed_result = await self._derive_completed_execution_result(snapshot)
             if completed_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
@@ -363,6 +364,7 @@ class JobManager:
         finally:
             self._tasks.pop(job_id, None)
             self._runner_tasks.pop(job_id, None)
+            self._monitor_terminalized_jobs.discard(job_id)
             monitor = self._monitors.pop(job_id, None)
             if monitor is not None:
                 monitor.cancel()
@@ -411,6 +413,31 @@ class JobManager:
                         return
                     except Exception:
                         return
+                    return
+
+                progress_blocker = await self._derive_progress_accounting_blocker(snapshot)
+                if progress_blocker is not None:
+                    self._monitor_terminalized_jobs.add(job_id)
+                    runner = self._runner_tasks.pop(job_id, None)
+                    if runner is not None and not runner.done():
+                        runner.cancel()
+                        runner.add_done_callback(_consume_task_result)
+                    job_task = self._tasks.pop(job_id, None)
+                    if job_task is not None and not job_task.done():
+                        job_task.cancel()
+                        job_task.add_done_callback(_consume_task_result)
+                    await self._append_event(
+                        "mcp.job.failed",
+                        job_id,
+                        {
+                            "status": JobStatus.FAILED.value,
+                            "message": "Job failed: workflow progress accounting stalled",
+                            "error": progress_blocker,
+                            "result_text": progress_blocker,
+                            "result_meta": {"failed_from_progress_accounting_stall": True},
+                            "is_error": True,
+                        },
+                    )
                     return
 
             message = await self._derive_status_message(snapshot)
@@ -492,6 +519,41 @@ class JobManager:
             ):
                 return f"Execution complete: {completed}/{total} ACs completed"
         return "Execution complete"
+
+    async def _derive_progress_accounting_blocker(self, snapshot: JobSnapshot) -> str | None:
+        """Return a terminal blocker when AC evidence exists but progress is stuck at zero."""
+        if not snapshot.links.session_id or not snapshot.links.execution_id:
+            return None
+        workflow_events = await self._event_store.query_events(
+            aggregate_id=snapshot.links.execution_id,
+            event_type="workflow.progress.updated",
+            limit=1,
+        )
+        if not workflow_events:
+            return None
+        data = workflow_events[0].data
+        completed = data.get("completed_count")
+        total = data.get("total_count")
+        phase = str(data.get("current_phase") or "")
+        if completed != 0 or not isinstance(total, int) or total <= 0:
+            return None
+        if phase.casefold() != "deliver":
+            return None
+
+        completed_events = await self._event_store.query_session_related_events(
+            snapshot.links.session_id,
+            execution_id=snapshot.links.execution_id,
+            event_type="execution.session.completed",
+            limit=1,
+        )
+        if not any(event.data.get("success") is True for event in completed_events):
+            return None
+
+        return (
+            "workflow progress accounting stalled: at least one AC execution session "
+            f"reported success, but workflow progress remains 0/{total} in Deliver. "
+            "Local output may exist, but orchestration did not record AC completion."
+        )
 
     async def _derive_status_message(self, snapshot: JobSnapshot) -> str | None:
         """Summarize linked execution or lineage progress."""
