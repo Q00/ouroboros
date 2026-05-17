@@ -502,8 +502,7 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` exists.\n"
-        "`tests/test_hello_auto.py` exists."
+        "`hello_auto.py` exists.\n`tests/test_hello_auto.py` exists."
     )
 
 
