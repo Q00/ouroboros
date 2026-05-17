@@ -200,6 +200,90 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_runner_exception_is_not_masked_by_execution_completion(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_runner_failed_after_terminal",
+                    data={"session_id": "orch_runner_failed", "status": "completed"},
+                )
+            )
+
+            async def _runner() -> MCPToolResult:
+                raise RuntimeError("post-processing failed")
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(
+                    session_id="orch_runner_failed",
+                    execution_id="exec_runner_failed_after_terminal",
+                ),
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            assert "post-processing failed" in (snapshot.error or "")
+            assert snapshot.result_meta.get("completed_from_execution_terminal") is not True
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_error_result_is_not_masked_by_execution_completion(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_tool_error_after_terminal",
+                    data={"session_id": "orch_tool_error", "status": "completed"},
+                )
+            )
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="handler failed after execution terminal",
+                        ),
+                    ),
+                    is_error=True,
+                )
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(
+                    session_id="orch_tool_error",
+                    execution_id="exec_tool_error_after_terminal",
+                ),
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            assert snapshot.result_text == "handler failed after execution terminal"
+            assert snapshot.result_meta.get("completed_from_execution_terminal") is not True
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_monitor_fails_job_when_deliver_progress_stays_zero_after_ac_success(
         self, tmp_path
     ) -> None:
