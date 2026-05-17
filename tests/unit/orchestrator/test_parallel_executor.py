@@ -81,6 +81,18 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
         "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
         files,
         commands,
+        commands,
+    )
+    assert _criterion_satisfied_by_evidence(
+        "Run the exact command `uv run pytest tests/test_hello_auto.py`.",
+        files,
+        commands,
+    )
+    assert not _criterion_satisfied_by_evidence(
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        files,
+        commands,
+        set(),
     )
     assert not _criterion_satisfied_by_evidence("`other.py` exists.", files, commands)
 
@@ -152,6 +164,99 @@ def test_complete_sibling_acs_from_successful_runtime_evidence() -> None:
     assert [result.outcome for result in results] == [
         ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.SATISFIED_EXTERNALLY,
+        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+    ]
+
+
+def test_complete_sibling_acs_requires_runtime_test_success_for_pass_claim() -> None:
+    success_without_test_output = ACExecutionResult(
+        ac_index=0,
+        ac_content="`hello_auto.py` defines `hello_auto() -> str`.",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool_use",
+                content="run pytest",
+                tool_name="Bash",
+                data={
+                    "tool_input": {
+                        "command": "/bin/zsh -lc 'uv run pytest tests/test_hello_auto.py'"
+                    }
+                },
+            ),
+        ),
+    )
+    failed_pytest = ACExecutionResult(
+        ac_index=1,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_without_test_output, failed_pytest],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
+    ]
+
+
+def test_complete_sibling_acs_accepts_shell_wrapped_successful_test_command() -> None:
+    success_with_test_output = ACExecutionResult(
+        ac_index=0,
+        ac_content="`hello_auto.py` defines `hello_auto() -> str`.",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool_use",
+                content="run pytest",
+                tool_name="Bash",
+                data={
+                    "tool_input": {
+                        "command": "/bin/zsh -lc 'uv run pytest tests/test_hello_auto.py'"
+                    }
+                },
+            ),
+            AgentMessage(
+                type="tool_result",
+                content="1 passed in 0.01s",
+                data={"stdout": "1 passed in 0.01s"},
+            ),
+        ),
+    )
+    failed_pytest = ACExecutionResult(
+        ac_index=1,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_test_output, failed_pytest],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 2
+    assert level_success == 2
+    assert level_failed == 0
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.SATISFIED_EXTERNALLY,
     ]
 

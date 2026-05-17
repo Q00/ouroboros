@@ -1451,25 +1451,58 @@ def _extract_leaf_evidence_lines(result: ACExecutionResult) -> list[str]:
     return lines
 
 
-def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], set[str]]:
-    """Return normalized file paths and commands observed for an AC result.
+def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set[str]:
+    """Return Bash test commands backed by adjacent runtime success output."""
+    commands: set[str] = set()
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash":
+            continue
+        message_commands = {
+            alias
+            for command in _runtime_message_command_values(message)
+            if _looks_like_test_command(command)
+            for alias in _normalized_command_claim_aliases(command)
+        }
+        if not message_commands:
+            continue
+        chunk = [message]
+        for following in messages[index + 1 :]:
+            if following.tool_name == "Bash":
+                break
+            chunk.append(following)
+        if any(_message_contains_test_success(item) for item in chunk):
+            commands.update(command for command in message_commands if command)
+    return commands
+
+
+def _add_command_evidence(commands: set[str], command: str) -> None:
+    """Add exact command evidence plus existing wrapper/test aliases."""
+    normalized = _normalize_command(command)
+    if normalized:
+        commands.add(normalized)
+    commands.update(alias for alias in _normalized_command_claim_aliases(command) if alias)
+
+
+def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], set[str], set[str]]:
+    """Return normalized file paths, run commands, and passed commands.
 
     This intentionally uses only structured/runtime evidence, not broad natural
     language success claims, so sibling AC completion remains conservative.
     """
     files: set[str] = set()
-    commands: set[str] = set()
+    run_commands: set[str] = set()
+    passed_commands: set[str] = set()
 
     if result.typed_evidence is not None:
         for value in _flatten_evidence_values(result.typed_evidence.get("files_touched")):
             normalized = str(value).strip()
             if normalized:
                 files.add(normalized)
-        for field in ("commands_run", "tests_passed"):
-            for value in _flatten_evidence_values(result.typed_evidence.get(field)):
-                normalized = _normalize_command(str(value))
-                if normalized:
-                    commands.add(normalized)
+        for value in _flatten_evidence_values(result.typed_evidence.get("commands_run")):
+            _add_command_evidence(run_commands, str(value))
+        for value in _flatten_evidence_values(result.typed_evidence.get("tests_passed")):
+            _add_command_evidence(passed_commands, str(value))
+            _add_command_evidence(run_commands, str(value))
 
     for message in result.messages:
         if not message.tool_name:
@@ -1481,9 +1514,7 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
         if message.tool_name == "Bash":
             command = tool_input.get("command")
             if isinstance(command, str):
-                normalized = _normalize_command(command)
-                if normalized:
-                    commands.add(normalized)
+                _add_command_evidence(run_commands, command)
             continue
 
         if message.tool_name in ("Write", "Edit", "NotebookEdit"):
@@ -1492,13 +1523,25 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
             if isinstance(file_path, str) and file_path.strip():
                 files.add(file_path.strip())
 
-    return files, commands
+    passed_commands.update(_successful_runtime_test_commands(result.messages))
+    return files, run_commands, passed_commands
 
 
-def _criterion_satisfied_by_evidence(criterion: str, files: set[str], commands: set[str]) -> bool:
+def _criterion_satisfied_by_evidence(
+    criterion: str,
+    files: set[str],
+    run_commands: set[str],
+    passed_commands: set[str] | None = None,
+) -> bool:
     """Conservatively decide whether evidence satisfies a sibling criterion."""
     lowered = criterion.casefold()
-    normalized_commands = {_normalize_command(command).casefold() for command in commands}
+    normalized_criterion = _normalize_command(criterion).casefold()
+    normalized_run_commands = {
+        _normalize_command(command).casefold() for command in run_commands if command
+    }
+    normalized_passed_commands = {
+        _normalize_command(command).casefold() for command in (passed_commands or set()) if command
+    }
 
     positive_file_markers = (
         " exists",
@@ -1522,17 +1565,19 @@ def _criterion_satisfied_by_evidence(criterion: str, files: set[str], commands: 
         ):
             return True
 
-    for command in normalized_commands:
-        if command and command in _normalize_command(criterion).casefold():
-            return True
+    command_success_markers = (" pass", " passes", " passed", " succeed", " succeeds", " exit code 0")
+    if any(marker in lowered for marker in command_success_markers):
+        for command in normalized_passed_commands:
+            if command and command in normalized_criterion:
+                return True
+        return False
 
-    # Common test AC phrasing names only the pytest target while the transcript
-    # stores the whole command. Require both pytest and the exact target path.
-    if "uv run pytest" in lowered and "tests/test_hello_auto.py" in lowered:
-        return any(
-            "uv run pytest" in command and "tests/test_hello_auto.py" in command
-            for command in normalized_commands
-        )
+    command_run_markers = (" run ", " runs ", " execute", " executes", " command ")
+    for command in normalized_run_commands:
+        if command and command in normalized_criterion and any(
+            marker in lowered for marker in command_run_markers
+        ):
+            return True
 
     return False
 
@@ -1565,10 +1610,15 @@ def _complete_sibling_acs_from_evidence(
     for result in level_results:
         if result.success:
             continue
-        for source_idx, files, commands in successful_evidence:
+        for source_idx, files, run_commands, passed_commands in successful_evidence:
             if source_idx == result.ac_index:
                 continue
-            if not _criterion_satisfied_by_evidence(result.ac_content, files, commands):
+            if not _criterion_satisfied_by_evidence(
+                result.ac_content,
+                files,
+                run_commands,
+                passed_commands,
+            ):
                 continue
             replacements[result.ac_index] = ACExecutionResult(
                 ac_index=result.ac_index,
