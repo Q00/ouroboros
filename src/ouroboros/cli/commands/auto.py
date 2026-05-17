@@ -49,6 +49,29 @@ from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 
 
+def _build_configured_ralph_handler(
+    *, runtime: str | None, opencode_mode: str | None
+) -> RalphHandler:
+    """Build the same fully wired Ralph handler used by the MCP composition root.
+
+    The plain ``RalphHandler(...)`` constructor intentionally supports tests and
+    plugin-only dispatch, but for in-process/job dispatch it creates a handler
+    whose ``EvolveStepHandler`` has no ``EvolutionaryLoop``. That leaks through
+    the direct CLI ``ooo auto --complete-product`` path as a background Ralph
+    failure: ``EvolutionaryLoop not configured``. Reuse the production MCP
+    composition root so CLI and MCP auto handoffs get the same executor,
+    evaluator, validator, event store, and job manager wiring.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+    server = create_ouroboros_server(runtime_backend=runtime, opencode_mode=opencode_mode)
+    handler = server._tool_handlers["ouroboros_ralph"]  # noqa: SLF001
+    if not isinstance(handler, RalphHandler):
+        msg = "MCP composition root returned non-Ralph handler for ouroboros_ralph"
+        raise TypeError(msg)
+    return handler
+
+
 class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported runtime backends for auto execution handoff."""
 
@@ -452,11 +475,17 @@ async def _run_auto(
         # ``ralph_opencode_mode`` so an OpenCode plugin session can take the
         # plugin ``_subagent`` dispatch path. ``opencode_mode`` (demoted) is
         # still correct for the authoring/run-handoff handlers above.
-        RalphHandler(agent_runtime_backend=runtime, opencode_mode=ralph_opencode_mode)
+        # Q00/ouroboros#1090: use the full MCP composition root rather than a
+        # bare RalphHandler so job-mode Ralph has an EvolutionaryLoop.
+        _build_configured_ralph_handler(runtime=runtime, opencode_mode=ralph_opencode_mode)
         if complete_product
         else None
     )
-    ralph_starter = HandlerRalphStarter(ralph_handler) if ralph_handler is not None else None
+    ralph_starter = (
+        HandlerRalphStarter(ralph_handler, project_dir=state.cwd)
+        if ralph_handler is not None
+        else None
+    )
     # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the same
     # ``RalphHandler`` so a session interrupted in ``RALPH_HANDOFF`` (e.g.
     # client disconnects while the background Ralph job keeps running) can

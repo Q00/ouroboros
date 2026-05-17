@@ -379,6 +379,53 @@ def test_auto_result_pipeline_carries_runtime_labels(tmp_path) -> None:
     assert result.opencode_mode is None
 
 
+def test_run_auto_complete_product_configures_ralph_evolutionary_loop(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression for #1090: CLI complete-product must not create a bare Ralph handler.
+
+    A bare ``RalphHandler(agent_runtime_backend=...)`` constructs an
+    ``EvolveStepHandler`` without an ``EvolutionaryLoop``. The background Ralph
+    job then fails at handoff time with ``EvolutionaryLoop not configured``.
+    """
+    import asyncio
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    captured = {}
+    monkeypatch.chdir(tmp_path)
+
+    async def fake_pipeline_run(self, run_state):  # noqa: ARG001
+        ralph_starter = self.ralph_starter
+        captured["evolve_handler"] = ralph_starter.handler._evolve_handler  # noqa: SLF001
+        captured["project_dir"] = ralph_starter.project_dir
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=run_state.auto_session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run):
+        result = asyncio.run(
+            _run_auto(
+                goal="safe goal",
+                resume=None,
+                runtime="hermes",
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=False,
+                complete_product=True,
+            )
+        )
+
+    assert result.status == "complete"
+    evolve_handler = captured.get("evolve_handler")
+    assert evolve_handler is not None
+    assert getattr(evolve_handler, "evolutionary_loop", None) is not None
+    assert captured["project_dir"] == str(tmp_path)
+
+
 def test_run_auto_demotes_plugin_to_subprocess_in_state(tmp_path) -> None:
     """`_run_auto` must overwrite persisted plugin opencode_mode to subprocess."""
     import asyncio

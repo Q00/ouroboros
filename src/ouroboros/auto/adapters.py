@@ -216,8 +216,9 @@ class HandlerRalphStarter:
     job tools.
     """
 
-    def __init__(self, handler: RalphHandler) -> None:
+    def __init__(self, handler: RalphHandler, *, project_dir: str | None = None) -> None:
         self.handler = handler
+        self.project_dir = project_dir
 
     @property
     def job_event_store(self) -> Any:
@@ -292,6 +293,8 @@ class HandlerRalphStarter:
             "lineage_id": lineage_id,
             "seed_content": seed_yaml,
         }
+        if self.project_dir is not None:
+            arguments["project_dir"] = self.project_dir
         if max_total_seconds is not None:
             arguments["max_total_seconds"] = max_total_seconds
         if per_iteration_timeout_seconds is not None:

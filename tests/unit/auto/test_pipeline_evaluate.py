@@ -699,10 +699,13 @@ async def test_handler_ralph_starter_returns_result_text() -> None:
         async def get_snapshot(self, _job_id: str) -> _StubSnapshot:
             return _StubSnapshot()
 
+    captured_arguments: dict[str, Any] = {}
+
     class _StubRalphHandler:
         _job_manager = _StubJobManager()
 
-        async def handle(self, _arguments: dict[str, Any]):  # noqa: ANN201
+        async def handle(self, arguments: dict[str, Any]):  # noqa: ANN201
+            captured_arguments.update(arguments)
             from ouroboros.core.types import Result
             from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
@@ -719,10 +722,13 @@ async def test_handler_ralph_starter_returns_result_text() -> None:
                 )
             )
 
-    starter = HandlerRalphStarter(_StubRalphHandler())  # type: ignore[arg-type]
+    starter = HandlerRalphStarter(  # type: ignore[arg-type]
+        _StubRalphHandler(), project_dir="/tmp/auto-project"
+    )
     result = await starter(_build_seed(), lineage_id="lineage_X")
     assert result["result_text"] == "ralph artifact text"
     assert result["terminal_status"] == "completed"
+    assert captured_arguments["project_dir"] == "/tmp/auto-project"
 
 
 # ---------------------------------------------------------------------------
