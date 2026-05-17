@@ -335,6 +335,30 @@ class TestStatusRunProjectionCommand:
         assert '"execution_id": "exec_123"' in result.output
         assert '"run_id": "run_123"' in result.output
 
+    def test_status_run_renders_projection_text_by_default(self) -> None:
+        async def fake_handle(self, arguments):
+            from ouroboros.core.types import Result
+            from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
+            assert arguments == {"session_id": "session_123"}
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="Run Projection\nRun: run_123\nSteps: 1",
+                        ),
+                    ),
+                    meta={"run": {"run_id": "run_123"}},
+                )
+            )
+
+        with patch("ouroboros.cli.commands.status.ProjectionQueryHandler.handle", fake_handle):
+            result = runner.invoke(app, ["status", "run", "--session-id", "session_123"])
+
+        assert result.exit_code == 0
+        assert result.output == "Run Projection\nRun: run_123\nSteps: 1"
+
     def test_status_run_reports_projection_errors(self) -> None:
         async def fake_handle(self, arguments):
             from ouroboros.core.types import Result
