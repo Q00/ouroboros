@@ -2164,3 +2164,40 @@ def test_auto_save_seed_accepts_default_seed_id_inside_seed_dir(tmp_path: Path) 
     assert path == (seeds_dir / "seed_safe_123.yaml").resolve()
     assert path.exists()
     assert load_seed(path).metadata.seed_id == "seed_safe_123"
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_complete_product_uses_injected_configured_ralph_handler(monkeypatch, tmp_path) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    class FakeRalphHandler:
+        pass
+
+    injected_ralph = FakeRalphHandler()
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003, ARG002
+            captured["ralph_starter_handler"] = kwargs["ralph_starter"].handler
+            captured["ralph_resumer_handler"] = kwargs["ralph_resumer"].handler
+
+        async def run(self, run_state):  # noqa: ANN001
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+
+    result = await AutoHandler(ralph_handler=injected_ralph).handle(
+        {"goal": "Build a CLI", "cwd": str(tmp_path), "complete_product": True}
+    )
+
+    assert result.is_ok
+    assert captured["ralph_starter_handler"] is injected_ralph
+    assert captured["ralph_resumer_handler"] is injected_ralph
+

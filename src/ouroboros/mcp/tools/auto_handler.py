@@ -99,6 +99,7 @@ class AutoHandler:
     opencode_mode: str | None = field(default=None, repr=False)
     mcp_manager: object | None = field(default=None, repr=False)
     mcp_tool_prefix: str = ""
+    ralph_handler: RalphHandler | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -417,14 +418,12 @@ class AutoHandler:
         # ``_subagent`` dispatch path instead of silently downgrading Ralph to
         # in-process job mode. Mirrors the CLI fix in ``cli/commands/auto.py``.
         ralph_opencode_mode = state.ralph_opencode_mode or opencode_mode
-        ralph_handler = (
-            RalphHandler(
+        ralph_handler = None
+        if complete_product:
+            ralph_handler = self.ralph_handler or RalphHandler(
                 agent_runtime_backend=runtime_backend,
                 opencode_mode=ralph_opencode_mode,
             )
-            if complete_product
-            else None
-        )
         ralph_starter = HandlerRalphStarter(ralph_handler) if ralph_handler is not None else None
         # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
         # same ``RalphHandler`` so MCP-side resumes of an interrupted
@@ -522,6 +521,7 @@ class StartAutoHandler:
     mcp_tool_prefix: str = ""
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
+    ralph_handler: RalphHandler | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -537,6 +537,7 @@ class StartAutoHandler:
             opencode_mode=self.opencode_mode,
             mcp_manager=self.mcp_manager,
             mcp_tool_prefix=self.mcp_tool_prefix,
+            ralph_handler=self.ralph_handler,
         )
 
     @property
