@@ -370,7 +370,6 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     assert "Recursive auto invocation occurred: no." in preferences["failure_modes"]
 
 
-
 def test_structured_auto_goal_keeps_after_auto_report_section_out_of_acceptance() -> None:
     goal = """
 Goal:
@@ -404,6 +403,7 @@ After auto finishes, report:
     assert "auto session id" not in preferences["acceptance_criteria"].casefold()
     assert "execution job" not in preferences["acceptance_criteria"].casefold()
     assert "test result" not in preferences["acceptance_criteria"].casefold()
+
 
 def test_structured_auto_goal_preserves_non_allowlisted_execution_criteria() -> None:
     goal = """
