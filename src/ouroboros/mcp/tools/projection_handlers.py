@@ -320,8 +320,8 @@ def _projection_meta(
         "run": projection.run.model_dump(mode="json"),
         "stages": [stage.model_dump(mode="json") for stage in projection.stages],
         "steps": [step.model_dump(mode="json") for step in projection.steps],
-        "artifacts": [],
-        "verdicts": [],
+        "artifacts": [artifact.model_dump(mode="json") for artifact in projection.artifacts],
+        "verdicts": [verdict.model_dump(mode="json") for verdict in projection.verdicts],
     }
 
 
@@ -334,6 +334,8 @@ def _format_projection_text(projection: ProjectionBuildResult, event_count: int)
         f"Events inspected: {event_count}",
         f"Stages: {len(projection.stages)}",
         f"Steps: {len(projection.steps)}",
+        f"Artifacts: {len(projection.artifacts)}",
+        f"Verdicts: {len(projection.verdicts)}",
     ]
     if projection.steps:
         lines.append("")

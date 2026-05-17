@@ -430,3 +430,90 @@ class TestIncrementalIngestion:
             ("evt_slow_start", "evt_slow_ret"),
             ("evt_fast_start", "evt_fast_ret"),
         ]
+
+
+class TestArtifactAndVerdictProjection:
+    def test_artifact_event_attaches_to_projected_step(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            _tool_started(call_id="c_art", tool_name="Bash", when=t0),
+            _tool_returned(call_id="c_art", tool_name="Bash", when=t0 + timedelta(seconds=1)),
+            BaseEvent(
+                id="evt_artifact",
+                type="harness.artifact.recorded",
+                timestamp=t0 + timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "call_id": "c_art",
+                    "artifact_id": "artifact_tests",
+                    "kind": "evidence",
+                    "path": "artifacts/tests.json",
+                    "media_type": "application/json",
+                    "summary": "pytest evidence",
+                },
+            ),
+        ]
+
+        result = build_projection(events, seed_id="seed_abc")
+
+        assert len(result.artifacts) == 1
+        artifact = result.artifacts[0]
+        assert artifact.artifact_id == "artifact_tests"
+        assert artifact.step_id == result.steps[0].step_id
+        assert artifact.kind == "evidence"
+        assert artifact.path == "artifacts/tests.json"
+        assert result.steps[0].artifact_ids == ("artifact_tests",)
+
+    def test_run_verdict_links_event_and_artifact_evidence(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            _tool_started(call_id="c_verdict", tool_name="Bash", when=t0),
+            _tool_returned(call_id="c_verdict", tool_name="Bash", when=t0 + timedelta(seconds=1)),
+            BaseEvent(
+                id="evt_artifact",
+                type="harness.artifact.recorded",
+                timestamp=t0 + timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={"call_id": "c_verdict", "artifact_id": "artifact_tests", "kind": "evidence"},
+            ),
+            BaseEvent(
+                id="evt_verdict",
+                type="harness.verdict.recorded",
+                timestamp=t0 + timedelta(seconds=3),
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "verdict_id": "verdict_run",
+                    "scope": "run",
+                    "outcome": "pass",
+                    "rationale": "all checks passed",
+                    "evidence_event_ids": ["evt_artifact"],
+                    "evidence_artifact_ids": ["artifact_tests"],
+                },
+            ),
+        ]
+
+        result = build_projection(events, seed_id="seed_abc")
+
+        assert len(result.verdicts) == 1
+        verdict = result.verdicts[0]
+        assert verdict.verdict_id == "verdict_run"
+        assert result.run.verdict_id == "verdict_run"
+        assert verdict.evidence_event_ids == ("evt_verdict", "evt_artifact")
+        assert verdict.evidence_artifact_ids == ("artifact_tests",)
+        assert verdict.rationale == "all checks passed"
+
+    def test_ac_verdict_requires_ac_id(self) -> None:
+        event = BaseEvent(
+            id="evt_bad_ac_verdict",
+            type="harness.verdict.recorded",
+            aggregate_type="execution",
+            aggregate_id="exec_1",
+            data={"scope": "ac", "outcome": "pass"},
+        )
+
+        result = build_projection([event], seed_id="seed_abc")
+
+        assert result.verdicts == ()

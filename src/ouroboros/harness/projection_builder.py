@@ -37,17 +37,26 @@ from uuid import NAMESPACE_URL, uuid5
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.projection import (
     PROJECTION_SCHEMA_VERSION,
+    ArtifactRecord,
     RunRecord,
     StageKind,
     StageRecord,
     StepKind,
     StepRecord,
+    VerdictOutcome,
+    VerdictRecord,
 )
 
 _TOOL_STARTED = "tool.call.started"
 _TOOL_RETURNED = "tool.call.returned"
 _LLM_REQUESTED = "llm.call.requested"
 _LLM_RETURNED = "llm.call.returned"
+_ARTIFACT_RECORDED_TYPES = frozenset(
+    {"artifact.created", "harness.artifact.recorded", "evaluation.artifact.recorded"}
+)
+_VERDICT_RECORDED_TYPES = frozenset(
+    {"verdict.recorded", "harness.verdict.recorded", "evaluation.verdict.recorded"}
+)
 
 _SHELL_TOOL_NAMES = frozenset({"Bash"})
 
@@ -65,6 +74,8 @@ class ProjectionBuildResult:
     run: RunRecord
     stages: tuple[StageRecord, ...]
     steps: tuple[StepRecord, ...]
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    verdicts: tuple[VerdictRecord, ...] = ()
 
 
 class ProjectionBuilder:
@@ -101,6 +112,8 @@ class ProjectionBuilder:
         self._llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._steps: OrderedDict[str, StepRecord] = OrderedDict()
         self._identity_events: list[BaseEvent] = []
+        self._artifact_events: list[BaseEvent] = []
+        self._verdict_events: list[BaseEvent] = []
         self._idle_started_at = datetime.now(UTC)
         self._first_event_at: datetime | None = None
         self._last_event_at: datetime | None = None
@@ -156,6 +169,14 @@ class ProjectionBuilder:
             self._handle_llm_returned(event)
             return self
 
+        if event.type in _ARTIFACT_RECORDED_TYPES:
+            self._artifact_events.append(event)
+            return self
+
+        if event.type in _VERDICT_RECORDED_TYPES:
+            self._verdict_events.append(event)
+            return self
+
         # Other event types are ignored in PR-1b; they will be mapped
         # in follow-up PRs alongside their dedicated kinds.
         return self
@@ -177,14 +198,45 @@ class ProjectionBuilder:
         started_at = self._first_event_at or self._idle_started_at
         ended_at = self._last_event_at
 
+        artifacts = tuple(
+            artifact
+            for event in self._artifact_events
+            if (artifact := _artifact_from_event(event, source_key=source_key)) is not None
+        )
+        artifact_ids_by_step_id: dict[str, list[str]] = {}
+        for artifact in artifacts:
+            artifact_ids_by_step_id.setdefault(artifact.step_id, []).append(artifact.artifact_id)
+
         steps_for_stage = tuple(
             _rewrite_step_identity(
                 step,
                 step_id=_stable_step_id(source_key, *_slot_parts(slot_key)),
                 run_id=run_id,
                 stage_id=stage_id,
+                artifact_ids=tuple(
+                    artifact_ids_by_step_id.get(
+                        _stable_step_id(source_key, *_slot_parts(slot_key)), ()
+                    )
+                ),
             )
             for slot_key, step in self._steps.items()
+        )
+
+        verdicts = tuple(
+            verdict
+            for event in self._verdict_events
+            if (
+                verdict := _verdict_from_event(
+                    event,
+                    source_key=source_key,
+                    run_id=run_id,
+                    artifacts=artifacts,
+                )
+            )
+            is not None
+        )
+        run_verdict_id = next(
+            (verdict.verdict_id for verdict in verdicts if verdict.scope == "run"), None
         )
 
         stage = StageRecord(
@@ -205,12 +257,15 @@ class ProjectionBuilder:
             started_at=started_at,
             ended_at=ended_at,
             stage_ids=(stage_id,),
+            verdict_id=run_verdict_id,
         )
 
         return ProjectionBuildResult(
             run=run,
             stages=(stage,),
             steps=steps_for_stage,
+            artifacts=artifacts,
+            verdicts=verdicts,
         )
 
     # -- internals ------------------------------------------------------
@@ -496,6 +551,7 @@ def _rewrite_step_identity(
     step_id: str,
     run_id: str,
     stage_id: str,
+    artifact_ids: tuple[str, ...] = (),
 ) -> StepRecord:
     return StepRecord(
         schema_version=step.schema_version,
@@ -510,9 +566,128 @@ def _rewrite_step_identity(
         ok=step.ok,
         source_event_ids=step.source_event_ids,
         legacy_inferred=step.legacy_inferred,
-        artifact_ids=step.artifact_ids,
+        artifact_ids=(*step.artifact_ids, *artifact_ids),
         metadata=step.metadata,
     )
+
+
+def _artifact_from_event(
+    event: BaseEvent,
+    *,
+    source_key: str,
+) -> ArtifactRecord | None:
+    if not isinstance(event.data, dict):
+        return None
+    call_id = _extract_call_id(event) or _optional_str(event.data.get("step_call_id"))
+    if call_id is None:
+        return None
+    family = _optional_str(event.data.get("step_family")) or "tool"
+    step_id = _stable_step_id(source_key, family, call_id)
+    artifact_id = _optional_str(event.data.get("artifact_id")) or _stable_artifact_id(
+        source_key, event.id
+    )
+    kind = _optional_str(event.data.get("kind")) or "evidence"
+    return ArtifactRecord(
+        artifact_id=artifact_id,
+        step_id=step_id,
+        kind=kind,
+        path=_optional_str(event.data.get("path")),
+        media_type=_optional_str(event.data.get("media_type")),
+        size_bytes=_optional_int(event.data.get("size_bytes")),
+        digest=_optional_str(event.data.get("digest")),
+        summary=_optional_str(event.data.get("summary")) or "",
+        metadata={"source_event_id": event.id, "event_type": event.type},
+    )
+
+
+def _verdict_from_event(
+    event: BaseEvent,
+    *,
+    source_key: str,
+    run_id: str,
+    artifacts: tuple[ArtifactRecord, ...],
+) -> VerdictRecord | None:
+    if not isinstance(event.data, dict):
+        return None
+    outcome = _verdict_outcome(event.data)
+    if outcome is None:
+        return None
+    scope = _optional_str(event.data.get("scope")) or "run"
+    if scope not in {"run", "ac"}:
+        scope = "run"
+    ac_id = _optional_str(event.data.get("ac_id")) if scope == "ac" else None
+    if scope == "ac" and ac_id is None:
+        return None
+    artifact_ids = tuple(
+        artifact.artifact_id
+        for artifact in artifacts
+        if artifact.artifact_id in _string_tuple(event.data.get("evidence_artifact_ids"))
+    )
+    return VerdictRecord(
+        verdict_id=_optional_str(event.data.get("verdict_id"))
+        or _stable_verdict_id(source_key, event.id),
+        run_id=run_id,
+        scope=scope,
+        ac_id=ac_id,
+        outcome=outcome,
+        rationale=_optional_str(event.data.get("rationale")) or "",
+        evidence_event_ids=(event.id, *_string_tuple(event.data.get("evidence_event_ids"))),
+        evidence_artifact_ids=artifact_ids,
+        recorded_at=event.timestamp,
+        metadata={"source_event_id": event.id, "event_type": event.type},
+    )
+
+
+def _verdict_outcome(data: dict[str, Any]) -> VerdictOutcome | None:
+    raw = data.get("outcome", data.get("verdict"))
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        aliases = {
+            "approved": VerdictOutcome.PASS,
+            "pass": VerdictOutcome.PASS,
+            "passed": VerdictOutcome.PASS,
+            "rejected": VerdictOutcome.FAIL,
+            "fail": VerdictOutcome.FAIL,
+            "failed": VerdictOutcome.FAIL,
+            "cancelled": VerdictOutcome.CANCELLED,
+            "canceled": VerdictOutcome.CANCELLED,
+            "escalate_human": VerdictOutcome.ESCALATE_HUMAN,
+            "human": VerdictOutcome.ESCALATE_HUMAN,
+            "unknown": VerdictOutcome.UNKNOWN,
+        }
+        return aliases.get(normalized)
+    approved = data.get("approved")
+    if isinstance(approved, bool):
+        return VerdictOutcome.PASS if approved else VerdictOutcome.FAIL
+    return None
+
+
+def _optional_str(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _stable_artifact_id(source_key: str, event_id: str) -> str:
+    digest = uuid5(NAMESPACE_URL, f"ouroboros:harness:artifact:{source_key}:{event_id}").hex[:12]
+    return f"artifact_{digest}"
+
+
+def _stable_verdict_id(source_key: str, event_id: str) -> str:
+    digest = uuid5(NAMESPACE_URL, f"ouroboros:harness:verdict:{source_key}:{event_id}").hex[:12]
+    return f"verdict_{digest}"
 
 
 def _step_from_start_only(
