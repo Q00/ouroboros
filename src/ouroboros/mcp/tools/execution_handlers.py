@@ -325,22 +325,23 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 if isinstance(seed_dict, dict) and isinstance(seed_dict.get("orchestrator"), dict)
                 else None
             )
-            if execution_mode == "legacy":
-                return Result.err(
-                    MCPToolError(
-                        "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
-                        "typed evidence plus verifier PASS is now required for acceptance.",
-                        tool_name="ouroboros_execute_seed",
+            if not is_resume:
+                if execution_mode == "legacy":
+                    return Result.err(
+                        MCPToolError(
+                            "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
+                            "typed evidence plus verifier PASS is now required for acceptance.",
+                            tool_name="ouroboros_execute_seed",
+                        )
                     )
-                )
-            if execution_mode not in (None, "", "fat_harness"):
-                return Result.err(
-                    MCPToolError(
-                        "seed.orchestrator.execution_mode is no longer configurable after "
-                        f"the fat-harness default flip (got {execution_mode!r}).",
-                        tool_name="ouroboros_execute_seed",
+                if execution_mode not in (None, "", "fat_harness"):
+                    return Result.err(
+                        MCPToolError(
+                            "seed.orchestrator.execution_mode is no longer configurable after "
+                            f"the fat-harness default flip (got {execution_mode!r}).",
+                            tool_name="ouroboros_execute_seed",
+                        )
                     )
-                )
             seed = Seed.from_dict(seed_dict)
         except yaml.YAMLError as e:
             log.error("mcp.tool.execute_seed.yaml_error", error=str(e))

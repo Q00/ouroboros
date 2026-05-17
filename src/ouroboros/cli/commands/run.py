@@ -391,7 +391,7 @@ async def _run_orchestrator(
         seed_data,
         max_decomposition_depth,
     )
-    resolved_fat_harness_mode = _resolve_fat_harness_mode(seed_data)
+    resolved_fat_harness_mode = False if resume_session else _resolve_fat_harness_mode(seed_data)
     resolved_max_parallel_workers = _resolve_max_parallel_workers()
     externally_satisfied_acs: dict[int, dict[str, Any]] | None = None
     if skip_completed:
@@ -448,6 +448,7 @@ async def _run_orchestrator(
             )
             session_id_for_run = resume_session
             execution_id = reconstructed.value.execution_id
+            resolved_fat_harness_mode = reconstructed.value.progress.get("fat_harness_mode") is True
         else:
             session_id_for_run = f"orch_{uuid4().hex[:12]}"
             execution_id = f"exec_{uuid4().hex[:12]}"

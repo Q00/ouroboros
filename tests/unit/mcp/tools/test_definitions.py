@@ -215,7 +215,13 @@ class TestExecuteSeedHandler:
             synchronous=True,
         )
         legacy_resumed = await handler.handle(
-            {"seed_content": VALID_SEED_YAML, "session_id": "sess_legacy", "skip_qa": True},
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: legacy\nmetadata:", 1
+                ),
+                "session_id": "sess_legacy",
+                "skip_qa": True,
+            },
             synchronous=True,
         )
 
