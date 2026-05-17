@@ -67,6 +67,56 @@ from ouroboros.providers.base import LLMAdapter
 log = structlog.get_logger(__name__)
 
 
+def _parse_seed_yaml_for_execution_mode(
+    seed_content: str,
+    *,
+    tool_name: str,
+) -> Result[tuple[Any, Any], MCPToolError]:
+    """Parse seed YAML enough to apply the shared execution-mode gate."""
+    try:
+        seed_dict = yaml.safe_load(seed_content)
+    except yaml.YAMLError as e:
+        log.error("mcp.tool.execute_seed.yaml_error", error=str(e))
+        return Result.err(
+            MCPToolError(
+                f"Failed to parse seed YAML: {e}",
+                tool_name=tool_name,
+            )
+        )
+
+    execution_mode = (
+        seed_dict.get("orchestrator", {}).get("execution_mode")
+        if isinstance(seed_dict, dict) and isinstance(seed_dict.get("orchestrator"), dict)
+        else None
+    )
+    return Result.ok((seed_dict, execution_mode))
+
+
+def _validate_fresh_execution_mode(
+    execution_mode: Any,
+    *,
+    tool_name: str,
+) -> Result[None, MCPToolError]:
+    """Reject removed/unknown fresh execution-mode selectors on every MCP path."""
+    if execution_mode == "legacy":
+        return Result.err(
+            MCPToolError(
+                "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
+                "typed evidence plus verifier PASS is now required for acceptance.",
+                tool_name=tool_name,
+            )
+        )
+    if execution_mode not in (None, "", "fat_harness"):
+        return Result.err(
+            MCPToolError(
+                "seed.orchestrator.execution_mode is no longer configurable after "
+                f"the fat-harness default flip (got {execution_mode!r}).",
+                tool_name=tool_name,
+            )
+        )
+    return Result.ok(None)
+
+
 def _pause_metadata_from_progress(progress: dict[str, Any]) -> dict[str, Any]:
     """Extract pause metadata safe to expose in MCP tool results."""
     metadata: dict[str, Any] = {}
@@ -285,6 +335,21 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 )
             )
 
+        seed_parse = _parse_seed_yaml_for_execution_mode(
+            seed_content,
+            tool_name="ouroboros_execute_seed",
+        )
+        if seed_parse.is_err:
+            return seed_parse
+        seed_dict, execution_mode = seed_parse.value
+        if not is_resume:
+            mode_result = _validate_fresh_execution_mode(
+                execution_mode,
+                tool_name="ouroboros_execute_seed",
+            )
+            if mode_result.is_err:
+                return mode_result
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_execute_subagent(
             seed_content=seed_content,
@@ -319,38 +384,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
 
         # Parse seed_content YAML into Seed object
         try:
-            seed_dict = yaml.safe_load(seed_content)
-            execution_mode = (
-                seed_dict.get("orchestrator", {}).get("execution_mode")
-                if isinstance(seed_dict, dict) and isinstance(seed_dict.get("orchestrator"), dict)
-                else None
-            )
-            if not is_resume:
-                if execution_mode == "legacy":
-                    return Result.err(
-                        MCPToolError(
-                            "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
-                            "typed evidence plus verifier PASS is now required for acceptance.",
-                            tool_name="ouroboros_execute_seed",
-                        )
-                    )
-                if execution_mode not in (None, "", "fat_harness"):
-                    return Result.err(
-                        MCPToolError(
-                            "seed.orchestrator.execution_mode is no longer configurable after "
-                            f"the fat-harness default flip (got {execution_mode!r}).",
-                            tool_name="ouroboros_execute_seed",
-                        )
-                    )
             seed = Seed.from_dict(seed_dict)
-        except yaml.YAMLError as e:
-            log.error("mcp.tool.execute_seed.yaml_error", error=str(e))
-            return Result.err(
-                MCPToolError(
-                    f"Failed to parse seed YAML: {e}",
-                    tool_name="ouroboros_execute_seed",
-                )
-            )
         except (ValidationError, PydanticValidationError) as e:
             log.error("mcp.tool.execute_seed.validation_error", error=str(e))
             return Result.err(
@@ -1073,6 +1107,22 @@ class StartExecuteSeedHandler:
         # Forward the resolved YAML so the inner ExecuteSeedHandler skips its
         # own path-resolution branch (the contract is now centralised here).
         arguments = {**arguments, "seed_content": seed_content}
+
+        is_resume = bool(arguments.get("session_id"))
+        seed_parse = _parse_seed_yaml_for_execution_mode(
+            seed_content,
+            tool_name="ouroboros_start_execute_seed",
+        )
+        if seed_parse.is_err:
+            return seed_parse
+        _, execution_mode = seed_parse.value
+        if not is_resume:
+            mode_result = _validate_fresh_execution_mode(
+                execution_mode,
+                tool_name="ouroboros_start_execute_seed",
+            )
+            if mode_result.is_err:
+                return mode_result
 
         # Resolve worker cap up front so plugin and background paths agree.
         try:

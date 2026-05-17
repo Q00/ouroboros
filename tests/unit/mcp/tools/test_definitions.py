@@ -255,6 +255,27 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "execution_mode='legacy' was removed" in str(result.error)
 
+    async def test_handle_plugin_rejects_removed_legacy_execution_mode(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Plugin-dispatched execute_seed uses the same fresh execution-mode gate."""
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: legacy\nmetadata:", 1
+                )
+            }
+        )
+
+        assert result.is_err
+        assert "execution_mode='legacy' was removed" in str(result.error)
+
     async def test_handle_rejects_unknown_execution_mode(self) -> None:
         """MCP execute_seed keeps execution_mode non-configurable like the CLI."""
         handler = ExecuteSeedHandler()
@@ -1609,6 +1630,28 @@ class TestAsyncJobHandlers:
         assert result.is_ok
         assert result.value.meta["execution_id"].startswith("exec_")
         assert result.value.meta["session_id"].startswith("orch_")
+
+    async def test_start_execute_seed_plugin_rejects_removed_legacy_execution_mode(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Plugin-dispatched start_execute_seed uses the same fresh execution-mode gate."""
+        handler = StartExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: legacy\nmetadata:", 1
+                )
+            }
+        )
+
+        assert result.is_err
+        assert "execution_mode='legacy' was removed" in str(result.error)
 
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()
