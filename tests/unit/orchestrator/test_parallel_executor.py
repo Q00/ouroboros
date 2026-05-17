@@ -6358,6 +6358,46 @@ class TestParallelACExecutor:
         )
 
     @pytest.mark.asyncio
+    async def test_execution_scoped_ac_completion_append_is_best_effort(self) -> None:
+        """Root AC evidence must not corrupt an already persisted successful AC lifecycle."""
+
+        event_store = AsyncMock()
+        event_store.replay = AsyncMock(return_value=[])
+        appended_events: list[BaseEvent] = []
+
+        async def _append(event: BaseEvent) -> None:
+            if event.type == "execution.ac.completed":
+                raise RuntimeError("root aggregate temporarily unavailable")
+            appended_events.append(event)
+
+        event_store.append = AsyncMock(side_effect=_append)
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity = executor._resolve_ac_runtime_identity(
+            0,
+            execution_context_id="exec_ac_progress",
+            retry_attempt=0,
+        )
+
+        await executor._emit_ac_runtime_event(
+            event_type="execution.session.completed",
+            runtime_identity=runtime_identity,
+            ac_content="Persist AC completion evidence",
+            runtime_handle=None,
+            execution_id="exec_ac_progress",
+            session_id="server-42",
+            result_summary="[TASK_COMPLETE]",
+            success=True,
+        )
+
+        assert [event.type for event in appended_events] == ["execution.session.completed"]
+        assert event_store.append.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_restarted_executor_loads_persisted_runtime_handle_for_same_attempt(self) -> None:
         """A fresh executor should rehydrate the same-attempt runtime handle from events."""
 
