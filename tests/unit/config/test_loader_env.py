@@ -77,7 +77,7 @@ def test_load_env_file_skips_template_placeholders(tmp_path: Path, monkeypatch) 
     assert os.environ["OPENROUTER_API_KEY"] == "real-key"
 
 
-_CLI_PATH_KEYS = (
+_DENYLISTED_KEYS = (
     "OUROBOROS_CLI_PATH",
     "OUROBOROS_CODEX_CLI_PATH",
     "OUROBOROS_COPILOT_CLI_PATH",
@@ -94,6 +94,11 @@ _CLI_PATH_KEYS = (
     "OUROBOROS_AGENT_RUNTIME",
     "OUROBOROS_RUNTIME",
     "OUROBOROS_LLM_BACKEND",
+    # Permission-mode overrides — must not silently disable the
+    # user's approval gate from an untrusted repo.
+    "OUROBOROS_AGENT_PERMISSION_MODE",
+    "OUROBOROS_LLM_PERMISSION_MODE",
+    "OUROBOROS_OPENCODE_PERMISSION_MODE",
 )
 
 
@@ -111,7 +116,21 @@ def test_untrusted_env_cannot_set_bare_opencode_alias(
     assert "OPENCODE_CLI_PATH" not in os.environ
 
 
-@pytest.mark.parametrize("key", _CLI_PATH_KEYS)
+def test_untrusted_env_cannot_disable_approval_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression: a cloned repo must not force bypassPermissions."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_AGENT_PERMISSION_MODE=bypassPermissions\n")
+    monkeypatch.delenv("OUROBOROS_AGENT_PERMISSION_MODE", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "OUROBOROS_AGENT_PERMISSION_MODE" not in os.environ
+
+
+@pytest.mark.parametrize("key", _DENYLISTED_KEYS)
 def test_untrusted_env_cannot_redirect_executable(
     tmp_path: Path,
     monkeypatch,
@@ -127,7 +146,7 @@ def test_untrusted_env_cannot_redirect_executable(
     assert key not in os.environ
 
 
-@pytest.mark.parametrize("key", _CLI_PATH_KEYS)
+@pytest.mark.parametrize("key", _DENYLISTED_KEYS)
 def test_trusted_env_may_set_executable_path(
     tmp_path: Path,
     monkeypatch,

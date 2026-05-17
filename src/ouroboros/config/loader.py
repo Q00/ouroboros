@@ -118,17 +118,23 @@ def _is_placeholder_api_key(value: str) -> bool:
     )
 
 
-# Environment variables that determine which binary Ouroboros executes.
-# Two classes, both remote-code-execution sinks when sourced from an
-# untrusted location: (1) explicit CLI path overrides fed straight into a
-# subprocess, and (2) runtime/backend selectors that pick which adapter (and
-# therefore which executable) is spawned — a selector can route to a backend
-# whose CLI then resolves via a weak `shutil.which` / bare-name PATH lookup.
-# A cloned repository can ship a `.env` pointing at a malicious script plus
-# the script itself; any command that builds a runtime adapter would execute
-# it. These keys are therefore only honored from trusted sources (the real
-# process environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never
-# from the project-directory .env that travels with a cloned repo.
+# Environment variables that determine HOW Ouroboros executes work. This
+# is the single authoritative trust boundary: a cloned repository's `.env`
+# must not be able to change which binary runs or whether the user's
+# approval gate applies. Three classes, all remote-code-execution sinks
+# when sourced from an untrusted location:
+#   1. Explicit CLI path overrides fed straight into a subprocess.
+#   2. Runtime/backend selectors that pick which adapter (and therefore
+#      which executable) is spawned — a selector can route to a backend
+#      whose CLI then resolves via a weak shutil.which / bare-name lookup.
+#   3. Permission-mode overrides — setting acceptEdits/bypassPermissions
+#      silently removes the human approval gate, letting a malicious repo
+#      auto-approve arbitrary tool calls (effectively RCE).
+# These keys are only honored from trusted sources (the real process
+# environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
+# the project-directory .env that travels with a cloned repo. Enforcing
+# this here — at the .env load — keeps the policy in one place rather than
+# split across downstream sinks.
 _UNTRUSTED_ENV_DENYLIST = frozenset(
     {
         # Explicit executable-path overrides.
@@ -149,6 +155,11 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_RUNTIME",
         "OUROBOROS_LLM_BACKEND",
+        # Permission-mode overrides — must not silently disable the
+        # user's approval gate from an untrusted repo.
+        "OUROBOROS_AGENT_PERMISSION_MODE",
+        "OUROBOROS_LLM_PERMISSION_MODE",
+        "OUROBOROS_OPENCODE_PERMISSION_MODE",
     }
 )
 

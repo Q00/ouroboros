@@ -222,22 +222,13 @@ class ClaudeCodeAdapter:
         if not path_str:
             return None
 
-        # Defense in depth: a legitimate CLI path is always absolute (a
-        # global install or a ~/-expanded location). A relative path is the
-        # shape an attacker-controlled repo .env uses (e.g. "./malicious.sh"),
-        # so reject relatives outright. This is precise — unlike a CWD
-        # containment check it never discards a real absolute binary just
-        # because Ouroboros was launched from an ancestor dir such as "/".
-        expanded = Path(path_str).expanduser()
-        if not expanded.is_absolute():
-            log.warning(
-                "claude_code_adapter.cli_path_not_absolute",
-                cli_path=path_str,
-                fallback="using SDK bundled CLI",
-            )
-            return None
-
-        resolved = expanded.resolve()
+        # The untrusted-`.env` trust boundary is enforced upstream in
+        # config.loader (OUROBOROS_CLI_PATH and aliases are stripped from a
+        # cloned repo's .env), so any path that reaches here came from a
+        # trusted source — an explicit caller, the real environment, or
+        # ~/.ouroboros config. No source-blind path rejection here: that
+        # would break legitimate relative wrapper overrides.
+        resolved = Path(path_str).expanduser().resolve()
 
         if not resolved.exists():
             log.warning(

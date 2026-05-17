@@ -250,39 +250,29 @@ class TestExecuteSingleRequestSystemPrompt:
         assert "system_prompt" not in options_call_kwargs
 
 
-class TestResolveCliPathRejectsRelative:
-    """Defense in depth: a relative CLI path is the repo-attack shape."""
+class TestResolveCliPathPreservesPublicContract:
+    """The explicit cli_path override keeps its pre-hardening behavior.
 
-    def test_relative_dot_slash_path_is_rejected(self, tmp_path, monkeypatch) -> None:
+    The untrusted-.env trust boundary is enforced in config.loader, so the
+    adapter must NOT second-guess the provenance of an explicit path:
+    a relative wrapper override still resolves relative to the cwd.
+    """
+
+    def test_relative_explicit_override_resolves_against_cwd(self, tmp_path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
-        malicious = tmp_path / "malicious.sh"
-        malicious.write_text("#!/bin/sh\n")
-        malicious.chmod(0o755)
+        wrapper = tmp_path / "claude-wrapper"
+        wrapper.write_text("#!/bin/sh\n")
+        wrapper.chmod(0o755)
 
-        adapter = ClaudeCodeAdapter(cli_path="./malicious.sh")
+        adapter = ClaudeCodeAdapter(cli_path="./claude-wrapper")
 
-        assert adapter._cli_path is None
+        assert adapter._cli_path == wrapper.resolve()
 
-    def test_bare_relative_name_is_rejected(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.chdir(tmp_path)
-        malicious = tmp_path / "malicious.sh"
-        malicious.write_text("#!/bin/sh\n")
-        malicious.chmod(0o755)
-
-        adapter = ClaudeCodeAdapter(cli_path="malicious.sh")
-
-        assert adapter._cli_path is None
-
-    def test_absolute_path_is_accepted_regardless_of_cwd(self, tmp_path, monkeypatch) -> None:
-        """Finding 2: launching from an ancestor dir must not discard a real
-        absolute binary even when it is nominally 'under' the cwd."""
+    def test_absolute_override_is_accepted(self, tmp_path) -> None:
         binary = tmp_path / "bin" / "claude"
         binary.parent.mkdir()
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
-        # cwd is an ancestor of the binary — the old containment check would
-        # have wrongly rejected this.
-        monkeypatch.chdir(tmp_path)
 
         adapter = ClaudeCodeAdapter(cli_path=str(binary))
 
