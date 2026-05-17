@@ -147,7 +147,9 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
     assert not _criterion_satisfied_by_evidence("`other.py` exists.", files, commands)
 
 
-def test_complete_sibling_acs_from_successful_runtime_evidence() -> None:
+def test_complete_sibling_acs_from_successful_runtime_evidence(tmp_path: Any) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_hello_auto.py").write_text("def test_hello(): pass\n")
     success = ACExecutionResult(
         ac_index=0,
         ac_content="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
@@ -179,6 +181,7 @@ def test_complete_sibling_acs_from_successful_runtime_evidence() -> None:
                 "tests_passed": ["uv run pytest tests/test_hello_auto.py"],
             }
         ),
+        runtime_handle=RuntimeHandle(backend="codex_cli", cwd=str(tmp_path)),
     )
     failed_test_file = ACExecutionResult(
         ac_index=1,
@@ -355,6 +358,8 @@ def test_complete_sibling_acs_keeps_exact_command_case_sensitive() -> None:
 
 def test_complete_sibling_acs_normalizes_absolute_typed_file_evidence(tmp_path: Any) -> None:
     test_file = tmp_path / "tests" / "test_hello_auto.py"
+    test_file.parent.mkdir()
+    test_file.write_text("def test_hello(): pass\n")
     success = ACExecutionResult(
         ac_index=0,
         ac_content="`tests/test_hello_auto.py` exists.",
@@ -385,6 +390,40 @@ def test_complete_sibling_acs_normalizes_absolute_typed_file_evidence(tmp_path: 
     assert [result.outcome for result in results] == [
         ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.SATISFIED_EXTERNALLY,
+    ]
+
+
+def test_complete_sibling_acs_requires_file_end_state_existence(tmp_path: Any) -> None:
+    success_without_current_file = ACExecutionResult(
+        ac_index=0,
+        ac_content="`tests/test_hello_auto.py` exists.",
+        success=True,
+        typed_evidence=EvidenceRecord(data={"files_touched": ["tests/test_hello_auto.py"]}),
+        runtime_handle=RuntimeHandle(backend="codex_cli", cwd=str(tmp_path)),
+    )
+    failed_file_presence = ACExecutionResult(
+        ac_index=1,
+        ac_content="`tests/test_hello_auto.py` exists.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_without_current_file, failed_file_presence],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
     ]
 
 

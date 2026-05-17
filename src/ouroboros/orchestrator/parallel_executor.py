@@ -1520,6 +1520,21 @@ def _typed_evidence_is_usable_for_sibling_reconciliation(result: ACExecutionResu
     return result.atomic_verifier_verdict is None or result.atomic_verifier_verdict.passed
 
 
+def _typed_file_evidence_proves_current_existence(
+    result: ACExecutionResult,
+    relative_path: str,
+) -> bool:
+    """Return True when typed file evidence is backed by current end-state existence."""
+    if result.runtime_handle is None or result.runtime_handle.cwd is None:
+        return False
+    candidate = (Path(result.runtime_handle.cwd).resolve() / relative_path).resolve()
+    try:
+        candidate.relative_to(Path(result.runtime_handle.cwd).resolve())
+    except ValueError:
+        return False
+    return candidate.is_file()
+
+
 def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], set[str], set[str]]:
     """Return normalized file paths, run commands, and passed commands.
 
@@ -1537,7 +1552,7 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
             normalized = (
                 _workspace_relative_file_claim(str(value), task_cwd=task_cwd) or str(value).strip()
             )
-            if normalized:
+            if normalized and _typed_file_evidence_proves_current_existence(result, normalized):
                 files.add(normalized)
         for value in _flatten_evidence_values(result.typed_evidence.get("commands_run")):
             _add_runtime_command_evidence(run_commands, str(value))
