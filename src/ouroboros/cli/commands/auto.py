@@ -623,15 +623,35 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(line)
 
 
+def _is_run_handoff_only_completion(result: AutoPipelineResult) -> bool:
+    """True when auto completed only by handing off execution work.
+
+    The persisted pipeline marks this state COMPLETE to avoid duplicate run
+    starts on resume, but it is not verified product completion yet.
+    """
+    return (
+        result.status == "complete"
+        and bool(result.run_handoff_status)
+        and not result.ralph_job_id
+        and not result.ralph_lineage_id
+    )
+
+
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
-    if result.status == "complete":
+    handoff_only = _is_run_handoff_only_completion(result)
+    if handoff_only:
+        print_info("Auto run handoff started")
+    elif result.status == "complete":
         print_success("Auto pipeline completed")
     elif result.status in {"blocked", "failed"}:
         print_error("Auto pipeline did not complete")
     else:
         print_info("Auto pipeline status")
     console.print(f"Auto session: [cyan]{result.auto_session_id}[/]")
-    console.print(f"Status: [bold]{result.status}[/]")
+    displayed_status = "run_handoff_started" if handoff_only else result.status
+    console.print(f"Status: [bold]{displayed_status}[/]")
+    if handoff_only:
+        console.print("Product status: [yellow]not verified complete; execution is still external/pending[/]")
     authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")

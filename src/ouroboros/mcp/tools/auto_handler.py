@@ -1159,8 +1159,23 @@ def _utc_iso(*, ttl_seconds: float | None = None) -> str:
     return value.isoformat()
 
 
+def _is_run_handoff_only_completion(result: AutoPipelineResult) -> bool:
+    """True when auto completed only by handing off execution work."""
+    return (
+        result.status == "complete"
+        and bool(result.run_handoff_status)
+        and not result.ralph_job_id
+        and not result.ralph_lineage_id
+    )
+
+
+def _presentation_status(result: AutoPipelineResult) -> str:
+    return "run_handoff_started" if _is_run_handoff_only_completion(result) else result.status
+
+
 def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     """Build MCP metadata for clients that render auto progress outside CLI text."""
+    handoff_only = _is_run_handoff_only_completion(result)
     meta: dict[str, Any] = {
         "status": result.status,
         "auto_session_id": result.auto_session_id,
@@ -1179,6 +1194,9 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "job_id": result.job_id,
         "run_session_id": result.run_session_id,
     }
+    if handoff_only:
+        meta["presentation_status"] = _presentation_status(result)
+        meta["product_status"] = "not_verified_complete"
     if result.execution_job_status:
         meta["execution_job_status"] = result.execution_job_status
     if result.execution_job_error:
@@ -1842,11 +1860,14 @@ def _execution_start_handler(
 
 
 def _format_result(result: AutoPipelineResult) -> str:
+    handoff_only = _is_run_handoff_only_completion(result)
     lines = [
         f"Auto session: {result.auto_session_id}",
-        f"Status: {result.status}",
+        f"Status: {_presentation_status(result)}",
         f"Phase: {result.phase}",
     ]
+    if handoff_only:
+        lines.append("Product status: not verified complete; execution is still external/pending")
     if result.grade:
         lines.append(f"Seed grade: {result.grade}")
     if result.interview_session_id:
