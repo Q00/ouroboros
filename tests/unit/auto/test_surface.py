@@ -2213,6 +2213,31 @@ async def test_auto_handler_complete_product_uses_configured_ralph_factory(
     assert captured["ralph_resumer_handler"] is configured_ralph
 
 
+def test_auto_handler_attached_completion_is_not_handoff_started() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_attached",
+        phase="complete",
+        run_handoff_status="attached",
+        attached_run_handle="exec_existing",
+        attached_run_source="operator",
+        attached_at="2026-05-07T00:00:00+00:00",
+    )
+
+    meta = _result_meta(result)
+    text = _format_result(result)
+
+    assert meta["status"] == "complete"
+    assert "presentation_status" not in meta
+    assert "product_status" not in meta
+    assert "Status: complete" in text
+    assert "Status: run_handoff_started" not in text
+    assert "Product status: not verified complete" not in text
+
+
 def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion() -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta

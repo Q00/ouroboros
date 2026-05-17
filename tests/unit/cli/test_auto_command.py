@@ -633,3 +633,22 @@ def test_print_result_handoff_completion_is_not_labeled_product_complete() -> No
     assert "Product status: not verified complete" in output
     assert "Auto pipeline completed" not in output
 
+
+def test_print_result_attached_completion_remains_product_complete() -> None:
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_attached",
+        phase="complete",
+        run_handoff_status="attached",
+        attached_run_handle="exec_existing",
+        attached_run_source="operator",
+        attached_at="2026-05-07T00:00:00+00:00",
+        resume_capability=AutoResumeCapability.NONE,
+    )
+
+    output = _capture_result(result)
+
+    assert "Auto pipeline completed" in output
+    assert "Status: complete" in output
+    assert "Status: run_handoff_started" not in output
+    assert "Product status: not verified complete" not in output

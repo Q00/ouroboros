@@ -35,6 +35,11 @@ from __future__ import annotations
 
 from typing import Final
 
+# Known run-handoff lifecycle status values. Kept named so presentation
+# surfaces key off the pipeline state machine rather than any non-empty
+# run_handoff_status.
+RUN_HANDOFF_STARTED_STATUS: Final[str] = "started"
+
 # Unknown handoff status values. Kept named so pipeline code does not need to
 # restate the retryable status alphabet outside this contract module.
 UNKNOWN_NO_HANDLE_STATUS: Final[str] = "unknown_no_handle"
@@ -93,6 +98,7 @@ def unknown_handoff_guidance(status: str) -> str:
 __all__ = [
     "IDEMPOTENCY_KEY_FIELD",
     "IDEMPOTENCY_KWARG_NAME",
+    "RUN_HANDOFF_STARTED_STATUS",
     "MAX_RUN_HANDOFF_RETRIES",
     "UNKNOWN_NO_HANDLE_GUIDANCE",
     "UNKNOWN_NO_HANDLE_STATUS",

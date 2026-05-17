@@ -30,9 +30,11 @@ from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.auto_handler import (
     AutoHandler,
     _derive_goal_user_preferences,
+    _format_result,
     _merge_resume_user_preferences,
     _reconcile_execution_job_snapshot,
     _reseed_preference_ledger,
+    _result_meta,
     _seed_initial_ledger_from_user_preferences,
 )
 from ouroboros.mcp.types import ContentType
@@ -182,6 +184,7 @@ def test_execution_job_completed_keeps_auto_complete(monkeypatch) -> None:
         auto_session_id="auto_1",
         phase="complete",
         job_id="job_done",
+        run_handoff_status="started",
         resume_capability=AutoResumeCapability.RESUME,
     )
 
@@ -190,6 +193,14 @@ def test_execution_job_completed_keeps_auto_complete(monkeypatch) -> None:
     assert reconciled.status == "complete"
     assert reconciled.execution_job_status == "completed"
     assert reconciled.resume_capability is AutoResumeCapability.NONE
+    meta = _result_meta(reconciled)
+    text = _format_result(reconciled)
+
+    assert "presentation_status" not in meta
+    assert "product_status" not in meta
+    assert "Status: complete" in text
+    assert "Status: run_handoff_started" not in text
+    assert "Product status: not verified complete" not in text
 
 
 def test_execution_job_failure_rewrites_complete_auto_result(monkeypatch) -> None:

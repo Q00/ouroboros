@@ -21,6 +21,7 @@ from ouroboros.auto.handoff_contract import (
     IDEMPOTENCY_KEY_FIELD,
     IDEMPOTENCY_KWARG_NAME,
     RETRY_GUIDANCE_PHRASE,
+    RUN_HANDOFF_STARTED_STATUS,
     UNKNOWN_HANDOFF_STATUSES,
     UNKNOWN_NO_HANDLE_STATUS,
     UNKNOWN_TIMEOUT_STATUS,
@@ -813,7 +814,7 @@ class AutoPipeline:
                 blocker = transient_blocker or state.last_error
                 return self._result(state, ledger, review=review, blocker=blocker)
             if any((state.job_id, state.execution_id, state.run_session_id)):
-                state.run_handoff_status = "started"
+                state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                 state.run_handoff_guidance = None
                 # Q00/ouroboros#773 (review-5 finding 2): honor the durable
                 # ``complete_product`` intent on RUN resume. Without this
@@ -1022,7 +1023,7 @@ class AutoPipeline:
                 )
                 state.run_subagent = run_subagent or {}
                 if any((state.job_id, state.execution_id, state.run_session_id)):
-                    state.run_handoff_status = "started"
+                    state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                     state.run_handoff_guidance = None
                     # Q00/ouroboros#773: when ``--complete-product`` is set
                     # and a ralph starter is configured, chain RUN →

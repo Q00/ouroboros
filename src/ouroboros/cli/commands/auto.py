@@ -21,6 +21,7 @@ from ouroboros.auto.adapters import (
     save_seed,
 )
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
+from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 
@@ -631,7 +632,8 @@ def _is_run_handoff_only_completion(result: AutoPipelineResult) -> bool:
     """
     return (
         result.status == "complete"
-        and bool(result.run_handoff_status)
+        and result.run_handoff_status == RUN_HANDOFF_STARTED_STATUS
+        and result.execution_job_status != "completed"
         and not result.ralph_job_id
         and not result.ralph_lineage_id
     )
@@ -651,7 +653,9 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     displayed_status = "run_handoff_started" if handoff_only else result.status
     console.print(f"Status: [bold]{displayed_status}[/]")
     if handoff_only:
-        console.print("Product status: [yellow]not verified complete; execution is still external/pending[/]")
+        console.print(
+            "Product status: [yellow]not verified complete; execution is still external/pending[/]"
+        )
     authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")

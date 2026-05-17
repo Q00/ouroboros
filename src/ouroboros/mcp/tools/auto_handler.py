@@ -33,6 +33,7 @@ from ouroboros.auto.execution_acceptance import (
     has_auto_wrapper_context,
     is_auto_reporting_acceptance_criterion,
 )
+from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import (
     REQUIRED_SECTIONS,
@@ -1163,7 +1164,8 @@ def _is_run_handoff_only_completion(result: AutoPipelineResult) -> bool:
     """True when auto completed only by handing off execution work."""
     return (
         result.status == "complete"
-        and bool(result.run_handoff_status)
+        and result.run_handoff_status == RUN_HANDOFF_STARTED_STATUS
+        and result.execution_job_status != "completed"
         and not result.ralph_job_id
         and not result.ralph_lineage_id
     )
