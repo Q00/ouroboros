@@ -10,6 +10,18 @@ _AUTO_WRAPPER_CRITERIA = frozenset(
         "`ooo auto` is handled by ouroboros auto/mcp, not plain text",
         "final report includes auto session id, seed id, seed path, and test result",
         "final report includes auto session id, seed id, files changed, exact test command, and test result",
+        "manual fallback is not used",
+        "manual fallback was not used",
+        "manual fallback used: no",
+        "manual fallback used: false",
+        "previous blocker recurrence is reported",
+        "previous blocker recurrence: no",
+        "previous last_question blocker did not recur",
+        "previous seed grade c blocker did not recur",
+        "previous interview closure blocker did not recur",
+        "recursive auto invocation did not occur",
+        "recursive auto invocation occurred: no",
+        "report whether recursive auto invocation occurred",
     }
 )
 

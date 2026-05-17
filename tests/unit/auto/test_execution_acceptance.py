@@ -48,10 +48,34 @@ def test_normalize_execution_acceptance_drops_auto_report_criteria() -> None:
     normalized = normalize_execution_acceptance(seed)
 
     assert normalized.acceptance_criteria == (
-        "Manual fallback is not used.",
         "`hello_auto.py` defines `hello_auto()` returning exactly `hello from ooo auto`.",
         "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
         "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    )
+
+
+def test_normalize_execution_acceptance_drops_observation_report_metadata() -> None:
+    seed = _seed(
+        "`hello_auto.py` exists.",
+        "`tests/test_hello_auto.py` exists.",
+        "The targeted test command `uv run pytest tests/test_hello_auto.py` passes.",
+        "Manual fallback used: no.",
+        "Previous last_question blocker did not recur.",
+        "Previous Seed grade C blocker did not recur.",
+        "Previous interview closure blocker did not recur.",
+        "Recursive auto invocation occurred: no.",
+    ).model_copy(
+        update={
+            "goal": "Verify current ooo auto can create hello_auto.py and tests/test_hello_auto.py using ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "`hello_auto.py` exists.",
+        "`tests/test_hello_auto.py` exists.",
+        "The targeted test command `uv run pytest tests/test_hello_auto.py` passes.",
     )
 
 

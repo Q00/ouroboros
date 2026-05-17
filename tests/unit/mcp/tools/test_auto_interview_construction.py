@@ -336,7 +336,38 @@ def test_structured_auto_goal_filters_report_only_success_criteria() -> None:
     assert "acceptance_criteria" in preferences
     assert "manual fallback" not in preferences["acceptance_criteria"].casefold()
     assert "seed id" not in preferences["acceptance_criteria"].casefold()
+    assert "files changed" not in preferences["acceptance_criteria"].casefold()
     assert "uv run pytest tests/test_hello_auto.py" in preferences["acceptance_criteria"]
+
+
+def test_structured_auto_goal_filters_observation_status_reporting_criteria() -> None:
+    goal = """
+Goal:
+Verify current ooo auto can create hello_auto.py and tests/test_hello_auto.py.
+
+Success criteria:
+- `hello_auto.py` exists.
+- `tests/test_hello_auto.py` exists.
+- The targeted test command `uv run pytest tests/test_hello_auto.py` passes.
+- Manual fallback used: no.
+- Previous last_question blocker did not recur.
+- Previous Seed grade C blocker did not recur.
+- Recursive auto invocation occurred: no.
+
+Important dispatch rule:
+If `ouroboros_auto` is unavailable or interpreted as normal text, stop and report failure.
+"""
+
+    preferences = _derive_goal_user_preferences(goal)
+
+    assert preferences["acceptance_criteria"] == (
+        "`hello_auto.py` exists.\n"
+        "`tests/test_hello_auto.py` exists.\n"
+        "The targeted test command `uv run pytest tests/test_hello_auto.py` passes."
+    )
+    assert "Previous last_question" in preferences["failure_modes"]
+    assert "Manual fallback used: no." in preferences["failure_modes"]
+    assert "Recursive auto invocation occurred: no." in preferences["failure_modes"]
 
 
 def test_structured_auto_goal_preserves_non_allowlisted_execution_criteria() -> None:
