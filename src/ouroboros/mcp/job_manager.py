@@ -94,6 +94,27 @@ def _latest_job_terminal_event(events: list[BaseEvent]) -> BaseEvent | None:
     return next((event for event in reversed(events) if event.type in terminal_types), None)
 
 
+def _latest_job_status_event(events: list[BaseEvent]) -> BaseEvent | None:
+    """Return the latest job event carrying a status field."""
+    return next((event for event in reversed(events) if "status" in event.data), None)
+
+
+def _snapshot_with_status_event(
+    snapshot: JobSnapshot,
+    event: BaseEvent,
+    cursor: int,
+) -> JobSnapshot:
+    """Project a non-terminal status event onto an existing reconstructed snapshot."""
+    data = event.data
+    return replace(
+        snapshot,
+        status=JobStatus(data.get("status", snapshot.status.value)),
+        message=data.get("message", snapshot.message),
+        updated_at=event.timestamp,
+        cursor=cursor,
+    )
+
+
 def _snapshot_with_terminal_event(
     snapshot: JobSnapshot,
     event: BaseEvent,
@@ -610,6 +631,12 @@ class JobManager:
             existing_terminal = _latest_job_terminal_event(events)
             if existing_terminal is not None:
                 return _snapshot_with_terminal_event(snapshot, existing_terminal, cursor)
+            latest_status_event = _latest_job_status_event(events)
+            if (
+                latest_status_event is not None
+                and latest_status_event.data.get("status") == JobStatus.CANCEL_REQUESTED.value
+            ):
+                return _snapshot_with_status_event(snapshot, latest_status_event, cursor)
             completed = await self._append_execution_completed_event(
                 snapshot.job_id,
                 completed_result,

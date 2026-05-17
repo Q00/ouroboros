@@ -493,6 +493,82 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_completed_execution_recovery_does_not_beat_concurrent_cancel_request(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            await store.initialize()
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.created",
+                    aggregate_type="job",
+                    aggregate_id="job_recover_cancel_race",
+                    data={
+                        "job_type": "execute_seed",
+                        "status": JobStatus.RUNNING.value,
+                        "message": "Running execute_seed",
+                        "links": {
+                            "session_id": "orch_recover_cancel_race",
+                            "execution_id": "exec_recover_cancel_race",
+                            "lineage_id": None,
+                        },
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_cancel_race",
+                    data={"session_id": "orch_recover_cancel_race", "status": "completed"},
+                )
+            )
+            recovery_lock = manager._recovery_locks.setdefault(
+                "job_recover_cancel_race",
+                asyncio.Lock(),
+            )
+            await recovery_lock.acquire()
+            snapshot_task = asyncio.create_task(manager.get_snapshot("job_recover_cancel_race"))
+            await asyncio.sleep(0)
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.updated",
+                    aggregate_type="job",
+                    aggregate_id="job_recover_cancel_race",
+                    data={
+                        "status": JobStatus.CANCEL_REQUESTED.value,
+                        "message": "Cancellation requested",
+                    },
+                )
+            )
+
+            recovery_lock.release()
+            snapshot = await snapshot_task
+
+            assert snapshot.status is JobStatus.CANCEL_REQUESTED
+            events, _ = await store.get_events_after(
+                "job",
+                "job_recover_cancel_race",
+                last_row_id=0,
+            )
+            terminal_events = [
+                event.type
+                for event in events
+                if event.type
+                in {
+                    "mcp.job.completed",
+                    "mcp.job.failed",
+                    "mcp.job.cancelled",
+                    "mcp.job.interrupted",
+                }
+            ]
+            assert terminal_events == []
+        finally:
+            await store.close()
+
     async def test_complete_workflow_progress_without_terminal_event_does_not_complete_job(
         self, tmp_path
     ) -> None:
