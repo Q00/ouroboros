@@ -456,6 +456,35 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    async def test_prepare_session_fails_when_initial_contract_cannot_persist(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A gated session must not start if its acceptance contract is not durable."""
+        tracker = SessionTracker.create(
+            "exec_prepared",
+            sample_seed.metadata.seed_id,
+            session_id="orch_prepared",
+        )
+        create_session = AsyncMock(return_value=Result.ok(tracker))
+        track_progress = AsyncMock(return_value=Result.err(ConfigError("store unavailable")))
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(runner._session_repo, "track_progress", track_progress),
+        ):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id="exec_prepared",
+                session_id="orch_prepared",
+            )
+
+        assert result.is_err
+        assert "initial session contract" in result.error.message
+        track_progress.assert_awaited_once_with("orch_prepared", {"fat_harness_mode": False})
+
+    @pytest.mark.asyncio
     async def test_execute_seed_delegates_to_precreated_session(
         self,
         runner: OrchestratorRunner,
@@ -1119,6 +1148,9 @@ class TestOrchestratorRunner:
 
         with (
             patch.object(runner._session_repo, "create_session", return_value=Result.ok(tracker)),
+            patch.object(
+                runner._session_repo, "track_progress", AsyncMock(return_value=Result.ok(None))
+            ),
             patch.object(
                 runner._event_store,
                 "append",

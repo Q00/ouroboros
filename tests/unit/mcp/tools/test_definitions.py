@@ -224,6 +224,34 @@ class TestExecuteSeedHandler:
         assert legacy_resumed.is_ok
         assert captured_modes == [True, True, False]
 
+    async def test_handle_rejects_removed_legacy_execution_mode(self) -> None:
+        """MCP execute_seed matches the CLI removal of the legacy selector."""
+        handler = ExecuteSeedHandler()
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: legacy\nmetadata:", 1
+                )
+            }
+        )
+
+        assert result.is_err
+        assert "execution_mode='legacy' was removed" in str(result.error)
+
+    async def test_handle_rejects_unknown_execution_mode(self) -> None:
+        """MCP execute_seed keeps execution_mode non-configurable like the CLI."""
+        handler = ExecuteSeedHandler()
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: nope\nmetadata:", 1
+                )
+            }
+        )
+
+        assert result.is_err
+        assert "execution_mode is no longer configurable" in str(result.error)
+
     async def test_handle_reports_execution_handler_config_error(self) -> None:
         """Config failures should surface with execution-handler context."""
         handler = ExecuteSeedHandler()

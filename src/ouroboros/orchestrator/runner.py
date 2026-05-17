@@ -2054,10 +2054,18 @@ class OrchestratorRunner:
             initial_progress,
         )
         if progress_result.is_err:
-            log.warning(
-                "orchestrator.runner.initial_progress_seed_failed",
-                session_id=tracker.session_id,
-                error=str(progress_result.error),
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to persist initial session contract",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "fat_harness_mode": self._fat_harness_mode,
+                        "cause": str(progress_result.error),
+                    },
+                )
             )
 
         return Result.ok(tracker.with_progress(initial_progress))
