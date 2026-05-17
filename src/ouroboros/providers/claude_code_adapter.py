@@ -222,7 +222,22 @@ class ClaudeCodeAdapter:
         if not path_str:
             return None
 
-        resolved = Path(path_str).expanduser().resolve()
+        # Defense in depth: a legitimate CLI path is always absolute (a
+        # global install or a ~/-expanded location). A relative path is the
+        # shape an attacker-controlled repo .env uses (e.g. "./malicious.sh"),
+        # so reject relatives outright. This is precise — unlike a CWD
+        # containment check it never discards a real absolute binary just
+        # because Ouroboros was launched from an ancestor dir such as "/".
+        expanded = Path(path_str).expanduser()
+        if not expanded.is_absolute():
+            log.warning(
+                "claude_code_adapter.cli_path_not_absolute",
+                cli_path=path_str,
+                fallback="using SDK bundled CLI",
+            )
+            return None
+
+        resolved = expanded.resolve()
 
         if not resolved.exists():
             log.warning(
@@ -243,23 +258,6 @@ class ClaudeCodeAdapter:
         if not os.access(resolved, os.X_OK):
             log.warning(
                 "claude_code_adapter.cli_not_executable",
-                cli_path=str(resolved),
-                fallback="using SDK bundled CLI",
-            )
-            return None
-
-        # Defense in depth: never execute a CLI that lives inside the current
-        # working directory. Ouroboros runs inside cloned repositories, so a
-        # CWD-internal executable is attacker-controlled (the repo brought it).
-        # A legitimate Claude CLI is always a globally installed binary, never
-        # shipped inside a project, so this rejects only malicious paths.
-        try:
-            resolved.relative_to(Path.cwd().resolve())
-        except ValueError:
-            pass  # Outside CWD — a normal global install location.
-        else:
-            log.warning(
-                "claude_code_adapter.cli_path_inside_cwd",
                 cli_path=str(resolved),
                 fallback="using SDK bundled CLI",
             )

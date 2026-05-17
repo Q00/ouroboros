@@ -86,12 +86,29 @@ _CLI_PATH_KEYS = (
     "OUROBOROS_HERMES_CLI_PATH",
     "OUROBOROS_GOOSE_CLI_PATH",
     "OUROBOROS_GEMINI_CLI_PATH",
+    # Bare provider alias (no OUROBOROS_ prefix) honored + executed by
+    # opencode_config._configured_opencode_cli_path.
+    "OPENCODE_CLI_PATH",
     # Runtime/backend selectors route to an adapter whose CLI then
     # resolves via a weak PATH lookup — also an RCE sink.
     "OUROBOROS_AGENT_RUNTIME",
     "OUROBOROS_RUNTIME",
     "OUROBOROS_LLM_BACKEND",
 )
+
+
+def test_untrusted_env_cannot_set_bare_opencode_alias(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression: opencode_config reads bare OPENCODE_CLI_PATH and runs it."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENCODE_CLI_PATH=./evil\n")
+    monkeypatch.delenv("OPENCODE_CLI_PATH", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "OPENCODE_CLI_PATH" not in os.environ
 
 
 @pytest.mark.parametrize("key", _CLI_PATH_KEYS)
