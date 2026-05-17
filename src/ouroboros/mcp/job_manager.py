@@ -326,11 +326,6 @@ class JobManager:
             snapshot = await self.get_snapshot(job_id)
             if snapshot.is_terminal:
                 return
-            if job_id in self._monitor_terminalized_jobs:
-                completed_result = await self._derive_completed_execution_result(snapshot)
-                if completed_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
-                    await self._append_execution_completed_event(job_id, completed_result)
-                return
             await self._append_event(
                 "mcp.job.failed",
                 job_id,
@@ -344,11 +339,6 @@ class JobManager:
         else:
             snapshot = await self.get_snapshot(job_id)
             if snapshot.is_terminal:
-                return
-            if job_id in self._monitor_terminalized_jobs:
-                completed_result = await self._derive_completed_execution_result(snapshot)
-                if completed_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
-                    await self._append_execution_completed_event(job_id, completed_result)
                 return
             terminal_type = "mcp.job.completed"
             terminal_status = JobStatus.COMPLETED
@@ -368,6 +358,11 @@ class JobManager:
             elif getattr(result, "is_error", False):
                 terminal_type = "mcp.job.failed"
                 terminal_status = JobStatus.FAILED
+            elif job_id in self._monitor_terminalized_jobs:
+                completed_result = await self._derive_completed_execution_result(snapshot)
+                if completed_result is not None:
+                    await self._append_execution_completed_event(job_id, completed_result)
+                    return
             else:
                 completed_result = await self._derive_completed_execution_result(snapshot)
                 if completed_result is not None:
