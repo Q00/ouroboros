@@ -620,6 +620,36 @@ class TestProjectionQueryHandler:
         )
         await memory_event_store.append(
             BaseEvent(
+                id="evt_proj_artifact",
+                type="harness.artifact.recorded",
+                timestamp=t0 + timedelta(milliseconds=15),
+                aggregate_type="execution",
+                aggregate_id="exec_projection_123",
+                data={
+                    "call_id": "call_1",
+                    "artifact_id": "artifact_projection_123",
+                    "kind": "evidence",
+                    "path": "artifacts/projection.json",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_proj_verdict",
+                type="harness.verdict.recorded",
+                timestamp=t0 + timedelta(milliseconds=18),
+                aggregate_type="execution",
+                aggregate_id="exec_projection_123",
+                data={
+                    "verdict_id": "verdict_projection_123",
+                    "scope": "run",
+                    "outcome": "pass",
+                    "evidence_artifact_ids": ["artifact_projection_123"],
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
                 id="evt_proj_child",
                 type="tool.call.started",
                 timestamp=t0 + timedelta(milliseconds=20),
@@ -643,10 +673,34 @@ class TestProjectionQueryHandler:
         assert result.value.meta["execution_id"] == "exec_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_123"
         assert result.value.meta["seed_id_source"] == "event"
-        assert result.value.meta["event_count"] == 3
+        assert result.value.meta["event_count"] == 5
+        assert "Artifacts: 1" in result.value.text_content
+        assert "Verdicts: 1" in result.value.text_content
         assert result.value.meta["run"]["goal"] == "Inspect projection"
+        assert result.value.meta["run"]["verdict_id"] == "verdict_projection_123"
         assert len(result.value.meta["stages"]) == 1
         assert len(result.value.meta["steps"]) == 2
+        assert result.value.meta["artifacts"] == [
+            {
+                "schema_version": 1,
+                "artifact_id": "artifact_projection_123",
+                "step_id": result.value.meta["steps"][0]["step_id"],
+                "kind": "evidence",
+                "path": "artifacts/projection.json",
+                "media_type": None,
+                "size_bytes": None,
+                "digest": None,
+                "summary": "",
+                "metadata": {
+                    "source_event_id": "evt_proj_artifact",
+                    "event_type": "harness.artifact.recorded",
+                },
+            }
+        ]
+        assert result.value.meta["verdicts"][0]["verdict_id"] == "verdict_projection_123"
+        assert result.value.meta["verdicts"][0]["evidence_artifact_ids"] == [
+            "artifact_projection_123"
+        ]
         step = result.value.meta["steps"][0]
         assert step["kind"] == "shell_command"
         assert step["ok"] is True

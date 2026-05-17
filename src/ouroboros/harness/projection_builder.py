@@ -16,7 +16,12 @@ Recognized event families in PR-1b:
   ``Bash`` tool calls are classified as :attr:`StepKind.SHELL_COMMAND`.
 * ``llm.call.requested`` / ``llm.call.returned`` — paired by ``call_id``
   into a :class:`StepRecord` of kind :attr:`StepKind.MODEL_CALL`.
-* Stage / verdict events are not mapped yet. The builder produces a
+* ``harness.artifact.recorded`` / ``evaluation.artifact.recorded`` —
+  attached to already-projected steps as :class:`ArtifactRecord` rows.
+* ``harness.verdict.recorded`` / ``evaluation.verdict.recorded`` —
+  projected as :class:`VerdictRecord` rows with snapshot-safe evidence
+  links.
+* Stage events are not mapped yet. The builder produces a
   single default :class:`StageRecord` of kind
   :attr:`StageKind.EXECUTE` that owns every step; richer stage
   detection is deferred to a future PR.
