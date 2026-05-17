@@ -233,7 +233,7 @@ _VALIDATION_ONLY_TEST_SIGNAL_RE = re.compile(
 def _has_mixed_code_and_documentation_work(ac_content: str) -> bool:
     """Return True when one AC appears to combine code mutation and docs work."""
     for connector in re.finditer(
-        r"\b(?:and|then|while|plus)\b|,",
+        r"\b(?:and|then|while|plus)\b|[,;:]",
         ac_content,
         re.IGNORECASE,
     ):
@@ -257,7 +257,7 @@ def _has_mixed_code_and_documentation_work(ac_content: str) -> bool:
 def _has_mixed_test_and_documentation_work(ac_content: str) -> bool:
     """Return True when one AC appears to combine test mutation and docs work."""
     for connector in re.finditer(
-        r"\b(?:and|then|while|plus)\b|,",
+        r"\b(?:and|then|while|plus)\b|[,;:]",
         ac_content,
         re.IGNORECASE,
     ):
@@ -277,7 +277,7 @@ def _has_mixed_test_and_documentation_work(ac_content: str) -> bool:
 def _has_mixed_validation_and_documentation_work(ac_content: str) -> bool:
     """Return True when one AC appears to combine docs work and test execution."""
     for connector in re.finditer(
-        r"\b(?:and|then|while|plus)\b|,",
+        r"\b(?:and|then|while|plus)\b|[,;:]",
         ac_content,
         re.IGNORECASE,
     ):
