@@ -156,6 +156,7 @@ def test_validation_only_ac_drops_files_touched_requirement(ac_content: str) -> 
         "Change the runtime workflow and run pytest.",
         "Ensure tests cover invalid inputs.",
         "Check tests into the repo for the new parser.",
+        "Check the existing tests into the repo for the parser.",
         "Check in tests for the new parser.",
         "Update existing test_todo.py coverage for invalid index handling.",
         "Add coverage to test_todo.py and run python -m unittest test_todo.py.",
