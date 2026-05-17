@@ -2657,6 +2657,7 @@ async def test_pipeline_grade_gate_resume_prefers_repaired_seed_path(tmp_path) -
     assert result.status == "complete"
     assert result.grade == "A"
     assert state.seed_artifact == repaired_seed.to_dict()
+    assert state.seed_id == repaired_seed.metadata.seed_id
 
 
 @pytest.mark.asyncio
@@ -2849,6 +2850,7 @@ async def test_pipeline_recovers_seed_loader_failure_from_review(tmp_path) -> No
     assert result.status == "complete"
     assert result.grade == "A"
     assert state.seed_artifact == repaired_seed.to_dict()
+    assert state.seed_id == repaired_seed.metadata.seed_id
 
 
 @pytest.mark.asyncio
