@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import importlib.resources
+import os
 from pathlib import Path
 import shutil
 from typing import Literal
@@ -310,6 +311,36 @@ def _prepare_managed_install_root(path: Path) -> None:
 
 def _refuse_symlinked_path_component(path: Path) -> None:
     """Fail closed when any existing component in an install root is a symlink."""
+    for candidate_path in _install_root_candidates(path):
+        _refuse_symlinked_candidate_path_component(candidate_path)
+
+
+def _install_root_candidates(path: Path) -> tuple[Path, ...]:
+    """Return filesystem paths that may be followed for an install root."""
+    if path.is_absolute():
+        return (path,)
+
+    candidates = [Path.cwd() / path]
+    pwd = os.environ.get("PWD")
+    if not pwd:
+        return tuple(candidates)
+
+    pwd_path = Path(pwd).expanduser()
+    if not pwd_path.is_absolute():
+        return tuple(candidates)
+
+    try:
+        pwd_matches_cwd = pwd_path.resolve(strict=True) == Path.cwd().resolve(strict=True)
+    except OSError:
+        pwd_matches_cwd = False
+    if pwd_matches_cwd:
+        candidates.append(pwd_path / path)
+
+    return tuple(dict.fromkeys(candidates))
+
+
+def _refuse_symlinked_candidate_path_component(path: Path) -> None:
+    """Fail closed when any existing component in one install-root candidate is a symlink."""
     for component in (*reversed(path.parents), path):
         if not component.is_symlink():
             continue

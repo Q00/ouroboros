@@ -162,6 +162,24 @@ class TestInstallCodexRules:
         assert installed_path.read_text(encoding="utf-8").startswith("# fresh rules\n")
         assert not missing_target.exists()
 
+    def test_refuses_relative_rules_root_from_symlinked_cwd(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Relative rule installs must not resolve through a symlinked cwd."""
+        real_workspace = tmp_path / "real-workspace"
+        symlink_workspace = tmp_path / "linked-workspace"
+        packaged_rules_dir = tmp_path / "packaged-rules"
+        real_workspace.mkdir()
+        symlink_workspace.symlink_to(real_workspace, target_is_directory=True)
+        self._write_rule(packaged_rules_dir, CODEX_RULE_FILENAME, "# fresh rules\n")
+        monkeypatch.chdir(symlink_workspace)
+        monkeypatch.setenv("PWD", str(symlink_workspace))
+
+        with pytest.raises(OSError, match="symlinked"):
+            install_codex_rules(codex_dir=".codex", rules_dir=packaged_rules_dir)
+
+        assert not real_workspace.joinpath(".codex", "rules", CODEX_RULE_FILENAME).exists()
+
     def test_packaged_rules_fail_closed_for_ooo_auto(self) -> None:
         """Codex rules must route ``ooo auto`` to the real MCP tool, not manual work."""
         rules = load_packaged_codex_rules()
@@ -532,6 +550,26 @@ class TestInstallCodexSkills:
             "fresh status skill"
         )
         assert not missing_target.exists()
+
+    def test_refuses_relative_skills_root_from_symlinked_cwd(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Relative skill installs must not resolve through a symlinked cwd."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "status", body="fresh status skill")
+        real_workspace = tmp_path / "real-workspace"
+        symlink_workspace = tmp_path / "linked-workspace"
+        real_workspace.mkdir()
+        symlink_workspace.symlink_to(real_workspace, target_is_directory=True)
+        monkeypatch.chdir(symlink_workspace)
+        monkeypatch.setenv("PWD", str(symlink_workspace))
+
+        with pytest.raises(OSError, match="symlinked"):
+            install_codex_skills(codex_dir=".codex", skills_dir=source_skills_dir)
+
+        assert not real_workspace.joinpath(
+            ".codex", "skills", f"{CODEX_SKILL_NAMESPACE}status"
+        ).exists()
 
 
 class TestResolvePackagedCodexAssets:

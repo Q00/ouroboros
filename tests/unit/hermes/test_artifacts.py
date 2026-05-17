@@ -232,3 +232,27 @@ class TestInstallHermesSkills:
 
         assert stale_skill.joinpath("SKILL.md").read_text(encoding="utf-8") == "outside stale"
         assert not outside_skill_root.joinpath("run").exists()
+
+    def test_refuses_relative_hermes_root_from_symlinked_cwd(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Relative Hermes installs must not resolve through a symlinked cwd."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        real_workspace = tmp_path / "real-workspace"
+        symlink_workspace = tmp_path / "linked-workspace"
+        real_workspace.mkdir()
+        symlink_workspace.symlink_to(real_workspace, target_is_directory=True)
+        monkeypatch.chdir(symlink_workspace)
+        monkeypatch.setenv("PWD", str(symlink_workspace))
+
+        with pytest.raises(OSError, match="symlinked"):
+            install_hermes_skills(hermes_dir=".hermes")
+
+        assert not real_workspace.joinpath(
+            ".hermes", "skills", "autonomous-ai-agents", "ouroboros", "run"
+        ).exists()
