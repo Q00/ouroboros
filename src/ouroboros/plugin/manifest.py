@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.plugin.hooks import (
+    HOOK_LIFECYCLE_READ_SCOPE,
     is_deferred_hook_kind,
     is_excluded_hook_kind,
     is_v1_failure_policy,
@@ -386,6 +387,13 @@ def _build_hook(
                 got=scope,
             )
 
+    _validate_hook_lifecycle_permission(
+        raw,
+        hook_index=hook_index,
+        manifest_path=manifest_path,
+        schema_version=schema_version,
+    )
+
     entrypoint_raw = raw["entrypoint"]
     return HookSpec(
         name=hook_name,
@@ -397,6 +405,35 @@ def _build_hook(
         timeout_seconds=raw.get("timeout_seconds"),
         permissions=tuple(raw.get("permissions", ())),
         description=raw.get("description", ""),
+    )
+
+
+def _validate_hook_lifecycle_permission(
+    raw: dict[str, Any],
+    *,
+    hook_index: int,
+    manifest_path: str | Path,
+    schema_version: str,
+) -> None:
+    """Require v0.3 lifecycle hooks to declare the v1 read permission.
+
+    Earlier slices introduced ``plugin:lifecycle:read`` as the permission
+    boundary for v1 observability hooks. Enforce it only for the tightened
+    v0.3 hook contract so supported v0.2 manifests keep their compatibility
+    behavior until that schema version is retired deliberately.
+    """
+
+    if schema_version != "0.3" or not is_v1_hook_kind(raw["name"]):
+        return
+    permissions = raw.get("permissions", ())
+    if HOOK_LIFECYCLE_READ_SCOPE in permissions:
+        return
+    raise PluginManifestError(
+        "v0.3 lifecycle hook must declare plugin:lifecycle:read",
+        path=str(manifest_path),
+        json_pointer=f"/hooks/{hook_index}/permissions",
+        expected=f"{HOOK_LIFECYCLE_READ_SCOPE!r} in hooks[].permissions",
+        got=permissions,
     )
 
 

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from ouroboros.plugin.hooks import HOOK_LIFECYCLE_READ_SCOPE
 from ouroboros.plugin.manifest import PluginManifestError, load_manifest
 
 # Re-use the canonical reference manifest from the existing manifest
@@ -30,6 +31,14 @@ from tests.unit.plugin.test_manifest import REFERENCE_MANIFEST
 def _hook_manifest() -> dict:
     payload = deepcopy(REFERENCE_MANIFEST)
     payload["schema_version"] = "0.3"
+    payload["permissions"].append(
+        {
+            "scope": HOOK_LIFECYCLE_READ_SCOPE,
+            "risk": "read_only",
+            "required": True,
+            "reason": "Allow v1 lifecycle hook observation.",
+        }
+    )
     return payload
 
 
@@ -50,7 +59,7 @@ def _valid_hook(name: str = "before_invocation", failure_policy: str = "fail_clo
             "type": "command",
             "command": "python -m plugin_hooks before",
         },
-        "permissions": [],
+        "permissions": [HOOK_LIFECYCLE_READ_SCOPE],
         "failure_policy": failure_policy,
         "timeout_seconds": 5,
     }
@@ -126,3 +135,36 @@ class TestHookFailurePolicy:
             load_manifest(_write(tmp_path, payload))
         err = exc_info.value
         assert err.json_pointer == "/hooks/0/failure_policy"
+
+
+class TestHookLifecyclePermission:
+    """v0.3 hooks must opt into the v1 lifecycle permission boundary."""
+
+    def test_missing_lifecycle_permission_rejected(self, tmp_path: Path) -> None:
+        payload = _hook_manifest()
+        payload["hooks"] = [_valid_hook()]
+        payload["hooks"][0]["permissions"] = []
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        err = exc_info.value
+        assert err.json_pointer == "/hooks/0/permissions"
+        assert "plugin:lifecycle:read" in err.args[0]
+        assert "hooks[].permissions" in err.expected
+
+    def test_lifecycle_permission_must_still_be_declared_top_level(self, tmp_path: Path) -> None:
+        payload = _hook_manifest()
+        payload["permissions"] = [
+            permission
+            for permission in payload["permissions"]
+            if permission["scope"] != HOOK_LIFECYCLE_READ_SCOPE
+        ]
+        payload["hooks"] = [_valid_hook()]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        err = exc_info.value
+        assert err.json_pointer == "/hooks/0/permissions/0"
+        assert "top-level permissions" in err.args[0]

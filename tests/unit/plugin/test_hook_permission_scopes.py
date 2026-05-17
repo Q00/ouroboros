@@ -6,9 +6,8 @@ frozen membership set and ``is_hook_lifecycle_scope`` is the routing
 helper consumed by manifest validators / capability resolvers in a
 later slice.
 
-This PR adds only the constants and the routing helper — no manifest
-validation requirement that hooks declare a lifecycle scope (that
-lands alongside the `plugin.permission_used` emission rule update).
+The manifest validator consumes the constants so v0.3 hook declarations
+must opt into the lifecycle read boundary before runtime dispatch lands.
 """
 
 from __future__ import annotations
