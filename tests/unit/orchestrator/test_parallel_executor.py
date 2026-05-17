@@ -6320,6 +6320,7 @@ class TestParallelACExecutor:
             seed_goal="Ship the feature",
             depth=0,
             start_time=datetime.now(UTC),
+            execution_id="exec_ac_progress",
         )
 
         appended_events = [call.args[0] for call in event_store.append.await_args_list]
@@ -6328,6 +6329,9 @@ class TestParallelACExecutor:
         )
         completed_event = next(
             event for event in appended_events if event.type == "execution.session.completed"
+        )
+        execution_completed_event = next(
+            event for event in appended_events if event.type == "execution.ac.completed"
         )
 
         assert result.success is True
@@ -6347,6 +6351,11 @@ class TestParallelACExecutor:
         assert "transcript_path" not in started_event.data["runtime"]
         assert "updated_at" not in started_event.data["runtime"]
         assert completed_event.data["session_id"] == "server-42"
+        assert execution_completed_event.aggregate_id == "exec_ac_progress"
+        assert execution_completed_event.data["success"] is True
+        assert execution_completed_event.data["acceptance_criterion"] == (
+            "Persist reconnectable OpenCode implementation handles"
+        )
 
     @pytest.mark.asyncio
     async def test_restarted_executor_loads_persisted_runtime_handle_for_same_attempt(self) -> None:

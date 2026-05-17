@@ -2632,6 +2632,26 @@ class ParallelACExecutor:
         if tool_catalog is not None:
             event.data["tool_catalog"] = tool_catalog
         await self._event_store.append(event)
+        if success is True and execution_id:
+            await self._event_store.append(
+                BaseEvent(
+                    type="execution.ac.completed",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id,
+                    data={
+                        **identity_metadata,
+                        "ac_id": runtime_identity.ac_id,
+                        "acceptance_criterion": ac_content,
+                        "execution_id": execution_id,
+                        "session_id": effective_session_id,
+                        "session_scope_id": runtime_identity.session_scope_id,
+                        "retry_attempt": runtime_identity.retry_attempt,
+                        "attempt_number": runtime_identity.attempt_number,
+                        "success": True,
+                        "result_summary": result_summary,
+                    },
+                )
+            )
 
     @staticmethod
     def _coerce_ac_indices(raw_indices: Any) -> tuple[int, ...]:
