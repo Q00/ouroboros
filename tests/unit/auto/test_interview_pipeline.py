@@ -1161,6 +1161,50 @@ async def test_pipeline_uses_explicit_goal_facts_before_completed_interview(tmp_
 
 
 @pytest.mark.asyncio
+async def test_pipeline_syncs_state_seed_id_after_repair_changes_identity(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_repair", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not need another answer")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed(ac=("Make it nice",))
+
+    saved: list[str] = []
+
+    def save(seed: Seed) -> str:
+        path = str(tmp_path / f"{seed.metadata.seed_id}.yaml")
+        saved.append(path)
+        return path
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.skip_run = True
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        seed_saver=save,
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    repaired = Seed.from_dict(state.seed_artifact)
+    assert result.status == "complete"
+    assert state.seed_id == repaired.metadata.seed_id
+    assert saved == [str(tmp_path / f"{repaired.metadata.seed_id}.yaml")]
+    assert state.seed_path == saved[0]
+    assert repaired.metadata.parent_seed_id is not None
+
+
+@pytest.mark.asyncio
 async def test_interview_resume_uses_persisted_pending_question(tmp_path) -> None:
     calls: list[str] = []
 
