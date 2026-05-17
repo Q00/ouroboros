@@ -417,7 +417,6 @@ class JobManager:
 
                 progress_blocker = await self._derive_progress_accounting_blocker(snapshot)
                 if progress_blocker is not None:
-                    self._monitor_terminalized_jobs.add(job_id)
                     await asyncio.shield(
                         self._append_event(
                             "mcp.job.failed",
@@ -432,6 +431,7 @@ class JobManager:
                             },
                         )
                     )
+                    self._monitor_terminalized_jobs.add(job_id)
                     runner = self._runner_tasks.pop(job_id, None)
                     if runner is not None and not runner.done():
                         runner.cancel()

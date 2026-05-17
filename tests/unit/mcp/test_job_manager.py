@@ -282,6 +282,84 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_progress_accounting_append_failure_does_not_suppress_runner_terminalization(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            stop = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                await stop.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late done"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_append_fail", execution_id="exec_append_fail"),
+            )
+
+            original_append_event = manager._append_event
+
+            async def _fail_terminal_failure_append(
+                event_type: str, job_id: str, data: dict, **kwargs
+            ) -> None:
+                if event_type == "mcp.job.failed":
+                    raise PersistenceError("synthetic append failure", operation="insert")
+                await original_append_event(event_type, job_id, data, **kwargs)
+
+            manager._append_event = _fail_terminal_failure_append
+
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_append_fail",
+                    data={
+                        "session_id": "orch_append_fail",
+                        "completed_count": 0,
+                        "total_count": 1,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.completed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_append_fail_ac_1",
+                    data={
+                        "execution_id": "exec_append_fail",
+                        "session_id": "child_1",
+                        "session_scope_id": "exec_append_fail_ac_1",
+                        "success": True,
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_append_fail",
+                    data={"session_id": "orch_append_fail", "status": "failed"},
+                )
+            )
+
+            await asyncio.sleep(1.2)
+
+            assert started.job_id not in manager._monitor_terminalized_jobs
+            assert (await manager.get_snapshot(started.job_id)).status is JobStatus.RUNNING
+        finally:
+            stop.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_progress_accounting_blocker_requires_failed_execution_terminal(
         self, tmp_path
     ) -> None:
