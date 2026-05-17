@@ -1164,10 +1164,13 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "execution_id": result.execution_id,
         "job_id": result.job_id,
         "run_session_id": result.run_session_id,
-        "execution_job_status": result.execution_job_status,
-        "execution_job_error": result.execution_job_error,
-        "execution_job_message": result.execution_job_message,
     }
+    if result.execution_job_status:
+        meta["execution_job_status"] = result.execution_job_status
+    if result.execution_job_error:
+        meta["execution_job_error"] = result.execution_job_error
+    if result.execution_job_message:
+        meta["execution_job_message"] = result.execution_job_message
     # Only advertise a runnable resume_command when --resume actually has
     # something to do. NONE-capability sessions (COMPLETE, or unrecoverable
     # BLOCKED/FAILED) must not surface a resume action via metadata —
@@ -1244,7 +1247,7 @@ async def _reconcile_execution_job_snapshot(result: AutoPipelineResult) -> AutoP
         return result
     blocker = result.blocker
     status = result.status
-    if snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED}:
+    if snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
         detail = snapshot.error or snapshot.result_text or snapshot.message
         blocker = (
             f"execution job {snapshot.status.value}: {detail}"
@@ -1818,7 +1821,11 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Execution job status: {result.execution_job_status}")
     if result.execution_job_error:
         lines.append(f"Execution job error: {result.execution_job_error}")
-    elif result.execution_job_message and result.execution_job_status in {"failed", "cancelled"}:
+    elif result.execution_job_message and result.execution_job_status in {
+        "failed",
+        "cancelled",
+        "interrupted",
+    }:
         lines.append(f"Execution job message: {result.execution_job_message}")
     if result.run_handoff_guidance:
         lines.append(f"Run handoff guidance: {result.run_handoff_guidance}")

@@ -181,6 +181,30 @@ def test_execution_job_cancelled_blocks_complete_auto_result(monkeypatch) -> Non
     assert reconciled.blocker == "execution job cancelled: Job cancelled"
 
 
+def test_execution_job_interrupted_blocks_complete_auto_result(monkeypatch) -> None:
+    class FakeJobManager:
+        async def get_snapshot(self, job_id: str) -> JobSnapshot:
+            assert job_id == "job_failed"
+            return _job_snapshot(JobStatus.INTERRUPTED)
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.JobManager",
+        lambda: FakeJobManager(),
+    )
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_1",
+        phase="complete",
+        job_id="job_failed",
+    )
+
+    reconciled = asyncio.run(_reconcile_execution_job_snapshot(result))
+
+    assert reconciled.status == "blocked"
+    assert reconciled.execution_job_status == "interrupted"
+    assert reconciled.blocker == "execution job interrupted: Job interrupted"
+
+
 def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
     """Observation-style prompts should seed known ledger sections before interview."""
     preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)
