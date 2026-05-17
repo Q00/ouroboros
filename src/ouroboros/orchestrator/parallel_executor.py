@@ -339,16 +339,33 @@ def _runtime_message_file_path_values(message: AgentMessage) -> tuple[str, ...]:
 
 
 def _runtime_message_command_values(message: AgentMessage) -> tuple[str, ...]:
-    """Return explicit command strings carried by a runtime message."""
+    """Return explicit command strings carried by a runtime message.
+
+    Runtime adapters normalize shell calls slightly differently.  Codex-like
+    events usually expose ``tool_input.command``; Goose may expose ``cmd`` or a
+    list argv form.  Keep extraction structured, not prose-based, so command
+    evidence does not fall back to arbitrary assistant text.
+    """
     values: list[str] = []
     for container_key in ("tool_input", "input", "arguments", "args"):
         container = message.data.get(container_key)
         if not isinstance(container, dict):
             continue
-        command = container.get("command")
-        if isinstance(command, str) and command.strip():
-            values.append(command.strip())
+        for command_key in ("command", "cmd", "command_line"):
+            command = container.get(command_key)
+            normalized = _runtime_command_value_to_text(command)
+            if normalized and normalized not in values:
+                values.append(normalized)
     return tuple(values)
+
+
+def _runtime_command_value_to_text(value: object) -> str | None:
+    """Normalize a structured runtime command value into shell text."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, list) and value:
+        return shlex.join(str(part) for part in value)
+    return None
 
 
 def _file_claim_matches_runtime_path(

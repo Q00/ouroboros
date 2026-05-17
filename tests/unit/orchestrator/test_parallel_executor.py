@@ -251,6 +251,28 @@ def test_command_claim_does_not_support_partial_shell_body() -> None:
     assert not _runtime_messages_support_command_claim("rg --files", (message,))
 
 
+def test_command_claim_supports_goose_cmd_and_list_shapes() -> None:
+    """Goose Bash tool_input may use cmd and list argv forms instead of command."""
+    cmd_message = AgentMessage(
+        type="tool",
+        content="Calling tool: Bash: pytest tests/test_a.py",
+        tool_name="Bash",
+        data={"tool_input": {"cmd": "pytest tests/test_a.py"}},
+    )
+    list_message = AgentMessage(
+        type="tool",
+        content="Calling tool: Bash: python -m unittest test_slugify.py",
+        tool_name="Bash",
+        data={"tool_input": {"cmd": ["python", "-m", "unittest", "test_slugify.py"]}},
+    )
+
+    assert _runtime_messages_support_command_claim("pytest tests/test_a.py", (cmd_message,))
+    assert _runtime_messages_support_command_claim(
+        "python -m unittest test_slugify.py",
+        (list_message,),
+    )
+
+
 def test_command_claim_supports_inner_command_after_safe_shell_preamble() -> None:
     """Wrapped production commands may cite the inner command after setup preambles."""
     message = AgentMessage(
