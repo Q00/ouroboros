@@ -48,6 +48,7 @@ def test_normalize_execution_acceptance_drops_auto_report_criteria() -> None:
     normalized = normalize_execution_acceptance(seed)
 
     assert normalized.acceptance_criteria == (
+        "Manual fallback is not used.",
         "`hello_auto.py` defines `hello_auto()` returning exactly `hello from ooo auto`.",
         "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
         "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
@@ -76,6 +77,7 @@ def test_normalize_execution_acceptance_preserves_mixed_non_keyword_requirements
         "CLI exits 2 on invalid flags.",
         "HTTP 400 responses include a machine-readable error code.",
         "JSON output matches the documented schema.",
+        "Final report includes auto session id and seed path.",
     )
 
 
@@ -87,7 +89,10 @@ def test_normalize_execution_acceptance_preserves_expected_ooo_auto_output() -> 
 
     normalized = normalize_execution_acceptance(seed)
 
-    assert normalized.acceptance_criteria == ("The command prints exactly `hello from ooo auto`.",)
+    assert normalized.acceptance_criteria == (
+        "The command prints exactly `hello from ooo auto`.",
+        "Manual fallback is not used.",
+    )
 
 
 def test_normalize_execution_acceptance_preserves_product_final_report_and_fallback() -> None:
@@ -98,7 +103,7 @@ def test_normalize_execution_acceptance_preserves_product_final_report_and_fallb
         "Previous blocker history is visible in the admin UI.",
         "Persist last_question for resumed interviews.",
         "Manual fallback is not used.",
-    )
+    ).model_copy(update={"goal": "Build a reporting API with fallback controls"})
 
     normalized = normalize_execution_acceptance(seed)
 
@@ -108,4 +113,13 @@ def test_normalize_execution_acceptance_preserves_product_final_report_and_fallb
         "The final report endpoint includes seed id and seed path.",
         "Previous blocker history is visible in the admin UI.",
         "Persist last_question for resumed interviews.",
+        "Manual fallback is not used.",
     )
+
+
+def test_normalize_execution_acceptance_preserves_exact_product_metadata_requirement() -> None:
+    seed = _seed(
+        "Final report includes auto session id, seed id, seed path, and test result.",
+    ).model_copy(update={"goal": "Build a product final-report endpoint"})
+
+    assert normalize_execution_acceptance(seed) is seed

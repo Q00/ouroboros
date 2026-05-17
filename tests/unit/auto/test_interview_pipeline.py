@@ -3786,10 +3786,12 @@ async def test_pipeline_normalizes_persisted_seed_artifact_on_resume(tmp_path) -
 
     seed = _seed(
         ac=(
+            "`hello_auto.py` exists.",
+            "`tests/test_hello_auto.py` exists.",
             "Final report includes auto session id, seed id, seed path, and test result.",
             "CLI exits 2 on invalid flags.",
         )
-    )
+    ).model_copy(update={"goal": "Verify current ooo auto can create hello_auto.py."})
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.transition(AutoPhase.INTERVIEW, "interview")
     state.transition(AutoPhase.SEED_GENERATION, "seed generated")

@@ -4,33 +4,37 @@ from __future__ import annotations
 
 from ouroboros.core.seed import Seed
 
-_AUTO_DISPATCH_MARKERS = (
-    "`ooo auto` is dispatched",
-    "ooo auto is dispatched",
-    "handled by ouroboros auto/mcp",
-    "handled by ouroboros auto",
-    "dispatch through mcp",
-    "dispatched to the mcp",
-    "mcp dispatch",
+_AUTO_WRAPPER_CRITERIA = frozenset(
+    {
+        "`ooo auto` is dispatched to the mcp tool `ouroboros_auto`",
+        "`ooo auto` is handled by ouroboros auto/mcp, not plain text",
+        "final report includes auto session id, seed id, seed path, and test result",
+        "final report includes auto session id, seed id, files changed, exact test command, and test result",
+    }
 )
 
-_FINAL_REPORT_WRAPPER_PREFIXES = (
-    "final report includes auto session id",
-    "the final report includes auto session id",
+_OBSERVATION_CONTEXT_REQUIRED = (
+    "hello_auto.py",
+    "tests/test_hello_auto.py",
+)
+
+_OBSERVATION_CONTEXT_ALTERNATES = (
+    "ooo auto",
+    "ouroboros_auto",
 )
 
 
 def normalize_execution_acceptance(seed: Seed) -> Seed:
     """Remove auto-observation/reporting criteria from execution Seeds.
 
-    Auto observation prompts often include reporting requirements such as
-    "manual fallback was not used" or "final report includes seed id". Those
-    are wrapper/reporting duties, not implementation duties for the execution
-    worker. Keep concrete file/test criteria and drop only meta-observation
-    criteria when doing so still leaves executable acceptance criteria.
+    Auto observation prompts can include wrapper/reporting duties such as
+    dispatch confirmation and final auto-session metadata. Those should not be
+    handed to the execution worker as implementation ACs. To avoid mutating
+    product requirements, only strip exact known wrapper criteria when the Seed
+    itself carries auto-wrapper context.
     """
     criteria = tuple(ac for ac in seed.acceptance_criteria if ac and ac.strip())
-    if not criteria:
+    if not criteria or not _has_auto_wrapper_context(seed.goal, criteria):
         return seed
 
     filtered = tuple(ac for ac in criteria if not is_auto_reporting_acceptance_criterion(ac))
@@ -40,22 +44,21 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
 
 
 def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
-    """Return true for wrapper/report-only criteria, not execution requirements.
+    """Return true only for exact known auto wrapper/report-only criteria."""
+    return _criterion_key(criterion) in _AUTO_WRAPPER_CRITERIA
 
-    The classifier is intentionally narrow: it recognizes the observation
-    wrapper's own reporting/dispatch obligations, while preserving product
-    requirements that merely mention concepts such as manual fallback, final
-    reports, IDs, blocker history, or interview fields.
-    """
-    lowered = " ".join(criterion.casefold().split())
-    if any(marker in lowered for marker in _AUTO_DISPATCH_MARKERS):
-        return True
-    if "manual fallback" in lowered and (
-        "not used" in lowered or "was not used" in lowered or "is not used" in lowered
-    ):
-        return True
-    if lowered.startswith(_FINAL_REPORT_WRAPPER_PREFIXES):
-        return True
-    return "ouroboros_auto" in lowered and (
-        "unavailable" in lowered or "interpreted as normal text" in lowered
+
+def has_auto_wrapper_context(text: str) -> bool:
+    """Return true only for the known hello_auto observation prompt shape."""
+    lowered = text.casefold()
+    return all(marker in lowered for marker in _OBSERVATION_CONTEXT_REQUIRED) and any(
+        marker in lowered for marker in _OBSERVATION_CONTEXT_ALTERNATES
     )
+
+
+def _has_auto_wrapper_context(goal: str, criteria: tuple[str, ...]) -> bool:
+    return has_auto_wrapper_context("\n".join((goal, *criteria)))
+
+
+def _criterion_key(criterion: str) -> str:
+    return " ".join(criterion.casefold().strip().rstrip(".").split())

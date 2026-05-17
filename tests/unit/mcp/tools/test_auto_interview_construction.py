@@ -300,7 +300,45 @@ Success criteria:
         "CLI exits 2 on invalid flags.\n"
         "HTTP 400 responses include a machine-readable error code.\n"
         "JSON output matches the documented schema.\n"
-        "The command prints exactly `hello from ooo auto`."
+        "The command prints exactly `hello from ooo auto`.\n"
+        "Final report includes auto session id, seed id, seed path, and test result."
+    )
+
+
+def test_structured_auto_goal_filters_wrapper_criteria_using_full_prompt_context() -> None:
+    goal = """
+Goal:
+Verify current ooo auto can create hello_auto.py and tests/test_hello_auto.py.
+
+Success criteria:
+- `hello_auto.py` exists.
+- `tests/test_hello_auto.py` exists.
+- Final report includes auto session id, seed id, seed path, and test result.
+
+Important dispatch rule:
+If `ouroboros_auto` is unavailable or interpreted as normal text, stop and report failure.
+"""
+
+    preferences = _derive_goal_user_preferences(goal)
+
+    assert preferences["acceptance_criteria"] == (
+        "`hello_auto.py` exists.\n`tests/test_hello_auto.py` exists."
+    )
+
+
+def test_structured_product_goal_preserves_exact_final_report_metadata_requirement() -> None:
+    goal = """
+Goal:
+Build a product final-report endpoint.
+
+Success criteria:
+- Final report includes auto session id, seed id, seed path, and test result.
+"""
+
+    preferences = _derive_goal_user_preferences(goal)
+
+    assert preferences["acceptance_criteria"] == (
+        "Final report includes auto session id, seed id, seed path, and test result."
     )
 
 
