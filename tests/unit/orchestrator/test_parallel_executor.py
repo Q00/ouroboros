@@ -105,6 +105,17 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
         commands,
     )
     assert not _criterion_satisfied_by_evidence(
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes and covers edge cases.",
+        files,
+        commands,
+        commands,
+    )
+    assert not _criterion_satisfied_by_evidence(
+        "Run the exact command `uv run pytest tests/test_hello_auto.py` and inspect output.",
+        files,
+        commands,
+    )
+    assert not _criterion_satisfied_by_evidence(
         "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
         files,
         commands,

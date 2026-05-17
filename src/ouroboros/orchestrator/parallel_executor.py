@@ -1532,7 +1532,6 @@ def _criterion_satisfied_by_evidence(
 ) -> bool:
     """Conservatively decide whether evidence satisfies a sibling criterion."""
     lowered = criterion.casefold()
-    normalized_criterion = _normalize_command(criterion).casefold()
     normalized_run_commands = {
         _normalize_command(command).casefold() for command in run_commands if command
     }
@@ -1554,7 +1553,7 @@ def _criterion_satisfied_by_evidence(
     )
     if any(marker in lowered for marker in command_success_markers):
         for command in normalized_passed_commands:
-            if command and command in normalized_criterion:
+            if command and _criterion_is_exact_command_pass_ac(criterion, command):
                 return True
         return False
 
@@ -1562,7 +1561,7 @@ def _criterion_satisfied_by_evidence(
     for command in normalized_run_commands:
         if (
             command
-            and command in normalized_criterion
+            and _criterion_is_exact_command_run_ac(criterion, command)
             and any(marker in lowered for marker in command_run_markers)
         ):
             return True
@@ -1595,6 +1594,56 @@ def _criterion_is_exact_file_presence_ac(criterion: str, file_path: str) -> bool
         "<path> is present",
         "the file <path> exists",
         "the file <path> is present",
+    }
+
+
+def _criterion_inline_code_values(criterion: str) -> list[str]:
+    """Return normalized inline-code fragments from a criterion."""
+    return [
+        _normalized_evidence_text(match.group(1).strip())
+        for match in re.finditer(r"`([^`]+)`", criterion)
+        if match.group(1).strip()
+    ]
+
+
+def _criterion_is_exact_command_pass_ac(criterion: str, command: str) -> bool:
+    """Return True when the criterion is only an exact command-pass AC."""
+    normalized_command = _normalized_evidence_text(command)
+    if not normalized_command or _criterion_inline_code_values(criterion) != [normalized_command]:
+        return False
+    normalized = _normalized_evidence_text(
+        re.sub(r"`[^`]+`", "<command>", criterion).strip().rstrip(".")
+    )
+    return normalized in {
+        "<command> passes",
+        "<command> passed",
+        "<command> succeeds",
+        "<command> succeeded",
+        "the exact command <command> passes",
+        "the exact command <command> passed",
+        "the exact command <command> succeeds",
+        "the exact command <command> succeeded",
+        "the exact command <command> exits with code 0",
+        "the command <command> passes",
+        "the command <command> succeeds",
+    }
+
+
+def _criterion_is_exact_command_run_ac(criterion: str, command: str) -> bool:
+    """Return True when the criterion is only an exact command-run AC."""
+    normalized_command = _normalized_evidence_text(command)
+    if not normalized_command or _criterion_inline_code_values(criterion) != [normalized_command]:
+        return False
+    normalized = _normalized_evidence_text(
+        re.sub(r"`[^`]+`", "<command>", criterion).strip().rstrip(".")
+    )
+    return normalized in {
+        "run <command>",
+        "run the exact command <command>",
+        "execute <command>",
+        "execute the exact command <command>",
+        "the exact command <command> runs",
+        "the command <command> runs",
     }
 
 
