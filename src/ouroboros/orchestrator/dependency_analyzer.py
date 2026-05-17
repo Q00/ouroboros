@@ -273,68 +273,97 @@ class HybridExecutionPlanner:
             msg = "Dependency graph contains duplicate AC node indices"
             raise ExecutionPlanningError(msg)
 
-        execution_levels = dependency_graph.execution_levels
-        if not execution_levels and dependency_graph.nodes:
-            execution_levels = _apply_serial_only_constraints(
+        if dependency_graph.execution_levels:
+            normalized_levels = tuple(
+                tuple(sorted(level)) for level in dependency_graph.execution_levels if level
+            )
+            try:
+                return _create_staged_execution_plan(
+                    nodes=dependency_graph.nodes,
+                    node_map=node_map,
+                    normalized_levels=normalized_levels,
+                )
+            except ExecutionPlanningError as exc:
+                log.warning(
+                    "dependency_analyzer.invalid_execution_levels_recomputed",
+                    error=str(exc),
+                    execution_levels=normalized_levels,
+                )
+
+        recomputed_levels: tuple[tuple[int, ...], ...] = ()
+        if dependency_graph.nodes:
+            recomputed_levels = _apply_serial_only_constraints(
                 _compute_execution_levels(dependency_graph.nodes),
                 dependency_graph.nodes,
             )
+        return _create_staged_execution_plan(
+            nodes=dependency_graph.nodes,
+            node_map=node_map,
+            normalized_levels=recomputed_levels,
+        )
 
-        normalized_levels = tuple(tuple(sorted(level)) for level in execution_levels if level)
-        ac_to_stage: dict[int, int] = {}
-        for stage_index, level in enumerate(normalized_levels):
-            for ac_index in level:
-                if ac_index in ac_to_stage:
-                    msg = f"AC {ac_index} appears in multiple execution stages"
-                    raise ExecutionPlanningError(msg)
-                ac_to_stage[ac_index] = stage_index
 
-        if node_map:
-            expected = set(node_map)
-            planned = set(ac_to_stage)
-            if expected != planned:
-                missing = sorted(expected - planned)
-                extra = sorted(planned - expected)
-                details: list[str] = []
-                if missing:
-                    details.append(f"missing={missing}")
-                if extra:
-                    details.append(f"extra={extra}")
-                msg = "Execution stages do not match dependency graph nodes: " + ", ".join(details)
+def _create_staged_execution_plan(
+    *,
+    nodes: tuple[ACNode, ...],
+    node_map: dict[int, ACNode],
+    normalized_levels: tuple[tuple[int, ...], ...],
+) -> StagedExecutionPlan:
+    """Build a staged plan from pre-normalized levels after validation."""
+    ac_to_stage: dict[int, int] = {}
+    for stage_index, level in enumerate(normalized_levels):
+        for ac_index in level:
+            if ac_index in ac_to_stage:
+                msg = f"AC {ac_index} appears in multiple execution stages"
                 raise ExecutionPlanningError(msg)
+            ac_to_stage[ac_index] = stage_index
 
-        stages: list[ExecutionStage] = []
-        for stage_index, level in enumerate(normalized_levels):
-            depends_on_stages: set[int] = set()
-            for ac_index in level:
-                node = node_map.get(ac_index)
-                if node is None:
-                    continue
-                if node.requires_serial_stage and len(level) > 1:
-                    msg = f"Serialized AC {ac_index} cannot share stage {stage_index + 1}"
+    if node_map:
+        expected = set(node_map)
+        planned = set(ac_to_stage)
+        if expected != planned:
+            missing = sorted(expected - planned)
+            extra = sorted(planned - expected)
+            details: list[str] = []
+            if missing:
+                details.append(f"missing={missing}")
+            if extra:
+                details.append(f"extra={extra}")
+            msg = "Execution stages do not match dependency graph nodes: " + ", ".join(details)
+            raise ExecutionPlanningError(msg)
+
+    stages: list[ExecutionStage] = []
+    for stage_index, level in enumerate(normalized_levels):
+        depends_on_stages: set[int] = set()
+        for ac_index in level:
+            node = node_map.get(ac_index)
+            if node is None:
+                continue
+            if node.requires_serial_stage and len(level) > 1:
+                msg = f"Serialized AC {ac_index} cannot share stage {stage_index + 1}"
+                raise ExecutionPlanningError(msg)
+            for dependency in node.depends_on:
+                dependency_stage = ac_to_stage.get(dependency)
+                if dependency_stage is None:
+                    msg = f"AC {ac_index} depends on missing AC {dependency}"
                     raise ExecutionPlanningError(msg)
-                for dependency in node.depends_on:
-                    dependency_stage = ac_to_stage.get(dependency)
-                    if dependency_stage is None:
-                        msg = f"AC {ac_index} depends on missing AC {dependency}"
-                        raise ExecutionPlanningError(msg)
-                    if dependency_stage >= stage_index:
-                        msg = (
-                            f"AC {ac_index} depends on AC {dependency}, but both are assigned "
-                            f"to stage {stage_index + 1}"
-                        )
-                        raise ExecutionPlanningError(msg)
-                    depends_on_stages.add(dependency_stage)
+                if dependency_stage >= stage_index:
+                    msg = (
+                        f"AC {ac_index} depends on AC {dependency}, but both are assigned "
+                        f"to stage {stage_index + 1}"
+                    )
+                    raise ExecutionPlanningError(msg)
+                depends_on_stages.add(dependency_stage)
 
-            stages.append(
-                ExecutionStage(
-                    index=stage_index,
-                    ac_indices=level,
-                    depends_on_stages=tuple(sorted(depends_on_stages)),
-                )
+        stages.append(
+            ExecutionStage(
+                index=stage_index,
+                ac_indices=level,
+                depends_on_stages=tuple(sorted(depends_on_stages)),
             )
+        )
 
-        return StagedExecutionPlan(nodes=dependency_graph.nodes, stages=tuple(stages))
+    return StagedExecutionPlan(nodes=nodes, stages=tuple(stages))
 
 
 class DependencyAnalyzer:

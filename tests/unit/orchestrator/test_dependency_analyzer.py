@@ -432,7 +432,7 @@ class TestHybridExecutionPlanner:
         )
         assert plan.get_stage_for_ac(3) == plan.stages[2]
 
-    def test_create_plan_rejects_same_stage_dependency_conflicts(self) -> None:
+    def test_create_plan_repairs_same_stage_dependency_conflicts(self) -> None:
         planner = HybridExecutionPlanner()
         graph = DependencyGraph(
             nodes=(
@@ -442,8 +442,48 @@ class TestHybridExecutionPlanner:
             execution_levels=((0, 1),),
         )
 
-        with pytest.raises(ExecutionPlanningError, match="assigned to stage 1"):
-            planner.create_plan(graph)
+        plan = planner.create_plan(graph)
+
+        assert plan.execution_levels == ((0,), (1,))
+        assert plan.stages == (
+            ExecutionStage(index=0, ac_indices=(0,), depends_on_stages=()),
+            ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+        )
+
+    def test_create_plan_repairs_invalid_supplied_levels_from_observation_failure(
+        self,
+    ) -> None:
+        planner = HybridExecutionPlanner()
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="Dispatch ooo auto through MCP"),
+                ACNode(index=1, content="Generate a Seed", depends_on=(0,)),
+                ACNode(index=2, content="Reach grade A", depends_on=(1,)),
+                ACNode(index=3, content="Execute the generated Seed", depends_on=(5,)),
+                ACNode(index=4, content="Run targeted pytest", depends_on=(3,)),
+                ACNode(index=5, content="Create hello_auto files", depends_on=(2,)),
+            ),
+            execution_levels=((0,), (1,), (2,), (3, 5), (4,)),
+        )
+
+        plan = planner.create_plan(graph)
+
+        assert plan.get_stage_for_ac(5).index < plan.get_stage_for_ac(3).index
+        assert plan.execution_levels == ((0,), (1,), (2,), (5,), (3,), (4,))
+
+    def test_create_plan_repairs_missing_and_extra_supplied_levels(self) -> None:
+        planner = HybridExecutionPlanner()
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="Create runtime"),
+                ACNode(index=1, content="Add resume flow", depends_on=(0,)),
+            ),
+            execution_levels=((0, 99),),
+        )
+
+        plan = planner.create_plan(graph)
+
+        assert plan.execution_levels == ((0,), (1,))
 
     def test_build_runtime_plan_groups_sparse_ac_ids_into_staged_batches(self) -> None:
         planner = HybridExecutionPlanner()
