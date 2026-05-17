@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pydantic import ValidationError
 import pytest
 
+from ouroboros.core.hitl_state import HumanInputSnapshot, HumanInputState
 from ouroboros.harness.projection import (
     ArtifactRecord,
     RunRecord,
@@ -112,6 +113,57 @@ def test_human_escalation_verdict_is_waiting_but_not_safe_resume() -> None:
     assert snapshot.safe_resume is False
     assert snapshot.verdict_id == "verdict_1"
     assert snapshot.resume_blockers == ("human_input_required",)
+
+
+def test_pending_hitl_request_is_exposed_in_run_snapshot_metadata() -> None:
+    pending = HumanInputSnapshot(
+        request_id="hitl_approve",
+        state=HumanInputState.PENDING,
+        request_event_id="evt_hitl_requested",
+        updated_event_id="evt_hitl_requested",
+        created_at=datetime(2026, 5, 15, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 15, tzinfo=UTC),
+        session_id="session_1",
+        run_id="run_1",
+        resume_target="plan:resume",
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage()],
+        pending_human_inputs=[pending],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.WAITING
+    assert snapshot.safe_resume is False
+    assert snapshot.resume_blockers == ("human_input_required",)
+    assert snapshot.source_event_ids == ("evt_hitl_requested",)
+    assert snapshot.metadata["pending_human_input_request_ids"] == ("hitl_approve",)
+    assert snapshot.metadata["pending_human_input_resume_targets"] == ("plan:resume",)
+
+
+def test_foreign_pending_hitl_request_is_ignored_for_run_snapshot() -> None:
+    pending = HumanInputSnapshot(
+        request_id="hitl_other",
+        state=HumanInputState.PENDING,
+        request_event_id="evt_other_hitl",
+        updated_event_id="evt_other_hitl",
+        created_at=datetime(2026, 5, 15, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 15, tzinfo=UTC),
+        session_id="session_other",
+        run_id="run_other",
+        resume_target="plan:resume",
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage()],
+        pending_human_inputs=[pending],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert "pending_human_input_request_ids" not in snapshot.metadata
+    assert snapshot.source_event_ids == ()
 
 
 def test_terminal_verdicts_block_resume() -> None:
