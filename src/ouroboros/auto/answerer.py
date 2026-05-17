@@ -1833,10 +1833,6 @@ def _maybe_apply_user_preference(
         return answer
     if not context.user_preferences:
         return answer
-    # Compute the lowered form lazily — most call sites pass it; ``answer_gap``
-    # and any future caller can rely on the inline normalisation here.
-    lowered_q = lowered or (_normalize_question(question) if question else "")
-    lowered_goal = _normalize_question(goal_text) if goal_text else ""
     for section in section_hints:
         raw_value = context.user_preferences.get(section)
         if not isinstance(raw_value, str):
@@ -1849,11 +1845,11 @@ def _maybe_apply_user_preference(
         # converged goal text so synthetic gap-fill prompts (which erase the
         # original risky context) cannot smuggle a confirmed USER_PREFERENCE
         # past the gate.
-        risky_blocker: AutoBlocker | None = None
-        if lowered_q and question:
-            risky_blocker = _risky_fallback_blocker_for(question, lowered_q)
-        if risky_blocker is None and lowered_goal and goal_text:
-            risky_blocker = _risky_fallback_blocker_for(goal_text, lowered_goal)
+        risky_blocker = risky_user_preference_blocker_for(
+            question=question,
+            lowered=lowered,
+            goal_text=goal_text,
+        )
         if risky_blocker is not None:
             return AutoAnswer(
                 text=(
@@ -1891,6 +1887,29 @@ def _maybe_apply_user_preference(
             generic_default=False,
         )
     return answer
+
+
+def risky_user_preference_blocker_for(
+    *,
+    question: str = "",
+    lowered: str = "",
+    goal_text: str = "",
+) -> AutoBlocker | None:
+    """Apply the risky-fallback gate for caller-supplied preferences.
+
+    ``user_preferences`` can enter the ledger through the answerer during an
+    interview or through MCP preallocation of a structured prompt. Both paths
+    must use the same gate so unsafe preference text cannot be persisted as
+    confirmed evidence before the interview has a chance to block it.
+    """
+    lowered_q = lowered or (_normalize_question(question) if question else "")
+    lowered_goal = _normalize_question(goal_text) if goal_text else ""
+    risky_blocker: AutoBlocker | None = None
+    if lowered_q and question:
+        risky_blocker = _risky_fallback_blocker_for(question, lowered_q)
+    if risky_blocker is None and lowered_goal and goal_text:
+        risky_blocker = _risky_fallback_blocker_for(goal_text, lowered_goal)
+    return risky_blocker
 
 
 _DESTRUCTIVE_BULK_VERBS = (

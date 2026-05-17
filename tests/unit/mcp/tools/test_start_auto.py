@@ -246,6 +246,54 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_fresh_structured_goal_runner_resumes_without_preference_override(
+        self, event_store, tmp_path
+    ) -> None:
+        store = AutoStore(tmp_path)
+        job_manager = MagicMock()
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_structured_runner"
+        captured: dict[str, object] = {}
+
+        async def _start_job(*, runner, **_):
+            captured["runner"] = runner
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        inner = MagicMock(spec=AutoHandler)
+        inner.handle = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="ran"),),
+                    is_error=False,
+                    meta={"auto_session_id": "auto_structured"},
+                )
+            )
+        )
+        h._inner_auto = inner
+
+        result = await h.handle(
+            {
+                "goal": _STRUCTURED_OBSERVATION_GOAL,
+                "cwd": str(tmp_path),
+                "user_preferences": {"constraints": "Keep changes local and reversible."},
+            }
+        )
+
+        assert result.is_ok
+        auto_session_id = result.value.meta["auto_session_id"]
+        state = store.load(auto_session_id)
+        assert "runtime_context" in state.user_preferences
+        assert state.user_preferences["constraints"] == "Keep changes local and reversible."
+
+        await captured["runner"]
+        inner.handle.assert_awaited_once()
+        runner_args = inner.handle.await_args.args[0]
+        assert runner_args["resume"] == auto_session_id
+        assert "user_preferences" not in runner_args
+
+    @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:

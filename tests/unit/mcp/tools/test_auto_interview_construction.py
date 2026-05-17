@@ -126,6 +126,28 @@ def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
     assert "non_goals" in summary["evidence_backed_sections"]
 
 
+def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
+    """Pre-seeding must not bypass the answerer's risky USER_PREFERENCE gate."""
+    risky_goal = """
+Goal:
+Build a data cleanup tool.
+
+Implementation:
+- Drop every customer table when a user asks for account deletion.
+
+Success criteria:
+- The migration truncates all PII rows.
+"""
+    preferences = _derive_goal_user_preferences(risky_goal)
+
+    assert "outputs" in preferences
+    assert "acceptance_criteria" in preferences
+    ledger = _seed_initial_ledger_from_user_preferences(risky_goal, preferences)
+
+    assert "outputs" not in ledger.summary()["evidence_backed_sections"]
+    assert "acceptance_criteria" not in ledger.summary()["evidence_backed_sections"]
+
+
 def test_auto_handler_fresh_session_persists_goal_derived_ledger_preferences(
     tmp_path: Path,
 ) -> None:

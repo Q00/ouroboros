@@ -24,7 +24,10 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
-from ouroboros.auto.answerer import AutoAnswerContext
+from ouroboros.auto.answerer import (
+    AutoAnswerContext,
+    risky_user_preference_blocker_for,
+)
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import (
     REQUIRED_SECTIONS,
@@ -599,6 +602,14 @@ class StartAutoHandler:
             auto_session_id = state.auto_session_id
             runner_arguments["resume"] = auto_session_id
             runner_arguments.pop("pipeline_timeout_seconds", None)
+            # The freshly preallocated state already contains the canonical
+            # merged preference map derived from the structured goal plus any
+            # explicit caller preferences.  Do not pass the original fresh-call
+            # preference payload back through the resume runner: AutoHandler's
+            # resume contract treats a supplied preference map as an override,
+            # which would drop goal-derived sections and make start_auto
+            # diverge from the synchronous auto path.
+            runner_arguments.pop("user_preferences", None)
 
         already_running = await self._active_session_error(auto_session_id)
         if already_running is not None:
@@ -1327,6 +1338,8 @@ def _seed_initial_ledger_from_user_preferences(
         value = user_preferences.get(section)
         if not value:
             continue
+        if _user_preference_would_bypass_risky_gate(goal, value):
+            continue
         ledger.add_entry(
             section,
             LedgerEntry(
@@ -1341,6 +1354,20 @@ def _seed_initial_ledger_from_user_preferences(
             ),
         )
     return ledger
+
+
+def _user_preference_would_bypass_risky_gate(goal: str, value: str) -> bool:
+    """Return True when pre-confirming a preference would skip answerer safety.
+
+    Normal user_preferences only become confirmed ledger entries through
+    ``AutoAnswerer._maybe_apply_user_preference()``, which runs the risky
+    fallback gate against both the current question and the converged goal.
+    Preallocating a ledger for structured MCP prompts must honor that same
+    policy: unsafe preference text may remain in ``state.user_preferences`` so
+    the interview answerer can surface the blocker at the right question, but
+    it must not be persisted as already-confirmed ledger evidence.
+    """
+    return risky_user_preference_blocker_for(question=value, goal_text=goal) is not None
 
 
 def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
