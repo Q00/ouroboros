@@ -143,6 +143,33 @@ class TestV03HookEnum:
         assert exc_info.value.json_pointer == "/hooks/0/name"
 
 
+class TestV03HookLifecyclePermissionSchema:
+    """v0.3 schema must match the Python lifecycle permission contract."""
+
+    def test_permissions_field_required_at_schema_layer(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        hook = _valid_hook()
+        hook.pop("permissions")
+        payload["hooks"] = [hook]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/hooks/0"
+        assert "permissions" in exc_info.value.args[0]
+
+    def test_lifecycle_permission_required_at_schema_layer(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload["hooks"] = [_valid_hook()]
+        payload["hooks"][0]["permissions"] = []
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/hooks/0/permissions"
+        assert HOOK_LIFECYCLE_READ_SCOPE in exc_info.value.expected
+
+
 class TestV02Compatibility:
     """The still-supported v0.2 schema keeps its broader hook enum.
 

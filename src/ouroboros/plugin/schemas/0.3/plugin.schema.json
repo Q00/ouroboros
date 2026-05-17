@@ -240,7 +240,7 @@
       "default": [],
       "items": {
         "type": "object",
-        "required": ["name", "entrypoint", "failure_policy"],
+        "required": ["name", "entrypoint", "failure_policy", "permissions"],
         "additionalProperties": false,
         "properties": {
           "name": {
@@ -273,6 +273,9 @@
             "items": {
               "type": "string",
               "pattern": "^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*){0,3}$"
+            },
+            "contains": {
+              "const": "plugin:lifecycle:read"
             },
             "uniqueItems": true,
             "default": []

@@ -150,8 +150,7 @@ class TestHookLifecyclePermission:
 
         err = exc_info.value
         assert err.json_pointer == "/hooks/0/permissions"
-        assert "plugin:lifecycle:read" in err.args[0]
-        assert "hooks[].permissions" in err.expected
+        assert HOOK_LIFECYCLE_READ_SCOPE in err.expected
 
     def test_lifecycle_permission_must_still_be_declared_top_level(self, tmp_path: Path) -> None:
         payload = _hook_manifest()
