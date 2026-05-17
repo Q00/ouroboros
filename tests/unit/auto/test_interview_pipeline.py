@@ -967,6 +967,49 @@ def test_seed_repairer_assigns_new_seed_identity_after_mutation() -> None:
     assert result.seed.metadata.parent_seed_id == seed.metadata.seed_id
 
 
+def test_seed_repairer_repairs_goal_mismatch_from_ledger() -> None:
+    ledger_goal = (
+        "Create hello_auto.py at the repository root and verify hello_auto() returns "
+        "the expected string with pytest"
+    )
+    ledger = SeedDraftLedger.from_goal(ledger_goal)
+    _fill_ready(ledger)
+    seed = _seed(
+        ac=("The targeted pytest test asserts hello_auto() returns the expected string and passes",)
+    ).model_copy(update={"goal": "Create a minimal proof file"})
+    review = SeedReviewer().review(seed, ledger=ledger)
+
+    result = SeedRepairer().repair_once(seed, review, ledger=ledger)
+
+    assert result.changed
+    assert result.blocker is None
+    assert result.seed.goal == ledger_goal
+    assert result.seed.metadata.seed_id != seed.metadata.seed_id
+    assert result.seed.metadata.parent_seed_id == seed.metadata.seed_id
+
+
+def test_seed_repairer_converges_after_repairable_goal_mismatch() -> None:
+    ledger_goal = (
+        "Create hello_auto.py at the repository root and verify hello_auto() returns "
+        "the expected string with pytest"
+    )
+    ledger = SeedDraftLedger.from_goal(ledger_goal)
+    _fill_ready(ledger)
+    seed = _seed(
+        ac=("The targeted pytest test asserts hello_auto() returns the expected string and passes",)
+    ).model_copy(update={"goal": "Create a minimal proof file"})
+
+    repaired, final_review, history = SeedRepairer(max_iterations=2).converge(
+        seed,
+        ledger=ledger,
+    )
+
+    assert len(history) == 1
+    assert repaired.goal == ledger_goal
+    assert final_review.grade_result.grade == SeedGrade.A
+    assert final_review.may_run
+
+
 def test_seed_repairer_non_goals_do_not_contradict_goal_scope() -> None:
     seed = _seed()
     ledger = SeedDraftLedger.from_goal("Add authentication and deploy this service to production")
