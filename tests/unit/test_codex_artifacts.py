@@ -144,6 +144,24 @@ class TestInstallCodexRules:
 
         assert not outside_codex_dir.joinpath("rules", CODEX_RULE_FILENAME).exists()
 
+    def test_replaces_dangling_symlinked_rule_leaf(self, tmp_path: Path) -> None:
+        """Rule refresh should replace a dangling managed rule symlink leaf."""
+        codex_dir = tmp_path / ".codex"
+        rules_dir = codex_dir / "rules"
+        packaged_rules_dir = tmp_path / "packaged-rules"
+        missing_target = tmp_path / "missing-outside-rule.md"
+        target_path = rules_dir / CODEX_RULE_FILENAME
+        rules_dir.mkdir(parents=True)
+        target_path.symlink_to(missing_target)
+        self._write_rule(packaged_rules_dir, CODEX_RULE_FILENAME, "# fresh rules\n")
+
+        installed_path = install_codex_rules(codex_dir=codex_dir, rules_dir=packaged_rules_dir)
+
+        assert installed_path == target_path
+        assert not installed_path.is_symlink()
+        assert installed_path.read_text(encoding="utf-8").startswith("# fresh rules\n")
+        assert not missing_target.exists()
+
     def test_packaged_rules_fail_closed_for_ooo_auto(self) -> None:
         """Codex rules must route ``ooo auto`` to the real MCP tool, not manual work."""
         rules = load_packaged_codex_rules()
@@ -493,6 +511,27 @@ class TestInstallCodexSkills:
 
         assert legacy_skill.joinpath("SKILL.md").read_text(encoding="utf-8") == "outside stale"
         assert not outside_skills_dir.joinpath(f"{CODEX_SKILL_NAMESPACE}status").exists()
+
+    def test_replaces_dangling_symlinked_skill_leaf(self, tmp_path: Path) -> None:
+        """Skill refresh should replace a dangling managed skill symlink leaf."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "status", body="fresh status skill")
+
+        codex_dir = tmp_path / ".codex"
+        skills_dir = codex_dir / "skills"
+        missing_target = tmp_path / "missing-outside-skill"
+        target_path = skills_dir / f"{CODEX_SKILL_NAMESPACE}status"
+        skills_dir.mkdir(parents=True)
+        target_path.symlink_to(missing_target, target_is_directory=True)
+
+        installed_paths = install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)
+
+        assert installed_paths == (target_path,)
+        assert not target_path.is_symlink()
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "fresh status skill"
+        )
+        assert not missing_target.exists()
 
 
 class TestResolvePackagedCodexAssets:
