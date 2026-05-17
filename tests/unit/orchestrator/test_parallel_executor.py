@@ -17,6 +17,7 @@ from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -28,6 +29,8 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelExecutionResult,
     StageExecutionOutcome,
     _build_governed_parent_summary,
+    _complete_sibling_acs_from_evidence,
+    _criterion_satisfied_by_evidence,
     _effective_evidence_schema_for_ac,
     _message_contains_test_success,
     _runtime_messages_support_command_claim,
@@ -66,6 +69,91 @@ def _make_executor() -> ParallelACExecutor:
     executor._emit_level_completed = AsyncMock()
     executor._emit_subtask_event = AsyncMock()
     return executor
+
+
+def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
+    files = {"hello_auto.py", "tests/test_hello_auto.py"}
+    commands = {"uv run pytest tests/test_hello_auto.py"}
+
+    assert _criterion_satisfied_by_evidence("`hello_auto.py` exists.", files, commands)
+    assert _criterion_satisfied_by_evidence("`tests/test_hello_auto.py` exists.", files, commands)
+    assert _criterion_satisfied_by_evidence(
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        files,
+        commands,
+    )
+    assert not _criterion_satisfied_by_evidence("`other.py` exists.", files, commands)
+
+
+def test_complete_sibling_acs_from_successful_runtime_evidence() -> None:
+    success = ACExecutionResult(
+        ac_index=0,
+        ac_content="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool_use",
+                content="write hello_auto",
+                tool_name="Write",
+                data={"tool_input": {"file_path": "hello_auto.py"}},
+            ),
+            AgentMessage(
+                type="tool_use",
+                content="write test",
+                tool_name="Write",
+                data={"tool_input": {"file_path": "tests/test_hello_auto.py"}},
+            ),
+            AgentMessage(
+                type="tool_use",
+                content="run pytest",
+                tool_name="Bash",
+                data={"tool_input": {"command": "uv run pytest tests/test_hello_auto.py"}},
+            ),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello_auto.py", "tests/test_hello_auto.py"],
+                "commands_run": ["uv run pytest tests/test_hello_auto.py"],
+                "tests_passed": ["uv run pytest tests/test_hello_auto.py"],
+            }
+        ),
+    )
+    failed_test_file = ACExecutionResult(
+        ac_index=1,
+        ac_content="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+    failed_pytest = ACExecutionResult(
+        ac_index=2,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+    failed_indices = {1, 2}
+    ac_statuses = {0: "completed", 1: "failed", 2: "failed"}
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success, failed_test_file, failed_pytest],
+        ac_statuses=ac_statuses,
+        failed_indices=failed_indices,
+        completed_count=1,
+        level_success=1,
+        level_failed=2,
+    )
+
+    assert completed_count == 3
+    assert level_success == 3
+    assert level_failed == 0
+    assert failed_indices == set()
+    assert ac_statuses == {0: "completed", 1: "completed", 2: "completed"}
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+    ]
 
 
 def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
