@@ -540,20 +540,52 @@ class JobManager:
         if phase.casefold() != "deliver":
             return None
 
-        completed_events = await self._event_store.query_session_related_events(
-            snapshot.links.session_id,
-            execution_id=snapshot.links.execution_id,
+        completed_events = await self._event_store.query_execution_related_events(
+            snapshot.links.execution_id,
             event_type="execution.session.completed",
-            limit=1,
+            limit=None,
         )
         if not any(event.data.get("success") is True for event in completed_events):
             return None
 
+        if await self._has_active_execution_session(snapshot.links.execution_id):
+            return None
+
         return (
             "workflow progress accounting stalled: at least one AC execution session "
-            f"reported success, but workflow progress remains 0/{total} in Deliver. "
-            "Local output may exist, but orchestration did not record AC completion."
+            f"reported success, but workflow progress remains 0/{total} in Deliver after all "
+            "known AC runtime sessions reached a terminal state. Local output may exist, "
+            "but orchestration did not record AC completion."
         )
+
+    async def _has_active_execution_session(self, execution_id: str) -> bool:
+        """Return True while any known AC runtime lifecycle stream is still active."""
+        lifecycle_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            limit=None,
+        )
+        lifecycle_types = {
+            "execution.session.started",
+            "execution.session.resumed",
+            "execution.session.recovered",
+            "execution.session.completed",
+            "execution.session.failed",
+        }
+        latest_by_scope: dict[str, str] = {}
+        for event in lifecycle_events:
+            if event.type not in lifecycle_types:
+                continue
+            scope = event.data.get("session_scope_id") or event.data.get("session_attempt_id")
+            if not isinstance(scope, str) or not scope:
+                scope = event.aggregate_id
+            latest_by_scope.setdefault(scope, event.type)
+
+        active_types = {
+            "execution.session.started",
+            "execution.session.resumed",
+            "execution.session.recovered",
+        }
+        return any(event_type in active_types for event_type in latest_by_scope.values())
 
     async def _derive_status_message(self, snapshot: JobSnapshot) -> str | None:
         """Summarize linked execution or lineage progress."""
