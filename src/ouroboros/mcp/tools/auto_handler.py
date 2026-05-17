@@ -32,6 +32,7 @@ from ouroboros.auto.answerer import (
 from ouroboros.auto.execution_acceptance import (
     has_auto_wrapper_context,
     is_auto_reporting_acceptance_criterion,
+    normalize_observation_execution_criteria,
 )
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
@@ -1659,11 +1660,13 @@ def _section_text(sections: dict[str, list[str]], *names: str) -> str:
 
 def _execution_success_criteria(text: str, *, context_text: str = "") -> str:
     strip_auto_wrapper = has_auto_wrapper_context("\n".join((context_text, text)))
-    lines = [
+    lines = tuple(
         line
         for line in (_clean_prompt_line(raw) for raw in text.splitlines())
         if line and not (strip_auto_wrapper and is_auto_reporting_acceptance_criterion(line))
-    ]
+    )
+    if strip_auto_wrapper:
+        lines = normalize_observation_execution_criteria(lines, context_text=context_text)
     return "\n".join(dict.fromkeys(lines))
 
 

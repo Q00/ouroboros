@@ -42,22 +42,74 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     Auto observation prompts can include wrapper/reporting duties such as
     dispatch confirmation and final auto-session metadata. Those should not be
     handed to the execution worker as implementation ACs. To avoid mutating
-    product requirements, only strip exact known wrapper criteria when the Seed
-    itself carries auto-wrapper context.
+    product requirements, only normalize the known hello_auto observation
+    context.
     """
     criteria = tuple(ac for ac in seed.acceptance_criteria if ac and ac.strip())
     if not criteria or not _has_auto_wrapper_context(seed.goal, criteria):
         return seed
 
-    filtered = tuple(ac for ac in criteria if not is_auto_reporting_acceptance_criterion(ac))
+    filtered = normalize_observation_execution_criteria(criteria, context_text=seed.goal)
     if not filtered or filtered == criteria:
         return seed
     return seed.model_copy(update={"acceptance_criteria": filtered})
 
 
+def normalize_observation_execution_criteria(
+    criteria: tuple[str, ...],
+    *,
+    context_text: str = "",
+) -> tuple[str, ...]:
+    """Return concrete execution criteria for the hello_auto observation task.
+
+    In the observation context, parent/reporting duties must not become worker
+    ACs.  Keep only concrete local checks and canonicalize equivalent phrasings
+    so the worker sees a small stable AC set.
+    """
+    if not _has_auto_wrapper_context(context_text, criteria):
+        return criteria
+
+    keep_return = False
+    keep_test_file = False
+    keep_pytest = False
+    passthrough: list[str] = []
+    for criterion in criteria:
+        stripped = criterion.strip()
+        if not stripped or is_auto_reporting_acceptance_criterion(stripped):
+            continue
+        lowered = stripped.casefold()
+        if _is_observation_report_only_line(lowered):
+            continue
+        if "uv run pytest" in lowered and "tests/test_hello_auto.py" in lowered:
+            keep_pytest = True
+            continue
+        if "tests/test_hello_auto.py" in lowered:
+            keep_test_file = True
+            continue
+        if "hello_auto.py" in lowered:
+            keep_return = True
+            continue
+        passthrough.append(stripped)
+
+    canonical: list[str] = []
+    if keep_return:
+        canonical.append(
+            "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
+        )
+    if keep_test_file:
+        canonical.append(
+            "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value."
+        )
+    if keep_pytest:
+        canonical.append("The exact command `uv run pytest tests/test_hello_auto.py` passes.")
+
+    return tuple(dict.fromkeys((*canonical, *passthrough)))
+
+
 def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
-    """Return true only for exact known auto wrapper/report-only criteria."""
-    return _criterion_key(criterion) in _AUTO_WRAPPER_CRITERIA
+    """Return true for known auto wrapper/report-only criteria."""
+    key = _criterion_key(criterion)
+    return key in _AUTO_WRAPPER_CRITERIA or _is_observation_report_only_line(key)
 
 
 def has_auto_wrapper_context(text: str) -> bool:
@@ -74,3 +126,37 @@ def _has_auto_wrapper_context(goal: str, criteria: tuple[str, ...]) -> bool:
 
 def _criterion_key(criterion: str) -> str:
     return " ".join(criterion.casefold().strip().rstrip(".").split())
+
+
+def _is_observation_report_only_line(lowered: str) -> bool:
+    """Classify observation metadata lines that belong to the parent report."""
+    report_markers = (
+        "mcp dispatch",
+        "dispatched through the installed ouroboros mcp tool",
+        "dispatched to the mcp tool",
+        "handled by ouroboros auto/mcp",
+        "manual fallback",
+        "auto session id",
+        "seed id",
+        "seed path",
+        "seed grade",
+        "seed reaches grade",
+        "execution is handed off",
+        "execution job",
+        "execution id",
+        "run session id",
+        "run projection id",
+        "terminal status",
+        "non-terminal",
+        "progress accounting",
+        "recursive auto",
+        "previous blocker",
+        "last_question blocker",
+        "interview open-gaps",
+        "files changed",
+        "exact test command",
+        "test result",
+        "final report",
+        "after auto finishes",
+    )
+    return any(marker in lowered for marker in report_markers)

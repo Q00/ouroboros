@@ -298,7 +298,7 @@ def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
     assert "constraints" in summary["evidence_backed_sections"]
     assert "non_goals" in summary["evidence_backed_sections"]
     assert "Final report" not in preferences["acceptance_criteria"]
-    assert "`hello_auto.py` exists" in preferences["acceptance_criteria"]
+    assert "`hello_auto.py` defines `hello_auto() -> str`" in preferences["acceptance_criteria"]
 
 
 def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
@@ -372,9 +372,9 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` exists.\n"
-        "`tests/test_hello_auto.py` exists.\n"
-        "The targeted test command `uv run pytest tests/test_hello_auto.py` passes."
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.\n"
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes."
     )
     assert "Previous last_question" in preferences["failure_modes"]
     assert "Manual fallback used: no." in preferences["failure_modes"]
@@ -407,11 +407,54 @@ After auto finishes, report:
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` exists.\n"
-        "`tests/test_hello_auto.py` exists.\n"
-        "The targeted test command `uv run pytest tests/test_hello_auto.py` passes."
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.\n"
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes."
     )
     assert "auto session id" not in preferences["acceptance_criteria"].casefold()
+    assert "execution job" not in preferences["acceptance_criteria"].casefold()
+    assert "test result" not in preferences["acceptance_criteria"].casefold()
+
+
+def test_structured_auto_goal_canonicalizes_latest_observation_success_criteria() -> None:
+    goal = """
+Observation run: verify latest main Ouroboros `ooo auto` execution lifecycle after the merged fixes.
+
+Goal:
+Create a minimal local proof file and test.
+
+Implementation:
+- Create `hello_auto.py` at the repository root.
+- Define `hello_auto() -> str`.
+- It must return exactly `hello from ooo auto`.
+- Create `tests/test_hello_auto.py`.
+- The test must import `hello_auto` and assert the exact return value.
+
+Success criteria:
+- `ooo auto` is dispatched through the installed Ouroboros MCP tool, not interpreted as plain text.
+- Seed reaches grade A.
+- Execution is handed off to the background execution job.
+- `hello_auto.py` exists.
+- `tests/test_hello_auto.py` exists.
+- `uv run pytest tests/test_hello_auto.py` passes.
+- The execution job reaches a terminal status without manual cancellation.
+
+After auto finishes, report:
+- Whether MCP dispatch succeeded.
+- Execution job id.
+- Whether progress accounting stalled at AC 0/N.
+- Files changed.
+- Exact test command.
+- Test result.
+"""
+
+    preferences = _derive_goal_user_preferences(goal)
+
+    assert preferences["acceptance_criteria"] == (
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.\n"
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes."
+    )
     assert "execution job" not in preferences["acceptance_criteria"].casefold()
     assert "test result" not in preferences["acceptance_criteria"].casefold()
 
@@ -459,7 +502,8 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     preferences = _derive_goal_user_preferences(goal)
 
     assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` exists.\n`tests/test_hello_auto.py` exists."
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.\n"
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value."
     )
 
 
