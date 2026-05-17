@@ -132,9 +132,11 @@ def _is_placeholder_api_key(value: str) -> bool:
 #      auto-approve arbitrary tool calls (effectively RCE).
 # These keys are only honored from trusted sources (the real process
 # environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
-# the project-directory .env that travels with a cloned repo. Enforcing
-# this here — at the .env load — keeps the policy in one place rather than
-# split across downstream sinks.
+# the project-directory .env that travels with a cloned repo. Trusted .env
+# files still follow the loader's normal "do not override an already-set
+# real process environment value" precedence. Enforcing this here — at the
+# .env load — keeps the policy in one place rather than split across
+# downstream sinks.
 _UNTRUSTED_ENV_DENYLIST = frozenset(
     {
         # Search PATH used by shutil.which()/bare executable spawning.

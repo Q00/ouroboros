@@ -1397,10 +1397,10 @@ class TestLLMHelperLookups:
 class TestEnvFileTrustBoundary:
     """Test trusted vs untrusted .env execution-routing boundaries."""
 
-    def test_untrusted_env_file_does_not_override_path(
+    def test_untrusted_env_file_does_not_set_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Project .env must not hijack PATH used by CLI resolution."""
+        """Project .env must not inject PATH used by CLI resolution."""
         original_path = "/usr/bin:/bin"
         malicious_bin = tmp_path / "repo" / "bin"
         env_file = tmp_path / "repo" / ".env"
@@ -1411,20 +1411,35 @@ class TestEnvFileTrustBoundary:
             "PROJECT_ONLY_VALUE=kept\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("PATH", original_path)
+        monkeypatch.delenv("PATH", raising=False)
         monkeypatch.delenv("PROJECT_ONLY_VALUE", raising=False)
         monkeypatch.delenv("OUROBOROS_GOOSE_CLI_PATH", raising=False)
 
         _load_env_file(env_file, trusted=False)
 
-        assert os.environ["PATH"] == original_path
+        assert "PATH" not in os.environ
         assert "OUROBOROS_GOOSE_CLI_PATH" not in os.environ
         assert os.environ["PROJECT_ONLY_VALUE"] == "kept"
 
-    def test_trusted_env_file_can_override_path(
+    def test_untrusted_env_file_does_not_override_process_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """User-owned ~/.ouroboros/.env remains able to configure PATH intentionally."""
+        """Project .env must not replace an existing process PATH."""
+        process_path = "/usr/bin:/bin"
+        malicious_bin = tmp_path / "repo" / "bin"
+        env_file = tmp_path / "repo" / ".env"
+        malicious_bin.mkdir(parents=True)
+        env_file.write_text(f"PATH={malicious_bin}:{process_path}\n", encoding="utf-8")
+        monkeypatch.setenv("PATH", process_path)
+
+        _load_env_file(env_file, trusted=False)
+
+        assert os.environ["PATH"] == process_path
+
+    def test_trusted_env_file_can_seed_missing_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User-owned ~/.ouroboros/.env may supply PATH when the process lacks one."""
         original_path = "/usr/bin:/bin"
         trusted_bin = tmp_path / "trusted-bin"
         env_file = tmp_path / ".env"
@@ -1434,6 +1449,20 @@ class TestEnvFileTrustBoundary:
         _load_env_file(env_file, trusted=True)
 
         assert os.environ["PATH"] == f"{trusted_bin}:{original_path}"
+
+    def test_trusted_env_file_does_not_override_process_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trusted .env keeps normal process-environment precedence for PATH."""
+        process_path = "/usr/bin:/bin"
+        trusted_bin = tmp_path / "trusted-bin"
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"PATH={trusted_bin}:{process_path}\n", encoding="utf-8")
+        monkeypatch.setenv("PATH", process_path)
+
+        _load_env_file(env_file, trusted=True)
+
+        assert os.environ["PATH"] == process_path
 
 
 class TestCredentialsFileSecure:
