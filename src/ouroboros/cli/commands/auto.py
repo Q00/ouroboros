@@ -48,6 +48,10 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExec
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 
+_STALE_COMPLETED_RALPH_HANDOFF_STATUSES = frozenset(
+    {RUN_HANDOFF_STARTED_STATUS, "ralph_retry_after_blocker"}
+)
+
 
 def _build_configured_ralph_handler(
     *, runtime: str | None, opencode_mode: str | None
@@ -726,7 +730,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"  Execution ID: {result.execution_id}")
         console.print(f"  Session ID: {result.run_session_id}")
     if result.run_handoff_status and not (
-        completed_ralph_product and result.run_handoff_status == RUN_HANDOFF_STARTED_STATUS
+        completed_ralph_product
+        and result.run_handoff_status in _STALE_COMPLETED_RALPH_HANDOFF_STATUSES
     ):
         console.print(f"Run handoff status: [bold]{result.run_handoff_status}[/]")
     if result.run_handoff_guidance:

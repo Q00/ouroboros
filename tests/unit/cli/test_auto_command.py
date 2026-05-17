@@ -706,6 +706,28 @@ def test_print_result_complete_product_completion_suppresses_stale_handoff_statu
     assert "Product status: not verified complete" not in output
 
 
+def test_print_result_complete_product_completion_suppresses_retry_handoff_status() -> None:
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_complete_product_retry",
+        phase="complete",
+        run_handoff_status="ralph_retry_after_blocker",
+        job_id="job_123",
+        execution_id="exec_123",
+        run_session_id="orch_123",
+        ralph_job_id="job_ralph",
+        ralph_lineage_id="lineage_123",
+        ralph_dispatch_mode="job",
+        resume_capability=AutoResumeCapability.NONE,
+    )
+
+    output = _capture_result(result)
+
+    assert "Auto pipeline completed" in output
+    assert "Product status: completed by Ralph loop" in output
+    assert "Run handoff status: ralph_retry_after_blocker" not in output
+
+
 def test_print_result_plugin_ralph_completion_remains_external_pending() -> None:
     result = AutoPipelineResult(
         status="complete",
