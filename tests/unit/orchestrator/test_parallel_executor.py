@@ -200,6 +200,11 @@ def test_complete_sibling_acs_requires_runtime_test_success_for_pass_claim() -> 
                     }
                 },
             ),
+            AgentMessage(
+                type="result",
+                content="success",
+                data={"subtype": "success"},
+            ),
         ),
     )
     failed_pytest = ACExecutionResult(
@@ -225,6 +230,41 @@ def test_complete_sibling_acs_requires_runtime_test_success_for_pass_claim() -> 
     assert [result.outcome for result in results] == [
         ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.FAILED,
+    ]
+
+
+def test_complete_sibling_acs_normalizes_absolute_typed_file_evidence(tmp_path: Any) -> None:
+    test_file = tmp_path / "tests" / "test_hello_auto.py"
+    success = ACExecutionResult(
+        ac_index=0,
+        ac_content="`tests/test_hello_auto.py` exists.",
+        success=True,
+        typed_evidence=EvidenceRecord(data={"files_touched": [str(test_file)]}),
+        runtime_handle=RuntimeHandle(backend="codex_cli", cwd=str(tmp_path)),
+    )
+    failed_file_presence = ACExecutionResult(
+        ac_index=1,
+        ac_content="`tests/test_hello_auto.py` exists.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success, failed_file_presence],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 2
+    assert level_success == 2
+    assert level_failed == 0
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.SATISFIED_EXTERNALLY,
     ]
 
 

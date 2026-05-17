@@ -1470,7 +1470,11 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
             if following.tool_name == "Bash":
                 break
             chunk.append(following)
-        if any(_message_contains_test_success(item) for item in chunk):
+        if any(
+            not item.is_final
+            and _text_contains_test_success(_runtime_message_test_proof_text(item))
+            for item in chunk
+        ):
             commands.update(command for command in message_commands if command)
     return commands
 
@@ -1494,8 +1498,11 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
     passed_commands: set[str] = set()
 
     if result.typed_evidence is not None:
+        task_cwd = result.runtime_handle.cwd if result.runtime_handle is not None else None
         for value in _flatten_evidence_values(result.typed_evidence.get("files_touched")):
-            normalized = str(value).strip()
+            normalized = (
+                _workspace_relative_file_claim(str(value), task_cwd=task_cwd) or str(value).strip()
+            )
             if normalized:
                 files.add(normalized)
         for value in _flatten_evidence_values(result.typed_evidence.get("commands_run")):
