@@ -1536,6 +1536,10 @@ class TestParallelACExecutor:
         assert runtime.last_prompt is not None
         assert "documentation-only current AC" in runtime.last_prompt
         assert "read/grep/diff command when that command is the validation" in runtime.last_prompt
+        assert "Do not include tests_passed at all for documentation-only ACs" in (
+            runtime.last_prompt
+        )
+        assert "do not list individual test names or prior test IDs" in runtime.last_prompt
         assert "files_touched, commands_run" in runtime.last_prompt
         assert "files_touched, commands_run, tests_passed" not in runtime.last_prompt
         assert result.typed_evidence is not None
@@ -1622,6 +1626,10 @@ class TestParallelACExecutor:
         assert runtime.last_prompt is not None
         assert "documentation-only current AC" in runtime.last_prompt
         assert "read/grep/diff command when that command is the validation" in runtime.last_prompt
+        assert "Do not include tests_passed at all for documentation-only ACs" in (
+            runtime.last_prompt
+        )
+        assert "do not list individual test names or prior test IDs" in runtime.last_prompt
         assert "files_touched, commands_run" in runtime.last_prompt
         assert "files_touched, commands_run, tests_passed" not in runtime.last_prompt
         evidence_event = next(

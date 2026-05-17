@@ -4283,8 +4283,10 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     "This is a documentation-only current AC: verify the requested docs "
                     "with current-session README/docs evidence such as Edit plus a direct "
                     "read/grep/diff command when that command is the validation for the docs change. "
-                    "Do not include tests_passed unless this current AC explicitly required "
-                    "code tests and you ran those tests in this runtime session.\n"
+                    "Do not include tests_passed at all for documentation-only ACs. "
+                    "If you ran tests as a sanity check, cite only the validation command "
+                    "in commands_run when it directly validates the current docs change; "
+                    "do not list individual test names or prior test IDs.\n"
                 )
             completion_instruction = (
                 "## Current AC Scope Contract\n"
