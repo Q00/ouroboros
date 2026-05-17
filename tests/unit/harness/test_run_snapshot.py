@@ -173,6 +173,31 @@ def test_foreign_pending_hitl_request_is_ignored_for_run_snapshot() -> None:
     assert snapshot.source_event_ids == ()
 
 
+def test_pending_hitl_request_does_not_override_failed_step_status() -> None:
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage("step_failed")],
+        steps=[_step("step_failed", ended=True, ok=False)],
+        pending_human_inputs=[_human_input_snapshot()],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.FAILED
+    assert "failed_steps_present" in snapshot.resume_blockers
+    assert snapshot.metadata["pending_human_input_request_ids"] == ("hitl_approve",)
+
+
+def test_pending_hitl_request_does_not_override_ended_run_status() -> None:
+    snapshot = build_run_snapshot(
+        run=_run(ended=True),
+        stages=[_stage()],
+        pending_human_inputs=[_human_input_snapshot()],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert "status_unknown" in snapshot.resume_blockers
+    assert snapshot.metadata["pending_human_input_request_ids"] == ("hitl_approve",)
+
+
 def test_terminal_hitl_request_is_ignored_for_run_snapshot() -> None:
     answered = _human_input_snapshot(state=HumanInputState.ANSWERED)
 

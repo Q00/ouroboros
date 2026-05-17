@@ -319,18 +319,18 @@ def _derive_status(
         return RunSnapshotStatus.UNKNOWN
     if missing_linked_verdict:
         return RunSnapshotStatus.UNKNOWN
-    if pending_human_input_request_ids:
-        return RunSnapshotStatus.WAITING
     if pending_in_closed_stage_ids or pending_failed_step_ids or pending_success_step_ids:
         return RunSnapshotStatus.UNKNOWN
     if failed_step_ids:
         return RunSnapshotStatus.FAILED
     if run.ended_at is not None:
         return RunSnapshotStatus.UNKNOWN
-    if pending_step_ids:
-        return RunSnapshotStatus.RUNNING
     if unknown_step_ids:
         return RunSnapshotStatus.UNKNOWN
+    if pending_human_input_request_ids:
+        return RunSnapshotStatus.WAITING
+    if pending_step_ids:
+        return RunSnapshotStatus.RUNNING
     return RunSnapshotStatus.UNKNOWN
 
 
