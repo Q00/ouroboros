@@ -118,7 +118,37 @@ def _is_placeholder_api_key(value: str) -> bool:
     )
 
 
-def _load_env_file(path: Path) -> None:
+# Environment variables that determine which binary Ouroboros executes.
+# Two classes, both remote-code-execution sinks when sourced from an
+# untrusted location: (1) explicit CLI path overrides fed straight into a
+# subprocess, and (2) runtime/backend selectors that pick which adapter (and
+# therefore which executable) is spawned — a selector can route to a backend
+# whose CLI then resolves via a weak `shutil.which` / bare-name PATH lookup.
+# A cloned repository can ship a `.env` pointing at a malicious script plus
+# the script itself; any command that builds a runtime adapter would execute
+# it. These keys are therefore only honored from trusted sources (the real
+# process environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never
+# from the project-directory .env that travels with a cloned repo.
+_UNTRUSTED_ENV_DENYLIST = frozenset(
+    {
+        # Explicit executable-path overrides.
+        "OUROBOROS_CLI_PATH",
+        "OUROBOROS_CODEX_CLI_PATH",
+        "OUROBOROS_COPILOT_CLI_PATH",
+        "OUROBOROS_KIRO_CLI_PATH",
+        "OUROBOROS_OPENCODE_CLI_PATH",
+        "OUROBOROS_HERMES_CLI_PATH",
+        "OUROBOROS_GOOSE_CLI_PATH",
+        "OUROBOROS_GEMINI_CLI_PATH",
+        # Runtime/backend selectors — choose which adapter is spawned.
+        "OUROBOROS_AGENT_RUNTIME",
+        "OUROBOROS_RUNTIME",
+        "OUROBOROS_LLM_BACKEND",
+    }
+)
+
+
+def _load_env_file(path: Path, *, trusted: bool = False) -> None:
     if not path.is_file():
         return
 
@@ -136,6 +166,11 @@ def _load_env_file(path: Path) -> None:
         if not key or any(ch.isspace() for ch in key):
             continue
 
+        if not trusted and key in _UNTRUSTED_ENV_DENYLIST:
+            # Untrusted project-directory .env must not redirect which
+            # binary Ouroboros executes (remote code execution guard).
+            continue
+
         parsed_value = _parse_env_value(raw_value)
         if not parsed_value or _is_placeholder_api_key(parsed_value):
             continue
@@ -145,8 +180,13 @@ def _load_env_file(path: Path) -> None:
             os.environ[key] = parsed_value
 
 
-for env_path in (Path(".env"), Path.home() / ".ouroboros" / ".env"):
-    _load_env_file(env_path)
+# The project-directory .env travels with whatever repository the user
+# cloned and is therefore untrusted; ~/.ouroboros/.env lives in the user's
+# home and is trusted. The trust flag gates execution-redirecting keys above.
+# `_load_env_file` defaults to trusted=False (fail-closed) so any future
+# caller is safe-by-default; trust must be opted into explicitly.
+_load_env_file(Path(".env"), trusted=False)
+_load_env_file(Path.home() / ".ouroboros" / ".env", trusted=True)
 
 
 def ensure_config_dir() -> Path:

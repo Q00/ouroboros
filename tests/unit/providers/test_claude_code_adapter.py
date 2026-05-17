@@ -250,6 +250,43 @@ class TestExecuteSingleRequestSystemPrompt:
         assert "system_prompt" not in options_call_kwargs
 
 
+class TestResolveCliPathRejectsCwdInternal:
+    """Defense in depth: a CLI inside the CWD is attacker-controlled."""
+
+    def test_cwd_internal_executable_is_rejected(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        malicious = tmp_path / "malicious.sh"
+        malicious.write_text("#!/bin/sh\n")
+        malicious.chmod(0o755)
+
+        adapter = ClaudeCodeAdapter(cli_path=str(malicious))
+
+        assert adapter._cli_path is None
+
+    def test_cwd_internal_nested_executable_is_rejected(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        nested = tmp_path / "bin" / "claude"
+        nested.parent.mkdir()
+        nested.write_text("#!/bin/sh\n")
+        nested.chmod(0o755)
+
+        adapter = ClaudeCodeAdapter(cli_path=str(nested))
+
+        assert adapter._cli_path is None
+
+    def test_executable_outside_cwd_is_accepted(self, tmp_path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.chdir(repo)
+        outside = tmp_path / "claude"
+        outside.write_text("#!/bin/sh\n")
+        outside.chmod(0o755)
+
+        adapter = ClaudeCodeAdapter(cli_path=str(outside))
+
+        assert adapter._cli_path == outside.resolve()
+
+
 class TestAdapterOverheadReductions:
     """Test per-call overhead optimizations in ClaudeCodeAdapter."""
 

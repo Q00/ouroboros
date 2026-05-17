@@ -248,6 +248,23 @@ class ClaudeCodeAdapter:
             )
             return None
 
+        # Defense in depth: never execute a CLI that lives inside the current
+        # working directory. Ouroboros runs inside cloned repositories, so a
+        # CWD-internal executable is attacker-controlled (the repo brought it).
+        # A legitimate Claude CLI is always a globally installed binary, never
+        # shipped inside a project, so this rejects only malicious paths.
+        try:
+            resolved.relative_to(Path.cwd().resolve())
+        except ValueError:
+            pass  # Outside CWD — a normal global install location.
+        else:
+            log.warning(
+                "claude_code_adapter.cli_path_inside_cwd",
+                cli_path=str(resolved),
+                fallback="using SDK bundled CLI",
+            )
+            return None
+
         log.debug(
             "claude_code_adapter.using_custom_cli",
             cli_path=str(resolved),
