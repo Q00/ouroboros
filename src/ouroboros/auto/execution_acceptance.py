@@ -25,6 +25,28 @@ _AUTO_WRAPPER_CRITERIA = frozenset(
     }
 )
 
+_OBSERVATION_REPORT_ONLY_CRITERIA = frozenset(
+    {
+        "`ooo auto` is dispatched through the installed ouroboros mcp tool, not interpreted as plain text",
+        "`ooo auto` is dispatched to the mcp tool `ouroboros_auto`",
+        "`ooo auto` is handled by ouroboros auto/mcp, not plain text",
+        "whether mcp dispatch succeeded",
+        "seed reaches grade a",
+        "execution is handed off to the background execution job",
+        "the execution job reaches a terminal status without manual cancellation",
+        "whether progress accounting stalled at ac 0/n is reported",
+        "execution job id",
+        "final execution job terminal status",
+        "whether manual fallback was used",
+        "whether previous blockers recurred",
+        "auto session id",
+        "seed id and seed path",
+        "files changed",
+        "exact test command",
+        "test result",
+    }
+)
+
 _OBSERVATION_CONTEXT_REQUIRED = (
     "hello_auto.py",
     "tests/test_hello_auto.py",
@@ -74,9 +96,8 @@ def normalize_observation_execution_criteria(
         stripped = criterion.strip()
         if not stripped:
             continue
-        lowered = stripped.casefold()
         if is_auto_reporting_acceptance_criterion(stripped) or _is_observation_report_only_line(
-            lowered
+            stripped
         ):
             continue
         normalized.append(_normalize_known_observation_execution_line(stripped))
@@ -142,35 +163,6 @@ def _normalize_known_observation_execution_line(criterion: str) -> str:
     return criterion
 
 
-def _is_observation_report_only_line(lowered: str) -> bool:
-    """Classify observation metadata lines that belong to the parent report."""
-    report_markers = (
-        "mcp dispatch",
-        "dispatched through the installed ouroboros mcp tool",
-        "dispatched to the mcp tool",
-        "handled by ouroboros auto/mcp",
-        "manual fallback",
-        "auto session id",
-        "seed id",
-        "seed path",
-        "seed grade",
-        "seed reaches grade",
-        "execution is handed off",
-        "execution job",
-        "execution id",
-        "run session id",
-        "run projection id",
-        "terminal status",
-        "non-terminal",
-        "progress accounting",
-        "recursive auto",
-        "previous blocker",
-        "last_question blocker",
-        "interview open-gaps",
-        "files changed",
-        "exact test command",
-        "test result",
-        "final report",
-        "after auto finishes",
-    )
-    return any(marker in lowered for marker in report_markers)
+def _is_observation_report_only_line(criterion: str) -> bool:
+    """Classify exact known observation metadata lines from the parent report."""
+    return _criterion_key(criterion) in _OBSERVATION_REPORT_ONLY_CRITERIA

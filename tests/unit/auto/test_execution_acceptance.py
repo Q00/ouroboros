@@ -128,6 +128,31 @@ def test_normalize_execution_acceptance_preserves_non_equivalent_file_criteria()
     )
 
 
+def test_normalize_execution_acceptance_preserves_real_product_lifecycle_criteria() -> None:
+    seed = _seed(
+        "`ooo auto` is dispatched through the installed Ouroboros MCP tool, not interpreted as plain text.",
+        "Implement a manual fallback mode for unavailable tools.",
+        "Persist execution job status for resumed runs.",
+        "Display progress accounting for every acceptance criterion.",
+        "`hello_auto.py` exists.",
+        "`tests/test_hello_auto.py` exists.",
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "Implement a manual fallback mode for unavailable tools.",
+        "Persist execution job status for resumed runs.",
+        "Display progress accounting for every acceptance criterion.",
+        "`hello_auto.py` exists.",
+        "`tests/test_hello_auto.py` exists.",
+    )
+
+
 def test_reporting_classifier_keeps_broad_observation_markers_context_scoped() -> None:
     assert is_auto_reporting_acceptance_criterion("Manual fallback is not used.")
     assert not is_auto_reporting_acceptance_criterion(
