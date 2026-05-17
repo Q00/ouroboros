@@ -222,6 +222,27 @@ def test_resume_preference_override_can_clear_persisted_section() -> None:
     assert "constraints" not in refreshed.summary()["evidence_backed_sections"]
 
 
+def test_resume_preference_clear_is_durable_across_later_overrides() -> None:
+    """Cleared goal-derived sections must not reappear on later resumes."""
+    original_preferences = {
+        **_derive_goal_user_preferences(_OBSERVATION_GOAL),
+        "constraints": "Stale constraint that should be removed.",
+    }
+    after_clear = _merge_resume_user_preferences(
+        _OBSERVATION_GOAL,
+        original_preferences,
+        {"constraints": None},
+    )
+    after_later_override = _merge_resume_user_preferences(
+        _OBSERVATION_GOAL,
+        after_clear,
+        {"non_goals": "Keep the later non-goal override."},
+    )
+
+    assert "constraints" not in after_later_override
+    assert after_later_override["non_goals"] == "Keep the later non-goal override."
+
+
 def test_auto_handler_fresh_session_persists_goal_derived_ledger_preferences(
     tmp_path: Path,
 ) -> None:

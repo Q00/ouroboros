@@ -1363,13 +1363,15 @@ def _merge_goal_user_preferences(goal: str, supplied: dict[str, str | None]) -> 
 
 
 def _merge_resume_user_preferences(
-    goal: str,
+    _goal: str,
     persisted: dict[str, str],
     supplied: dict[str, str | None],
 ) -> dict[str, str]:
     """Merge resume preferences without dropping previously persisted facts."""
-    merged = _derive_goal_user_preferences(goal)
-    merged.update(persisted)
+    # Fresh sessions already persist goal-derived preferences. On resume the
+    # persisted map is the durable source of truth; re-deriving from the goal
+    # would resurrect sections the operator explicitly cleared earlier.
+    merged = dict(persisted)
     for key, value in supplied.items():
         if value is None:
             merged.pop(key, None)
