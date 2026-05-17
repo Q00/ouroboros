@@ -251,6 +251,42 @@ def test_command_claim_does_not_support_partial_shell_body() -> None:
     assert not _runtime_messages_support_command_claim("rg --files", (message,))
 
 
+def test_command_claim_supports_inner_command_after_safe_shell_preamble() -> None:
+    """Wrapped production commands may cite the inner command after setup preambles."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "/bin/bash -lc 'cd /workspace && python scripts/generate.py'"}
+        },
+    )
+
+    assert _runtime_messages_support_command_claim(
+        "python scripts/generate.py",
+        (message,),
+    )
+
+
+def test_command_claim_rejects_inner_command_after_non_setup_preamble() -> None:
+    """Non-test aliases must not treat arbitrary shell-script tails as proof."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "/bin/zsh -lc 'python setup.py && python scripts/generate.py'"
+            }
+        },
+    )
+
+    assert not _runtime_messages_support_command_claim(
+        "python scripts/generate.py",
+        (message,),
+    )
+
+
 class TestProfileAwareDecompositionAudit:
     @pytest.mark.asyncio
     async def test_level_started_event_records_active_decomposition_profile(self) -> None:
@@ -1475,6 +1511,7 @@ class TestParallelACExecutor:
         assert result.error is None
         assert runtime.last_prompt is not None
         assert "documentation-only current AC" in runtime.last_prompt
+        assert "read/grep/diff command when that command is the validation" in runtime.last_prompt
         assert "files_touched, commands_run" in runtime.last_prompt
         assert "files_touched, commands_run, tests_passed" not in runtime.last_prompt
         assert result.typed_evidence is not None
@@ -1560,6 +1597,7 @@ class TestParallelACExecutor:
         assert result.success is True
         assert runtime.last_prompt is not None
         assert "documentation-only current AC" in runtime.last_prompt
+        assert "read/grep/diff command when that command is the validation" in runtime.last_prompt
         assert "files_touched, commands_run" in runtime.last_prompt
         assert "files_touched, commands_run, tests_passed" not in runtime.last_prompt
         evidence_event = next(
