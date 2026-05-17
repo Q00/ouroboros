@@ -681,6 +681,31 @@ def test_print_result_handoff_completion_is_not_labeled_product_complete() -> No
     assert "Auto pipeline completed" not in output
 
 
+def test_print_result_complete_product_completion_suppresses_stale_handoff_status() -> None:
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_complete_product",
+        phase="complete",
+        run_handoff_status="started",
+        job_id="job_123",
+        execution_id="exec_123",
+        run_session_id="orch_123",
+        ralph_job_id="job_ralph",
+        ralph_lineage_id="lineage_123",
+        ralph_dispatch_mode="sync",
+        resume_capability=AutoResumeCapability.NONE,
+    )
+
+    output = _capture_result(result)
+
+    assert "Auto pipeline completed" in output
+    assert "Status: complete" in output
+    assert "Product status: completed by Ralph loop" in output
+    assert "Status: run_handoff_started" not in output
+    assert "Run handoff status: started" not in output
+    assert "Product status: not verified complete" not in output
+
+
 def test_print_result_attached_completion_remains_product_complete() -> None:
     result = AutoPipelineResult(
         status="complete",

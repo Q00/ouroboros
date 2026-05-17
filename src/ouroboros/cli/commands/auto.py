@@ -668,8 +668,16 @@ def _is_run_handoff_only_completion(result: AutoPipelineResult) -> bool:
     )
 
 
+def _is_completed_ralph_product(result: AutoPipelineResult) -> bool:
+    """True when ``--complete-product`` reached a terminal Ralph completion."""
+    return result.status == "complete" and bool(
+        result.ralph_job_id or result.ralph_lineage_id or result.ralph_dispatch_mode
+    )
+
+
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     handoff_only = _is_run_handoff_only_completion(result)
+    completed_ralph_product = _is_completed_ralph_product(result)
     if handoff_only:
         print_info("Auto run handoff started")
     elif result.status == "complete":
@@ -685,6 +693,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(
             "Product status: [yellow]not verified complete; execution is still external/pending[/]"
         )
+    elif completed_ralph_product:
+        console.print("Product status: [green]completed by Ralph loop[/]")
     authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
@@ -703,7 +713,9 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"  Job ID: {result.job_id}")
         console.print(f"  Execution ID: {result.execution_id}")
         console.print(f"  Session ID: {result.run_session_id}")
-    if result.run_handoff_status:
+    if result.run_handoff_status and not (
+        completed_ralph_product and result.run_handoff_status == RUN_HANDOFF_STARTED_STATUS
+    ):
         console.print(f"Run handoff status: [bold]{result.run_handoff_status}[/]")
     if result.run_handoff_guidance:
         console.print(f"Run handoff guidance: [yellow]{result.run_handoff_guidance}[/]")
