@@ -457,6 +457,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     task_workspace=workspace,
                     checkpoint_store=checkpoint_store,
                     max_parallel_workers=max_parallel_workers,
+                    fat_harness_mode=not is_resume,
                 )
 
                 skip_qa = arguments.get("skip_qa", False)

@@ -311,13 +311,8 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
-        """Create a runner for legacy plumbing tests without evidence gating."""
-        return OrchestratorRunner(
-            mock_adapter,
-            mock_event_store,
-            mock_console,
-            fat_harness_mode=False,
-        )
+        """Create a runner with mocked dependencies."""
+        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
     @pytest.mark.asyncio
     async def test_execute_seed_success(
@@ -2108,7 +2103,12 @@ class TestOrchestratorRunner:
         """Runner wiring should make profile-aware decomposition live in production."""
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
-        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            fat_harness_mode=True,
+        )
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         dependency_graph = DependencyGraph(
             nodes=(ACNode(index=0, content=sample_seed.acceptance_criteria[0]),),
@@ -3524,13 +3524,8 @@ class TestCancellationPolling:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
-        """Create a runner for legacy plumbing tests without evidence gating."""
-        return OrchestratorRunner(
-            mock_adapter,
-            mock_event_store,
-            mock_console,
-            fat_harness_mode=False,
-        )
+        """Create a runner with mocked dependencies."""
+        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
     @pytest.mark.asyncio
     async def test_check_cancellation_returns_false_when_no_event(

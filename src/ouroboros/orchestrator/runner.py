@@ -271,7 +271,7 @@ def _execution_profile_for_seed(seed: Seed) -> ExecutionProfile | None:
         return None
 
 
-def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = True) -> ExecutionStrategy:
+def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = False) -> ExecutionStrategy:
     """Resolve the prompt/tool strategy for the active execution mode."""
     if fat_harness_mode:
         profile = _execution_profile_for_seed(seed)
@@ -430,7 +430,7 @@ class OrchestratorRunner:
         checkpoint_store: CheckpointStore | None = None,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         max_parallel_workers: int = 3,
-        fat_harness_mode: bool = True,
+        fat_harness_mode: bool = False,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -456,9 +456,11 @@ class OrchestratorRunner:
             max_decomposition_depth: Maximum recursive AC decomposition depth.
             max_parallel_workers: Maximum concurrent AC workers for parallel execution.
             fat_harness_mode: Enforce profile typed-evidence validation plus
-                verifier PASS at atomic AC acceptance. Enabled by default after
-                #978 P5 so runner-managed acceptance cannot fall back to
-                self-reported completion.
+                verifier PASS at atomic AC acceptance. Public entrypoints that
+                can support the gate (for example CLI `ooo run`) pass this
+                explicitly; the low-level constructor default stays False so
+                direct runner/resume callers are not silently converted to a
+                stricter contract they cannot satisfy.
         """
         self._adapter = adapter
         self._event_store = event_store
