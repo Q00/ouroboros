@@ -282,7 +282,7 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_progress_accounting_append_failure_does_not_suppress_runner_terminalization(
+    async def test_progress_accounting_append_failure_retries_terminalization(
         self, tmp_path
     ) -> None:
         store = _build_store(tmp_path)
@@ -306,15 +306,18 @@ class TestJobManager:
             )
 
             original_append_event = manager._append_event
+            failed_attempts = 0
 
-            async def _fail_terminal_failure_append(
+            async def _fail_first_terminal_failure_append(
                 event_type: str, job_id: str, data: dict, **kwargs
             ) -> None:
-                if event_type == "mcp.job.failed":
+                nonlocal failed_attempts
+                if event_type == "mcp.job.failed" and failed_attempts == 0:
+                    failed_attempts += 1
                     raise PersistenceError("synthetic append failure", operation="insert")
                 await original_append_event(event_type, job_id, data, **kwargs)
 
-            manager._append_event = _fail_terminal_failure_append
+            manager._append_event = _fail_first_terminal_failure_append
 
             await store.append(
                 BaseEvent(
@@ -351,10 +354,12 @@ class TestJobManager:
                 )
             )
 
-            await asyncio.sleep(1.2)
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=3.0
+            )
 
-            assert started.job_id not in manager._monitor_terminalized_jobs
-            assert (await manager.get_snapshot(started.job_id)).status is JobStatus.RUNNING
+            assert failed_attempts == 1
+            assert snapshot.result_meta["failed_from_progress_accounting_stall"] is True
         finally:
             stop.set()
             await _cancel_manager_tasks(manager)

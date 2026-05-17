@@ -417,20 +417,28 @@ class JobManager:
 
                 progress_blocker = await self._derive_progress_accounting_blocker(snapshot)
                 if progress_blocker is not None:
-                    await asyncio.shield(
-                        self._append_event(
-                            "mcp.job.failed",
-                            job_id,
-                            {
-                                "status": JobStatus.FAILED.value,
-                                "message": "Job failed: workflow progress accounting stalled",
-                                "error": progress_blocker,
-                                "result_text": progress_blocker,
-                                "result_meta": {"failed_from_progress_accounting_stall": True},
-                                "is_error": True,
-                            },
+                    try:
+                        await asyncio.shield(
+                            self._append_event(
+                                "mcp.job.failed",
+                                job_id,
+                                {
+                                    "status": JobStatus.FAILED.value,
+                                    "message": "Job failed: workflow progress accounting stalled",
+                                    "error": progress_blocker,
+                                    "result_text": progress_blocker,
+                                    "result_meta": {"failed_from_progress_accounting_stall": True},
+                                    "is_error": True,
+                                },
+                            )
                         )
-                    )
+                    except Exception:
+                        logger.warning(
+                            "mcp.job.progress_accounting_failure_append_failed",
+                            extra={"job_id": job_id},
+                            exc_info=True,
+                        )
+                        continue
                     self._monitor_terminalized_jobs.add(job_id)
                     runner = self._runner_tasks.pop(job_id, None)
                     if runner is not None and not runner.done():
