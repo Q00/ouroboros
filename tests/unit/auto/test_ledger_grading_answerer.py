@@ -306,7 +306,10 @@ def test_grade_gate_accepts_coding_observation_run_acceptance_criteria() -> None
         ac=(
             'hello_auto() returns "hello from ooo auto"',
             "The targeted command uv run pytest tests/test_hello_auto.py passes",
+            "The targeted command uv run pytest tests/test_api.py::test_ok passes",
+            "The targeted command uv run pytest integration/test_api.py passes",
             "Final report includes auto session id, seed id, files changed, exact test command, and test result",
+            "Final report includes auto session id, seed id, files changed, exact test command, and test result without screenshots",
         ),
     )
 
@@ -314,6 +317,69 @@ def test_grade_gate_accepts_coding_observation_run_acceptance_criteria() -> None
 
     assert result.grade == SeedGrade.A
     assert not any(finding.code == "untestable_acceptance_criteria" for finding in result.findings)
+
+
+def test_grade_gate_rejects_vacuous_coding_command_acceptance_criteria() -> None:
+    """Do not let command-shaped wording bypass concrete observability."""
+    ledger = SeedDraftLedger.from_goal("Create hello_auto.py and verify it with pytest")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create hello_auto.py and verify it with pytest",
+        ac=(
+            "The command exits",
+            "The command reports success",
+            "The command passes",
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    untestable = [
+        finding for finding in result.findings if finding.code == "untestable_acceptance_criteria"
+    ]
+    assert [finding.target for finding in untestable] == [
+        "acceptance_criteria[0]",
+        "acceptance_criteria[1]",
+        "acceptance_criteria[2]",
+    ]
+
+
+def test_grade_gate_rejects_vacuous_report_acceptance_criteria() -> None:
+    """Report-shaped criteria still need concrete report contents."""
+    ledger = SeedDraftLedger.from_goal("Create hello_auto.py and verify it with pytest")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create hello_auto.py and verify it with pytest",
+        ac=(
+            "Final report includes",
+            "The report includes success",
+            "The report lists results",
+            "The report includes error",
+            "The report lists output",
+            "Final report includes auto session id, files changed, exact test command, and test result, but omits seed id",
+            "Final report includes auto session id, seed id, files changed, exact test command, and test result; seed id is optional",
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    assert [
+        finding.target
+        for finding in result.findings
+        if finding.code == "untestable_acceptance_criteria"
+    ] == [
+        "acceptance_criteria[0]",
+        "acceptance_criteria[1]",
+        "acceptance_criteria[2]",
+        "acceptance_criteria[3]",
+        "acceptance_criteria[4]",
+        "acceptance_criteria[5]",
+        "acceptance_criteria[6]",
+    ]
 
 
 def test_grade_gate_rejects_vague_acceptance_criteria() -> None:

@@ -55,6 +55,13 @@ _OBSERVABLE_HINTS = (
     "http",
     "200",
 )
+_FINAL_REPORT_REQUIRED_FIELDS = (
+    "auto session id",
+    "seed id",
+    "files changed",
+    "exact test command",
+    "test result",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,14 +354,15 @@ def _is_observable(value: str) -> bool:
     lowered = value.lower()
     if not any(hint in lowered for hint in _OBSERVABLE_HINTS):
         return False
+    if _is_concrete_final_report_observation(lowered):
+        return True
     observable_patterns = (
         r"`[^`]+`\s+(prints|returns|creates|writes|exits|displays)",
         r"\b(prints|returns|creates|writes|exits|displays|contains)\b.+\b(stdout|stderr|file|artifact|status|response|output|non-zero|exit code)\b",
         r"\b(stdout|stderr|file|artifact|status|response|output|non-zero|exit code)\b.+\b(contains|equals|includes|is|exists|created|written)\b",
         r"\b(test|check)\b.+\b(passes|fails|asserts|verifies)\b",
-        r"\b(command|pytest|test|check|ruff|mypy|linter|type check)\b.+\b(passes|reports|exits)\b",
+        r"\btargeted command\b.+\bpytest\b.+\b[^\s]+\.py(?:::[^\s]+)?(?=\s).+\bpasses\b",
         r"\b[\w.]+\([^)]*\)\s+returns\s+[`\"'][^`\"']+[`\"']",
-        r"\b(report|response|output)\b.+\b(contains|includes|lists)\b",
         r"\b(api|endpoint|request)\b.+\b(returns|responds|status)\b",
         r"\b(cli|command|process)\b.+\b(exits|returns)\b\s+(with\s+)?(exit\s+code\s+)?0\b",
         r"\b(exit\s+code|status)\s+0\b",
@@ -362,6 +370,28 @@ def _is_observable(value: str) -> bool:
         r"\b(http\s+)?status\s+2\d\d\b",
     )
     return any(re.search(pattern, lowered) for pattern in observable_patterns)
+
+
+def _is_concrete_final_report_observation(value: str) -> bool:
+    if "final report" not in value or not re.search(r"\bincludes?\b", value):
+        return False
+    if not all(field in value for field in _FINAL_REPORT_REQUIRED_FIELDS):
+        return False
+    return not _contradicts_required_final_report_fields(value)
+
+
+def _contradicts_required_final_report_fields(value: str) -> bool:
+    optional_terms = r"optional|not required|may be omitted|can be omitted"
+    missing_terms = (
+        r"omit|omits|without|missing|excludes|does not include|doesn['’]t include|not include"
+    )
+    for required_field in _FINAL_REPORT_REQUIRED_FIELDS:
+        field_pattern = re.escape(required_field)
+        if re.search(rf"\b{field_pattern}\b.{{0,60}}\b({optional_terms})\b", value):
+            return True
+        if re.search(rf"\b({missing_terms})\b.{{0,60}}\b{field_pattern}\b", value):
+            return True
+    return False
 
 
 def deterministic_floor(ledger: SeedDraftLedger) -> float:
