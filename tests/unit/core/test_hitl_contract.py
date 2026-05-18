@@ -200,12 +200,18 @@ def test_request_allows_secret_marker_words_in_plain_values() -> None:
         source=HumanInputSource.PLUGIN_FIREWALL,
         risk_class=HumanInputRiskClass.CREDENTIAL_GATED,
         question="Approve?",
+        required_permission="plugin:credential:check",
         resume_target="plugin:permission",
-        payload={"reason": "token budget exceeded; credential check required"},
+        surface="plugin.firewall.permission",
+        payload={
+            "permission_scope": "plugin:credential:check",
+            "reason": "token budget exceeded; credential check required",
+        },
     )
 
     assert request.to_event_data()["payload"] == {
-        "reason": "token budget exceeded; credential check required"
+        "permission_scope": "plugin:credential:check",
+        "reason": "token budget exceeded; credential check required",
     }
 
 
@@ -218,11 +224,21 @@ def test_request_allows_benign_token_metadata_keys() -> None:
         source=HumanInputSource.PLUGIN_FIREWALL,
         risk_class=HumanInputRiskClass.LOW,
         question="Approve?",
+        required_permission="plugin:tokens:inspect",
         resume_target="plugin:permission",
-        payload={"token_count": 1024, "token_limit": 4096},
+        surface="plugin.firewall.permission",
+        payload={
+            "permission_scope": "plugin:tokens:inspect",
+            "token_count": 1024,
+            "token_limit": 4096,
+        },
     )
 
-    assert request.to_event_data()["payload"] == {"token_count": 1024, "token_limit": 4096}
+    assert request.to_event_data()["payload"] == {
+        "permission_scope": "plugin:tokens:inspect",
+        "token_count": 1024,
+        "token_limit": 4096,
+    }
 
 
 def test_plugin_permission_request_uses_firewall_hitl_contract() -> None:
@@ -297,6 +313,71 @@ def test_plugin_destructive_permission_request_uses_destructive_confirmation() -
     assert answered["response_kind"] == "approval"
     assert answered["approval_decision"] is False
     assert answered["surface"] == "plugin.firewall.permission"
+
+
+def test_plugin_permission_request_requires_required_permission() -> None:
+    with pytest.raises(ValueError, match="required_permission"):
+        HumanInputRequest(
+            request_id="hitl-plugin-permission-1",
+            session_id="plugin-session-1",
+            created_by="plugin-firewall",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+            resume_target="plugin-firewall:permission:plugin-session-1",
+            surface="plugin.firewall.permission",
+            payload={"permission_scope": "plugin:lifecycle:read"},
+        )
+
+
+def test_plugin_permission_request_requires_surface() -> None:
+    with pytest.raises(ValueError, match="surface"):
+        HumanInputRequest(
+            request_id="hitl-plugin-permission-1",
+            session_id="plugin-session-1",
+            created_by="plugin-firewall",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+            required_permission="plugin:lifecycle:read",
+            resume_target="plugin-firewall:permission:plugin-session-1",
+            payload={"permission_scope": "plugin:lifecycle:read"},
+        )
+
+
+def test_plugin_permission_request_requires_payload() -> None:
+    with pytest.raises(ValueError, match="payload"):
+        HumanInputRequest(
+            request_id="hitl-plugin-permission-1",
+            session_id="plugin-session-1",
+            created_by="plugin-firewall",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+            required_permission="plugin:lifecycle:read",
+            resume_target="plugin-firewall:permission:plugin-session-1",
+            surface="plugin.firewall.permission",
+        )
+
+
+def test_plugin_permission_request_requires_payload_permission_scope_match() -> None:
+    with pytest.raises(ValueError, match="permission_scope"):
+        HumanInputRequest(
+            request_id="hitl-plugin-permission-1",
+            session_id="plugin-session-1",
+            created_by="plugin-firewall",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+            required_permission="plugin:lifecycle:read",
+            resume_target="plugin-firewall:permission:plugin-session-1",
+            surface="plugin.firewall.permission",
+            payload={"permission_scope": "plugin:lifecycle:write"},
+        )
 
 
 def test_request_accepts_mapping_payloads_and_freezes_normalized_copy() -> None:

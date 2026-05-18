@@ -256,9 +256,33 @@ class HumanInputRequest:
             raise ValueError("select HumanInputRequest requires at least one option")
         object.__setattr__(self, "options", _normalize_string_tuple("options", self.options))
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
+        self._validate_source_specific_contract()
         object.__setattr__(
             self, "created_at", _normalize_utc_datetime("created_at", self.created_at)
         )
+
+    def _validate_source_specific_contract(self) -> None:
+        if self.source is not HumanInputSource.PLUGIN_FIREWALL or self.kind not in {
+            HumanInputKind.APPROVAL,
+            HumanInputKind.DESTRUCTIVE_CONFIRMATION,
+        }:
+            return
+
+        if self.required_permission is None:
+            raise ValueError(
+                "plugin_firewall approval HumanInputRequest requires required_permission"
+            )
+        if self.surface is None:
+            raise ValueError("plugin_firewall approval HumanInputRequest requires surface")
+        if not self.payload:
+            raise ValueError("plugin_firewall approval HumanInputRequest requires payload")
+
+        permission_scope = self.payload.get("permission_scope")
+        if permission_scope != self.required_permission:
+            raise ValueError(
+                "plugin_firewall approval HumanInputRequest payload permission_scope "
+                "must match required_permission"
+            )
 
     @property
     def aggregate_id(self) -> str:
