@@ -5,13 +5,20 @@ Check system status and execution history.
 
 import asyncio
 import json
+import os
+from pathlib import Path
+import shutil
 from typing import Annotated, Any
 
 import typer
+import yaml
 
 from ouroboros.auto.state import AutoPhase, AutoStore
+from ouroboros.backends import get_backend_capability, resolve_runtime_backend_name
+from ouroboros.cli.commands.config import _load_config, _resolve_cli_path, _resolve_db_path
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import create_status_table, print_table
+from ouroboros.config.loader import load_config
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 
 app = typer.Typer(
@@ -202,20 +209,201 @@ def execution(
         print_info("Would include event history")
 
 
+_CREDENTIAL_PROVIDER_BY_LLM_BACKEND = {
+    "claude": "anthropic",
+    "claude_code": "anthropic",
+    "copilot": "openai",
+    "gemini": "google",
+    "litellm": "openrouter",
+    "openai": "openai",
+    "openrouter": "openrouter",
+}
+
+_API_KEY_ENV_BY_PROVIDER = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _health_row(name: str, status: str, detail: str | None = None) -> dict[str, str]:
+    label = name if not detail else f"{name} — {detail}"
+    return {"name": label, "status": status}
+
+
+def _database_file_path(data: dict, config_path: Path) -> Path:
+    configured = data.get("persistence", {}).get("database_path")
+    if configured:
+        path = Path(str(configured)).expanduser()
+        if path.is_absolute():
+            return path
+        return config_path.parent / path
+    return config_path.parent / "ouroboros.db"
+
+
+def _check_runtime_backend(data: dict) -> dict[str, str]:
+    raw_backend = data.get("orchestrator", {}).get("runtime_backend", "claude")
+    try:
+        backend = resolve_runtime_backend_name(str(raw_backend))
+    except ValueError as exc:
+        return _health_row("Runtime backend", "error", str(exc))
+
+    capability = get_backend_capability(backend)
+    configured_cli = _resolve_cli_path(data)
+    candidates = [configured_cli] if configured_cli else []
+    if capability is not None and capability.cli_name:
+        candidates.append(capability.cli_name)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        expanded = Path(candidate).expanduser()
+        if expanded.is_absolute() or len(expanded.parts) > 1:
+            if expanded.exists() and expanded.is_file() and os.access(expanded, os.X_OK):
+                return _health_row("Runtime backend", "ok", f"{backend}: {expanded}")
+            continue
+        resolved = shutil.which(candidate)
+        if resolved:
+            return _health_row("Runtime backend", "ok", f"{backend}: {resolved}")
+
+    expected = configured_cli or (
+        capability.cli_name if capability and capability.cli_name else backend
+    )
+    return _health_row("Runtime backend", "error", f"{backend} CLI not found: {expected}")
+
+
+def _credential_provider_for_backend(backend: str) -> str | None:
+    normalized = backend.strip().lower()
+    return _CREDENTIAL_PROVIDER_BY_LLM_BACKEND.get(normalized)
+
+
+def _codex_auth_file_exists() -> bool:
+    auth_base = os.environ.get("CODEX_HOME")
+    if not auth_base:
+        home = os.environ.get("HOME")
+        if not home:
+            return False
+        auth_base = str(Path(home).expanduser() / ".codex")
+    return (Path(auth_base).expanduser() / "auth.json").is_file()
+
+
+def _provider_env_key_present(provider: str) -> bool:
+    env_key = _API_KEY_ENV_BY_PROVIDER.get(provider)
+    if not env_key:
+        return False
+    return bool(os.environ.get(env_key, "").strip())
+
+
+def _effective_llm_backend(data: dict) -> str:
+    env_backend = os.environ.get("OUROBOROS_LLM_BACKEND", "").strip().lower()
+    if env_backend:
+        return env_backend
+
+    env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
+    runtime_capability = get_backend_capability(env_runtime)
+    if runtime_capability is not None and runtime_capability.supports_llm:
+        if env_runtime == "claude_code":
+            return "claude_code"
+        return runtime_capability.name
+
+    return str(data.get("llm", {}).get("backend", "claude_code"))
+
+
+def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
+    backend = _effective_llm_backend(data)
+    if backend.strip().lower() in {"codex", "codex_cli"}:
+        if _codex_auth_file_exists():
+            return _health_row("Credentials", "ok", "codex OAuth file present")
+        if os.environ.get("OPENAI_API_KEY", "").strip():
+            return _health_row("Credentials", "ok", "OPENAI_API_KEY present for codex")
+        return _health_row(
+            "Credentials", "error", "missing Codex OAuth auth.json or OPENAI_API_KEY"
+        )
+
+    provider = _credential_provider_for_backend(backend)
+    if provider is None:
+        return _health_row("Credentials", "ok", f"{backend} uses local CLI authentication")
+
+    if _provider_env_key_present(provider):
+        return _health_row("Credentials", "ok", f"{_API_KEY_ENV_BY_PROVIDER[provider]} present")
+
+    credentials_path = config_path.parent / "credentials.yaml"
+    if not credentials_path.exists():
+        return _health_row("Credentials", "error", f"missing {credentials_path} for {provider}")
+
+    try:
+        raw_credentials = yaml.safe_load(credentials_path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return _health_row("Credentials", "error", f"cannot read credentials: {exc}")
+
+    provider_config = raw_credentials.get("providers", {}).get(provider, {})
+    api_key = (
+        str(provider_config.get("api_key", "")).strip() if isinstance(provider_config, dict) else ""
+    )
+    if not api_key:
+        return _health_row("Credentials", "warning", f"{provider} key is empty")
+    if api_key.startswith("YOUR_") and api_key.endswith("_API_KEY"):
+        return _health_row("Credentials", "warning", f"{provider} key is still a template value")
+    return _health_row("Credentials", "ok", f"{provider} key present")
+
+
 @app.command()
 def health() -> None:
     """Check system health.
 
-    Verifies database connectivity, provider configuration, and system resources.
+    Verifies configuration, database, runtime backend, and credentials.
     """
-    # Placeholder implementation with example data
-    health_data = [
-        {"name": "Database", "status": "ok"},
-        {"name": "Configuration", "status": "ok"},
-        {"name": "Providers", "status": "warning"},
-    ]
-    table = create_status_table(health_data, "System Health")
+    checks: list[dict[str, str]] = []
+    data: dict | None = None
+    config_path: Path | None = None
+
+    try:
+        data, config_path = _load_config()
+        load_config(config_path)
+    except Exception as exc:
+        checks.append(_health_row("Configuration", "error", str(exc)))
+    else:
+        checks.append(_health_row("Configuration", "ok", str(config_path)))
+
+    if data is None or config_path is None:
+        checks.extend(
+            [
+                _health_row("Database", "error", "configuration unavailable"),
+                _health_row("Runtime backend", "error", "configuration unavailable"),
+                _health_row("Credentials", "error", "configuration unavailable"),
+            ]
+        )
+    else:
+        try:
+            db_path = _database_file_path(data, config_path)
+            db_detail = _resolve_db_path(data, config_path)
+            if not db_path.exists():
+                checks.append(
+                    _health_row(
+                        "Database", "warning", f"missing; will be created on first run: {db_detail}"
+                    )
+                )
+            elif not db_path.is_file():
+                checks.append(_health_row("Database", "error", f"not a file: {db_detail}"))
+            else:
+                try:
+                    with db_path.open("rb"):
+                        pass
+                except OSError as exc:
+                    checks.append(_health_row("Database", "error", f"not readable: {exc}"))
+                else:
+                    checks.append(_health_row("Database", "ok", db_detail))
+        except Exception as exc:
+            checks.append(_health_row("Database", "error", str(exc)))
+
+        checks.append(_check_runtime_backend(data))
+        checks.append(_check_credentials(data, config_path))
+
+    table = create_status_table(checks, "System Health")
     print_table(table)
+    if any(check["status"] == "error" for check in checks):
+        raise typer.Exit(1)
 
 
 __all__ = ["app"]

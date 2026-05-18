@@ -580,24 +580,30 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** the `status` subcommands return lightweight placeholder summaries. They are useful for smoke testing the command surface, but should not be treated as authoritative orchestration state.
+> **Current state:** `status health` performs live local preflight checks. The `status executions` and `status execution` subcommands still return lightweight placeholder summaries and should not be treated as authoritative orchestration state.
 
 ### `status health`
 
-Check system health. Verifies database connectivity, provider configuration, and system resources.
+Check local system health. The command validates configuration, checks the configured database path, verifies the active runtime CLI is reachable, and confirms that credentials for the active LLM provider are present without printing key material.
 
 ```bash
 ouroboros status health
 ```
 
+`status health` exits with status `0` when no check is `error`; it exits with status `1` if any check is `error`. Warnings, such as a missing database file that will be created on first run or an empty template credential value, are rendered in the table but do not fail the command.
+
 **Representative Output:**
 
 ```
-+---------------+---------+
-| Database      |   ok    |
-| Configuration |   ok    |
-| Providers     | warning |
-+---------------+---------+
+                   System Health
++--------------------------------------------+---------+
+| Name                                       | Status  |
++--------------------------------------------+---------+
+| Configuration — ~/.ouroboros/config.yaml   |   ok    |
+| Database — data/ouroboros.db (...)         |   ok    |
+| Runtime backend — claude: /usr/bin/claude  |   ok    |
+| Credentials — anthropic key present        |   ok    |
++--------------------------------------------+---------+
 ```
 
 ### `status executions`
