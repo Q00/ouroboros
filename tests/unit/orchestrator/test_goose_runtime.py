@@ -56,6 +56,29 @@ class _FakeProcess:
         return self._returncode
 
 
+def test_goose_default_permission_mode_preserves_approval_gate() -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project")
+
+    assert runtime.permission_mode == "approve"
+    assert runtime._build_child_env()["GOOSE_MODE"] == "approve"
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "accept_edits", "acceptedits"])
+def test_goose_safe_permission_aliases_preserve_approval_gate(mode: str) -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode=mode)
+
+    assert runtime.permission_mode == "approve"
+    assert runtime._build_child_env()["GOOSE_MODE"] == "approve"
+
+
+@pytest.mark.parametrize("mode", ["auto", "bypassPermissions", "bypass_permissions"])
+def test_goose_explicit_bypass_permission_aliases_map_to_auto(mode: str) -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode=mode)
+
+    assert runtime.permission_mode == "auto"
+    assert runtime._build_child_env()["GOOSE_MODE"] == "auto"
+
+
 def test_goose_command_uses_run_stream_json_and_stdin() -> None:
     runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
 

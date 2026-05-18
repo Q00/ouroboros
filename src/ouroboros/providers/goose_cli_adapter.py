@@ -90,11 +90,11 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
         """Normalize Goose permission mode values for ``GOOSE_MODE``."""
-        candidate = (permission_mode or "auto").strip()
+        candidate = (permission_mode or "approve").strip()
         aliases = {
-            "default": "auto",
-            "acceptedits": "auto",
-            "accept_edits": "auto",
+            "default": "approve",
+            "acceptedits": "approve",
+            "accept_edits": "approve",
             "bypasspermissions": "auto",
             "bypass_permissions": "auto",
             "auto": "auto",

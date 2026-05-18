@@ -110,11 +110,11 @@ class GooseCliRuntime(CodexCliRuntime):
         historically uses Claude/Codex-style names, so map the common values to
         Goose's documented modes while preserving explicit Goose-native values.
         """
-        candidate = (permission_mode or "auto").strip()
+        candidate = (permission_mode or "approve").strip()
         aliases = {
-            "default": "auto",
-            "acceptedits": "auto",
-            "accept_edits": "auto",
+            "default": "approve",
+            "acceptedits": "approve",
+            "accept_edits": "approve",
             "bypasspermissions": "auto",
             "bypass_permissions": "auto",
             "auto": "auto",
