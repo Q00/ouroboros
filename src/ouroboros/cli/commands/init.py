@@ -5,6 +5,7 @@ Supports both LiteLLM (external API) and Claude Code (Max Plan) modes.
 """
 
 import asyncio
+from datetime import UTC, datetime
 from enum import Enum, auto
 from pathlib import Path
 from typing import Annotated
@@ -27,11 +28,24 @@ from ouroboros.cli.formatters.panels import print_error, print_info, print_succe
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.hitl_contract import (
+    HumanInputKind,
+    HumanInputRequest,
+    HumanInputResponse,
+    HumanInputResponseKind,
+    HumanInputRiskClass,
+    HumanInputSource,
+)
 from ouroboros.core.initial_context import (
     load_pm_seed_as_context as _load_pm_seed_as_context_result,
 )
 from ouroboros.core.initial_context import (
     resolve_initial_context_input,
+)
+from ouroboros.events.hitl import (
+    create_hitl_answered_event,
+    create_hitl_cancelled_event,
+    create_hitl_requested_event,
 )
 from ouroboros.observability import LoggingConfig, configure_logging
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
@@ -171,9 +185,70 @@ def _get_adapter(
     return create_llm_adapter(backend=resolved_backend, cwd=Path.cwd())
 
 
+def _interview_hitl_request(
+    state: InterviewState,
+    *,
+    round_number: int,
+    question: str,
+    created_at: datetime | None = None,
+) -> HumanInputRequest:
+    return HumanInputRequest(
+        request_id=f"hitl_interview_{state.interview_id}_{round_number}",
+        session_id=state.interview_id,
+        run_id=state.interview_id,
+        invocation_id=f"interview-round-{round_number}",
+        created_by="ouroboros.init",
+        kind=HumanInputKind.FREE_TEXT,
+        source=HumanInputSource.INTERVIEW,
+        risk_class=HumanInputRiskClass.LOW,
+        question=question,
+        resume_target=f"init:interview:{state.interview_id}:round:{round_number}",
+        title=f"Interview round {round_number}",
+        surface="cli.init.interview",
+        created_at=created_at or datetime.now(UTC),
+    )
+
+
+def _interview_hitl_response(
+    request: HumanInputRequest,
+    response: str,
+    *,
+    received_at: datetime | None = None,
+) -> HumanInputResponse:
+    return HumanInputResponse(
+        request_id=request.request_id,
+        session_id=request.session_id,
+        run_id=request.run_id,
+        invocation_id=request.invocation_id,
+        actor="local-user",
+        response_kind=HumanInputResponseKind.TEXT,
+        text=response,
+        surface="cli.init.interview",
+        received_at=received_at or datetime.now(UTC),
+    )
+
+
+async def _append_hitl_events(event_store, events: list) -> None:
+    if event_store is None:
+        return
+    await event_store.append_batch(events)
+
+
+async def _get_init_event_store():
+    from ouroboros.persistence.event_store import EventStore
+
+    db_path = Path.home() / ".ouroboros" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    await event_store.initialize()
+    return event_store
+
+
 async def _run_interview_loop(
     engine: InterviewEngine,
     state: InterviewState,
+    *,
+    event_store=None,
 ) -> InterviewState:
     """Run the interview question loop until completion or user exit.
 
@@ -211,12 +286,35 @@ async def _run_interview_loop(
         console.print(f"[bold yellow]Q:[/] {question}")
         console.print()
 
+        hitl_request = _interview_hitl_request(state, round_number=current_round, question=question)
+        await _append_hitl_events(event_store, [create_hitl_requested_event(hitl_request)])
+
         # Get user response (multiline-safe for paste)
         response = await multiline_prompt_async("Your response")
 
         if not response.strip():
+            await _append_hitl_events(
+                event_store,
+                [
+                    create_hitl_cancelled_event(
+                        hitl_request,
+                        reason="Empty interview response rejected",
+                        actor="local-user",
+                    )
+                ],
+            )
             print_error("Response cannot be empty. Please try again.")
             continue
+
+        await _append_hitl_events(
+            event_store,
+            [
+                create_hitl_answered_event(
+                    hitl_request,
+                    _interview_hitl_response(hitl_request, response),
+                )
+            ],
+        )
 
         # Record response
         record_result = await engine.record_response(state, response, question)
@@ -303,7 +401,8 @@ async def _run_interview(
     console.print()
 
     # Run initial interview loop
-    state = await _run_interview_loop(engine, state)
+    event_store = await _get_init_event_store()
+    state = await _run_interview_loop(engine, state, event_store=event_store)
 
     # Outer loop for retry on high ambiguity
     while True:
@@ -344,7 +443,7 @@ async def _run_interview(
             await engine.save_state(state)  # Save status change immediately
 
             # Continue interview loop (reusing the same helper)
-            state = await _run_interview_loop(engine, state)
+            state = await _run_interview_loop(engine, state, event_store=event_store)
             continue
 
         if result == SeedGenerationResult.CANCELLED:
