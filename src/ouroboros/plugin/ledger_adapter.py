@@ -41,9 +41,8 @@ from ouroboros.plugin.hooks import HOOK_EVENT_TYPES
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
 # Plugin audit event types accepted by the current core ledger adapter.
-# Runtime hook dispatch remains a separate #939 follow-up; these hook event
-# names are schema-vendored here so future dispatch does not invent audit
-# vocabulary at emission time.
+# Hook event names are schema-vendored here so runtime dispatch and ledger
+# wrapping use the same closed audit vocabulary.
 AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.discovered",
     "plugin.installed",

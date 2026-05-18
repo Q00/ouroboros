@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros.plugin.hooks import HOOK_LIFECYCLE_READ_SCOPE
+from ouroboros.plugin.hooks import HOOK_EVENT_TYPES, HOOK_LIFECYCLE_READ_SCOPE
 from ouroboros.plugin.manifest import (
     SUPPORTED_SCHEMA_VERSIONS,
     PluginManifestError,
@@ -205,22 +205,33 @@ class TestV03HookAuditEvents:
             "plugin.permission_used",
             "plugin.completed",
             "plugin.failed",
-        )
-
-    def test_manifest_audit_events_accept_hook_schema_vendored_events(self, tmp_path: Path) -> None:
-        payload = _v03_manifest()
-        payload["audit"] = {
-            "events": [
-                "plugin.hook.invoked",
-                "plugin.hook.completed",
-                "plugin.hook.blocked",
-                "plugin.hook.failed",
-            ]
-        }
-        manifest = load_manifest(_write(tmp_path, payload))
-        assert manifest.audit.events == (
             "plugin.hook.invoked",
             "plugin.hook.completed",
             "plugin.hook.blocked",
             "plugin.hook.failed",
         )
+
+    def test_manifest_audit_events_accept_hook_wrapper_events(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload["audit"] = {"events": ["plugin.hook.blocked", "plugin.hook.failed"]}
+        manifest = load_manifest(_write(tmp_path, payload))
+        assert manifest.audit.events == ("plugin.hook.blocked", "plugin.hook.failed")
+
+    def test_schema_audit_default_matches_v1_lifecycle_events(self) -> None:
+        schema_path = (
+            Path(__file__).resolve().parents[3]
+            / "src/ouroboros/plugin/schemas/0.3/plugin.schema.json"
+        )
+        schema = json.loads(schema_path.read_text())
+        default_events = tuple(schema["properties"]["audit"]["default"]["events"])
+        assert default_events == (
+            "plugin.invoked",
+            "plugin.permission_used",
+            "plugin.completed",
+            "plugin.failed",
+            "plugin.hook.invoked",
+            "plugin.hook.completed",
+            "plugin.hook.blocked",
+            "plugin.hook.failed",
+        )
+        assert set(default_events) >= HOOK_EVENT_TYPES

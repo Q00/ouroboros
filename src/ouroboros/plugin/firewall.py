@@ -319,6 +319,8 @@ def _event_envelope(
 
 
 def _matching_hooks(manifest: PluginManifest, hook_kind: HookKind) -> tuple[HookSpec, ...]:
+    if manifest.schema_version != "0.3":
+        return ()
     return tuple(hook for hook in manifest.hooks if hook.name == hook_kind.value)
 
 

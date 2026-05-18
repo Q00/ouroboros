@@ -31,6 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.plugin.hooks import (
+    HOOK_BLOCKED_EVENT,
+    HOOK_COMPLETED_EVENT,
+    HOOK_FAILED_EVENT,
+    HOOK_INVOKED_EVENT,
     HOOK_LIFECYCLE_READ_SCOPE,
     is_deferred_hook_kind,
     is_excluded_hook_kind,
@@ -162,6 +166,20 @@ class AuditSpec:
                 "plugin.failed",
             )
         )
+
+    @staticmethod
+    def standard_events_for_schema(schema_version: str) -> AuditSpec:
+        if schema_version == "0.3":
+            return AuditSpec(
+                events=(
+                    *AuditSpec.standard_four_events().events,
+                    HOOK_INVOKED_EVENT,
+                    HOOK_COMPLETED_EVENT,
+                    HOOK_BLOCKED_EVENT,
+                    HOOK_FAILED_EVENT,
+                )
+            )
+        return AuditSpec.standard_four_events()
 
 
 @dataclass(frozen=True)
@@ -662,7 +680,7 @@ def load_manifest(path: str | Path) -> PluginManifest:
 
     audit_raw = raw.get("audit")
     if audit_raw is None:
-        audit = AuditSpec.standard_four_events()
+        audit = AuditSpec.standard_events_for_schema(schema_version)
     else:
         audit = AuditSpec(events=tuple(audit_raw["events"]))
 
