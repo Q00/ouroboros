@@ -336,9 +336,7 @@ def test_health_accepts_claude_sdk_default_without_configured_cli(
     assert "claude: SDK default" in result.output
 
 
-def test_health_reports_malformed_credentials_without_crashing(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_health_reports_malformed_credentials_without_crashing(monkeypatch, tmp_path: Path) -> None:
     _clear_auth_env(monkeypatch)
     config_dir = tmp_path / "config"
     (config_dir / "data").mkdir(parents=True)

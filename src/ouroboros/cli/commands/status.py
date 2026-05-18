@@ -273,12 +273,7 @@ def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
     if configured_cli and configured_cli not in candidates:
         candidates.append(configured_cli)
 
-    if (
-        not candidates
-        and backend != "claude"
-        and capability is not None
-        and capability.cli_name
-    ):
+    if not candidates and backend != "claude" and capability is not None and capability.cli_name:
         candidates.append(capability.cli_name)
     return candidates
 
