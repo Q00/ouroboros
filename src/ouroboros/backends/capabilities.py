@@ -212,7 +212,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_runtime=True,
         supports_llm=True,
         supports_interview_driver=True,
-        cli_name="kiro",
+        cli_name="kiro-cli",
         cli_config_key="kiro_cli_path",
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),

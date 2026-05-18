@@ -370,3 +370,40 @@ def test_health_reports_malformed_credentials_providers_without_crashing(
     assert result.exit_code == 1
     assert "Credentials" in result.output
     assert "credentials providers must be a mapping" in result.output
+
+
+def test_health_uses_kiro_cli_default_name(monkeypatch, tmp_path: Path) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=None, backend="kiro")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "kiro")
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "/opt/bin/kiro-cli" if name == "kiro-cli" else None,
+    )
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert "kiro: /opt/bin/kiro-cli" in result.output
+    assert "kiro CLI not found" not in result.output
+
+
+def test_health_errors_for_malformed_provider_credentials(monkeypatch, tmp_path: Path) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=cli)
+    (config_dir / "credentials.yaml").write_text("providers:\n  anthropic: []\n")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "Credentials" in result.output
+    assert "credentials provider anthropic must be a mapping" in result.output

@@ -395,9 +395,12 @@ def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
     if not isinstance(providers, dict):
         return _health_row("Credentials", "error", "credentials providers must be a mapping")
     provider_config = providers.get(provider, {})
-    api_key = (
-        str(provider_config.get("api_key", "")).strip() if isinstance(provider_config, dict) else ""
-    )
+    if not isinstance(provider_config, dict):
+        return _health_row(
+            "Credentials", "error", f"credentials provider {provider} must be a mapping"
+        )
+
+    api_key = str(provider_config.get("api_key", "")).strip()
     if not api_key:
         return _health_row("Credentials", "warning", f"{provider} key is empty")
     if api_key.startswith("YOUR_") and api_key.endswith("_API_KEY"):
