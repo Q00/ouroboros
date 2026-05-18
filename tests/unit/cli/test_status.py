@@ -45,7 +45,11 @@ def _make_cli(path: Path) -> Path:
 
 
 def _write_config(
-    config_dir: Path, *, cli_path: Path | str | None = None, backend: str = "claude"
+    config_dir: Path,
+    *,
+    cli_path: Path | str | None = None,
+    backend: str = "claude",
+    extra_orchestrator: dict[str, str] | None = None,
 ) -> Path:
     data = {
         "orchestrator": {
@@ -55,6 +59,8 @@ def _write_config(
         "llm": {"backend": "claude_code"},
         "persistence": {"database_path": "data/ouroboros.db"},
     }
+    if extra_orchestrator:
+        data["orchestrator"].update(extra_orchestrator)
     config_path = config_dir / "config.yaml"
     config_path.write_text(yaml.dump(data))
     return config_path
@@ -250,6 +256,36 @@ def test_health_honors_agent_runtime_and_cli_path_environment_overrides(
     assert f"codex: {codex_cli}" in result.output
     assert str(stale_claude) not in result.output
     assert "codex OAuth file present" in result.output
+
+
+def test_health_honors_effective_backend_configured_cli_when_runtime_env_overrides(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    stale_claude = tmp_path / "missing" / "claude"
+    codex_cli = _make_cli(tmp_path / "configured-bin" / "codex")
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(
+        config_dir,
+        cli_path=stale_claude,
+        backend="claude",
+        extra_orchestrator={"codex_cli_path": str(codex_cli)},
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "codex")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert f"codex: {codex_cli}" in result.output
+    assert str(stale_claude) not in result.output
 
 
 def test_health_treats_copilot_as_cli_authenticated_not_openai_key_backend(

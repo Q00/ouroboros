@@ -15,7 +15,7 @@ import yaml
 
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.backends import get_backend_capability, resolve_runtime_backend_name
-from ouroboros.cli.commands.config import _load_config, _resolve_cli_path, _resolve_db_path
+from ouroboros.cli.commands.config import _load_config, _resolve_db_path
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import create_status_table, print_table
 from ouroboros.config.loader import load_config
@@ -261,18 +261,18 @@ def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
         if env_path:
             candidates.append(str(Path(env_path).expanduser()))
 
-    # Keep the existing config helper for config-file path resolution, but only
-    # when the config-file backend is the effective backend being checked.
-    configured_backend = str(data.get("orchestrator", {}).get("runtime_backend", "claude"))
-    try:
-        config_backend = resolve_runtime_backend_name(configured_backend)
-    except ValueError:
-        config_backend = None
-    configured_cli = _resolve_cli_path(data) if config_backend == backend else None
+    capability = get_backend_capability(backend)
+    config_key = capability.cli_config_key if capability is not None else None
+    configured_cli = None
+    if config_key:
+        configured_cli = data.get("orchestrator", {}).get(config_key)
+
+    # Do not consult the config-file runtime backend here: env overrides may
+    # select a different effective backend for this process, and that backend's
+    # own configured CLI path still mirrors the runtime launcher contract.
     if configured_cli and configured_cli not in candidates:
         candidates.append(configured_cli)
 
-    capability = get_backend_capability(backend)
     if not candidates and capability is not None and capability.cli_name:
         candidates.append(capability.cli_name)
     return candidates
