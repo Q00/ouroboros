@@ -449,7 +449,7 @@ ouroboros config backend [BACKEND]
 
 | Argument | Description |
 |----------|-------------|
-| `BACKEND` | Backend to switch to: `claude` or `codex`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
+| `BACKEND` | Backend to switch to: `claude`, `codex`, `gemini`, `hermes`, or `goose`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
 
 **Examples:**
 
@@ -462,6 +462,9 @@ ouroboros config backend codex
 
 # Switch to Claude Code
 ouroboros config backend claude
+
+# Switch to Hermes
+ouroboros config backend hermes
 ```
 
 ### `config init`
@@ -580,7 +583,40 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** `status health` performs live local preflight checks. The `status executions` and `status execution` subcommands still return lightweight placeholder summaries and should not be treated as authoritative orchestration state.
+> **Current state:** `status auto`, `status run`, and `status health` are live read-only status surfaces. The `status executions` and `status execution` subcommands still return lightweight placeholder summaries and should not be treated as authoritative orchestration state.
+
+### `status auto`
+
+Show unified `ooo auto` + Ralph handoff status for an auto session.
+
+```bash
+ouroboros status auto AUTO_SESSION_ID
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `AUTO_SESSION_ID` | Yes | Auto session id to inspect, such as `auto_<hex>` |
+
+### `status run`
+
+Build a read-only Run/Stage/Step projection from persisted events. Provide at
+least one selector: `--session-id` or `--execution-id`.
+
+```bash
+ouroboros status run (--session-id TEXT | --execution-id TEXT) [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--session-id TEXT` | Orchestrator session ID to project; required unless `--execution-id` is provided |
+| `--execution-id TEXT` | Execution aggregate ID to project; required unless `--session-id` is provided |
+| `--seed-id TEXT` | Optional seed ID override for projection labels |
+| `--limit INTEGER` | Optional event count safety cap |
+| `--json` | Emit machine-readable projection JSON |
 
 ### `status health`
 

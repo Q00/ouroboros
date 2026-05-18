@@ -223,7 +223,7 @@ Help improve docs by:
 - Translating documentation (if you speak multiple languages)
 - Creating tutorials or guides
 
-When reporting or fixing a documentation problem, apply the [Documentation Issue Severity Rubric](#documentation-issue-severity-rubric) to label the issue (`docs:critical`, `docs:high`, `docs:medium`, or `docs:low`) so maintainers can triage and prioritise correctly.
+When reporting or fixing a documentation problem, apply the [Documentation Issue Severity Rubric](#documentation-issue-severity-rubric): use the existing `documentation` label and add a `**Severity:** critical/high/medium/low` line so maintainers can triage and prioritise correctly.
 
 ### Code Review
 
@@ -535,9 +535,9 @@ Flags covered: `--orchestrator/--no-orchestrator`, `--resume`, `--mcp-config`, `
 
 #### `config.py` — `ouroboros config`
 
-Subcommands: `show`, `init`, `set`, `validate`
+Subcommands: `show`, `backend`, `init`, `set`, `validate`
 
-> **Note**: All four subcommands are currently placeholder stubs. Mark as `[Placeholder — not yet implemented]` in docs until fully implemented.
+`config` subcommands are implemented command surfaces. Keep their behavior aligned with the authoritative [`docs/cli-reference.md`](./docs/cli-reference.md) `config` section.
 
 **Must update:**
 - `docs/cli-reference.md` — `config` command section
@@ -545,9 +545,11 @@ Subcommands: `show`, `init`, `set`, `validate`
 
 #### `status.py` — `ouroboros status`
 
-Subcommands: `executions`, `execution`, `health`
+Implemented subcommands: `auto`, `run`
 
-> **Note**: All subcommands return placeholder data. Mark as `[Placeholder — not yet implemented]` in docs until real persistence reads are wired in.
+Placeholder subcommands on `main`: `executions`, `execution`, `health`
+
+> **Note**: Only the placeholder subcommands listed above should be marked `[Placeholder — not yet implemented]` in docs until real persistence or health-check behavior is wired in. Do not mark implemented `status` subcommands as placeholders.
 
 **Must update:**
 - `docs/cli-reference.md` — `status` command section
@@ -698,12 +700,12 @@ When adding support for a **new runtime backend** (e.g., new entry in `AgentRunt
 
 When a reviewer or contributor identifies a documentation problem, classify it by severity before filing an issue or leaving a PR comment. This classification determines urgency and whether a PR can be merged with the issue open.
 
-| Severity | Label | Definition | User Impact | Merge Policy |
-|----------|-------|------------|-------------|--------------|
-| **Critical** | `docs:critical` | The documented information is **factually wrong**: a command, flag, path, or option described in the docs does not exist or behaves differently than described. | User follows the docs and **fails** — the command errors, the path is missing, the flag is rejected. | **Block merge.** The PR must not ship until fixed. |
-| **High** | `docs:high` | The documentation is **misleading**: information is technically present but framed in a way that causes confusion, omits a required step, or implies a capability that is unimplemented. This includes wrong environment variable names that silently have no effect. | User follows the docs and **proceeds incorrectly** — they finish the step but reach a wrong state or have false expectations. | **Block merge** unless the issue is filed and linked. Fix within the same sprint. |
-| **Medium** | `docs:medium` | The documentation has **inconsistent style or terminology**: the same concept is named differently across files, formatting does not follow the project's conventions, or phrasing is ambiguous but not incorrect. Also applies to missing-content findings where the gap is for an edge case or optional feature and users can succeed with defaults or alternative docs. | User is mildly confused by inconsistency but can still succeed. | **Non-blocking.** Can merge; fix before the next release. |
-| **Low** | `docs:low` | The documentation has a **minor cosmetic gap**: an alternative invocation form is undocumented, a behavior note is absent but has no user-visible impact, or an edge case is missing from one file but covered elsewhere. No confusion or incorrect behavior results. | User experiences minor friction at most; no incorrect outcome. | **Non-blocking.** Address opportunistically. |
+| Severity | Issue marker | Definition | User Impact | Merge Policy |
+|----------|--------------|------------|-------------|--------------|
+| **Critical** | `documentation` label + `**Severity:** critical` in the issue/PR body | The documented information is **factually wrong**: a command, flag, path, or option described in the docs does not exist or behaves differently than described. | User follows the docs and **fails** — the command errors, the path is missing, the flag is rejected. | **Block merge.** The PR must not ship until fixed. |
+| **High** | `documentation` label + `**Severity:** high` in the issue/PR body | The documentation is **misleading**: information is technically present but framed in a way that causes confusion, omits a required step, or implies a capability that is unimplemented. This includes wrong environment variable names that silently have no effect. | User follows the docs and **proceeds incorrectly** — they finish the step but reach a wrong state or have false expectations. | **Block merge** unless the issue is filed and linked. Fix within the same sprint. |
+| **Medium** | `documentation` label + `**Severity:** medium` in the issue/PR body | The documentation has **inconsistent style or terminology**: the same concept is named differently across files, formatting does not follow the project's conventions, or phrasing is ambiguous but not incorrect. Also applies to missing-content findings where the gap is for an edge case or optional feature and users can succeed with defaults or alternative docs. | User is mildly confused by inconsistency but can still succeed. | **Non-blocking.** Can merge; fix before the next release. |
+| **Low** | `documentation` label + `**Severity:** low` in the issue/PR body | The documentation has a **minor cosmetic gap**: an alternative invocation form is undocumented, a behavior note is absent but has no user-visible impact, or an edge case is missing from one file but covered elsewhere. No confusion or incorrect behavior results. | User experiences minor friction at most; no incorrect outcome. | **Non-blocking.** Address opportunistically. |
 
 #### Severity Examples
 
@@ -723,12 +725,12 @@ When a reviewer or contributor identifies a documentation problem, classify it b
 #### How to Apply the Rubric in PRs
 
 1. **When reviewing a docs-affecting PR**, scan each changed file against the [Documentation Decay Detection](#documentation-decay-detection) checks below and classify any finding using the table above.
-2. **When filing a GitHub issue** for a documentation problem, add the appropriate `docs:critical`, `docs:high`, `docs:medium`, or `docs:low` label.
-3. **When writing a PR description** that fixes a documentation problem, state the severity in the PR summary (e.g., _"Fixes docs:critical — `--resume` flag was listed with wrong default"_).
+2. **When filing a GitHub issue** for a documentation problem, add the existing `documentation` label and include a body line such as `**Severity:** critical`, `**Severity:** high`, `**Severity:** medium`, or `**Severity:** low`.
+3. **When writing a PR description** that fixes a documentation problem, state the severity in the PR summary (e.g., _"Fixes documentation severity: critical — `--resume` flag was listed with wrong default"_).
 4. **Critical and High issues found during review must be resolved or have a linked follow-up issue before the PR is approved.**
-5. **Record new findings** in [`docs/doc-issues-register.md`](./docs/doc-issues-register.md) using the filing template at the bottom of that file. When a fix is merged, move the entry to "Resolved Issues" and add the resolution date.
+5. **Track open documentation findings in GitHub issues** with the `documentation` label; do not rely on a separate register file unless one is introduced and kept current.
 
-> **Current open issues** are tracked in [`docs/doc-issues-register.md`](./docs/doc-issues-register.md).
+> **Current open documentation issues** are tracked with the [`documentation`](https://github.com/Q00/ouroboros/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation) label.
 
 ---
 
