@@ -44,7 +44,6 @@ from ouroboros.core.initial_context import (
 )
 from ouroboros.events.hitl import (
     create_hitl_answered_event,
-    create_hitl_cancelled_event,
     create_hitl_requested_event,
 )
 from ouroboros.observability import LoggingConfig, configure_logging
@@ -293,16 +292,6 @@ async def _run_interview_loop(
         response = await multiline_prompt_async("Your response")
 
         if not response.strip():
-            await _append_hitl_events(
-                event_store,
-                [
-                    create_hitl_cancelled_event(
-                        hitl_request,
-                        reason="Empty interview response rejected",
-                        actor="local-user",
-                    )
-                ],
-            )
             print_error("Response cannot be empty. Please try again.")
             continue
 
