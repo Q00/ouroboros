@@ -74,6 +74,11 @@ def create_validated_hitl_timeout_event(
         raise HumanInputResumeValidationError(
             f"HITL request {request_id!r} has not expired"
         )
+    if request.timeout_action is HumanInputTimeoutAction.STAY_WAITING:
+        raise HumanInputResumeValidationError(
+            f"HITL request {request_id!r} uses timeout_action=stay_waiting; "
+            "no terminal timeout event should be emitted"
+        )
     return create_hitl_timed_out_event(request, reason=reason)
 
 

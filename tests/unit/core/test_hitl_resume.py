@@ -11,6 +11,7 @@ from ouroboros.core.hitl_contract import (
     HumanInputResponseKind,
     HumanInputRiskClass,
     HumanInputSource,
+    HumanInputTimeoutAction,
 )
 from ouroboros.core.hitl_resume import (
     HumanInputResumeValidationError,
@@ -23,7 +24,10 @@ from ouroboros.core.hitl_state import HumanInputState, project_human_input_state
 from ouroboros.events.hitl import create_hitl_answered_event, create_hitl_requested_event
 
 
-def _request() -> HumanInputRequest:
+def _request(
+    *,
+    timeout_action: HumanInputTimeoutAction = HumanInputTimeoutAction.STAY_WAITING,
+) -> HumanInputRequest:
     return HumanInputRequest(
         request_id="hitl-1",
         session_id="session-1",
@@ -36,6 +40,7 @@ def _request() -> HumanInputRequest:
         question="Approve the plan?",
         resume_target="plan:approval",
         timeout_seconds=60,
+        timeout_action=timeout_action,
         payload={"plan_id": "plan-1"},
         created_at=datetime(2026, 5, 18, tzinfo=UTC),
     )
@@ -168,7 +173,7 @@ def test_create_validated_hitl_resume_event_answers_wait_with_naive_created_at()
 
 
 def test_create_validated_hitl_timeout_event_accepts_expired_pending_request() -> None:
-    request = _request()
+    request = _request(timeout_action=HumanInputTimeoutAction.EXPIRE_BLOCKED)
     requested = create_hitl_requested_event(request)
 
     event = create_validated_hitl_timeout_event(
@@ -181,7 +186,26 @@ def test_create_validated_hitl_timeout_event_accepts_expired_pending_request() -
     assert event.type == "hitl.timed_out"
     assert event.aggregate_id == "hitl-1"
     assert event.data["reason"] == "approval timed out"
-    assert event.data["timeout_action"] == "stay_waiting"
+    assert event.data["timeout_action"] == "expire_blocked"
+
+    snapshot = project_human_input_state([requested, event])[0]
+    assert snapshot.state is HumanInputState.TIMED_OUT
+    assert snapshot.is_terminal is True
+
+
+def test_create_validated_hitl_timeout_event_rejects_stay_waiting_request() -> None:
+    request = _request()
+    requested = create_hitl_requested_event(request)
+
+    with pytest.raises(
+        HumanInputResumeValidationError,
+        match="timeout_action=stay_waiting",
+    ):
+        create_validated_hitl_timeout_event(
+            [requested],
+            request_id="hitl-1",
+            now=request.created_at + timedelta(seconds=60),
+        )
 
 
 def test_create_validated_hitl_timeout_event_rejects_not_expired_request() -> None:
