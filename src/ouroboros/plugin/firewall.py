@@ -18,10 +18,11 @@ firewall is the single chokepoint that:
   6. Emit `plugin.completed` (status=success) or `plugin.failed`
      (status=failed) on terminal.
 
-Audit events conform to schemas/0.1/audit-event.schema.json. Bounded
-payloads: argv stored as-is, raw stdout/stderr replaced with a sha256
-hash. Tokens, channel IDs, free-form user messages are forbidden by
-contract.
+Command audit events conform to schemas/0.1/audit-event.schema.json;
+v0.3 lifecycle hook events conform to schemas/0.3/audit-event.schema.json.
+Bounded payloads: argv stored as-is, raw stdout/stderr replaced with a
+sha256 hash. Tokens, channel IDs, free-form user messages are forbidden
+by contract.
 
 The firewall does NOT own the audit log. Callers pass an `event_sink`
 (any callable taking a dict) which is typically wired to the core

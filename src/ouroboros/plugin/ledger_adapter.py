@@ -1,10 +1,11 @@
 """Adapter from firewall audit events to the core event store.
 
-The firewall (`plugin/firewall.py`) emits events that conform to
-`schemas/0.1/audit-event.schema.json`. Those events have
-`additionalProperties: false`, so any wrapping fields the core ledger
-needs (`id`, `aggregate_type`, `aggregate_id`, `timestamp`) MUST live
-in a layer ABOVE the audit-event boundary, not inside it.
+The firewall (`plugin/firewall.py`) emits command events that conform to
+`schemas/0.1/audit-event.schema.json` and v0.3 lifecycle hook events that
+conform to `schemas/0.3/audit-event.schema.json`. Those events have
+`additionalProperties: false`, so any wrapping fields the core ledger needs
+(`id`, `aggregate_type`, `aggregate_id`, `timestamp`) MUST live in a layer
+ABOVE the audit-event boundary, not inside it.
 
 This adapter:
 
