@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.types import Result
@@ -2112,6 +2113,78 @@ class TestInterviewHandlerCwd:
         cwd_param = next(p for p in defn.parameters if p.name == "cwd")
         assert cwd_param.required is False
         assert cwd_param.type == ToolInputType.STRING
+
+    async def test_safe_default_synthesis_closes_persisted_interview_without_second_done(
+        self,
+    ) -> None:
+        """Safe-default synthesis is the only auto completion signal that bypasses the done streak."""
+        handler = InterviewHandler()
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-safe-default",
+            status=InterviewStatus.IN_PROGRESS,
+            ambiguity_score=0.12,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "Goal Clarity",
+                    "clarity_score": 0.9,
+                    "weight": 0.4,
+                    "justification": "clear",
+                },
+                "constraint_clarity": {
+                    "name": "Constraint Clarity",
+                    "clarity_score": 0.9,
+                    "weight": 0.3,
+                    "justification": "clear",
+                },
+                "success_criteria_clarity": {
+                    "name": "Success Criteria Clarity",
+                    "clarity_score": 0.9,
+                    "weight": 0.3,
+                    "justification": "clear",
+                },
+            },
+            completion_candidate_streak=0,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What else should we know?",
+                    user_response=None,
+                )
+            ],
+        )
+
+        async def complete_interview(
+            current_state: InterviewState,
+        ) -> Result[InterviewState, Exception]:
+            current_state.status = InterviewStatus.COMPLETED
+            return Result.ok(current_state)
+
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.complete_interview = AsyncMock(side_effect=complete_interview)
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+            return_value=mock_engine,
+        ):
+            result = await handler.handle(
+                {
+                    "session_id": "sess-safe-default",
+                    "answer": (
+                        "[from-auto][safe-default-synthesis] Mark the interview complete "
+                        "and hand off for seed generation."
+                    ),
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["completed"] is True
+        assert result.value.meta["seed_ready"] is True
+        assert state.status is InterviewStatus.COMPLETED
+        assert state.rounds == []
+        mock_engine.complete_interview.assert_awaited_once()
 
 
 class TestCancelExecutionHandler:

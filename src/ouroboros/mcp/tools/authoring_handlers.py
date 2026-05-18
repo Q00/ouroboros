@@ -203,6 +203,14 @@ def _normalize_interview_answer(answer: str) -> str:
     return " ".join(re.findall(r"[a-z0-9']+", answer.lower()))
 
 
+def _is_safe_default_synthesis_completion(answer: str | None) -> bool:
+    """Return True for the auto driver's auditable safe-default close signal."""
+    return bool(
+        answer is not None
+        and answer.lstrip().lower().startswith("[from-auto][safe-default-synthesis]")
+    )
+
+
 def _is_interview_completion_signal(answer: str | None) -> bool:
     """Return True when the answer explicitly asks to end the interview.
 
@@ -235,7 +243,7 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
     # defaults and now needs the persisted interview session to close in the
     # same turn that records those defaults.  Keep this allowance tied to the
     # explicit synthesis tag so ordinary ``[from-auto]`` answers remain guarded.
-    allow_auto_safe_default_completion = stripped.startswith("[from-auto][safe-default-synthesis]")
+    allow_auto_safe_default_completion = _is_safe_default_synthesis_completion(answer)
     if (
         stripped.startswith("[from-")
         and not stripped.startswith("[from-user]")
@@ -1927,6 +1935,7 @@ class InterviewHandler:
                 # If answer provided, record it first
                 if answer:
                     if _is_interview_completion_signal(answer):
+                        is_safe_default_synthesis = _is_safe_default_synthesis_completion(answer)
                         # Remember whether a round is awaiting an answer so we
                         # can pop it only on the branches that actually end
                         # the interview. Shortfall/refusal paths keep the
@@ -1964,6 +1973,16 @@ class InterviewHandler:
                             exit_score,
                             is_brownfield=state.is_brownfield,
                         ):
+                            if is_safe_default_synthesis:
+                                if has_pending_round:
+                                    state.rounds.pop()
+                                return await self._complete_interview_response(
+                                    engine,
+                                    state,
+                                    session_id,
+                                    exit_score,
+                                )
+
                             # Explicit 'done' with a qualifying score counts
                             # as an implicit stability signal — advance the
                             # streak so repeated 'done' inputs can progress
