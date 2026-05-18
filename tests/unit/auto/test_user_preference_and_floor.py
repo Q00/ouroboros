@@ -22,10 +22,12 @@ from ouroboros.auto.answerer import (
 )
 from ouroboros.auto.grading import GradeGate, SeedGrade, deterministic_floor
 from ouroboros.auto.ledger import (
+    SOURCE_PRIORITY,
     LedgerEntry,
     LedgerSource,
     LedgerStatus,
     SeedDraftLedger,
+    resolve_conflict,
 )
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -168,6 +170,185 @@ def test_count_active_conflicting_entries_returns_count_across_sections() -> Non
         ),
     )
     assert ledger.count_active_conflicting_entries() == 2
+
+
+# ---------------------------------------------------------------------------
+# deterministic conflict policy
+# ---------------------------------------------------------------------------
+
+
+def test_source_priority_places_user_preference_between_convention_and_default() -> None:
+    assert SOURCE_PRIORITY.index(LedgerSource.EXISTING_CONVENTION) < SOURCE_PRIORITY.index(
+        LedgerSource.USER_PREFERENCE
+    )
+    assert SOURCE_PRIORITY.index(LedgerSource.USER_PREFERENCE) < SOURCE_PRIORITY.index(
+        LedgerSource.CONSERVATIVE_DEFAULT
+    )
+
+
+def test_higher_priority_incoming_entry_supersedes_lower_priority_existing() -> None:
+    ledger = SeedDraftLedger()
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.storage",
+            value="Use a local JSON file",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.85,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.storage",
+            value="Use SQLite because the repo already depends on it",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.70,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+
+    entries = ledger.sections["constraints"].entries
+    assert entries[0].status is LedgerStatus.WEAK
+    assert entries[1].status is LedgerStatus.CONFIRMED
+    assert ledger.sections["constraints"].status() is LedgerStatus.CONFIRMED
+
+
+def test_higher_priority_existing_entry_supersedes_lower_priority_incoming() -> None:
+    ledger = SeedDraftLedger()
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.storage",
+            value="Use SQLite because the repo already depends on it",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.70,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.storage",
+            value="Use a local JSON file",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.95,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    entries = ledger.sections["constraints"].entries
+    assert entries[0].status is LedgerStatus.CONFIRMED
+    assert entries[1].status is LedgerStatus.WEAK
+    assert ledger.sections["constraints"].status() is LedgerStatus.CONFIRMED
+
+
+def test_later_grounded_answer_clears_prior_same_key_blocker() -> None:
+    ledger = SeedDraftLedger()
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.python",
+            value="Python version unknown; cannot proceed",
+            source=LedgerSource.BLOCKER,
+            confidence=1.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.python",
+            value="Python 3.13 from pyproject.toml",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.90,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+
+    entries = ledger.sections["runtime_context"].entries
+    assert entries[0].status is LedgerStatus.WEAK
+    assert entries[1].status is LedgerStatus.CONFIRMED
+    assert ledger.sections["runtime_context"].status() is LedgerStatus.CONFIRMED
+
+
+def test_same_priority_higher_confidence_wins() -> None:
+    ledger = SeedDraftLedger()
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.python",
+            value="Python 3.12",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.60,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.python",
+            value="Python 3.13",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.90,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+
+    entries = ledger.sections["runtime_context"].entries
+    assert entries[0].status is LedgerStatus.WEAK
+    assert entries[1].status is LedgerStatus.CONFIRMED
+
+
+def test_same_priority_same_confidence_stays_conflicting_for_human_resolution() -> None:
+    ledger = SeedDraftLedger()
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.python",
+            value="Python 3.12",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.80,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.python",
+            value="Python 3.13",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.80,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+
+    entries = ledger.sections["runtime_context"].entries
+    assert entries[0].status is LedgerStatus.CONFLICTING
+    assert entries[1].status is LedgerStatus.CONFLICTING
+    assert ledger.sections["runtime_context"].status() is LedgerStatus.CONFLICTING
+    assert "runtime_context" in ledger.open_gaps()
+    assert ledger.count_active_conflicting_entries() == 2
+
+
+def test_resolve_conflict_reports_same_value_without_marking_conflict() -> None:
+    existing = LedgerEntry(
+        key="outputs.format",
+        value="Stable stdout",
+        source=LedgerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.80,
+        status=LedgerStatus.DEFAULTED,
+    )
+    incoming = LedgerEntry(
+        key="outputs.format",
+        value=" stable  stdout ",
+        source=LedgerSource.ASSUMPTION,
+        confidence=0.50,
+        status=LedgerStatus.INFERRED,
+    )
+
+    assert resolve_conflict(existing, incoming).value == "same_value"
 
 
 # ---------------------------------------------------------------------------
