@@ -71,9 +71,7 @@ def create_validated_hitl_timeout_event(
         raise HumanInputResumeValidationError("HITL timeout clock must be timezone-aware")
     elapsed = (now - request.created_at).total_seconds()
     if elapsed < request.timeout_seconds:
-        raise HumanInputResumeValidationError(
-            f"HITL request {request_id!r} has not expired"
-        )
+        raise HumanInputResumeValidationError(f"HITL request {request_id!r} has not expired")
     if request.timeout_action is HumanInputTimeoutAction.STAY_WAITING:
         raise HumanInputResumeValidationError(
             f"HITL request {request_id!r} uses timeout_action=stay_waiting; "
