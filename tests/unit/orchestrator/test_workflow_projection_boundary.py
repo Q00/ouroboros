@@ -142,6 +142,9 @@ def test_workflow_ir_and_projection_remain_separate_read_models() -> None:
     assert isinstance(spec, WorkflowSpec)
     assert isinstance(task_node, WorkflowNode)
     assert not isinstance(task_node, StepRecord)
-    assert all(not isinstance(node, (RunRecord, StageRecord, StepRecord, ArtifactRecord)) for node in spec.nodes)
+    assert all(
+        not isinstance(node, (RunRecord, StageRecord, StepRecord, ArtifactRecord))
+        for node in spec.nodes
+    )
     assert all("RunRecord" not in node.model_dump_json() for node in spec.nodes)
     assert all("StepRecord" not in node.model_dump_json() for node in spec.nodes)
