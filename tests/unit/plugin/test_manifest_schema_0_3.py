@@ -257,7 +257,44 @@ class TestV03HookAuditEvents:
             "plugin.hook.failed",
         )
 
-    def test_manifest_audit_events_accept_hook_wrapper_events(self, tmp_path: Path) -> None:
+    def test_manifest_audit_events_accept_complete_hook_wrapper_events(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _v03_manifest()
+        payload["hooks"] = [_valid_hook(name="before_invocation")]
+        payload["audit"] = {
+            "events": [
+                "plugin.hook.invoked",
+                "plugin.hook.completed",
+                "plugin.hook.blocked",
+                "plugin.hook.failed",
+            ]
+        }
+        manifest = load_manifest(_write(tmp_path, payload))
+        assert manifest.audit.events == (
+            "plugin.hook.invoked",
+            "plugin.hook.completed",
+            "plugin.hook.blocked",
+            "plugin.hook.failed",
+        )
+
+    def test_manifest_with_hooks_rejects_partial_explicit_hook_audit_events(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _v03_manifest()
+        payload["hooks"] = [_valid_hook(name="before_invocation")]
+        payload["audit"] = {"events": ["plugin.hook.blocked", "plugin.hook.failed"]}
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/audit/events"
+        assert "plugin.hook.invoked" in exc_info.value.got
+        assert "plugin.hook.completed" in exc_info.value.got
+
+    def test_manifest_without_hooks_may_declare_partial_hook_audit_events(
+        self, tmp_path: Path
+    ) -> None:
         payload = _v03_manifest()
         payload["audit"] = {"events": ["plugin.hook.blocked", "plugin.hook.failed"]}
         manifest = load_manifest(_write(tmp_path, payload))

@@ -33,6 +33,7 @@ from typing import Any
 from ouroboros.plugin.hooks import (
     HOOK_BLOCKED_EVENT,
     HOOK_COMPLETED_EVENT,
+    HOOK_EVENT_TYPES,
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
     HOOK_LIFECYCLE_POLICY_SCOPE,
@@ -582,6 +583,39 @@ def _validate_after_invocation_policy(
     )
 
 
+def _validate_hook_audit_events(
+    *,
+    audit: AuditSpec,
+    audit_was_explicit: bool,
+    hooks: tuple[HookSpec, ...],
+    manifest_path: str | Path,
+    schema_version: str,
+) -> None:
+    """Keep explicit v0.3 audit declarations aligned with hook dispatch.
+
+    The v0.3 firewall emits ``plugin.hook.invoked`` for every dispatched
+    lifecycle hook and then emits one of the hook terminal events. When a
+    manifest declares hooks and also narrows ``audit.events`` explicitly,
+    the explicit list becomes the runtime contract; accepting a partial
+    hook vocabulary would let the dispatcher produce records outside that
+    contract. Omitted audit blocks use :meth:`AuditSpec.standard_events_for_schema`,
+    which already includes the complete v1 hook event vocabulary.
+    """
+
+    if schema_version != "0.3" or not audit_was_explicit or not hooks:
+        return
+    missing_events = HOOK_EVENT_TYPES.difference(audit.events)
+    if not missing_events:
+        return
+    raise PluginManifestError(
+        "v0.3 manifests with hooks must declare the complete hook audit vocabulary",
+        path=str(manifest_path),
+        json_pointer="/audit/events",
+        expected=f"events including {sorted(HOOK_EVENT_TYPES)!r}",
+        got=f"missing {sorted(missing_events)!r} from {list(audit.events)!r}",
+    )
+
+
 def _escape_json_pointer_token(token: str) -> str:
     return token.replace("~", "~0").replace("/", "~1")
 
@@ -736,8 +770,10 @@ def load_manifest(path: str | Path) -> PluginManifest:
     audit_raw = raw.get("audit")
     if audit_raw is None:
         audit = AuditSpec.standard_events_for_schema(schema_version)
+        audit_was_explicit = False
     else:
         audit = AuditSpec(events=tuple(audit_raw["events"]))
+        audit_was_explicit = True
 
     declared_permission_scopes = frozenset(p.scope for p in permissions)
     hooks = tuple(
@@ -749,6 +785,13 @@ def load_manifest(path: str | Path) -> PluginManifest:
             schema_version=schema_version,
         )
         for index, h in enumerate(raw.get("hooks", ()))
+    )
+    _validate_hook_audit_events(
+        audit=audit,
+        audit_was_explicit=audit_was_explicit,
+        hooks=hooks,
+        manifest_path=manifest_path,
+        schema_version=schema_version,
     )
 
     return PluginManifest(
