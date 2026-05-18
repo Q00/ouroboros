@@ -187,6 +187,53 @@ class AuditSpec:
 
 
 @dataclass(frozen=True)
+class PluginActionDescriptor:
+    """Read-only action projection for one manifest command.
+
+    The descriptor is intentionally derived only from validated manifest data.
+    It must not import plugin modules or execute entrypoints.
+    """
+
+    action_id: str
+    namespace: str
+    name: str
+    summary: str
+    usage: str
+    risk: str
+    requires_confirmation: bool
+    arguments: tuple[CommandArgument, ...]
+    entrypoint: Entrypoint
+    required_permissions: tuple[str, ...]
+    optional_permissions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PluginDescriptor:
+    """Harness-readable plugin component/action projection.
+
+    This is a validation/read-model contract for plugin discovery and future
+    conformance checks. It does not grant permissions, dispatch hooks, or run the
+    plugin entrypoint.
+    """
+
+    component_id: str
+    plugin_id: str
+    kind: str
+    name: str
+    version: str
+    schema_version: str
+    source: SourceSpec
+    entrypoint: Entrypoint
+    actions: tuple[PluginActionDescriptor, ...]
+    capabilities_declared: tuple[Capability, ...]
+    permissions_declared: tuple[Permission, ...]
+    lifecycle_hooks: tuple[HookSpec, ...]
+    audit_events: tuple[str, ...]
+    compatibility: tuple[str, ...]
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class PluginManifest:
     """Frozen representation of a validated plugin manifest.
 
@@ -209,6 +256,55 @@ class PluginManifest:
     description: str = ""
     audit: AuditSpec = field(default_factory=AuditSpec.standard_four_events)
     hooks: tuple[HookSpec, ...] = ()
+
+    def to_descriptor(self) -> PluginDescriptor:
+        """Project this manifest into a pure component/action descriptor."""
+        return plugin_descriptor_from_manifest(self)
+
+
+def plugin_descriptor_from_manifest(manifest: PluginManifest) -> PluginDescriptor:
+    """Return a pure read-model descriptor for a validated plugin manifest.
+
+    The projection is manifest-only by design: it reuses frozen dataclasses from
+    ``load_manifest`` and never imports plugin code or executes entrypoint
+    commands.
+    """
+
+    required_permissions = tuple(p.scope for p in manifest.permissions if p.required)
+    optional_permissions = tuple(p.scope for p in manifest.permissions if not p.required)
+    actions = tuple(
+        PluginActionDescriptor(
+            action_id=f"{manifest.name}:{command.namespace}:{command.name}",
+            namespace=command.namespace,
+            name=command.name,
+            summary=command.summary,
+            usage=command.usage,
+            risk=command.risk,
+            requires_confirmation=command.requires_confirmation,
+            arguments=command.arguments,
+            entrypoint=manifest.entrypoint,
+            required_permissions=required_permissions,
+            optional_permissions=optional_permissions,
+        )
+        for command in manifest.commands
+    )
+    return PluginDescriptor(
+        component_id=manifest.name,
+        plugin_id=manifest.name,
+        kind="plugin",
+        name=manifest.name,
+        version=manifest.version,
+        schema_version=manifest.schema_version,
+        source=manifest.source,
+        entrypoint=manifest.entrypoint,
+        actions=actions,
+        capabilities_declared=manifest.capabilities,
+        permissions_declared=manifest.permissions,
+        lifecycle_hooks=manifest.hooks,
+        audit_events=manifest.audit.events,
+        compatibility=SUPPORTED_SCHEMA_VERSIONS,
+        description=manifest.description,
+    )
 
 
 def _load_schema(schema_version: str, *, manifest_path: str | Path) -> dict[str, Any]:
@@ -850,10 +946,13 @@ __all__ = [
     "Entrypoint",
     "HookSpec",
     "Permission",
+    "PluginActionDescriptor",
+    "PluginDescriptor",
     "PluginManifest",
     "PluginManifestError",
     "SourceSpec",
     "AuditSpec",
     "load_manifest",
+    "plugin_descriptor_from_manifest",
     "SUPPORTED_SCHEMA_VERSIONS",
 ]
