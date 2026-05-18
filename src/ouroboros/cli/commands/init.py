@@ -263,6 +263,7 @@ async def _run_interview_loop(
     state: InterviewState,
     *,
     event_store=None,
+    disabled_event_stores: set[int] | None = None,
 ) -> InterviewState:
     """Run the interview question loop until completion or user exit.
 
@@ -334,6 +335,8 @@ async def _run_interview_loop(
                 ),
             ],
         ):
+            if disabled_event_stores is not None and event_store is not None:
+                disabled_event_stores.add(id(event_store))
             event_store = None
 
         console.print()
@@ -409,69 +412,95 @@ async def _run_interview(
 
     # Run initial interview loop
     event_store = await _get_init_event_store()
-    state = await _run_interview_loop(engine, state, event_store=event_store)
+    disabled_event_stores: set[int] = set()
 
-    # Outer loop for retry on high ambiguity
-    while True:
-        # Interview complete
+    try:
+        loop_event_store = None if event_store is None else event_store
+        state = await _run_interview_loop(
+            engine,
+            state,
+            event_store=loop_event_store,
+            disabled_event_stores=disabled_event_stores,
+        )
+
+        # Outer loop for retry on high ambiguity
+        while True:
+            # Interview complete
+            console.print()
+            print_success("Interview completed!")
+            console.print(f"[muted]Total rounds: {len(state.rounds)}[/]")
+            console.print(f"[muted]Interview ID: {state.interview_id}[/]")
+
+            # Save final state
+            save_result = await engine.save_state(state)
+            if save_result.is_ok:
+                console.print(f"[muted]State saved to: {save_result.value}[/]")
+
+            console.print()
+
+            # Ask if user wants to proceed to Seed generation
+            should_generate_seed = Confirm.ask(
+                "[bold cyan]Proceed to generate Seed specification?[/]",
+                default=True,
+            )
+
+            if not should_generate_seed:
+                console.print(
+                    "[muted]You can resume later with:[/] "
+                    f"[bold]ouroboros init start --resume {state.interview_id}[/]"
+                )
+                return
+
+            # Generate Seed
+            seed_path, result = await _generate_seed_from_interview(state, llm_adapter, llm_backend)
+
+            if result == SeedGenerationResult.CONTINUE_INTERVIEW:
+                # Re-open interview for more questions
+                console.print()
+                print_info("Continuing interview to reduce ambiguity...")
+                state.status = InterviewStatus.IN_PROGRESS
+                await engine.save_state(state)  # Save status change immediately
+
+                # Continue interview loop (reusing the same helper)
+                loop_event_store = (
+                    None
+                    if event_store is None or id(event_store) in disabled_event_stores
+                    else event_store
+                )
+                state = await _run_interview_loop(
+                    engine,
+                    state,
+                    event_store=loop_event_store,
+                    disabled_event_stores=disabled_event_stores,
+                )
+                continue
+
+            if result == SeedGenerationResult.CANCELLED:
+                return
+
+            # Success - proceed to workflow
+            break
+
+        # Ask if user wants to start workflow
         console.print()
-        print_success("Interview completed!")
-        console.print(f"[muted]Total rounds: {len(state.rounds)}[/]")
-        console.print(f"[muted]Interview ID: {state.interview_id}[/]")
-
-        # Save final state
-        save_result = await engine.save_state(state)
-        if save_result.is_ok:
-            console.print(f"[muted]State saved to: {save_result.value}[/]")
-
-        console.print()
-
-        # Ask if user wants to proceed to Seed generation
-        should_generate_seed = Confirm.ask(
-            "[bold cyan]Proceed to generate Seed specification?[/]",
+        should_start_workflow = Confirm.ask(
+            "[bold cyan]Start workflow now?[/]",
             default=True,
         )
 
-        if not should_generate_seed:
-            console.print(
-                "[muted]You can resume later with:[/] "
-                f"[bold]ouroboros init start --resume {state.interview_id}[/]"
+        if should_start_workflow:
+            await _start_workflow(
+                seed_path,
+                use_orchestrator,
+                runtime_backend=workflow_runtime_backend,
             )
-            return
 
-        # Generate Seed
-        seed_path, result = await _generate_seed_from_interview(state, llm_adapter, llm_backend)
-
-        if result == SeedGenerationResult.CONTINUE_INTERVIEW:
-            # Re-open interview for more questions
-            console.print()
-            print_info("Continuing interview to reduce ambiguity...")
-            state.status = InterviewStatus.IN_PROGRESS
-            await engine.save_state(state)  # Save status change immediately
-
-            # Continue interview loop (reusing the same helper)
-            state = await _run_interview_loop(engine, state, event_store=event_store)
-            continue
-
-        if result == SeedGenerationResult.CANCELLED:
-            return
-
-        # Success - proceed to workflow
-        break
-
-    # Ask if user wants to start workflow
-    console.print()
-    should_start_workflow = Confirm.ask(
-        "[bold cyan]Start workflow now?[/]",
-        default=True,
-    )
-
-    if should_start_workflow:
-        await _start_workflow(
-            seed_path,
-            use_orchestrator,
-            runtime_backend=workflow_runtime_backend,
-        )
+    finally:
+        if event_store is not None:
+            try:
+                await event_store.close()
+            except Exception:
+                pass
 
 
 async def _generate_seed_from_interview(
