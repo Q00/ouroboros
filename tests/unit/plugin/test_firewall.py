@@ -13,7 +13,11 @@ from ouroboros.plugin.firewall import (
     DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS,
     invoke_plugin,
 )
-from ouroboros.plugin.hooks import HOOK_LIFECYCLE_POLICY_SCOPE, HOOK_LIFECYCLE_READ_SCOPE
+from ouroboros.plugin.hooks import (
+    HOOK_EVENT_TYPES,
+    HOOK_LIFECYCLE_POLICY_SCOPE,
+    HOOK_LIFECYCLE_READ_SCOPE,
+)
 from ouroboros.plugin.manifest import load_manifest
 from ouroboros.plugin.trust_store import TrustStore
 from ouroboros.plugin.userlevel_registry import (
@@ -399,6 +403,242 @@ def test_v03_after_hook_runs_after_terminal_failed_event(tmp_path: Path) -> None
         "plugin.hook.completed",
     ]
     assert events[6]["result"]["status"] == "failed"
+
+
+def test_v03_no_hooks_keeps_standard_command_audit_sequence(tmp_path: Path) -> None:
+    """Conformance baseline: v0.3 alone must not imply hook dispatch."""
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["schema_version"] = "0.3"
+    program = _make_program(tmp_path, payload)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-no-hooks",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+
+    assert result.status == "success"
+    assert [event["event_type"] for event in events] == [
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.completed",
+    ]
+
+
+def test_v03_explicit_complete_audit_event_allowlist_conforms(tmp_path: Path) -> None:
+    """Explicit v0.3 audit.events may narrow only if every emitted event remains listed."""
+    payload = _hook_manifest_payload("0.3")
+    payload["audit"] = {
+        "events": [
+            "plugin.invoked",
+            "plugin.permission_used",
+            "plugin.completed",
+            "plugin.failed",
+            *sorted(HOOK_EVENT_TYPES),
+        ]
+    }
+    program = _make_program(tmp_path, payload)
+    trust_store = TrustStore(root=tmp_path / "trust")
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_POLICY_SCOPE,
+        granted_by="user:test",
+    )
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_READ_SCOPE,
+        granted_by="user:test",
+    )
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-explicit-audit",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+
+    assert result.status == "success"
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.completed",
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+    ]
+
+
+def test_v03_missing_lifecycle_trust_blocks_before_hook_dispatch(tmp_path: Path) -> None:
+    program = _make_program(tmp_path, _hook_manifest_payload("0.3"))
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-missing-hook-trust",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "blocked"
+    assert calls == []
+    assert [event["event_type"] for event in events] == ["plugin.failed"]
+    assert "plugin:lifecycle:read" in result.message
+    assert "plugin.hook.invoked" not in {event["event_type"] for event in events}
+
+
+def test_v03_fail_closed_before_hook_timeout_blocks_without_command_launch(
+    tmp_path: Path,
+) -> None:
+    program = _make_program(tmp_path, _hook_manifest_payload("0.3"))
+    trust_store = TrustStore(root=tmp_path / "trust")
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_POLICY_SCOPE,
+        granted_by="user:test",
+    )
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_READ_SCOPE,
+        granted_by="user:test",
+    )
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
+        if argv[:3] == ["python", "-m", "hook_before"]:
+            raise subprocess.TimeoutExpired(
+                cmd=argv,
+                timeout=kwargs["timeout"],
+                output=b"partial hook stdout",
+                stderr=b"partial hook stderr",
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-hook-timeout-closed",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "blocked"
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.blocked",
+    ]
+    blocked = events[1]
+    assert "timed out" in blocked["result"]["message"]
+    assert "stdout_sha256" in blocked["provenance"]
+    serialized = json.dumps(events)
+    assert "partial hook stdout" not in serialized
+    assert "partial hook stderr" not in serialized
+
+
+def test_v03_fail_open_before_hook_timeout_records_failure_and_continues(
+    tmp_path: Path,
+) -> None:
+    payload = _hook_manifest_payload("0.3")
+    payload["hooks"][0]["failure_policy"] = "fail_open"
+    payload["hooks"][0]["permissions"] = [HOOK_LIFECYCLE_READ_SCOPE]
+    payload["permissions"] = [
+        permission
+        for permission in payload["permissions"]
+        if permission["scope"] != HOOK_LIFECYCLE_POLICY_SCOPE
+    ]
+    program = _make_program(tmp_path, payload)
+    trust_store = TrustStore(root=tmp_path / "trust")
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    trust = trust_store.grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_READ_SCOPE,
+        granted_by="user:test",
+    )
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
+        if argv[:3] == ["python", "-m", "hook_before"]:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-hook-timeout-open",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "success"
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.failed",
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.completed",
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+    ]
+    assert events[1]["result"]["status"] == "failed"
+    assert "timed out" in events[1]["result"]["message"]
 
 
 def test_trust_violation_only_emits_failed_no_invoked(tmp_path: Path) -> None:

@@ -492,6 +492,24 @@ events:
 Core MUST NOT emit any new `plugin.hook.*` event until the upstream
 audit-event schema and vendored core copy both include that event name.
 
+### v0.3 lifecycle conformance baseline
+
+The v0.3 lifecycle wrapper has a compatibility matrix that future plugin work
+MUST keep green before promoting more hook kinds. The baseline covers:
+
+- manifests with no hooks, which keep the standard command audit sequence;
+- `before_invocation` fail-open observation, which records hook failure and
+  continues the original invocation;
+- `before_invocation` fail-closed policy, which blocks before `plugin.invoked`;
+- `after_invocation` fail-open observation after terminal command events;
+- explicit `audit.events` lists that include every runtime-emitted command and
+  hook event;
+- lifecycle permission trust-gate failures before any hook dispatch; and
+- timeout/error paths that persist only bounded hashes for hook output.
+
+This matrix is a regression baseline, not a new feature surface. It MUST NOT
+promote deferred hook names or change v0.3 schema compatibility by itself.
+
 ### Review boundary for follow-up PRs
 
 The hook rollout should remain reviewable:
