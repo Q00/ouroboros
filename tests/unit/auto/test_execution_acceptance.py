@@ -124,6 +124,28 @@ def test_normalize_execution_acceptance_preserves_non_equivalent_file_criteria()
     )
 
 
+def test_normalize_execution_acceptance_preserves_extra_hello_auto_requirements() -> None:
+    seed = _seed(
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        "`hello_auto.py` contains a module-level docstring.",
+        "`tests/test_hello_auto.py` uses pytest.mark.smoke.",
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        _SINGLE_HELLO_AUTO_OBSERVATION_AC,
+        "`hello_auto.py` contains a module-level docstring.",
+        "`tests/test_hello_auto.py` uses pytest.mark.smoke.",
+    )
+
+
 def test_normalize_execution_acceptance_preserves_real_product_lifecycle_criteria() -> None:
     seed = _seed(
         "`ooo auto` is dispatched through the installed Ouroboros MCP tool, not interpreted as plain text.",
