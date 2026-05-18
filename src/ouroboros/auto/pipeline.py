@@ -1477,10 +1477,11 @@ class AutoPipeline:
             and artifact_hash is not None
             and state.evaluate_artifact_hash != artifact_hash
         ):
-            state.recovery_guard_tripped = None
-            state.evaluate_round = 0
-            state.failure_fingerprints = []
-            state.personas_invoked = []
+            if not _is_active_recovery_redispatch(state):
+                state.recovery_guard_tripped = None
+                state.evaluate_round = 0
+                state.failure_fingerprints = []
+                state.personas_invoked = []
 
         # RFC #809 Phase 2.2b — sticky guard check (post-reset). If the
         # previous round exhausted a recovery guard AND the artifact
@@ -2211,6 +2212,20 @@ class AutoPipeline:
                 reattach_terminal=True,
             )
 
+        if (
+            state.run_handoff_status == "ralph_retry_after_blocker"
+            and self.ralph_starter is None
+            and not state.ralph_job_id
+            and not state.ralph_lineage_id
+        ):
+            state.mark_blocked(
+                "Ralph handoff retry requires a configured ralph starter; "
+                f"{_RECOVERY_BLOCKED_CHOICES}",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
+
         handle = state.ralph_job_id or state.ralph_lineage_id
         if handle:
             state.run_handoff_guidance = (
@@ -2863,6 +2878,19 @@ def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool
     if state.phase is not AutoPhase.RALPH_HANDOFF:
         return False
     return state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
+
+
+def _is_active_recovery_redispatch(state: AutoPipelineState) -> bool:
+    """Return True while a safe lateral plan is driving a Ralph redispatch."""
+    if state.run_handoff_status != "ralph_retry_after_blocker":
+        return False
+    if not isinstance(state.last_recovery_plan, dict):
+        return False
+    try:
+        plan = AutoRecoveryPlan.from_dict(state.last_recovery_plan)
+    except ValueError:
+        return False
+    return AutoPipeline._can_redispatch_recovery_plan(plan)
 
 
 def _prepare_recovery_redispatch(state: AutoPipelineState) -> None:

@@ -28,6 +28,7 @@ from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
+    MAX_EVALUATE_ROUNDS,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
@@ -447,6 +448,98 @@ async def test_pipeline_consumes_lateral_plan_with_fresh_ralph_redispatch(tmp_pa
     assert any("[auto recovery]" in constraint for constraint in ralph_seeds[1].constraints)
     assert any("Run the CLI directly" in constraint for constraint in ralph_seeds[1].constraints)
     assert state.last_recovery_plan is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_redispatch_fresh_artifact_preserves_loop_budget(tmp_path) -> None:
+    """Automated recovery redispatches must not reset the recovery guards.
+
+    Fresh Ralph artifacts normally clear stale operator-driven exhaustion, but
+    a safe lateral ``ralph_redispatch`` plan is part of the same closed loop. A
+    changed artifact from that path must still respect the existing round,
+    fingerprint, and persona budgets.
+    """
+    state = _state_at_run_phase(tmp_path)
+    state.phase = AutoPhase.EVALUATE
+    state.run_handoff_status = "ralph_retry_after_blocker"
+    state.last_recovery_plan = {
+        "action": "ralph_redispatch",
+        "safe_to_redispatch": True,
+        "reason": "safe lateral retry",
+        "qa_score": 0.30,
+        "qa_verdict": "fail",
+        "differences": ["old failure"],
+        "suggestions": ["try another route"],
+        "persona": "hacker",
+        "instruction": "Use a CLI-only verification path.",
+    }
+    state.evaluate_artifact_hash = "stale_hash_does_not_match_new_artifact"
+    state.evaluate_round = MAX_EVALUATE_ROUNDS
+    state.failure_fingerprints = ["fp1", "fp2", "fp3"]
+    state.personas_invoked = [ThinkingPersona.HACKER.value]
+
+    eval_calls = 0
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal eval_calls
+        eval_calls += 1
+        return EvaluateResult(passed=True, score=0.95, verdict="pass")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=_ralph_starter(),
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    result = await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text="brand new recovery artifact bytes",
+        stop_reason=None,
+    )
+
+    assert result.status == "blocked"
+    assert eval_calls == 0
+    assert state.recovery_guard_tripped == "round_budget"
+    assert state.evaluate_round == MAX_EVALUATE_ROUNDS
+    assert state.failure_fingerprints == ["fp1", "fp2", "fp3"]
+    assert state.personas_invoked == [ThinkingPersona.HACKER.value]
+
+
+@pytest.mark.asyncio
+async def test_recovery_redispatch_without_starter_resume_stays_blocked(tmp_path) -> None:
+    """A no-starter recovery retry must not resume into guidance-only limbo."""
+    state = _state_at_run_phase(tmp_path)
+    state.phase = AutoPhase.RALPH_HANDOFF
+    state.run_handoff_status = "ralph_retry_after_blocker"
+    state.ralph_job_id = None
+    state.ralph_lineage_id = None
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=None,
+        complete_product=True,
+        evaluator=None,
+    )
+
+    result = await pipeline._resume_ralph_handoff(
+        state, ledger=_StubLedger(), review=None, seed=_build_seed()
+    )
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "ralph_starter"
+    assert "requires a configured ralph starter" in (state.last_error or "")
 
 
 @pytest.mark.asyncio
