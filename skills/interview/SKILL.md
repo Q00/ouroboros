@@ -131,6 +131,19 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 2. **For each question from MCP, apply the routing paths below:**
 
+   **Milestone lateral-review advisory**:
+   If an MCP response includes `meta.lateral_review_recommended=true`, treat it
+   as a non-blocking cue that the interview just crossed an ambiguity milestone
+   such as `initial -> progress`, `progress -> refined`, or `refined -> ready`.
+   The MCP tool is still only a question generator; it has not run lateral
+   personas, blocked the interview, or changed requirements. Before answering
+   the returned question, the main session may run `ooo lateral` / the
+   `ouroboros_lateral_think` MCP surface to inspect hidden assumptions for the
+   named `meta.lateral_review_milestone`, then fold only concrete, user-safe
+   findings into the next answer or user question. If lateral tooling is
+   unavailable or unnecessary, continue with the returned question; do not
+   restart the interview.
+
    **PATH 1 — Code Answer** (describe current state from codebase):
    When the question asks about existing tech stack, frameworks, dependencies,
    current patterns, architecture, or file structure:

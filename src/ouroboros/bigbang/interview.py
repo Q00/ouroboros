@@ -188,6 +188,7 @@ class InterviewState(BaseModel):
     ambiguity_score: float | None = Field(default=None, ge=0.0, le=1.0)
     ambiguity_breakdown: dict[str, Any] | None = None
     completion_candidate_streak: int = Field(default=0, ge=0)
+    lateral_review_advised_milestones: list[str] = Field(default_factory=list)
 
     @property
     def current_round_number(self) -> int:
@@ -235,6 +236,13 @@ class InterviewState(BaseModel):
         """Persist the latest ambiguity evaluation on the interview state."""
         self.ambiguity_score = score
         self.ambiguity_breakdown = breakdown
+        self.mark_updated()
+
+    def note_lateral_review_advisory(self, milestone: str) -> None:
+        """Persist that a milestone transition advisory has been emitted."""
+        if milestone in self.lateral_review_advised_milestones:
+            return
+        self.lateral_review_advised_milestones.append(milestone)
         self.mark_updated()
 
     def clear_stored_ambiguity(self) -> None:

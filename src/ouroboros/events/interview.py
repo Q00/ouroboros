@@ -90,20 +90,6 @@ def interview_response_emitted(
     producing an empty-``thinking`` / ``stop_reason=tool_use`` turn after
     receiving an interview question) with response payload characteristics.
     See Q00/ouroboros#831 comment thread for the hang trace context.
-
-    Args:
-        interview_id: Session id.
-        response_kind: One of ``"start"`` / ``"resume_pending"`` /
-            ``"answer"`` -- which build path produced the response.
-        round_number: Round count at emission time (``len(state.rounds)``).
-        payload_chars: Total characters in the response text body.
-        transcript_chars: Sum of ``len(question) + len(user_response)`` for
-            every round in ``state.rounds``, including pending questions with
-            no response yet.
-        ambiguity_prefix_present: ``True`` when the response text begins
-            with ``(ambiguity: ...)``.
-        is_length_guard: ``True`` when the response carries the
-            ``INITIAL_CONTEXT_SUMMARY_QUESTION`` meta-directive.
     """
     return BaseEvent(
         type="interview.response.emitted",
@@ -116,5 +102,33 @@ def interview_response_emitted(
             "transcript_chars": transcript_chars,
             "ambiguity_prefix_present": ambiguity_prefix_present,
             "is_length_guard": is_length_guard,
+        },
+    )
+
+
+def interview_lateral_review_recommended(
+    interview_id: str,
+    *,
+    from_milestone: str,
+    to_milestone: str,
+    ambiguity_score: float,
+    round_number: int,
+) -> BaseEvent:
+    """Create event when a milestone transition recommends lateral review.
+
+    The event is advisory only: it records that the main/session layer may run
+    a lateral review between interview turns, but it does not imply that the
+    interview handler invoked lateral thinking or blocked question generation.
+    """
+    return BaseEvent(
+        type="interview.lateral_review.recommended",
+        aggregate_type="interview",
+        aggregate_id=interview_id,
+        data={
+            "from_milestone": from_milestone,
+            "to_milestone": to_milestone,
+            "ambiguity_score": ambiguity_score,
+            "round_number": round_number,
+            "reason": "first_forward_milestone_transition",
         },
     )
