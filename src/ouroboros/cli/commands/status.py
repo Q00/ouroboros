@@ -14,7 +14,11 @@ import typer
 import yaml
 
 from ouroboros.auto.state import AutoPhase, AutoStore
-from ouroboros.backends import get_backend_capability, resolve_runtime_backend_name
+from ouroboros.backends import (
+    get_backend_capability,
+    resolve_llm_backend_name,
+    resolve_runtime_backend_name,
+)
 from ouroboros.cli.commands.config import _load_config, _resolve_db_path
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import create_status_table, print_table
@@ -359,9 +363,11 @@ def _effective_llm_backend(data: dict) -> str:
 
 def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
     backend = _effective_llm_backend(data)
-    normalized_backend = backend.strip().lower()
-    capability = get_backend_capability(normalized_backend)
-    canonical_backend = capability.name if capability is not None else normalized_backend
+    try:
+        canonical_backend = resolve_llm_backend_name(backend)
+    except ValueError as exc:
+        return _health_row("Credentials", "error", str(exc))
+
     if canonical_backend == "codex":
         if _codex_auth_file_exists():
             return _health_row("Credentials", "ok", "codex OAuth file present")
@@ -371,9 +377,11 @@ def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
             "Credentials", "error", "missing Codex OAuth auth.json or OPENAI_API_KEY"
         )
 
-    provider = _credential_provider_for_backend(backend)
+    provider = _credential_provider_for_backend(canonical_backend)
     if provider is None:
-        return _health_row("Credentials", "ok", f"{backend} uses local CLI authentication")
+        return _health_row(
+            "Credentials", "ok", f"{canonical_backend} uses local CLI authentication"
+        )
 
     if _provider_env_key_present(provider):
         return _health_row("Credentials", "ok", f"{_API_KEY_ENV_BY_PROVIDER[provider]} present")

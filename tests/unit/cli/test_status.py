@@ -407,3 +407,22 @@ def test_health_errors_for_malformed_provider_credentials(monkeypatch, tmp_path:
     assert result.exit_code == 1
     assert "Credentials" in result.output
     assert "credentials provider anthropic must be a mapping" in result.output
+
+
+def test_health_errors_for_unsupported_llm_backend(monkeypatch, tmp_path: Path) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=cli)
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "not-a-backend")
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "Credentials" in result.output
+    assert "Unsupported backend" in result.output
+    assert "uses local CLI authentication" not in result.output
