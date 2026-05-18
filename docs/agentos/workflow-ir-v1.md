@@ -48,6 +48,9 @@ SDK and does not add plugin dispatch behavior.
 - Plugin command execution remains outside this v1 IR surface.
 - Plugin nodes can be represented as planned nodes, but v1 does not execute
   them or grant permissions.
+- Plugin descriptor adapters may carry action/permission metadata into planned
+  `owner=plugin` nodes only when `dispatch_enabled=false`; entrypoint commands
+  are not runtime instructions in the IR.
 
 ## Non-goals for v1 follow-ups
 

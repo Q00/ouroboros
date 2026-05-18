@@ -21,12 +21,19 @@ from ouroboros.orchestrator.workflow_ir import (
     WorkflowSpec,
     validate_workflow,
 )
+from ouroboros.plugin.manifest import PluginDescriptor
 
 DEFAULT_SEED_AC_INPUT_SCHEMA_REF = "ouroboros://schemas/seed-acceptance-criterion-input/v1"
 """Canonical input-schema reference used for current string AC dispatch nodes."""
 
 DEFAULT_SEED_AC_EVIDENCE_SCHEMA_REF = "ouroboros://schemas/seed-acceptance-evidence/v1"
 """Canonical evidence-schema reference used for current string AC dispatch nodes."""
+
+DEFAULT_PLUGIN_ACTION_INPUT_SCHEMA_REF = "ouroboros://schemas/plugin-action-input/v1"
+"""Contract ref for plugin action nodes represented in Workflow IR."""
+
+DEFAULT_PLUGIN_ACTION_EVIDENCE_SCHEMA_REF = "ouroboros://schemas/plugin-action-evidence/v1"
+"""Contract ref for evidence expected from plugin action nodes."""
 
 
 def workflow_spec_from_seed(
@@ -164,6 +171,125 @@ def workflow_spec_from_seed(
     return spec
 
 
+def workflow_spec_from_plugin_descriptor(
+    descriptor: PluginDescriptor,
+    *,
+    input_schema_ref: str = DEFAULT_PLUGIN_ACTION_INPUT_SCHEMA_REF,
+    evidence_schema_ref: str = DEFAULT_PLUGIN_ACTION_EVIDENCE_SCHEMA_REF,
+    metadata: Mapping[str, Any] | None = None,
+) -> WorkflowSpec:
+    """Project a plugin descriptor into contract-only Workflow IR metadata.
+
+    The adapter represents plugin actions as planned plugin-owned nodes so #956
+    can reason about graph shape without granting permissions or dispatching the
+    plugin runtime. It consumes only the read-only manifest descriptor from #939.
+
+    Raises:
+        ValueError: If the descriptor has no actions or emits an invalid spec.
+    """
+    if not descriptor.actions:
+        msg = "Plugin descriptor must contain at least one action to project Workflow IR"
+        raise ValueError(msg)
+
+    nodes: list[WorkflowNode] = []
+    edges: list[WorkflowEdge] = []
+    terminal_node = WorkflowNode(
+        node_id=f"plugin_{_slug(descriptor.plugin_id)}_terminal",
+        kind=NodeKind.TERMINAL,
+        owner=NodeOwner.HARNESS,
+        name=f"Plugin {descriptor.name} planning complete",
+        metadata={
+            "plugin_id": descriptor.plugin_id,
+            "component_id": descriptor.component_id,
+            "dispatch_enabled": False,
+        },
+    )
+
+    declared_permission_scopes = tuple(permission.scope for permission in descriptor.permissions_declared)
+    lifecycle_hook_names = tuple(hook.name for hook in descriptor.lifecycle_hooks)
+    capability_names = tuple(capability.name for capability in descriptor.capabilities_declared)
+
+    for action in descriptor.actions:
+        node_id = f"plugin_{_slug(descriptor.plugin_id)}_{_slug(action.namespace)}_{_slug(action.name)}"
+        nodes.append(
+            WorkflowNode(
+                node_id=node_id,
+                kind=NodeKind.TASK,
+                owner=NodeOwner.PLUGIN,
+                name=f"{action.namespace} {action.name}",
+                input_schema_ref=input_schema_ref,
+                evidence_schema_ref=evidence_schema_ref,
+                capability_envelope=capability_names,
+                runtime_hints={
+                    "dispatch_enabled": False,
+                    "contract_only": True,
+                },
+                metadata={
+                    "plugin_id": descriptor.plugin_id,
+                    "component_id": descriptor.component_id,
+                    "plugin_name": descriptor.name,
+                    "plugin_version": descriptor.version,
+                    "schema_version": descriptor.schema_version,
+                    "action_id": action.action_id,
+                    "namespace": action.namespace,
+                    "command_name": action.name,
+                    "risk": action.risk,
+                    "requires_confirmation": action.requires_confirmation,
+                    "declared_permission_scopes": declared_permission_scopes,
+                    "required_permission_scopes": action.required_permissions,
+                    "optional_permission_scopes": action.optional_permissions,
+                    "lifecycle_hook_names": lifecycle_hook_names,
+                    "dispatch_enabled": False,
+                },
+            )
+        )
+        edges.append(
+            WorkflowEdge(
+                edge_id=f"edge_{node_id}_{terminal_node.node_id}",
+                source=node_id,
+                target=terminal_node.node_id,
+                kind=EdgeKind.TERMINAL,
+                metadata={
+                    "plugin_id": descriptor.plugin_id,
+                    "action_id": action.action_id,
+                    "dispatch_enabled": False,
+                },
+            )
+        )
+
+    spec_metadata: dict[str, Any] = dict(metadata or {})
+    spec_metadata.update(
+        {
+            "plugin_id": descriptor.plugin_id,
+            "component_id": descriptor.component_id,
+            "plugin_name": descriptor.name,
+            "plugin_version": descriptor.version,
+            "schema_version": descriptor.schema_version,
+            "actions_count": len(descriptor.actions),
+            "dispatch_enabled": False,
+        }
+    )
+    spec = WorkflowSpec(
+        spec_id=f"wfspec_plugin_{_slug(descriptor.plugin_id)}",
+        source=SourceKind.PLUGIN,
+        source_ref=descriptor.plugin_id,
+        nodes=(*nodes, terminal_node),
+        edges=tuple(edges),
+        metadata=spec_metadata,
+    )
+    validation = validate_workflow(spec)
+    if not validation.ok:
+        details = ", ".join(error.code for error in validation.errors)
+        msg = f"Plugin descriptor projected to invalid WorkflowSpec: {details}"
+        raise ValueError(msg)
+    return spec
+
+
+def _slug(value: str) -> str:
+    normalized = "_".join(part for part in value.strip().replace(":", "_").split() if part)
+    return "".join(char if char.isalnum() or char == "_" else "_" for char in normalized) or "plugin"
+
+
 def _normalize_acceptance_criteria(criteria: tuple[str, ...]) -> tuple[str, ...]:
     normalized: list[str] = []
     for zero_based_index, criterion in enumerate(criteria):
@@ -183,7 +309,10 @@ def _normalize_acceptance_criteria(criteria: tuple[str, ...]) -> tuple[str, ...]
 
 
 __all__ = [
+    "DEFAULT_PLUGIN_ACTION_EVIDENCE_SCHEMA_REF",
+    "DEFAULT_PLUGIN_ACTION_INPUT_SCHEMA_REF",
     "DEFAULT_SEED_AC_EVIDENCE_SCHEMA_REF",
     "DEFAULT_SEED_AC_INPUT_SCHEMA_REF",
+    "workflow_spec_from_plugin_descriptor",
     "workflow_spec_from_seed",
 ]
