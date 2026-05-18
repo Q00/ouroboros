@@ -601,25 +601,28 @@ ouroboros status auto AUTO_SESSION_ID
 
 ### `status run`
 
-Build a read-only Run/Stage/Step projection from persisted events.
+Build a read-only Run/Stage/Step projection from persisted events. Provide at
+least one selector: `--session-id` or `--execution-id`.
 
 ```bash
-ouroboros status run [OPTIONS]
+ouroboros status run (--session-id TEXT | --execution-id TEXT) [OPTIONS]
 ```
 
 **Options:**
 
 | Option | Description |
 |--------|-------------|
-| `--session-id TEXT` | Optional orchestrator session ID to project |
-| `--execution-id TEXT` | Optional execution aggregate ID to project |
+| `--session-id TEXT` | Orchestrator session ID to project; required unless `--execution-id` is provided |
+| `--execution-id TEXT` | Execution aggregate ID to project; required unless `--session-id` is provided |
 | `--seed-id TEXT` | Optional seed ID override for projection labels |
 | `--limit INTEGER` | Optional event count safety cap |
 | `--json` | Emit machine-readable projection JSON |
 
 ### `status health`
 
-Check system health. Verifies database connectivity, provider configuration, and system resources.
+Show a placeholder/example health summary. This command currently prints canned
+rows and does not verify database connectivity, provider configuration, or
+system resources.
 
 ```bash
 ouroboros status health
