@@ -54,7 +54,7 @@ def test_forward_milestone_transition_records_advisory_meta() -> None:
         "lateral_review_from_milestone": "initial",
         "lateral_review_reason": "first_forward_milestone_transition",
     }
-    assert state.lateral_review_advised_milestones == ["progress"]
+    assert state.lateral_review_advised_milestones == []
 
 
 def test_duplicate_milestone_transition_is_suppressed() -> None:
@@ -102,15 +102,21 @@ def test_same_milestone_transition_is_not_advisory() -> None:
 def test_only_three_forward_milestones_can_be_advised() -> None:
     state = InterviewState(interview_id="interview_test")
 
-    assert _maybe_record_lateral_review_advisory(
+    meta = _maybe_record_lateral_review_advisory(
         state, previous_milestone="initial", score=_score(0.35)
     )
-    assert _maybe_record_lateral_review_advisory(
+    assert meta
+    state.note_lateral_review_advisory(meta["lateral_review_milestone"])
+    meta = _maybe_record_lateral_review_advisory(
         state, previous_milestone="progress", score=_score(0.25)
     )
-    assert _maybe_record_lateral_review_advisory(
+    assert meta
+    state.note_lateral_review_advisory(meta["lateral_review_milestone"])
+    meta = _maybe_record_lateral_review_advisory(
         state, previous_milestone="refined", score=_score(0.15)
     )
+    assert meta
+    state.note_lateral_review_advisory(meta["lateral_review_milestone"])
 
     assert state.lateral_review_advised_milestones == ["progress", "refined", "ready"]
     assert len(state.lateral_review_advised_milestones) == 3
@@ -184,3 +190,51 @@ async def test_handler_surfaces_advisory_in_meta_without_question_text_leak() ->
     assert "lateral" not in result.value.content[0].text.lower()
     assert state.lateral_review_advised_milestones == ["progress"]
     handler._emit_event_bg.assert_called()
+
+
+async def test_handler_does_not_record_advisory_when_question_generation_fails() -> None:
+    state = InterviewState(
+        interview_id="sess-818",
+        ambiguity_score=None,
+        rounds=[
+            InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2?", user_response="A2"),
+            InterviewRound(round_number=3, question="Q3?", user_response=None),
+        ],
+    )
+
+    async def record_response(
+        state: InterviewState, user_response: str, question: str
+    ) -> Result[InterviewState, object]:
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=question,
+                user_response=user_response,
+            )
+        )
+        return Result.ok(state)
+
+    mock_engine = MagicMock()
+    mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+    mock_engine.record_response = AsyncMock(side_effect=record_response)
+    mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+    mock_engine.ask_next_question = AsyncMock(
+        return_value=Result.err(Exception("empty response from provider"))
+    )
+
+    handler = InterviewHandler(interview_engine=mock_engine)
+    handler.llm_adapter = MagicMock()
+    handler._score_interview_state = AsyncMock(return_value=_score(0.35))  # type: ignore[method-assign]
+    handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+
+    result = await handler.handle({"session_id": "sess-818", "answer": "A3"})
+
+    assert result.is_ok
+    assert result.value.is_error is True
+    assert "lateral_review_recommended" not in result.value.meta
+    assert state.lateral_review_advised_milestones == []
+    assert not any(
+        call.args[0].type == "interview.lateral_review.recommended"
+        for call in handler._emit_event_bg.call_args_list
+    )

@@ -327,10 +327,11 @@ def _maybe_record_lateral_review_advisory(
 ) -> dict[str, Any] | None:
     """Return advisory meta for a first-time forward milestone transition.
 
-    This helper is intentionally deterministic and side-effect limited: it
-    records that an advisory was emitted for the target milestone, but it does
-    not invoke lateral thinking, block question generation, or alter the
-    interview answer/Seed contract.
+    This helper is intentionally deterministic and side-effect free: it only
+    computes whether the next response should carry an advisory. The caller
+    persists the advised milestone after it knows a question-bearing response
+    will actually be returned, so auto-complete and question-generation failure
+    paths do not consume the advisory without surfacing it.
     """
     current_milestone = _milestone_for_score(score)
     if previous_milestone is None or current_milestone is None:
@@ -344,7 +345,6 @@ def _maybe_record_lateral_review_advisory(
     if current_milestone in state.lateral_review_advised_milestones:
         return None
 
-    state.note_lateral_review_advisory(current_milestone)
     return {
         "lateral_review_recommended": True,
         "lateral_review_milestone": current_milestone,
@@ -2173,22 +2173,6 @@ class InterviewHandler:
                             previous_milestone=previous_milestone,
                             score=live_score,
                         )
-                        if lateral_review_meta is not None and live_score is not None:
-                            from ouroboros.events.interview import (
-                                interview_lateral_review_recommended,
-                            )
-
-                            self._emit_event_bg(
-                                interview_lateral_review_recommended(
-                                    session_id,
-                                    from_milestone=lateral_review_meta[
-                                        "lateral_review_from_milestone"
-                                    ],
-                                    to_milestone=lateral_review_meta["lateral_review_milestone"],
-                                    ambiguity_score=live_score.overall_score,
-                                    round_number=len(state.rounds),
-                                )
-                            )
                         if (
                             live_score is not None
                             and qualifies_for_seed_completion(
@@ -2255,6 +2239,23 @@ class InterviewHandler:
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
 
                 question = question_result.value
+                if lateral_review_meta is not None and live_score is not None:
+                    state.note_lateral_review_advisory(
+                        lateral_review_meta["lateral_review_milestone"]
+                    )
+                    from ouroboros.events.interview import (
+                        interview_lateral_review_recommended,
+                    )
+
+                    self._emit_event_bg(
+                        interview_lateral_review_recommended(
+                            session_id,
+                            from_milestone=lateral_review_meta["lateral_review_from_milestone"],
+                            to_milestone=lateral_review_meta["lateral_review_milestone"],
+                            ambiguity_score=live_score.overall_score,
+                            round_number=len(state.rounds),
+                        )
+                    )
                 display_question = _format_question_with_ambiguity(question, live_score)
 
                 # Save pending question as unanswered round for next resume
