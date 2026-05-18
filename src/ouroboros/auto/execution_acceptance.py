@@ -57,6 +57,60 @@ _OBSERVATION_CONTEXT_ALTERNATES = (
     "ouroboros_auto",
 )
 
+_CANONICAL_HELLO_AUTO_OBSERVATION_AC = (
+    "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+    "`hello_auto() -> str` returns exactly `hello from ooo auto`, "
+    "the test imports `hello_auto` and asserts that exact value, and "
+    "the exact command `uv run pytest tests/test_hello_auto.py` passes."
+)
+
+_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX = (
+    "a command/api check returns stable observable output or artifacts proving "
+    "the original requirement for "
+)
+
+_HELLO_AUTO_RETURN_EQUIVALENTS = frozenset(
+    {
+        "`hello_auto.py` defines `hello_auto()` returning exactly `hello from ooo auto`",
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`",
+        "hello_auto.py defines hello_auto() returning exactly hello from ooo auto",
+        "hello_auto.py defines hello_auto() -> str returning exactly hello from ooo auto",
+    }
+)
+
+_HELLO_AUTO_TEST_FILE_EQUIVALENTS = frozenset(
+    {
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value",
+        "tests/test_hello_auto.py imports hello_auto and asserts the exact return value",
+        "tests/test_hello_auto.py imports hello_auto and asserts exact return value",
+    }
+)
+
+_HELLO_AUTO_PYTEST_EQUIVALENTS = frozenset(
+    {
+        "`uv run pytest tests/test_hello_auto.py` passes",
+        "uv run pytest tests/test_hello_auto.py passes",
+        "the exact command `uv run pytest tests/test_hello_auto.py` passes",
+        "the targeted test command `uv run pytest tests/test_hello_auto.py` passes",
+    }
+)
+
+_HELLO_AUTO_EXISTENCE_EQUIVALENTS = frozenset(
+    {
+        "`hello_auto.py` exists",
+        "hello_auto.py exists",
+        "`tests/test_hello_auto.py` exists",
+        "tests/test_hello_auto.py exists",
+    }
+)
+
+_HELLO_AUTO_OBSERVATION_UNIT_EQUIVALENTS = (
+    _HELLO_AUTO_RETURN_EQUIVALENTS
+    | _HELLO_AUTO_TEST_FILE_EQUIVALENTS
+    | _HELLO_AUTO_PYTEST_EQUIVALENTS
+    | _HELLO_AUTO_EXISTENCE_EQUIVALENTS
+)
+
 
 def normalize_execution_acceptance(seed: Seed) -> Seed:
     """Remove auto-observation/reporting criteria from execution Seeds.
@@ -91,7 +145,7 @@ def normalize_observation_execution_criteria(
     if not _has_auto_wrapper_context(context_text, criteria):
         return criteria
 
-    normalized: list[str] = []
+    execution_lines: list[str] = []
     for criterion in criteria:
         stripped = criterion.strip()
         if not stripped:
@@ -100,8 +154,17 @@ def normalize_observation_execution_criteria(
             stripped
         ):
             continue
-        normalized.append(_normalize_known_observation_execution_line(stripped))
+        if _is_observation_report_wrapper(stripped):
+            continue
+        execution_lines.append(stripped)
 
+    if _has_complete_hello_auto_observation_unit(context_text, tuple(execution_lines)):
+        passthrough = [
+            line for line in execution_lines if not _is_hello_auto_observation_unit_line(line)
+        ]
+        return tuple(dict.fromkeys((_CANONICAL_HELLO_AUTO_OBSERVATION_AC, *passthrough)))
+
+    normalized = [_normalize_known_observation_execution_line(line) for line in execution_lines]
     return tuple(dict.fromkeys(normalized))
 
 
@@ -136,29 +199,13 @@ def _criterion_key(criterion: str) -> str:
 def _normalize_known_observation_execution_line(criterion: str) -> str:
     """Canonicalize only known-equivalent hello_auto execution AC phrasings."""
     key = _criterion_key(criterion)
-    hello_return_equivalents = {
-        "`hello_auto.py` defines `hello_auto()` returning exactly `hello from ooo auto`",
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`",
-        "hello_auto.py defines hello_auto() returning exactly hello from ooo auto",
-        "hello_auto.py defines hello_auto() -> str returning exactly hello from ooo auto",
-    }
-    test_file_equivalents = {
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value",
-        "tests/test_hello_auto.py imports hello_auto and asserts the exact return value",
-    }
-    pytest_equivalents = {
-        "`uv run pytest tests/test_hello_auto.py` passes",
-        "uv run pytest tests/test_hello_auto.py passes",
-        "the exact command `uv run pytest tests/test_hello_auto.py` passes",
-        "the targeted test command `uv run pytest tests/test_hello_auto.py` passes",
-    }
-    if key in hello_return_equivalents:
+    if key in _HELLO_AUTO_RETURN_EQUIVALENTS:
         return (
             "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
         )
-    if key in test_file_equivalents:
+    if key in _HELLO_AUTO_TEST_FILE_EQUIVALENTS:
         return "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value."
-    if key in pytest_equivalents:
+    if key in _HELLO_AUTO_PYTEST_EQUIVALENTS:
         return "The exact command `uv run pytest tests/test_hello_auto.py` passes."
     return criterion
 
@@ -166,3 +213,38 @@ def _normalize_known_observation_execution_line(criterion: str) -> str:
 def _is_observation_report_only_line(criterion: str) -> bool:
     """Classify exact known observation metadata lines from the parent report."""
     return _criterion_key(criterion) in _OBSERVATION_REPORT_ONLY_CRITERIA
+
+
+def _has_complete_hello_auto_observation_unit(
+    context_text: str,
+    criteria: tuple[str, ...],
+) -> bool:
+    """Return true when the observation asks for the full proof+pytest unit."""
+    text = "\n".join((context_text, *criteria)).casefold()
+    return (
+        "hello_auto.py" in text
+        and "tests/test_hello_auto.py" in text
+        and "hello from ooo auto" in text
+        and "uv run pytest tests/test_hello_auto.py" in text
+    )
+
+
+def _is_hello_auto_observation_unit_line(criterion: str) -> bool:
+    """Classify lines that are part of the canonical hello_auto smoke unit."""
+    subject = _unwrap_seed_repairer_original_requirement(criterion)
+    return _criterion_key(subject) in _HELLO_AUTO_OBSERVATION_UNIT_EQUIVALENTS
+
+
+def _is_observation_report_wrapper(criterion: str) -> bool:
+    """Return true for repairer-wrapped observation report requirements."""
+    key = _criterion_key(criterion)
+    if not key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
+        return False
+    return "observation report" in key or "plain chat summary" in key
+
+
+def _unwrap_seed_repairer_original_requirement(criterion: str) -> str:
+    key = _criterion_key(criterion)
+    if not key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
+        return criterion
+    return key.removeprefix(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX)

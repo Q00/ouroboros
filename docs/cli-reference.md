@@ -583,7 +583,7 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** `status auto` and `status run` are live read-only status surfaces. `status health`, `status executions`, and `status execution` still return lightweight placeholder summaries on `main` and should not be treated as authoritative orchestration state until their implementation lands.
+> **Current state:** `status auto`, `status run`, and `status health` are live read-only status surfaces. The `status executions` and `status execution` subcommands still return lightweight placeholder summaries and should not be treated as authoritative orchestration state.
 
 ### `status auto`
 
@@ -620,22 +620,26 @@ ouroboros status run (--session-id TEXT | --execution-id TEXT) [OPTIONS]
 
 ### `status health`
 
-Show a placeholder/example health summary. This command currently prints canned
-rows and does not verify database connectivity, provider configuration, or
-system resources.
+Check local system health. The command validates configuration, checks the configured database path, verifies the effective runtime CLI is reachable after applying `OUROBOROS_AGENT_RUNTIME` / `OUROBOROS_RUNTIME` and runtime-specific `OUROBOROS_*_CLI_PATH` overrides, and confirms that credentials for the active LLM provider are present without printing key material. CLI-authenticated backends such as Copilot are reported as local CLI authentication rather than requiring an API key.
 
 ```bash
 ouroboros status health
 ```
 
+`status health` exits with status `0` when no check is `error`; it exits with status `1` if any check is `error`. Warnings, such as a missing database file that will be created on first run or an empty template credential value, are rendered in the table but do not fail the command.
+
 **Representative Output:**
 
 ```
-+---------------+---------+
-| Database      |   ok    |
-| Configuration |   ok    |
-| Providers     | warning |
-+---------------+---------+
+                   System Health
++--------------------------------------------+---------+
+| Name                                       | Status  |
++--------------------------------------------+---------+
+| Configuration — ~/.ouroboros/config.yaml   |   ok    |
+| Database — data/ouroboros.db (...)         |   ok    |
+| Runtime backend — claude: /usr/bin/claude  |   ok    |
+| Credentials — anthropic key present        |   ok    |
++--------------------------------------------+---------+
 ```
 
 ### `status executions`

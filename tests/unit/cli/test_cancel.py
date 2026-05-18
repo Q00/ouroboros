@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from ouroboros.cli.main import app
@@ -136,6 +137,19 @@ class TestBareMode:
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
+        mock_es.append.assert_not_awaited()
+        mock_es.append_batch.assert_awaited_once()
+        batch = mock_es.append_batch.await_args.args[0]
+        assert len(batch) == 2
+        requested_event, answered_event = batch
+        assert requested_event.type == "hitl.requested"
+        assert requested_event.data["kind"] == "destructive_confirmation"
+        assert requested_event.data["source"] == "control_plane"
+        assert requested_event.data["risk_class"] == "destructive"
+        assert requested_event.data["resume_target"] == "cancel:execution:orch_001"
+        assert answered_event.type == "hitl.answered"
+        assert answered_event.aggregate_id == requested_event.aggregate_id
+        assert answered_event.data["approval_decision"] is True
 
     @patch("ouroboros.cli.commands.cancel._get_event_store")
     def test_bare_mode_select_and_decline(self, mock_get_es: AsyncMock) -> None:
@@ -167,6 +181,95 @@ class TestBareMode:
 
         assert result.exit_code == 0
         assert "No executions were modified" in result.output
+        mock_es.append.assert_not_awaited()
+        mock_es.append_batch.assert_awaited_once()
+        batch = mock_es.append_batch.await_args.args[0]
+        assert len(batch) == 2
+        assert batch[0].type == "hitl.requested"
+        answered_event = batch[1]
+        assert answered_event.type == "hitl.answered"
+        assert answered_event.data["approval_decision"] is False
+        mock_repo.mark_cancelled.assert_not_called()
+
+    @patch("ouroboros.cli.commands.cancel._get_event_store")
+    def test_bare_mode_prompt_abort_records_hitl_cancelled(self, mock_get_es: AsyncMock) -> None:
+        """Test bare mode: aborted confirmation records a terminal HITL event."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_es = AsyncMock()
+        mock_get_es.return_value = mock_es
+
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="orch_001",
+                    data={},
+                ),
+            ]
+        )
+
+        tracker = _make_tracker(session_id="orch_001", status=SessionStatus.RUNNING)
+
+        with (
+            patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo,
+            patch("ouroboros.cli.commands.cancel.typer.confirm", side_effect=typer.Abort),
+        ):
+            mock_repo = MockRepo.return_value
+            mock_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+
+            result = runner.invoke(app, ["cancel", "execution"], input="1\n")
+
+        assert result.exit_code == 0
+        assert "No executions were modified" in result.output
+        mock_es.append.assert_not_awaited()
+        mock_es.append_batch.assert_awaited_once()
+        batch = mock_es.append_batch.await_args.args[0]
+        assert len(batch) == 2
+        assert batch[0].type == "hitl.requested"
+        assert batch[1].type == "hitl.cancelled"
+        assert batch[1].aggregate_id == batch[0].aggregate_id
+        assert batch[1].data["reason"] == "Local CLI confirmation prompt aborted"
+        mock_repo.mark_cancelled.assert_not_called()
+
+    @patch("ouroboros.cli.commands.cancel._get_event_store")
+    def test_bare_mode_append_batch_failure_does_not_cancel_session(
+        self, mock_get_es: AsyncMock
+    ) -> None:
+        """Test failed HITL persistence cannot leave a partial request or cancel."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_es = AsyncMock()
+        mock_es.append_batch = AsyncMock(side_effect=PersistenceError("batch failed"))
+        mock_get_es.return_value = mock_es
+
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="orch_001",
+                    data={},
+                ),
+            ]
+        )
+
+        tracker = _make_tracker(session_id="orch_001", status=SessionStatus.RUNNING)
+
+        with patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo:
+            mock_repo = MockRepo.return_value
+            mock_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+
+            result = runner.invoke(app, ["cancel", "execution"], input="1\ny\n")
+
+        assert result.exit_code == 1
+        assert "Failed to record cancellation confirmation" in result.output
+        mock_es.append.assert_not_awaited()
+        mock_es.append_batch.assert_awaited_once()
+        batch = mock_es.append_batch.await_args.args[0]
+        assert [event.type for event in batch] == ["hitl.requested", "hitl.answered"]
+        mock_repo.mark_cancelled.assert_not_called()
 
     @patch("ouroboros.cli.commands.cancel._get_event_store")
     def test_bare_mode_invalid_selection(self, mock_get_es: AsyncMock) -> None:

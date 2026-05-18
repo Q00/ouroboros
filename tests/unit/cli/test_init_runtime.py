@@ -205,3 +205,62 @@ class TestInitWorkflowRuntimeHandoff:
         error_text = mock_print_error.call_args.args[0]
         assert "configured_cli_path" in error_text
         assert "/Applications/cmux.app/Contents/Resources/bin/claude" in error_text
+
+    @pytest.mark.asyncio
+    async def test_seed_generation_forces_when_ambiguity_above_threshold(self) -> None:
+        """When the user picks 'generate anyway' on a high-ambiguity interview,
+        the CLI passes force=True to SeedGenerator.generate() instead of fabricating
+        a fake AmbiguityScore."""
+        state = InterviewState(
+            interview_id="interview_force_path",
+            initial_context="Build something",
+        )
+        llm_adapter = MagicMock()
+        high_ambiguity = AmbiguityScore(
+            overall_score=0.45,
+            breakdown=ScoreBreakdown(
+                goal_clarity=ComponentScore(
+                    name="Goal",
+                    clarity_score=0.5,
+                    weight=0.4,
+                    justification="unclear",
+                ),
+                constraint_clarity=ComponentScore(
+                    name="Constraints",
+                    clarity_score=0.5,
+                    weight=0.3,
+                    justification="unclear",
+                ),
+                success_criteria_clarity=ComponentScore(
+                    name="Success",
+                    clarity_score=0.5,
+                    weight=0.3,
+                    justification="unclear",
+                ),
+            ),
+        )
+
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(high_ambiguity))
+
+        mock_seed = MagicMock()
+        mock_seed.metadata.seed_id = "seed_force_path"
+        mock_generator = MagicMock()
+        mock_generator.generate = AsyncMock(return_value=Result.ok(mock_seed))
+        mock_generator.save_seed = AsyncMock(return_value=Result.ok(Path("/tmp/seed.yaml")))
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
+            patch("ouroboros.cli.commands.init.Prompt.ask", return_value="2"),
+        ):
+            seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+
+        assert result == SeedGenerationResult.SUCCESS
+        assert seed_path is not None
+        # The replacement for the FORCED_SCORE_VALUE hack: real score is preserved,
+        # force=True is passed as an explicit keyword argument.
+        call_kwargs = mock_generator.generate.call_args.kwargs
+        assert call_kwargs.get("force") is True
+        passed_score = mock_generator.generate.call_args.args[1]
+        assert passed_score.overall_score == 0.45

@@ -4,6 +4,14 @@ from ouroboros.auto.execution_acceptance import (
     is_auto_reporting_acceptance_criterion,
     normalize_execution_acceptance,
 )
+
+_SINGLE_HELLO_AUTO_OBSERVATION_AC = (
+    "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+    "`hello_auto() -> str` returns exactly `hello from ooo auto`, "
+    "the test imports `hello_auto` and asserts that exact value, and "
+    "the exact command `uv run pytest tests/test_hello_auto.py` passes."
+)
+
 from ouroboros.core.seed import (
     EvaluationPrinciple,
     ExitCondition,
@@ -50,11 +58,7 @@ def test_normalize_execution_acceptance_drops_auto_report_criteria() -> None:
 
     normalized = normalize_execution_acceptance(seed)
 
-    assert normalized.acceptance_criteria == (
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
-        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
-    )
+    assert normalized.acceptance_criteria == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
 
 
 def test_normalize_execution_acceptance_drops_observation_report_metadata() -> None:
@@ -75,11 +79,7 @@ def test_normalize_execution_acceptance_drops_observation_report_metadata() -> N
 
     normalized = normalize_execution_acceptance(seed)
 
-    assert normalized.acceptance_criteria == (
-        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
-        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
-        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
-    )
+    assert normalized.acceptance_criteria == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
 
 
 def test_normalize_execution_acceptance_filters_latest_observation_prompt_metadata() -> None:
@@ -94,17 +94,13 @@ def test_normalize_execution_acceptance_filters_latest_observation_prompt_metada
         "Whether progress accounting stalled at AC 0/N is reported.",
     ).model_copy(
         update={
-            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto. hello_auto returns exactly hello from ooo auto."
         }
     )
 
     normalized = normalize_execution_acceptance(seed)
 
-    assert normalized.acceptance_criteria == (
-        "`hello_auto.py` exists.",
-        "`tests/test_hello_auto.py` exists.",
-        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
-    )
+    assert normalized.acceptance_criteria == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
 
 
 def test_normalize_execution_acceptance_preserves_non_equivalent_file_criteria() -> None:
@@ -115,7 +111,7 @@ def test_normalize_execution_acceptance_preserves_non_equivalent_file_criteria()
         "pytest tests/test_hello_auto.py -q passes.",
     ).model_copy(
         update={
-            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto. hello_auto returns exactly hello from ooo auto."
         }
     )
 
@@ -125,6 +121,28 @@ def test_normalize_execution_acceptance_preserves_non_equivalent_file_criteria()
         "`hello_auto.py` contains a module-level docstring.",
         "`tests/test_hello_auto.py` uses pytest.mark.smoke.",
         "pytest tests/test_hello_auto.py -q passes.",
+    )
+
+
+def test_normalize_execution_acceptance_preserves_extra_hello_auto_requirements() -> None:
+    seed = _seed(
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        "`hello_auto.py` contains a module-level docstring.",
+        "`tests/test_hello_auto.py` uses pytest.mark.smoke.",
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        _SINGLE_HELLO_AUTO_OBSERVATION_AC,
+        "`hello_auto.py` contains a module-level docstring.",
+        "`tests/test_hello_auto.py` uses pytest.mark.smoke.",
     )
 
 
@@ -138,7 +156,7 @@ def test_normalize_execution_acceptance_preserves_real_product_lifecycle_criteri
         "`tests/test_hello_auto.py` exists.",
     ).model_copy(
         update={
-            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto. hello_auto returns exactly hello from ooo auto."
         }
     )
 
@@ -161,6 +179,23 @@ def test_reporting_classifier_keeps_broad_observation_markers_context_scoped() -
     assert not is_auto_reporting_acceptance_criterion(
         "Whether progress accounting stalled at AC 0/N is reported."
     )
+
+
+def test_normalize_execution_acceptance_unwraps_repaired_observation_criteria() -> None:
+    seed = _seed(
+        "A command/API check returns stable observable output or artifacts proving the original requirement for `hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for tests/test_hello_auto.py imports hello_auto and asserts exact return value.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Final observation report plain chat summary including requested unavailable MCP/auto metadata as not available/not run in this surface when applicable.",
+    ).model_copy(
+        update={
+            "goal": "Observation run for ooo auto via ouroboros_auto: create hello_auto.py and tests/test_hello_auto.py; hello_auto returns exactly hello from ooo auto; validate with uv run pytest tests/test_hello_auto.py."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
 
 
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:

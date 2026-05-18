@@ -430,20 +430,11 @@ async def _generate_seed_from_interview(
             llm_adapter=llm_adapter,
             model=get_clarification_model(llm_backend),
         )
-        # For forced generation, we need to bypass the threshold check
-        if ambiguity_score.is_ready_for_seed:
-            seed_result = await generator.generate(state, ambiguity_score)
-        else:
-            # TODO: Add force=True parameter to SeedGenerator.generate() instead of this hack
-            # Creating a modified score to bypass threshold check
-            from ouroboros.bigbang.ambiguity import AmbiguityScore as AmbScore
-
-            FORCED_SCORE_VALUE = 0.19  # Just under threshold (0.2)
-            forced_score = AmbScore(
-                overall_score=FORCED_SCORE_VALUE,
-                breakdown=ambiguity_score.breakdown,
-            )
-            seed_result = await generator.generate(state, forced_score)
+        seed_result = await generator.generate(
+            state,
+            ambiguity_score,
+            force=not ambiguity_score.is_ready_for_seed,
+        )
 
     if seed_result.is_err:
         error = seed_result.error

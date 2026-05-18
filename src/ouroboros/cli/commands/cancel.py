@@ -8,20 +8,95 @@ Interacts directly with the EventStore (not via MCP tool).
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import os
 from typing import Annotated
+from uuid import uuid4
 
 import typer
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.tables import create_table, print_table
+from ouroboros.core.hitl_contract import (
+    HumanInputKind,
+    HumanInputRequest,
+    HumanInputResponse,
+    HumanInputResponseKind,
+    HumanInputRiskClass,
+    HumanInputSource,
+)
+from ouroboros.events.hitl import (
+    create_hitl_answered_event,
+    create_hitl_cancelled_event,
+    create_hitl_requested_event,
+)
 
 app = typer.Typer(
     name="cancel",
     help="Cancel stuck or orphaned executions.",
     invoke_without_command=True,
 )
+
+
+async def _confirm_cancel_session_with_hitl(
+    event_store,
+    *,
+    session_id: str,
+    status: str,
+) -> bool:
+    """Ask for cancellation confirmation through the typed HITL contract."""
+
+    requested_at = datetime.now(UTC)
+    request = HumanInputRequest(
+        request_id=f"hitl_cancel_{uuid4().hex[:12]}",
+        session_id=session_id,
+        run_id=session_id,
+        created_by="ouroboros.cancel",
+        kind=HumanInputKind.DESTRUCTIVE_CONFIRMATION,
+        source=HumanInputSource.CONTROL_PLANE,
+        risk_class=HumanInputRiskClass.DESTRUCTIVE,
+        question=f"Cancel session {session_id} ({status})?",
+        resume_target=f"cancel:execution:{session_id}",
+        title="Cancel execution",
+        body="Confirm before cancelling a running or paused execution.",
+        surface="cli.cancel.execution",
+        payload={"session_status": status},
+        created_at=requested_at,
+    )
+    requested_event = create_hitl_requested_event(request)
+    try:
+        approved = typer.confirm(request.question)
+    except (KeyboardInterrupt, EOFError, typer.Abort):
+        await event_store.append_batch(
+            [
+                requested_event,
+                create_hitl_cancelled_event(
+                    request,
+                    reason="Local CLI confirmation prompt aborted",
+                    actor="local-user",
+                ),
+            ]
+        )
+        return False
+
+    response = HumanInputResponse(
+        request_id=request.request_id,
+        session_id=session_id,
+        run_id=session_id,
+        actor="local-user",
+        response_kind=HumanInputResponseKind.APPROVAL,
+        approval_decision=approved,
+        surface="cli.cancel.execution",
+        received_at=datetime.now(UTC),
+    )
+    await event_store.append_batch(
+        [
+            requested_event,
+            create_hitl_answered_event(request, response),
+        ]
+    )
+    return approved
 
 
 async def _get_event_store():
@@ -246,12 +321,17 @@ async def _interactive_cancel(reason: str) -> None:
         selected = active_sessions[index]
         session_id = selected.session_id
 
-        # Confirm before cancelling
-        confirm = typer.confirm(
-            f"Cancel session {session_id} ({selected.status.value})?",
-        )
+        try:
+            confirmed = await _confirm_cancel_session_with_hitl(
+                event_store,
+                session_id=session_id,
+                status=selected.status.value,
+            )
+        except Exception as exc:
+            print_error(f"Failed to record cancellation confirmation: {exc}")
+            raise typer.Exit(1) from exc
 
-        if not confirm:
+        if not confirmed:
             print_info("Cancelled. No executions were modified.")
             return
 
