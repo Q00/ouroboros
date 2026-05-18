@@ -20,6 +20,7 @@ from typing import Any, Final, cast
 
 RUNTIME_TRANSITION_SCHEMA_VERSION: Final[int] = 1
 MAX_RUNTIME_TRANSITION_PAYLOAD_BYTES: Final[int] = 8192
+_CONCRETE_JOB_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^job-[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 _SECRET_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -200,6 +201,18 @@ def _normalize_refs(values: Iterable[str]) -> tuple[str, ...]:
         seen.add(ref)
         normalized.append(ref)
     return tuple(normalized)
+
+
+def _looks_like_concrete_job_id(value: object) -> bool:
+    return isinstance(value, str) and _CONCRETE_JOB_ID_PATTERN.fullmatch(value) is not None
+
+
+def _plugin_reuses_concrete_job_id(transition: RuntimeTransition) -> bool:
+    if transition.runtime_scope is not RuntimeScope.PLUGIN:
+        return False
+    if _looks_like_concrete_job_id(transition.subject_id):
+        return True
+    return _looks_like_concrete_job_id(transition.metadata.get("job_id"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +403,19 @@ def evaluate_runtime_transition(
     if isinstance(terminal_states, str | bytes):
         raise TypeError("RuntimeTransition terminal_states must be an iterable of strings")
     terminal_set = {_require_non_blank("terminal_state", state) for state in terminal_states}
+    if _plugin_reuses_concrete_job_id(transition):
+        return RuntimeTransitionResult(
+            transition=transition,
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class=RuntimeFailureClass.BLOCKING,
+            failure_kind=RuntimeTransitionFailureKind.INVALID_SCOPE,
+            message=(
+                "plugin runtime transitions must use plugin child-session subjects, "
+                "not concrete JobManager job ids"
+            ),
+            current_revision=current_revision,
+            current_state=normalized_current,
+        )
     if normalized_current in terminal_set:
         return RuntimeTransitionResult(
             transition=transition,
@@ -427,7 +453,7 @@ def evaluate_runtime_transition(
             current_revision=current_revision,
             current_state=normalized_current,
         )
-    if require_evidence and not transition.evidence_refs:
+    if (require_evidence or transition.to_state in terminal_set) and not transition.evidence_refs:
         return RuntimeTransitionResult(
             transition=transition,
             decision=RuntimeTransitionDecision.REJECTED,

@@ -23,9 +23,11 @@ separate evidence. Conversely, a real background job MUST use
 
 `RuntimeTransition` records the narrow boundary decision before a caller mutates
 runtime state. The event data must include `runtime_scope`, `subject_id`,
-`from_state`, `to_state`, `actor`, and bounded metadata. For terminal or
-cross-boundary changes, callers should require at least one `evidence_refs`
-entry that points at the owner surface:
+`from_state`, `to_state`, `actor`, and bounded metadata. Terminal transitions
+require at least one `evidence_refs` entry by default when the caller supplies
+the terminal-state set to the validator. Callers may also opt in for additional
+cross-boundary changes before the terminal state. Evidence must point at the
+owner surface:
 
 - `mcp_job`: `event://mcp.job.status/<job_id>` or equivalent JobManager event.
 - `plugin`: `event://plugin/<plugin_id>/delegated/<session_id>` or plugin audit

@@ -267,6 +267,51 @@ def test_plugin_delegation_transition_is_not_a_jobmanager_job() -> None:
     }
 
 
+def test_plugin_transition_rejects_concrete_job_subject_id() -> None:
+    result = evaluate_runtime_transition(
+        _transition(
+            runtime_scope=RuntimeScope.PLUGIN,
+            subject_id="job-ralph-123",
+            from_state="delegated",
+            to_state="blocked",
+            reason="plugin child session reported blocked state",
+            actor=RuntimeTransitionActor.PLUGIN,
+            expected_revision=None,
+            evidence_refs=("event://plugin/opencode-ralph/delegated/session-42/blocked",),
+        ),
+        current_state="delegated",
+        allowed_transitions=(("delegated", "blocked"),),
+    )
+
+    assert result.accepted is False
+    assert result.failure_class is RuntimeFailureClass.BLOCKING
+    assert result.failure_kind is RuntimeTransitionFailureKind.INVALID_SCOPE
+    assert "JobManager job ids" in result.message
+
+
+def test_plugin_transition_rejects_concrete_job_metadata_id() -> None:
+    result = evaluate_runtime_transition(
+        _transition(
+            runtime_scope=RuntimeScope.PLUGIN,
+            subject_id="plugin:opencode-ralph/session-42",
+            from_state="delegated",
+            to_state="blocked",
+            reason="plugin child session reported blocked state",
+            actor=RuntimeTransitionActor.PLUGIN,
+            expected_revision=None,
+            evidence_refs=("event://plugin/opencode-ralph/delegated/session-42/blocked",),
+            metadata={"job_id": "job-ralph-123"},
+        ),
+        current_state="delegated",
+        allowed_transitions=(("delegated", "blocked"),),
+    )
+
+    assert result.accepted is False
+    assert result.failure_class is RuntimeFailureClass.BLOCKING
+    assert result.failure_kind is RuntimeTransitionFailureKind.INVALID_SCOPE
+    assert "JobManager job ids" in result.message
+
+
 def test_jobmanager_transition_uses_concrete_mcp_job_subject() -> None:
     transition = _transition(
         runtime_scope=RuntimeScope.MCP_JOB,
@@ -293,7 +338,7 @@ def test_jobmanager_transition_uses_concrete_mcp_job_subject() -> None:
     assert result.to_event_data()["runtime_scope"] == "mcp_job"
 
 
-def test_plugin_terminal_transition_without_bridge_evidence_is_blocking() -> None:
+def test_plugin_terminal_transition_without_bridge_evidence_is_blocking_by_default() -> None:
     result = evaluate_runtime_transition(
         _transition(
             runtime_scope=RuntimeScope.PLUGIN,
@@ -308,12 +353,47 @@ def test_plugin_terminal_transition_without_bridge_evidence_is_blocking() -> Non
         current_state="delegated",
         allowed_transitions=(("delegated", "completed"), ("delegated", "blocked")),
         terminal_states=("completed", "failed", "cancelled"),
-        require_evidence=True,
     )
 
     assert result.accepted is False
     assert result.failure_class is RuntimeFailureClass.BLOCKING
     assert result.failure_kind is RuntimeTransitionFailureKind.MISSING_EVIDENCE
+
+
+def test_mcp_job_terminal_transition_without_evidence_is_blocking_by_default() -> None:
+    result = evaluate_runtime_transition(
+        _transition(
+            from_state="running",
+            to_state="completed",
+            reason="JobManager persisted terminal result",
+            actor=RuntimeTransitionActor.SYSTEM,
+            expected_revision=None,
+            evidence_refs=(),
+        ),
+        current_state="running",
+        allowed_transitions=(("running", "completed"), ("running", "failed")),
+        terminal_states=("completed", "failed", "cancelled"),
+    )
+
+    assert result.accepted is False
+    assert result.failure_class is RuntimeFailureClass.BLOCKING
+    assert result.failure_kind is RuntimeTransitionFailureKind.MISSING_EVIDENCE
+
+
+def test_non_terminal_transition_without_evidence_is_allowed_by_default() -> None:
+    result = evaluate_runtime_transition(
+        _transition(
+            from_state="pending",
+            to_state="running",
+            expected_revision=None,
+            evidence_refs=(),
+        ),
+        current_state="pending",
+        allowed_transitions=_ALLOWED,
+        terminal_states=("completed", "failed", "cancelled"),
+    )
+
+    assert result.accepted is True
 
 
 def test_validation_rejects_noop_duplicate_evidence_and_secret_metadata() -> None:
