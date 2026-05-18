@@ -227,19 +227,28 @@ def _interview_hitl_response(
     )
 
 
-async def _append_hitl_events(event_store, events: list) -> None:
+async def _append_hitl_events(event_store, events: list) -> bool:
     if event_store is None:
-        return
-    await event_store.append_batch(events)
+        return True
+    try:
+        await event_store.append_batch(events)
+    except Exception as exc:  # noqa: BLE001 - HITL telemetry must not block CLI init.
+        print_warning(f"HITL telemetry persistence failed; continuing without it: {exc}")
+        return False
+    return True
 
 
 async def _get_init_event_store():
     from ouroboros.persistence.event_store import EventStore
 
-    db_path = Path.home() / ".ouroboros" / "ouroboros.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
-    await event_store.initialize()
+    try:
+        db_path = Path.home() / ".ouroboros" / "ouroboros.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await event_store.initialize()
+    except Exception as exc:  # noqa: BLE001 - init interview must not depend on telemetry.
+        print_warning(f"HITL telemetry is unavailable; continuing without it: {exc}")
+        return None
     return event_store
 
 
@@ -286,7 +295,8 @@ async def _run_interview_loop(
         console.print()
 
         hitl_request = _interview_hitl_request(state, round_number=current_round, question=question)
-        await _append_hitl_events(event_store, [create_hitl_requested_event(hitl_request)])
+        if not await _append_hitl_events(event_store, [create_hitl_requested_event(hitl_request)]):
+            event_store = None
 
         # Get user response (multiline-safe for paste)
         response = await multiline_prompt_async("Your response")
@@ -295,7 +305,7 @@ async def _run_interview_loop(
             print_error("Response cannot be empty. Please try again.")
             continue
 
-        await _append_hitl_events(
+        if not await _append_hitl_events(
             event_store,
             [
                 create_hitl_answered_event(
@@ -303,7 +313,8 @@ async def _run_interview_loop(
                     _interview_hitl_response(hitl_request, response),
                 )
             ],
-        )
+        ):
+            event_store = None
 
         # Record response
         record_result = await engine.record_response(state, response, question)
