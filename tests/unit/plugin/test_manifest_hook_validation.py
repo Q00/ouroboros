@@ -158,6 +158,9 @@ class TestHookFailurePolicy:
                 declared_permission_scopes=frozenset(
                     {HOOK_LIFECYCLE_READ_SCOPE, HOOK_LIFECYCLE_POLICY_SCOPE}
                 ),
+                declared_required_permission_scopes=frozenset(
+                    {HOOK_LIFECYCLE_READ_SCOPE, HOOK_LIFECYCLE_POLICY_SCOPE}
+                ),
                 hook_index=0,
                 manifest_path="ouroboros.plugin.json",
                 schema_version="0.3",
@@ -218,3 +221,18 @@ class TestHookLifecyclePermission:
         err = exc_info.value
         assert err.json_pointer == "/hooks/0/permissions/0"
         assert "top-level permissions" in err.args[0]
+
+    def test_fail_closed_policy_permission_must_be_required_top_level(self, tmp_path: Path) -> None:
+        payload = _hook_manifest()
+        for permission in payload["permissions"]:
+            if permission["scope"] == HOOK_LIFECYCLE_POLICY_SCOPE:
+                permission["required"] = False
+        payload["hooks"] = [_valid_hook(failure_policy="fail_closed")]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        err = exc_info.value
+        assert err.json_pointer == "/permissions"
+        assert "required=true" in err.expected
+        assert HOOK_LIFECYCLE_POLICY_SCOPE in err.expected

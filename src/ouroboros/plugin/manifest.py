@@ -377,6 +377,7 @@ def _build_hook(
     raw: dict[str, Any],
     *,
     declared_permission_scopes: frozenset[str],
+    declared_required_permission_scopes: frozenset[str],
     hook_index: int,
     manifest_path: str | Path,
     schema_version: str,
@@ -418,6 +419,7 @@ def _build_hook(
 
     _validate_hook_lifecycle_permission(
         raw,
+        declared_required_permission_scopes=declared_required_permission_scopes,
         hook_index=hook_index,
         manifest_path=manifest_path,
         schema_version=schema_version,
@@ -440,6 +442,7 @@ def _build_hook(
 def _validate_hook_lifecycle_permission(
     raw: dict[str, Any],
     *,
+    declared_required_permission_scopes: frozenset[str],
     hook_index: int,
     manifest_path: str | Path,
     schema_version: str,
@@ -449,7 +452,9 @@ def _validate_hook_lifecycle_permission(
     ``plugin:lifecycle:read`` remains the permission boundary for
     observability hooks. Hooks that can veto command execution through
     ``fail_closed`` must declare the stronger ``plugin:lifecycle:policy``
-    scope. Enforce this only for the tightened v0.3 hook contract so
+    scope and that scope must be a required top-level permission, because
+    the firewall trust gate authorizes required top-level permissions before
+    hook dispatch. Enforce this only for the tightened v0.3 hook contract so
     supported v0.2 manifests keep their compatibility behavior until that
     schema version is retired deliberately.
     """
@@ -468,15 +473,25 @@ def _validate_hook_lifecycle_permission(
         )
     if (
         raw["failure_policy"] != HookFailurePolicy.FAIL_CLOSED.value
-        or HOOK_LIFECYCLE_POLICY_SCOPE in permissions
+        or HOOK_LIFECYCLE_POLICY_SCOPE not in permissions
     ):
+        if raw["failure_policy"] != HookFailurePolicy.FAIL_CLOSED.value:
+            return
+        raise PluginManifestError(
+            "v0.3 fail_closed lifecycle hook must declare plugin:lifecycle:policy",
+            path=str(manifest_path),
+            json_pointer=f"/hooks/{hook_index}/permissions",
+            expected=f"{HOOK_LIFECYCLE_POLICY_SCOPE!r} in hooks[].permissions",
+            got=permissions,
+        )
+    if HOOK_LIFECYCLE_POLICY_SCOPE in declared_required_permission_scopes:
         return
     raise PluginManifestError(
-        "v0.3 fail_closed lifecycle hook must declare plugin:lifecycle:policy",
+        "v0.3 fail_closed lifecycle hook policy permission must be required",
         path=str(manifest_path),
-        json_pointer=f"/hooks/{hook_index}/permissions",
-        expected=f"{HOOK_LIFECYCLE_POLICY_SCOPE!r} in hooks[].permissions",
-        got=permissions,
+        json_pointer="/permissions",
+        expected=f"top-level {HOOK_LIFECYCLE_POLICY_SCOPE!r} permission with required=true",
+        got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
     )
 
 
@@ -776,10 +791,12 @@ def load_manifest(path: str | Path) -> PluginManifest:
         audit_was_explicit = True
 
     declared_permission_scopes = frozenset(p.scope for p in permissions)
+    declared_required_permission_scopes = frozenset(p.scope for p in permissions if p.required)
     hooks = tuple(
         _build_hook(
             h,
             declared_permission_scopes=declared_permission_scopes,
+            declared_required_permission_scopes=declared_required_permission_scopes,
             hook_index=index,
             manifest_path=manifest_path,
             schema_version=schema_version,
