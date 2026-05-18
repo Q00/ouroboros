@@ -226,6 +226,44 @@ class HumanInputRequest:
             raise ValueError("legacy HITL request replay only supports schema_version=1")
         return cls(**kwargs, _legacy_schema_v1_replay=True)
 
+    @classmethod
+    def from_persisted_event_data(cls, **kwargs: Any) -> Self:
+        """Rehydrate a request from persisted event data.
+
+        Fresh requests must always use the strict constructor.  Persisted replay
+        only relaxes early schema v1 plugin-firewall approval records that are
+        missing fields later required by the v1 permission contract.
+        """
+
+        if cls._requires_legacy_schema_v1_plugin_firewall_replay(kwargs):
+            return cls.from_persisted_schema_v1(**kwargs)
+        return cls(**kwargs)
+
+    @staticmethod
+    def _requires_legacy_schema_v1_plugin_firewall_replay(kwargs: Mapping[str, Any]) -> bool:
+        if kwargs.get("schema_version", HITL_CONTRACT_SCHEMA_VERSION) != 1:
+            return False
+        source = kwargs.get("source")
+        if source not in {HumanInputSource.PLUGIN_FIREWALL, HumanInputSource.PLUGIN_FIREWALL.value}:
+            return False
+
+        kind = kwargs.get("kind")
+        if kind not in {
+            HumanInputKind.APPROVAL,
+            HumanInputKind.DESTRUCTIVE_CONFIRMATION,
+            HumanInputKind.APPROVAL.value,
+            HumanInputKind.DESTRUCTIVE_CONFIRMATION.value,
+        }:
+            return False
+
+        payload = kwargs.get("payload", {})
+        permission_scope = payload.get("permission_scope") if isinstance(payload, Mapping) else None
+        return (
+            kwargs.get("required_permission") is None
+            or kwargs.get("surface") is None
+            or permission_scope is None
+        )
+
     def __post_init__(self, _legacy_schema_v1_replay: bool) -> None:
         if type(self.schema_version) is not int or self.schema_version < 1:
             raise ValueError("HumanInputRequest schema_version must be a positive integer")

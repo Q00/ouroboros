@@ -396,6 +396,43 @@ def test_plugin_permission_request_requires_payload_permission_scope_match() -> 
         )
 
 
+def test_persisted_schema_v2_plugin_permission_request_uses_strict_constructor() -> None:
+    request = HumanInputRequest.from_persisted_event_data(
+        request_id="hitl-plugin-permission-v2",
+        session_id="plugin-session-1",
+        schema_version=2,
+        created_by="plugin-firewall",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLUGIN_FIREWALL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+        required_permission="plugin:lifecycle:read",
+        resume_target="plugin-firewall:permission:plugin-session-1",
+        surface="plugin.firewall.permission",
+        payload={"plugin_id": "acme.docs", "permission_scope": "plugin:lifecycle:read"},
+    )
+
+    assert request.schema_version == 2
+    assert request.required_permission == "plugin:lifecycle:read"
+
+
+def test_persisted_schema_v2_plugin_permission_request_rejects_missing_fields() -> None:
+    with pytest.raises(ValueError, match="required_permission"):
+        HumanInputRequest.from_persisted_event_data(
+            request_id="hitl-plugin-permission-v2",
+            session_id="plugin-session-1",
+            schema_version=2,
+            created_by="plugin-firewall",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+            resume_target="plugin-firewall:permission:plugin-session-1",
+            surface="plugin.firewall.permission",
+            payload={"plugin_id": "acme.docs", "permission_scope": "plugin:lifecycle:read"},
+        )
+
+
 def test_request_accepts_mapping_payloads_and_freezes_normalized_copy() -> None:
     source: dict[str, object] = {"items": ["alpha", {"count": 1}]}
     request = HumanInputRequest(

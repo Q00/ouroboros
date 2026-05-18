@@ -18,7 +18,11 @@ from ouroboros.core.hitl_resume import (
     human_input_request_from_snapshot,
     pending_human_input_snapshot_for_response,
 )
-from ouroboros.core.hitl_state import HumanInputState, project_human_input_state
+from ouroboros.core.hitl_state import (
+    HumanInputSnapshot,
+    HumanInputState,
+    project_human_input_state,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.hitl import create_hitl_answered_event, create_hitl_requested_event
 
@@ -161,6 +165,74 @@ def test_human_input_request_from_legacy_plugin_firewall_snapshot_accepts_missin
     assert reconstructed.payload == {"plugin_id": "deployer"}
     assert event.type == "hitl.answered"
     assert event.aggregate_id == "hitl-legacy-plugin"
+
+
+def test_human_input_request_from_schema_v2_plugin_firewall_snapshot_reconstructs() -> None:
+    requested = BaseEvent(
+        type="hitl.requested",
+        aggregate_type="hitl",
+        aggregate_id="hitl-plugin-v2",
+        data={
+            "schema_version": 2,
+            "request_id": "hitl-plugin-v2",
+            "session_id": "plugin-session-1",
+            "created_by": "plugin-firewall",
+            "kind": "approval",
+            "source": "plugin_firewall",
+            "risk_class": "material_branch",
+            "question": "Allow plugin acme.docs to use plugin:lifecycle:read?",
+            "required_permission": "plugin:lifecycle:read",
+            "resume_target": "plugin-firewall:permission:plugin-session-1",
+            "surface": "plugin.firewall.permission",
+            "payload": {
+                "plugin_id": "acme.docs",
+                "permission_scope": "plugin:lifecycle:read",
+            },
+        },
+        timestamp=datetime(2026, 5, 18, tzinfo=UTC),
+    )
+    snapshot = project_human_input_state([requested])[0]
+
+    reconstructed = human_input_request_from_snapshot(snapshot)
+
+    assert reconstructed.schema_version == 2
+    assert reconstructed.source is HumanInputSource.PLUGIN_FIREWALL
+    assert reconstructed.required_permission == "plugin:lifecycle:read"
+    assert reconstructed.payload["permission_scope"] == "plugin:lifecycle:read"
+
+
+def test_human_input_request_from_schema_v2_plugin_firewall_snapshot_rejects_missing_fields() -> (
+    None
+):
+    snapshot = HumanInputSnapshot(
+        request_id="hitl-plugin-v2",
+        state=HumanInputState.PENDING,
+        request_event_id="evt_plugin_v2_requested",
+        updated_event_id="evt_plugin_v2_requested",
+        created_at=datetime(2026, 5, 18, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 18, tzinfo=UTC),
+        session_id="plugin-session-1",
+        resume_target="plugin-firewall:permission:plugin-session-1",
+        request={
+            "schema_version": 2,
+            "request_id": "hitl-plugin-v2",
+            "session_id": "plugin-session-1",
+            "created_by": "plugin-firewall",
+            "kind": "approval",
+            "source": "plugin_firewall",
+            "risk_class": "material_branch",
+            "question": "Allow plugin acme.docs to use plugin:lifecycle:read?",
+            "resume_target": "plugin-firewall:permission:plugin-session-1",
+            "surface": "plugin.firewall.permission",
+            "payload": {
+                "plugin_id": "acme.docs",
+                "permission_scope": "plugin:lifecycle:read",
+            },
+        },
+    )
+
+    with pytest.raises(HumanInputResumeValidationError, match="cannot be reconstructed"):
+        human_input_request_from_snapshot(snapshot)
 
 
 def test_create_validated_hitl_resume_event_answers_wait_with_malformed_created_at() -> None:

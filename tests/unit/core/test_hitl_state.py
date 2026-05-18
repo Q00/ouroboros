@@ -108,6 +108,74 @@ def test_projects_legacy_schema_v1_plugin_firewall_request_missing_new_fields() 
     assert snapshot.request["payload"] == {"plugin_id": "acme.docs"}
 
 
+def test_projects_schema_v2_plugin_firewall_request_with_complete_permission_contract() -> None:
+    event = _with_time(
+        BaseEvent(
+            type="hitl.requested",
+            aggregate_type="hitl",
+            aggregate_id="hitl-plugin-v2",
+            data={
+                "schema_version": 2,
+                "request_id": "hitl-plugin-v2",
+                "session_id": "plugin-session-1",
+                "created_by": "plugin-firewall",
+                "kind": "approval",
+                "source": "plugin_firewall",
+                "risk_class": "material_branch",
+                "question": "Allow plugin acme.docs to use plugin:lifecycle:read?",
+                "required_permission": "plugin:lifecycle:read",
+                "resume_target": "plugin-firewall:permission:plugin-session-1",
+                "surface": "plugin.firewall.permission",
+                "payload": {
+                    "plugin_id": "acme.docs",
+                    "permission_scope": "plugin:lifecycle:read",
+                },
+            },
+        ),
+        0,
+        "evt_plugin_v2_requested",
+    )
+
+    snapshots = project_human_input_state([event])
+
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.request_id == "hitl-plugin-v2"
+    assert snapshot.state is HumanInputState.PENDING
+    assert snapshot.request["schema_version"] == 2
+    assert snapshot.request["required_permission"] == "plugin:lifecycle:read"
+
+
+def test_rejects_schema_v2_plugin_firewall_request_missing_permission_contract() -> None:
+    event = _with_time(
+        BaseEvent(
+            type="hitl.requested",
+            aggregate_type="hitl",
+            aggregate_id="hitl-plugin-v2",
+            data={
+                "schema_version": 2,
+                "request_id": "hitl-plugin-v2",
+                "session_id": "plugin-session-1",
+                "created_by": "plugin-firewall",
+                "kind": "approval",
+                "source": "plugin_firewall",
+                "risk_class": "material_branch",
+                "question": "Allow plugin acme.docs to use plugin:lifecycle:read?",
+                "resume_target": "plugin-firewall:permission:plugin-session-1",
+                "surface": "plugin.firewall.permission",
+                "payload": {
+                    "plugin_id": "acme.docs",
+                    "permission_scope": "plugin:lifecycle:read",
+                },
+            },
+        ),
+        0,
+        "evt_plugin_v2_requested",
+    )
+
+    assert project_human_input_state([event]) == ()
+
+
 def test_answered_event_closes_request_with_response_payload() -> None:
     request = _request()
     events = [
