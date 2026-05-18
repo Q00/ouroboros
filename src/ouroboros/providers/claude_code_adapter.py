@@ -291,6 +291,9 @@ class ClaudeCodeAdapter:
         if stderr:
             return False
 
+        if error.details.get("retryable") is True:
+            return True
+
         message = error.message.lower()
         is_cli_process_exit = error_type in {"ProcessError", "CalledProcessError"}
         return is_cli_process_exit and "command failed with exit code" in message
@@ -1042,6 +1045,11 @@ class ClaudeCodeAdapter:
                             subtype=subtype,
                             partial_rejected=bool(partial_content),
                         )
+                        if (
+                            error_result is not None
+                            and error_result.details.get("error_type") == "MalformedToolUseTurn"
+                        ):
+                            continue
                         error_result = ProviderError(
                             message=error_msg,
                             details={
