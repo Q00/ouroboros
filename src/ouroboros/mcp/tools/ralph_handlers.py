@@ -476,9 +476,12 @@ class StartRalphHandler(RalphHandler):
             name="ouroboros_start_ralph",
             description=(
                 "Fire-and-forget alias for ouroboros_ralph. Starts the same "
-                "runtime-owned Ralph loop and returns a job_id immediately for "
-                "ouroboros_job_status, ouroboros_job_wait, ouroboros_job_result, "
-                "and ouroboros_cancel_job."
+                "runtime-owned Ralph loop. In non-plugin runtimes, returns a "
+                "job_id immediately for ouroboros_job_status, ouroboros_job_wait, "
+                "ouroboros_job_result, and ouroboros_cancel_job. In OpenCode "
+                "plugin mode, delegates to a plugin child session and returns "
+                "job_id=None with status='delegated_to_plugin'; results are not "
+                "pollable via job_status/job_result."
             ),
             parameters=base.parameters,
         )

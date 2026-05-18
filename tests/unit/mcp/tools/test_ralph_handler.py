@@ -10,7 +10,7 @@ import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobManager, JobStatus
-from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.ralph_loop import RalphLoopConfig, RalphLoopRunner
@@ -278,6 +278,44 @@ async def test_ralph_handler_plugin_mode_delegates_without_local_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_ralph_handler_plugin_mode_delegates_without_local_job() -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    job_manager = JobManager(store)
+    evolve = _FakeEvolveHandler(["converged"])
+    handler = StartRalphHandler(
+        evolve_handler=evolve,  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=job_manager,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    try:
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_start_plugin",
+                "seed_content": "goal: start plugin",
+                "max_generations": 3,
+            }
+        )
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["job_id"] is None
+        assert meta["status"] == "delegated_to_plugin"
+        assert meta["dispatch_mode"] == "plugin"
+        assert meta["lineage_id"] == "lin_start_plugin"
+        assert meta["max_generations"] == 3
+        assert meta["_subagent"]["tool_name"] == "ouroboros_ralph"
+        assert meta["_subagent"]["context"]["seed_content"] == "goal: start plugin"
+        assert meta["_subagent"]["context"]["delegation_depth"] == 1
+        assert meta["_subagent"]["context"]["allow_nested_ouroboros_ralph"] is False
+        assert evolve.calls == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_ralph_handler_rejects_excessive_max_generations() -> None:
     handler = RalphHandler(evolve_handler=_FakeEvolveHandler(["converged"]))  # type: ignore[arg-type]
 
@@ -311,8 +349,6 @@ def test_ralph_handler_definition_is_public_tool() -> None:
 
 
 def test_start_ralph_handler_definition_is_fire_and_forget_alias() -> None:
-    from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
-
     handler = StartRalphHandler(evolve_handler=_FakeEvolveHandler(["converged"]))  # type: ignore[arg-type]
 
     assert handler.definition.name == "ouroboros_start_ralph"
@@ -320,3 +356,7 @@ def test_start_ralph_handler_definition_is_fire_and_forget_alias() -> None:
         param.name for param in RalphHandler().definition.parameters
     )
     assert "job_id" in handler.definition.description
+    assert "OpenCode plugin mode" in handler.definition.description
+    assert "job_id=None" in handler.definition.description
+    assert "delegated_to_plugin" in handler.definition.description
+    assert "not pollable" in handler.definition.description
