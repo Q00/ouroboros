@@ -143,7 +143,7 @@ def test_unwrap_returns_audit_event() -> None:
     assert unwrapped == ev
 
 
-def test_audit_event_types_include_current_runtime_events_only() -> None:
+def test_audit_event_types_include_schema_vendored_hook_events() -> None:
     assert AUDIT_EVENT_TYPES == (
         "plugin.discovered",
         "plugin.installed",
@@ -152,16 +152,23 @@ def test_audit_event_types_include_current_runtime_events_only() -> None:
         "plugin.permission_used",
         "plugin.completed",
         "plugin.failed",
+        "plugin.hook.blocked",
+        "plugin.hook.completed",
+        "plugin.hook.failed",
+        "plugin.hook.invoked",
     )
-    assert tuple(AUDIT_SCHEMA["properties"]["event_type"]["enum"]) == AUDIT_EVENT_TYPES
-    assert set(AUDIT_EVENT_TYPES) < set(AUDIT_SCHEMA_0_3["properties"]["event_type"]["enum"])
+    assert tuple(AUDIT_SCHEMA["properties"]["event_type"]["enum"]) == AUDIT_EVENT_TYPES[:7]
+    assert set(AUDIT_EVENT_TYPES) == set(AUDIT_SCHEMA_0_3["properties"]["event_type"]["enum"])
 
 
-def test_v0_3_schema_accepts_future_hook_runtime_events() -> None:
+def test_v0_3_hook_invoked_and_completed_round_trip() -> None:
     for event_type in ("plugin.hook.invoked", "plugin.hook.completed"):
         ev = _audit_event(event_type, schema_version="0.3")
-        assert event_type not in AUDIT_EVENT_TYPES
-        assert not list(AUDIT_VALIDATOR_0_3.iter_errors(ev))
+        env = wrap_plugin_event(ev, correlation_id=f"corr-{event_type}")
+        assert env["event_type"] == event_type
+        recovered = unwrap_plugin_event(env)
+        assert recovered == ev
+        assert not list(AUDIT_VALIDATOR_0_3.iter_errors(recovered))
 
 
 def test_round_trip_for_all_audit_event_types() -> None:
