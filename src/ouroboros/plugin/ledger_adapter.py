@@ -36,13 +36,14 @@ from collections.abc import Callable
 import copy
 import uuid
 
+from ouroboros.plugin.hooks import HOOK_EVENT_TYPES
+
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
-# Plugin audit event types currently emitted by the v0.1 runtime.
-# Hook and permission-denial-specific event names are intentionally not
-# part of this manifest/audit vocabulary until the runtime emits them;
-# permission denials are represented as plugin.failed with
-# result.status == "blocked".
+# Plugin audit event types accepted by the current core ledger adapter.
+# Runtime hook dispatch remains a separate #939 follow-up; these hook event
+# names are schema-vendored here so future dispatch does not invent audit
+# vocabulary at emission time.
 AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.discovered",
     "plugin.installed",
@@ -51,6 +52,7 @@ AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.permission_used",
     "plugin.completed",
     "plugin.failed",
+    *tuple(sorted(HOOK_EVENT_TYPES)),
 )
 
 

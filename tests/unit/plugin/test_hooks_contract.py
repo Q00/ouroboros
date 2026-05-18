@@ -19,8 +19,12 @@ from __future__ import annotations
 from ouroboros.plugin.hooks import (
     HOOK_AUDIT_EVENTS,
     HOOK_BLOCKED_EVENT,
+    HOOK_COMPLETED_EVENT,
+    HOOK_EVENT_TYPES,
     HOOK_FAILED_EVENT,
+    HOOK_INVOKED_EVENT,
     HOOK_OUTCOME_AUDIT_EVENTS,
+    HOOK_RUNTIME_AUDIT_EVENTS,
     DeferredHookKind,
     ExcludedHookKind,
     HookFailurePolicy,
@@ -124,3 +128,11 @@ class TestRoutingHelpers:
         assert not is_v1_hook_kind(unknown)
         assert not is_deferred_hook_kind(unknown)
         assert not is_excluded_hook_kind(unknown)
+
+
+def test_hook_runtime_audit_event_contract_includes_invoked_and_completed() -> None:
+    assert HOOK_INVOKED_EVENT == "plugin.hook.invoked"
+    assert HOOK_COMPLETED_EVENT == "plugin.hook.completed"
+    assert frozenset({"plugin.hook.invoked", "plugin.hook.completed"}) == HOOK_RUNTIME_AUDIT_EVENTS
+    assert HOOK_RUNTIME_AUDIT_EVENTS <= HOOK_EVENT_TYPES
+    assert HOOK_OUTCOME_AUDIT_EVENTS <= HOOK_EVENT_TYPES

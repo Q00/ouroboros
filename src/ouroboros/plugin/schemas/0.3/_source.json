@@ -10,7 +10,8 @@
       "Allows plugin.hook.blocked / plugin.hook.failed in explicit audit.events declarations while preserving the four-event default used by the Python manifest loader until runtime hook dispatch lands."
     ],
     "audit-event.schema.json": [
-      "Vendored audit-event.schema.json with local 0.3 $id/title/schema_version alignment and added plugin.hook.blocked / plugin.hook.failed to match the v1 hook wrapper event constants."
+      "Vendored audit-event.schema.json with local 0.3 $id/title/schema_version alignment and added plugin.hook.blocked / plugin.hook.failed to match the v1 hook wrapper event constants.",
+      "Added plugin.hook.invoked / plugin.hook.completed as schema-vendored runtime event names for future v1 lifecycle dispatch without enabling runtime hook execution."
     ]
   }
 }

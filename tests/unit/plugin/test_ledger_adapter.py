@@ -22,12 +22,17 @@ SCHEMA_PATH = Path(__file__).resolve().parents[3] / (
 )
 AUDIT_SCHEMA = json.loads(SCHEMA_PATH.read_text())
 AUDIT_VALIDATOR = Draft202012Validator(AUDIT_SCHEMA)
+SCHEMA_0_3_PATH = Path(__file__).resolve().parents[3] / (
+    "src/ouroboros/plugin/schemas/0.3/audit-event.schema.json"
+)
+AUDIT_SCHEMA_0_3 = json.loads(SCHEMA_0_3_PATH.read_text())
+AUDIT_VALIDATOR_0_3 = Draft202012Validator(AUDIT_SCHEMA_0_3)
 
 
-def _audit_event(event_type: str, **overrides) -> dict:
-    """Build an audit event matching schemas/0.1/audit-event.schema.json."""
+def _audit_event(event_type: str, *, schema_version: str = "0.1", **overrides) -> dict:
+    """Build an audit event matching the requested audit-event schema."""
     base = {
-        "schema_version": "0.1",
+        "schema_version": schema_version,
         "event_type": event_type,
         "occurred_at": "2026-05-07T12:00:00Z",
         "plugin": {
@@ -43,7 +48,8 @@ def _audit_event(event_type: str, **overrides) -> dict:
     }
     base.update(overrides)
     # Confirm the test fixture itself validates against the schema.
-    errs = list(AUDIT_VALIDATOR.iter_errors(base))
+    validator = AUDIT_VALIDATOR_0_3 if schema_version == "0.3" else AUDIT_VALIDATOR
+    errs = list(validator.iter_errors(base))
     assert not errs, f"test fixture invalid: {errs}"
     return base
 
@@ -137,7 +143,7 @@ def test_unwrap_returns_audit_event() -> None:
     assert unwrapped == ev
 
 
-def test_audit_event_types_match_current_v0_runtime_vocabulary() -> None:
+def test_audit_event_types_include_schema_vendored_hook_events() -> None:
     assert AUDIT_EVENT_TYPES == (
         "plugin.discovered",
         "plugin.installed",
@@ -146,14 +152,30 @@ def test_audit_event_types_match_current_v0_runtime_vocabulary() -> None:
         "plugin.permission_used",
         "plugin.completed",
         "plugin.failed",
+        "plugin.hook.blocked",
+        "plugin.hook.completed",
+        "plugin.hook.failed",
+        "plugin.hook.invoked",
     )
-    assert tuple(AUDIT_SCHEMA["properties"]["event_type"]["enum"]) == AUDIT_EVENT_TYPES
+    assert tuple(AUDIT_SCHEMA["properties"]["event_type"]["enum"]) == AUDIT_EVENT_TYPES[:7]
+    assert set(AUDIT_EVENT_TYPES) == set(AUDIT_SCHEMA_0_3["properties"]["event_type"]["enum"])
+
+
+def test_v0_3_hook_invoked_and_completed_round_trip() -> None:
+    for event_type in ("plugin.hook.invoked", "plugin.hook.completed"):
+        ev = _audit_event(event_type, schema_version="0.3")
+        env = wrap_plugin_event(ev, correlation_id=f"corr-{event_type}")
+        assert env["event_type"] == event_type
+        recovered = unwrap_plugin_event(env)
+        assert recovered == ev
+        assert not list(AUDIT_VALIDATOR_0_3.iter_errors(recovered))
 
 
 def test_round_trip_for_all_audit_event_types() -> None:
     """Round-trip every event type defined in the schema."""
     for event_type in AUDIT_EVENT_TYPES:
-        ev = _audit_event(event_type)
+        schema_version = "0.3" if event_type.startswith("plugin.hook.") else "0.1"
+        ev = _audit_event(event_type, schema_version=schema_version)
         env = wrap_plugin_event(ev, correlation_id=f"corr-{event_type}")
         recovered = unwrap_plugin_event(env)
         assert recovered == ev, f"{event_type} did not round-trip"
@@ -254,7 +276,8 @@ def test_envelope_event_type_matches_payload_event_type() -> None:
     (so the events_table.event_type column is queryable without parsing
     the JSON payload)."""
     for event_type in AUDIT_EVENT_TYPES:
-        ev = _audit_event(event_type)
+        schema_version = "0.3" if event_type.startswith("plugin.hook.") else "0.1"
+        ev = _audit_event(event_type, schema_version=schema_version)
         env = wrap_plugin_event(ev, correlation_id="x")
         assert env["event_type"] == env["payload"]["event_type"] == event_type
 

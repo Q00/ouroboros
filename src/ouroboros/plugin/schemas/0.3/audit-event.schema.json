@@ -30,6 +30,8 @@
         "plugin.permission_used",
         "plugin.completed",
         "plugin.failed",
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
         "plugin.hook.blocked",
         "plugin.hook.failed"
       ]
