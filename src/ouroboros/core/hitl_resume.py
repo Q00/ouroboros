@@ -22,7 +22,7 @@ from ouroboros.core.hitl_contract import (
 )
 from ouroboros.core.hitl_state import HumanInputSnapshot, HumanInputState, project_human_input_state
 from ouroboros.events.base import BaseEvent
-from ouroboros.events.hitl import create_hitl_answered_event
+from ouroboros.events.hitl import create_hitl_answered_event, create_hitl_timed_out_event
 
 
 class HumanInputResumeValidationError(ValueError):
@@ -45,6 +45,53 @@ def create_validated_hitl_resume_event(
     snapshot = pending_human_input_snapshot_for_response(events, response)
     request = human_input_request_from_snapshot(snapshot)
     return create_hitl_answered_event(request, response)
+
+
+def create_validated_hitl_timeout_event(
+    events: Iterable[BaseEvent],
+    *,
+    request_id: str,
+    now: datetime,
+    reason: str = "HITL request timed out",
+) -> BaseEvent:
+    """Return ``hitl.timed_out`` when a pending request has expired.
+
+    The helper is intentionally pure: callers provide replayed HITL history and
+    the current clock value, and receive the event they may append. No scheduler,
+    UI timer, or dispatch behavior is implied by this function.
+    """
+
+    snapshot = _pending_human_input_snapshot_by_id(events, request_id)
+    request = human_input_request_from_snapshot(snapshot)
+    if request.timeout_seconds is None:
+        raise HumanInputResumeValidationError(
+            f"HITL request {request_id!r} does not define timeout_seconds"
+        )
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise HumanInputResumeValidationError("HITL timeout clock must be timezone-aware")
+    elapsed = (now - request.created_at).total_seconds()
+    if elapsed < request.timeout_seconds:
+        raise HumanInputResumeValidationError(
+            f"HITL request {request_id!r} has not expired"
+        )
+    return create_hitl_timed_out_event(request, reason=reason)
+
+
+def _pending_human_input_snapshot_by_id(
+    events: Iterable[BaseEvent], request_id: str
+) -> HumanInputSnapshot:
+    snapshots = project_human_input_state(events)
+    matching = tuple(snapshot for snapshot in snapshots if snapshot.request_id == request_id)
+    if not matching:
+        raise HumanInputResumeValidationError(
+            f"HITL request {request_id!r} was not found in replayed state"
+        )
+    snapshot = matching[-1]
+    if snapshot.state is not HumanInputState.PENDING:
+        raise HumanInputResumeValidationError(
+            f"HITL request {request_id!r} is not pending; current state is {snapshot.state.value}"
+        )
+    return snapshot
 
 
 def pending_human_input_snapshot_for_response(
@@ -186,6 +233,7 @@ def _datetime_from_payload(value: Any, *, fallback: datetime) -> datetime:
 __all__ = [
     "HumanInputResumeValidationError",
     "create_validated_hitl_resume_event",
+    "create_validated_hitl_timeout_event",
     "human_input_request_from_snapshot",
     "pending_human_input_snapshot_for_response",
 ]

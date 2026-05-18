@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -15,6 +15,7 @@ from ouroboros.core.hitl_contract import (
 from ouroboros.core.hitl_resume import (
     HumanInputResumeValidationError,
     create_validated_hitl_resume_event,
+    create_validated_hitl_timeout_event,
     human_input_request_from_snapshot,
     pending_human_input_snapshot_for_response,
 )
@@ -164,3 +165,57 @@ def test_create_validated_hitl_resume_event_answers_wait_with_naive_created_at()
     assert reconstructed.to_event_data()["created_at"] == "2026-05-19T12:30:00+00:00"
     assert event.type == "hitl.answered"
     assert event.aggregate_id == "hitl-1"
+
+
+def test_create_validated_hitl_timeout_event_accepts_expired_pending_request() -> None:
+    request = _request()
+    requested = create_hitl_requested_event(request)
+
+    event = create_validated_hitl_timeout_event(
+        [requested],
+        request_id="hitl-1",
+        now=request.created_at + timedelta(seconds=60),
+        reason="approval timed out",
+    )
+
+    assert event.type == "hitl.timed_out"
+    assert event.aggregate_id == "hitl-1"
+    assert event.data["reason"] == "approval timed out"
+    assert event.data["timeout_action"] == "stay_waiting"
+
+
+def test_create_validated_hitl_timeout_event_rejects_not_expired_request() -> None:
+    request = _request()
+    requested = create_hitl_requested_event(request)
+
+    with pytest.raises(HumanInputResumeValidationError, match="not expired"):
+        create_validated_hitl_timeout_event(
+            [requested],
+            request_id="hitl-1",
+            now=request.created_at + timedelta(seconds=59),
+        )
+
+
+def test_create_validated_hitl_timeout_event_rejects_terminal_request() -> None:
+    request = _request()
+    requested = create_hitl_requested_event(request)
+    answered = create_hitl_answered_event(request, _approval_response())
+
+    with pytest.raises(HumanInputResumeValidationError, match="not pending"):
+        create_validated_hitl_timeout_event(
+            [requested, answered],
+            request_id="hitl-1",
+            now=request.created_at + timedelta(seconds=120),
+        )
+
+
+def test_create_validated_hitl_timeout_event_requires_timezone_aware_clock() -> None:
+    request = _request()
+    requested = create_hitl_requested_event(request)
+
+    with pytest.raises(HumanInputResumeValidationError, match="timezone-aware"):
+        create_validated_hitl_timeout_event(
+            [requested],
+            request_id="hitl-1",
+            now=datetime(2026, 5, 18),
+        )
