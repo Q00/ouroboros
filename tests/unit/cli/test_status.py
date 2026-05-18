@@ -19,6 +19,15 @@ API_ENV_KEYS = [
     "OPENROUTER_API_KEY",
     "OUROBOROS_LLM_BACKEND",
     "OUROBOROS_RUNTIME",
+    "OUROBOROS_AGENT_RUNTIME",
+    "OUROBOROS_CLI_PATH",
+    "OUROBOROS_CODEX_CLI_PATH",
+    "OUROBOROS_COPILOT_CLI_PATH",
+    "OUROBOROS_GEMINI_CLI_PATH",
+    "OUROBOROS_GOOSE_CLI_PATH",
+    "OUROBOROS_HERMES_CLI_PATH",
+    "OUROBOROS_KIRO_CLI_PATH",
+    "OUROBOROS_OPENCODE_CLI_PATH",
     "CODEX_HOME",
 ]
 
@@ -214,3 +223,59 @@ def test_health_rejects_configured_runtime_cli_that_is_not_executable(
     assert result.exit_code == 1
     assert "Runtime backend" in result.output
     assert "CLI not found" in result.output
+
+
+def test_health_honors_agent_runtime_and_cli_path_environment_overrides(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    stale_claude = tmp_path / "missing" / "claude"
+    codex_cli = _make_cli(tmp_path / "custom-bin" / "codex")
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=stale_claude, backend="claude")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
+    monkeypatch.setenv("OUROBOROS_CODEX_CLI_PATH", str(codex_cli))
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "codex")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert f"codex: {codex_cli}" in result.output
+    assert str(stale_claude) not in result.output
+    assert "codex OAuth file present" in result.output
+
+
+def test_health_treats_copilot_as_cli_authenticated_not_openai_key_backend(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    copilot_cli = _make_cli(tmp_path / "bin" / "copilot")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    (config_dir / "config.yaml").write_text(
+        yaml.dump(
+            {
+                "orchestrator": {
+                    "runtime_backend": "copilot",
+                    "copilot_cli_path": str(copilot_cli),
+                },
+                "llm": {"backend": "copilot"},
+                "persistence": {"database_path": "data/ouroboros.db"},
+            }
+        )
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert "copilot uses local CLI authentication" in result.output
+    assert "OPENAI_API_KEY" not in result.output

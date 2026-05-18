@@ -212,7 +212,6 @@ def execution(
 _CREDENTIAL_PROVIDER_BY_LLM_BACKEND = {
     "claude": "anthropic",
     "claude_code": "anthropic",
-    "copilot": "openai",
     "gemini": "google",
     "litellm": "openrouter",
     "openai": "openai",
@@ -224,6 +223,17 @@ _API_KEY_ENV_BY_PROVIDER = {
     "google": "GOOGLE_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+}
+
+_CLI_PATH_ENV_BY_BACKEND = {
+    "claude": "OUROBOROS_CLI_PATH",
+    "codex": "OUROBOROS_CODEX_CLI_PATH",
+    "copilot": "OUROBOROS_COPILOT_CLI_PATH",
+    "gemini": "OUROBOROS_GEMINI_CLI_PATH",
+    "goose": "OUROBOROS_GOOSE_CLI_PATH",
+    "hermes": "OUROBOROS_HERMES_CLI_PATH",
+    "kiro": "OUROBOROS_KIRO_CLI_PATH",
+    "opencode": "OUROBOROS_OPENCODE_CLI_PATH",
 }
 
 
@@ -242,18 +252,50 @@ def _database_file_path(data: dict, config_path: Path) -> Path:
     return config_path.parent / "ouroboros.db"
 
 
-def _check_runtime_backend(data: dict) -> dict[str, str]:
-    raw_backend = data.get("orchestrator", {}).get("runtime_backend", "claude")
+def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
+    """Return CLI path candidates using the same precedence as runtime launchers."""
+    candidates: list[str] = []
+    env_key = _CLI_PATH_ENV_BY_BACKEND.get(backend)
+    if env_key is not None:
+        env_path = os.environ.get(env_key, "").strip()
+        if env_path:
+            candidates.append(str(Path(env_path).expanduser()))
+
+    # Keep the existing config helper for config-file path resolution, but only
+    # when the config-file backend is the effective backend being checked.
+    configured_backend = str(data.get("orchestrator", {}).get("runtime_backend", "claude"))
     try:
-        backend = resolve_runtime_backend_name(str(raw_backend))
+        config_backend = resolve_runtime_backend_name(configured_backend)
+    except ValueError:
+        config_backend = None
+    configured_cli = _resolve_cli_path(data) if config_backend == backend else None
+    if configured_cli and configured_cli not in candidates:
+        candidates.append(configured_cli)
+
+    capability = get_backend_capability(backend)
+    if not candidates and capability is not None and capability.cli_name:
+        candidates.append(capability.cli_name)
+    return candidates
+
+
+def _effective_runtime_backend(data: dict) -> str:
+    env_backend = os.environ.get("OUROBOROS_AGENT_RUNTIME", "").strip().lower()
+    if env_backend:
+        return env_backend
+    env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
+    if env_runtime:
+        return env_runtime
+    return str(data.get("orchestrator", {}).get("runtime_backend", "claude"))
+
+
+def _check_runtime_backend(data: dict) -> dict[str, str]:
+    try:
+        backend = resolve_runtime_backend_name(_effective_runtime_backend(data))
     except ValueError as exc:
         return _health_row("Runtime backend", "error", str(exc))
 
     capability = get_backend_capability(backend)
-    configured_cli = _resolve_cli_path(data)
-    candidates = [configured_cli] if configured_cli else []
-    if capability is not None and capability.cli_name:
-        candidates.append(capability.cli_name)
+    candidates = _candidate_cli_paths(backend, data)
 
     for candidate in candidates:
         if not candidate:
@@ -267,15 +309,18 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
         if resolved:
             return _health_row("Runtime backend", "ok", f"{backend}: {resolved}")
 
-    expected = configured_cli or (
-        capability.cli_name if capability and capability.cli_name else backend
-    )
+    expected = candidates[0] if candidates else (capability.cli_name if capability else backend)
     return _health_row("Runtime backend", "error", f"{backend} CLI not found: {expected}")
 
 
 def _credential_provider_for_backend(backend: str) -> str | None:
     normalized = backend.strip().lower()
-    return _CREDENTIAL_PROVIDER_BY_LLM_BACKEND.get(normalized)
+    if normalized in _CREDENTIAL_PROVIDER_BY_LLM_BACKEND:
+        return _CREDENTIAL_PROVIDER_BY_LLM_BACKEND[normalized]
+    capability = get_backend_capability(normalized)
+    if capability is None:
+        return None
+    return _CREDENTIAL_PROVIDER_BY_LLM_BACKEND.get(capability.name)
 
 
 def _codex_auth_file_exists() -> bool:
@@ -312,7 +357,10 @@ def _effective_llm_backend(data: dict) -> str:
 
 def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
     backend = _effective_llm_backend(data)
-    if backend.strip().lower() in {"codex", "codex_cli"}:
+    normalized_backend = backend.strip().lower()
+    capability = get_backend_capability(normalized_backend)
+    canonical_backend = capability.name if capability is not None else normalized_backend
+    if canonical_backend == "codex":
         if _codex_auth_file_exists():
             return _health_row("Credentials", "ok", "codex OAuth file present")
         if os.environ.get("OPENAI_API_KEY", "").strip():

@@ -584,7 +584,7 @@ Check Ouroboros system status.
 
 ### `status health`
 
-Check local system health. The command validates configuration, checks the configured database path, verifies the active runtime CLI is reachable, and confirms that credentials for the active LLM provider are present without printing key material.
+Check local system health. The command validates configuration, checks the configured database path, verifies the effective runtime CLI is reachable after applying `OUROBOROS_AGENT_RUNTIME` / `OUROBOROS_RUNTIME` and runtime-specific `OUROBOROS_*_CLI_PATH` overrides, and confirms that credentials for the active LLM provider are present without printing key material. CLI-authenticated backends such as Copilot are reported as local CLI authentication rather than requiring an API key.
 
 ```bash
 ouroboros status health
