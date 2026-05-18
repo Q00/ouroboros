@@ -34,6 +34,26 @@ class LedgerStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+SOURCE_PRIORITY: tuple[LedgerSource, ...] = (
+    LedgerSource.USER_GOAL,
+    LedgerSource.REPO_FACT,
+    LedgerSource.EXISTING_CONVENTION,
+    LedgerSource.NON_GOAL,
+    LedgerSource.USER_PREFERENCE,
+    LedgerSource.CONSERVATIVE_DEFAULT,
+    LedgerSource.INFERENCE,
+    LedgerSource.ASSUMPTION,
+    LedgerSource.BLOCKER,
+)
+"""Deterministic conflict priority for same-key ledger contradictions.
+
+Higher-priority sources are allowed to supersede lower-priority entries
+without a human decision. Same-priority ties fall back to confidence; exact
+source+confidence ties remain CONFLICTING so the interview driver blocks
+instead of inventing a merge.
+"""
+
+
 REQUIRED_SECTIONS = (
     "goal",
     "actors",
@@ -144,6 +164,52 @@ class LedgerEntry:
             msg = "ledger entry confidence must be between 0 and 1"
             raise ValueError(msg)
         return cls(**data)
+
+
+class ConflictResolution(StrEnum):
+    """Outcome of resolving a same-key ledger contradiction."""
+
+    SAME_VALUE = "same_value"
+    INCOMING_WINS = "incoming_wins"
+    EXISTING_WINS = "existing_wins"
+    BLOCKED = "blocked"
+    CONFLICTING = "conflicting"
+
+
+def resolve_conflict(existing: LedgerEntry, incoming: LedgerEntry) -> ConflictResolution:
+    """Resolve a same-key ledger conflict without model judgment.
+
+    The policy follows #809 Pillar B: source priority first, then confidence,
+    then CONFLICTING for exact ties. Incoming ``BLOCKED`` entries remain a
+    human-decision surface; earlier transient blockers can be retired by a
+    later non-blocked same-key answer.
+    """
+    if _normalize_conflict_value(existing.value) == _normalize_conflict_value(incoming.value):
+        return ConflictResolution.SAME_VALUE
+    if incoming.status == LedgerStatus.BLOCKED:
+        return ConflictResolution.BLOCKED
+    if existing.status == LedgerStatus.BLOCKED:
+        return ConflictResolution.INCOMING_WINS
+
+    existing_priority = _source_priority_index(existing.source)
+    incoming_priority = _source_priority_index(incoming.source)
+    if incoming_priority < existing_priority:
+        return ConflictResolution.INCOMING_WINS
+    if existing_priority < incoming_priority:
+        return ConflictResolution.EXISTING_WINS
+
+    if incoming.confidence > existing.confidence:
+        return ConflictResolution.INCOMING_WINS
+    if existing.confidence > incoming.confidence:
+        return ConflictResolution.EXISTING_WINS
+    return ConflictResolution.CONFLICTING
+
+
+def _source_priority_index(source: LedgerSource) -> int:
+    try:
+        return SOURCE_PRIORITY.index(source)
+    except ValueError:
+        return len(SOURCE_PRIORITY)
 
 
 @dataclass(slots=True)
@@ -271,20 +337,29 @@ class SeedDraftLedger:
                 )
         else:
             for existing in same_key_entries:
-                if entry.status == LedgerStatus.BLOCKED:
+                resolution = resolve_conflict(existing, entry)
+                if resolution is ConflictResolution.BLOCKED:
                     continue
-                if existing.status == LedgerStatus.BLOCKED:
+                if resolution is ConflictResolution.INCOMING_WINS:
                     existing.status = LedgerStatus.WEAK
-                    existing.rationale = (
-                        existing.rationale or "Superseded by a later same-key answer."
+                    existing.rationale = existing.rationale or (
+                        "Superseded by deterministic source-priority/confidence policy."
+                    )
+                    continue
+                if resolution is ConflictResolution.EXISTING_WINS:
+                    entry.status = LedgerStatus.WEAK
+                    entry.rationale = entry.rationale or (
+                        "Superseded by deterministic source-priority/confidence policy."
                     )
                     continue
                 existing.status = LedgerStatus.CONFLICTING
                 entry.status = LedgerStatus.CONFLICTING
-                existing.rationale = (
-                    existing.rationale or "Conflicts with another auto ledger answer."
+                existing.rationale = existing.rationale or (
+                    "Conflicts with another same-priority auto ledger answer."
                 )
-                entry.rationale = entry.rationale or "Conflicts with another auto ledger answer."
+                entry.rationale = entry.rationale or (
+                    "Conflicts with another same-priority auto ledger answer."
+                )
         section.entries.append(entry)
 
     def record_qa(self, question: str, answer: str) -> None:
