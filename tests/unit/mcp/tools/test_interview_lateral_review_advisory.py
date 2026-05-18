@@ -192,6 +192,59 @@ async def test_handler_surfaces_advisory_in_meta_without_question_text_leak() ->
     handler._emit_event_bg.assert_called()
 
 
+async def test_handler_does_not_record_advisory_before_auto_completion() -> None:
+    """Auto-completion should not consume a lateral advisory milestone."""
+    handler = InterviewHandler(llm_adapter=MagicMock())
+    handler._emit_event_bg = MagicMock()
+    state = InterviewState(
+        interview_id="sess-auto-complete",
+        ambiguity_score=0.45,
+        completion_candidate_streak=2,
+        rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2", user_response="A2"),
+            InterviewRound(round_number=3, question="Ready?", user_response=None),
+        ],
+    )
+    ready_score = _score(0.15)
+
+    async def record_response(
+        state: InterviewState, user_response: str, question: str
+    ) -> Result[InterviewState, object]:
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=question,
+                user_response=user_response,
+            )
+        )
+        return Result.ok(state)
+
+    mock_engine = MagicMock()
+    mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+    mock_engine.record_response = AsyncMock(side_effect=record_response)
+    mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+    mock_engine.complete_interview = AsyncMock(return_value=Result.ok(state))
+    mock_engine.ask_next_question = AsyncMock()
+
+    handler = InterviewHandler(interview_engine=mock_engine)
+    handler.llm_adapter = MagicMock()
+    handler._score_interview_state = AsyncMock(return_value=ready_score)  # type: ignore[method-assign]
+    handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+
+    result = await handler.handle({"session_id": "sess-auto-complete", "answer": "This is ready."})
+
+    assert result.is_ok
+    assert result.value.meta["completed"] is True
+    assert state.lateral_review_advised_milestones == []
+    mock_engine.complete_interview.assert_awaited_once()
+    mock_engine.ask_next_question.assert_not_called()
+    assert not any(
+        call.args[0].type == "interview.lateral_review.recommended"
+        for call in handler._emit_event_bg.call_args_list
+    )
+
+
 async def test_handler_does_not_record_advisory_when_question_generation_fails() -> None:
     state = InterviewState(
         interview_id="sess-818",
