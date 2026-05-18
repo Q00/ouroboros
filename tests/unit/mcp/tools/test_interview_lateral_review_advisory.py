@@ -140,7 +140,10 @@ def test_advisory_event_is_structured_and_non_blocking() -> None:
 async def test_handler_surfaces_advisory_in_meta_without_question_text_leak() -> None:
     state = InterviewState(
         interview_id="sess-817",
-        ambiguity_score=0.45,
+        # No stored ambiguity yet: this is the normal first live scoring path
+        # after MIN_ROUNDS_BEFORE_EARLY_EXIT. The handler should treat it as
+        # crossing from the implicit ``initial`` milestone.
+        ambiguity_score=None,
         rounds=[
             InterviewRound(round_number=1, question="Q1?", user_response="A1"),
             InterviewRound(round_number=2, question="Q2?", user_response="A2"),

@@ -2091,10 +2091,15 @@ class InterviewHandler:
                     # answer to the previously-answered question, corrupting
                     # the transcript. Require the caller to supply the
                     # question via ``last_question``.
+                    # If this is the first live ambiguity score, the interview
+                    # is crossing from the implicit starting milestone.  Treat
+                    # the absent stored score as ``initial`` so the normal first
+                    # ``initial -> progress/refined/ready`` transition can
+                    # surface the advisory instead of being skipped forever.
                     previous_milestone = (
                         get_milestone(state.ambiguity_score)[0].value
                         if state.ambiguity_score is not None
-                        else None
+                        else "initial"
                     )
 
                     if state.rounds[-1].user_response is None:
