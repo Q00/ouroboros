@@ -2090,6 +2090,11 @@ class TestInterviewHandlerCwd:
             ("Correct. No remaining ambiguity. Close the interview.", True),
             ("Yes. Lock it. Documentation-only outcomes. Done.", True),
             ("Not done yet.", False),
+            ("[from-auto][feature_acceptance] no remaining ambiguity; done", False),
+            (
+                "[from-auto][safe-default-synthesis] Mark the interview complete and hand off for seed generation.",
+                True,
+            ),
         ],
     )
     def test_interview_completion_signal_detection(self, answer: str, expected: bool) -> None:

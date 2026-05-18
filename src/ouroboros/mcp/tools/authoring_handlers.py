@@ -207,7 +207,12 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
     """Return True when the answer explicitly asks to end the interview.
 
     Only ``[from-user]`` and prefix-less answers represent human intent to close.
-    The auto driver's ``_feature_acceptance_answer`` echoes the LLM question into
+    The one deterministic non-human exception is the auto driver's
+    ``[from-auto][safe-default-synthesis]`` payload, which is emitted only after
+    the driver has already accepted auditable safe defaults for the remaining
+    required gaps and must close the persisted interview in the same turn.
+
+    The auto driver's ordinary ``_feature_acceptance_answer`` echoes the LLM question into
     its answer text, which can accidentally include phrases like "no remaining
     ambiguity" and trip the shortfall branch. Gate the heuristic by prefix so
     ``[from-auto]`` / ``[from-code]`` / ``[from-research]`` answers — which carry
@@ -224,7 +229,18 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
         return False
 
     stripped = answer.lstrip().lower()
-    if stripped.startswith("[from-") and not stripped.startswith("[from-user]"):
+    # Auto-generated answers normally must not express user intent to close, but
+    # the safe-default finalizer is the one deterministic exception: the auto
+    # driver has already decided the remaining required gaps are conservative
+    # defaults and now needs the persisted interview session to close in the
+    # same turn that records those defaults.  Keep this allowance tied to the
+    # explicit synthesis tag so ordinary ``[from-auto]`` answers remain guarded.
+    allow_auto_safe_default_completion = stripped.startswith("[from-auto][safe-default-synthesis]")
+    if (
+        stripped.startswith("[from-")
+        and not stripped.startswith("[from-user]")
+        and not allow_auto_safe_default_completion
+    ):
         return False
 
     normalized = _normalize_interview_answer(answer)
