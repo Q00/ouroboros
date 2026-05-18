@@ -174,9 +174,12 @@ def _plain_json_value(value: Any) -> Any:
 def _datetime_from_payload(value: Any, *, fallback: datetime) -> datetime:
     if isinstance(value, str) and value.strip():
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value)
         except ValueError:
             return fallback
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return fallback
+        return parsed
     return fallback
 
 

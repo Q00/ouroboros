@@ -140,3 +140,27 @@ def test_create_validated_hitl_resume_event_answers_wait_with_malformed_created_
     assert reconstructed.to_event_data()["created_at"] == "2026-05-19T12:30:00+00:00"
     assert event.type == "hitl.answered"
     assert event.aggregate_id == "hitl-1"
+
+
+def test_create_validated_hitl_resume_event_answers_wait_with_naive_created_at() -> None:
+    base_requested = create_hitl_requested_event(_request())
+    requested = base_requested.model_copy(
+        update={
+            "timestamp": datetime(2026, 5, 19, 12, 30, tzinfo=UTC),
+            "data": {
+                **base_requested.data,
+                "created_at": "2026-05-19T12:30:00",
+            },
+        }
+    )
+    snapshot = project_human_input_state([requested])[0]
+
+    assert snapshot.state is HumanInputState.PENDING
+
+    reconstructed = human_input_request_from_snapshot(snapshot)
+    event = create_validated_hitl_resume_event([requested], _approval_response())
+
+    assert reconstructed.created_at == requested.timestamp
+    assert reconstructed.to_event_data()["created_at"] == "2026-05-19T12:30:00+00:00"
+    assert event.type == "hitl.answered"
+    assert event.aggregate_id == "hitl-1"
