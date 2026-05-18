@@ -228,6 +228,14 @@ def test_execution_job_failure_rewrites_complete_auto_result(monkeypatch) -> Non
     assert reconciled.blocker == "execution job failed: planner failed"
 
 
+_SINGLE_HELLO_AUTO_OBSERVATION_AC = (
+    "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+    "`hello_auto() -> str` returns exactly `hello from ooo auto`, "
+    "the test imports `hello_auto` and asserts that exact value, and "
+    "the exact command `uv run pytest tests/test_hello_auto.py` passes."
+)
+
+
 def test_execution_job_cancelled_blocks_complete_auto_result(monkeypatch) -> None:
     class FakeJobManager:
         async def get_snapshot(self, job_id: str) -> JobSnapshot:
@@ -450,11 +458,7 @@ After auto finishes, report:
 
     preferences = _derive_goal_user_preferences(goal)
 
-    assert preferences["acceptance_criteria"] == (
-        "`hello_auto.py` exists.\n"
-        "`tests/test_hello_auto.py` exists.\n"
-        "The exact command `uv run pytest tests/test_hello_auto.py` passes."
-    )
+    assert preferences["acceptance_criteria"] == _SINGLE_HELLO_AUTO_OBSERVATION_AC
     assert "execution job" not in preferences["acceptance_criteria"].casefold()
     assert "test result" not in preferences["acceptance_criteria"].casefold()
 

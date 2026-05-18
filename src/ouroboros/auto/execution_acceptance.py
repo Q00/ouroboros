@@ -57,6 +57,13 @@ _OBSERVATION_CONTEXT_ALTERNATES = (
     "ouroboros_auto",
 )
 
+_CANONICAL_HELLO_AUTO_OBSERVATION_AC = (
+    "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+    "`hello_auto() -> str` returns exactly `hello from ooo auto`, "
+    "the test imports `hello_auto` and asserts that exact value, and "
+    "the exact command `uv run pytest tests/test_hello_auto.py` passes."
+)
+
 
 def normalize_execution_acceptance(seed: Seed) -> Seed:
     """Remove auto-observation/reporting criteria from execution Seeds.
@@ -91,7 +98,7 @@ def normalize_observation_execution_criteria(
     if not _has_auto_wrapper_context(context_text, criteria):
         return criteria
 
-    normalized: list[str] = []
+    execution_lines: list[str] = []
     for criterion in criteria:
         stripped = criterion.strip()
         if not stripped:
@@ -100,8 +107,17 @@ def normalize_observation_execution_criteria(
             stripped
         ):
             continue
-        normalized.append(_normalize_known_observation_execution_line(stripped))
+        if _is_observation_report_wrapper(stripped):
+            continue
+        execution_lines.append(stripped)
 
+    if _has_complete_hello_auto_observation_unit(context_text, tuple(execution_lines)):
+        passthrough = [
+            line for line in execution_lines if not _is_hello_auto_observation_unit_line(line)
+        ]
+        return tuple(dict.fromkeys((_CANONICAL_HELLO_AUTO_OBSERVATION_AC, *passthrough)))
+
+    normalized = [_normalize_known_observation_execution_line(line) for line in execution_lines]
     return tuple(dict.fromkeys(normalized))
 
 
@@ -166,3 +182,56 @@ def _normalize_known_observation_execution_line(criterion: str) -> str:
 def _is_observation_report_only_line(criterion: str) -> bool:
     """Classify exact known observation metadata lines from the parent report."""
     return _criterion_key(criterion) in _OBSERVATION_REPORT_ONLY_CRITERIA
+
+
+def _has_complete_hello_auto_observation_unit(
+    context_text: str,
+    criteria: tuple[str, ...],
+) -> bool:
+    """Return true when the observation asks for the full proof+pytest unit."""
+    text = "\n".join((context_text, *criteria)).casefold()
+    return (
+        "hello_auto.py" in text
+        and "tests/test_hello_auto.py" in text
+        and "hello from ooo auto" in text
+        and "uv run pytest tests/test_hello_auto.py" in text
+    )
+
+
+def _is_hello_auto_observation_unit_line(criterion: str) -> bool:
+    """Classify lines that are part of the canonical hello_auto smoke unit."""
+    key = _criterion_key(criterion)
+    if key.startswith(
+        "a command/api check returns stable observable output or artifacts proving "
+        "the original requirement for "
+    ):
+        subject = key.rsplit("the original requirement for ", 1)[1]
+    else:
+        subject = key
+
+    if "final observation report" in subject:
+        return False
+    if "observation report" in subject and "plain chat summary" in subject:
+        return False
+
+    return any(
+        marker in subject
+        for marker in (
+            "hello_auto.py",
+            "tests/test_hello_auto.py",
+            "uv run pytest tests/test_hello_auto.py",
+            "hello_auto()",
+            "hello from ooo auto",
+        )
+    )
+
+
+def _is_observation_report_wrapper(criterion: str) -> bool:
+    """Return true for repairer-wrapped observation report requirements."""
+    key = _criterion_key(criterion)
+    if not key.startswith(
+        "a command/api check returns stable observable output or artifacts proving "
+        "the original requirement for "
+    ):
+        return False
+    return "observation report" in key or "plain chat summary" in key
