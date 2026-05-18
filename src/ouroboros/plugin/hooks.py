@@ -82,6 +82,23 @@ class DeferredHookKind(StrEnum):
     ON_CANCEL = "on_cancel"
 
 
+TERMINAL_DEFERRED_HOOK_KINDS: Final[frozenset[DeferredHookKind]] = frozenset(
+    {DeferredHookKind.ON_ERROR, DeferredHookKind.ON_CANCEL}
+)
+"""Deferred hooks that observe terminal plugin-wrapper outcomes only.
+
+These hooks are contractually distinct from tool-call and artifact/state
+interception hooks. They may eventually observe errors or cancellation, but they
+are not v1 hooks, cannot mask the original error/cancel result, and are not
+accepted by v0.3 manifests.
+"""
+
+TERMINAL_DEFERRED_HOOK_NAMES: Final[frozenset[str]] = frozenset(
+    hook.value for hook in TERMINAL_DEFERRED_HOOK_KINDS
+)
+"""String names for deferred terminal outcome hooks."""
+
+
 class ExcludedHookKind(StrEnum):
     """Candidate hook names explicitly excluded from the v1 vocabulary.
 
@@ -176,6 +193,16 @@ def is_deferred_hook_kind(value: str) -> bool:
     return value in {kind.value for kind in DeferredHookKind}
 
 
+def is_terminal_deferred_hook_kind(value: str) -> bool:
+    """Return True iff ``value`` names a deferred terminal outcome hook.
+
+    ``on_error`` and ``on_cancel`` are intentionally kept outside the v1
+    manifest/runtime vocabulary. This helper gives validators, docs, and future
+    migration code a precise contract bucket without making the hooks runnable.
+    """
+    return value in TERMINAL_DEFERRED_HOOK_NAMES
+
+
 def is_excluded_hook_kind(value: str) -> bool:
     """Return True iff ``value`` names an explicitly excluded hook."""
     return value in {kind.value for kind in ExcludedHookKind}
@@ -209,6 +236,8 @@ __all__ = [
     "HOOK_LIFECYCLE_SCOPES",
     "HOOK_OUTCOME_AUDIT_EVENTS",
     "HOOK_RUNTIME_AUDIT_EVENTS",
+    "TERMINAL_DEFERRED_HOOK_KINDS",
+    "TERMINAL_DEFERRED_HOOK_NAMES",
     "DeferredHookKind",
     "ExcludedHookKind",
     "HookFailurePolicy",
@@ -216,6 +245,7 @@ __all__ = [
     "is_deferred_hook_kind",
     "is_excluded_hook_kind",
     "is_hook_lifecycle_scope",
+    "is_terminal_deferred_hook_kind",
     "is_v1_failure_policy",
     "is_v1_hook_kind",
 ]
