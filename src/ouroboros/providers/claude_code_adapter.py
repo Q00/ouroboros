@@ -50,6 +50,7 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
+from ouroboros.providers.tool_use_diagnostics import diagnose_tool_use_turn
 
 log = structlog.get_logger(__name__)
 
@@ -921,6 +922,26 @@ class ClaudeCodeAdapter:
                     session_id = msg_data.get("session_id")
 
                 elif class_name == "AssistantMessage":
+                    diagnostic = diagnose_tool_use_turn(sdk_message, provider="claude_code")
+                    if diagnostic.is_malformed:
+                        error_result = ProviderError(
+                            message=diagnostic.reason,
+                            details={
+                                **diagnostic.to_dict(),
+                                "session_id": session_id,
+                                "error_type": "MalformedToolUseTurn",
+                                "max_turns": options_kwargs["max_turns"],
+                                "cwd": self._cwd,
+                            },
+                        )
+                        log.warning(
+                            "claude_code_adapter.malformed_tool_use_turn",
+                            session_id=session_id,
+                            retryable=diagnostic.retryable,
+                            stop_reason=diagnostic.stop_reason,
+                            tool_use_count=diagnostic.tool_use_count,
+                        )
+                        continue
                     # Extract text content and tool use
                     content_blocks = getattr(sdk_message, "content", [])
                     for block in content_blocks:

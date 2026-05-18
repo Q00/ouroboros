@@ -1782,3 +1782,39 @@ class TestProviderErrorFormatDetails:
         rendered = error.format_details()
         # Should not contain the raw dict representation
         assert "(details:" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_use_assistant_message_surfaces_retryable_diagnostic(self) -> None:
+        """AssistantMessage stop_reason=tool_use without ToolUseBlock is a runtime diagnostic."""
+        adapter = ClaudeCodeAdapter(max_turns=5)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def malformed_tool_use_query(*args, **kwargs):
+            assistant_msg = MagicMock()
+            type(assistant_msg).__name__ = "AssistantMessage"
+            assistant_msg.stop_reason = "tool_use"
+            assistant_msg.content = []
+            yield assistant_msg
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls, MagicMock(side_effect=malformed_tool_use_query)
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert result.error.details["error_type"] == "MalformedToolUseTurn"
+        assert result.error.details["provider"] == "claude_code"
+        assert result.error.details["stop_reason"] == "tool_use"
+        assert result.error.details["tool_use_count"] == 0
+        assert result.error.details["is_malformed"] is True
+        assert result.error.details["retryable"] is True
