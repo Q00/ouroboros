@@ -1503,6 +1503,8 @@ class TestCreateOuroborosServerOpenCodeMode:
             "ouroboros_lateral_think": "ouroboros.mcp.tools.definitions.LateralThinkHandler",
             "ouroboros_evolve_step": "ouroboros.mcp.tools.definitions.EvolveStepHandler",
             "ouroboros_start_evolve_step": "ouroboros.mcp.tools.definitions.StartEvolveStepHandler",
+            "ouroboros_ralph": "ouroboros.mcp.tools.definitions.RalphHandler",
+            "ouroboros_start_ralph": "ouroboros.mcp.tools.definitions.StartRalphHandler",
             "ouroboros_pm_interview": "ouroboros.mcp.tools.pm_handler.PMInterviewHandler",
             "ouroboros_qa": "ouroboros.mcp.tools.qa.QAHandler",
         }

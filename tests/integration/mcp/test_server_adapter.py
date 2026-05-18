@@ -550,6 +550,19 @@ class TestCreateOuroborosServer:
         assert start_auto._inner_auto.generate_seed_handler is auto.generate_seed_handler
         assert start_auto._inner_auto.start_execute_seed_handler is auto.start_execute_seed_handler
 
+    def test_create_server_registers_start_ralph_alias(self) -> None:
+        """The composition root must expose the start_ralph alias too."""
+        from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
+
+        server = create_ouroboros_server()
+
+        assert isinstance(server._tool_handlers["ouroboros_ralph"], RalphHandler)
+        assert isinstance(server._tool_handlers["ouroboros_start_ralph"], StartRalphHandler)
+        assert (
+            server._tool_handlers["ouroboros_start_ralph"].definition.description
+            == StartRalphHandler().definition.description
+        )
+
     def test_creates_server_with_custom_config(self) -> None:
         """Factory creates server with custom configuration."""
         server = create_ouroboros_server(

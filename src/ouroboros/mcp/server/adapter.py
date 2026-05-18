@@ -1183,6 +1183,7 @@ def create_ouroboros_server(
         StartEvaluateHandler,
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
+        StartRalphHandler,
     )
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
@@ -1679,6 +1680,13 @@ def create_ouroboros_server(
         )
 
     ralph_handler = build_ralph_handler(resolved_runtime_backend, opencode_mode)
+    start_ralph_handler = StartRalphHandler(
+        evolve_handler=evolve_step,
+        event_store=event_store,
+        job_manager=job_manager,
+        agent_runtime_backend=resolved_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
     interview = InterviewHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
@@ -1801,6 +1809,7 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         ralph_handler,
+        start_ralph_handler,
         LineageStatusHandler(
             event_store=event_store,
         ),
