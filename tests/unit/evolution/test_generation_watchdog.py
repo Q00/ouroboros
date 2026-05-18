@@ -500,8 +500,12 @@ async def test_ac_heartbeat_aggregate_resets_idle_timeout(
 
 
 @pytest.mark.asyncio
-async def test_parent_execution_child_events_reset_idle_timeout() -> None:
+async def test_parent_execution_child_events_reset_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Child execution scopes linked by parent_execution_id prove generation liveness."""
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     session_id = "session-child-exec"
     execution_id = "evolve:lin-child:generation:1"
@@ -516,9 +520,11 @@ async def test_parent_execution_child_events_reset_idle_timeout() -> None:
         await event_store.append(_session_started(session_id, execution_id))
         for count in range(1, 5):
             await asyncio.sleep(0.04)
+            clock.advance(0.04)
             await event_store.append(
                 _subagent_started(f"evolve_lin_child_generation_1_child_{count}", execution_id)
             )
+        clock.advance(0.04)
         return "done"
 
     assert await watchdog.watch(child_work()) == "done"
