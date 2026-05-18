@@ -38,6 +38,11 @@ Workflow IR nodes must not directly embed #946 records. Runtime or fixture code
 may emit lifecycle/events whose source IDs later project into #946 records, but
 that projection remains an observed read model, not the planning contract.
 
+The default boundary fixture must stay local and deterministic: it may pair a
+validated `WorkflowSpec` with synthetic EventStore rows to prove source-event
+linkage, but it must not add dispatch, cache, persistence, or projection-record
+embedding to the IR.
+
 ## Boundary with UserLevel plugins
 
 Workflow IR is core harness substrate. UserLevel plugins may eventually provide
