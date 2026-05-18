@@ -33,6 +33,8 @@ from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON, mirror_ralph_job_events
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.recovery_plan import (
+    AutoRecoveryPlan,
+    RecoveryPlanAction,
     build_lateral_recovery_plan,
     build_manual_recovery_plan,
 )
@@ -53,22 +55,15 @@ from ouroboros.resilience.lateral import ThinkingPersona
 
 # RFC #809 Phase 2.2b — Stack 1 of 2 scope and invariants.
 #
-# **Scope of this module's recovery wiring.** P2.2b lands in two stacked
-# PRs. This file is Stack 1: the deterministic *guards* and *multi-persona
-# advisory* path. There is intentionally no automated Ralph re-dispatch
-# here — when EVALUATE fails, ``_run_lateral`` records the persona's
-# advisory and the session ends in ``BLOCKED``. The four guards
+# **Scope of this module's recovery wiring.** P2.2b landed in two stacked
+# PRs. Stack 1 added the deterministic *guards* and *multi-persona
+# advisory* path. Stack 2 consumes the typed ``AutoRecoveryPlan`` produced
+# by lateral advice: safe ``ralph_redispatch`` plans are routed into a
+# fresh Ralph handoff and then back through EVALUATE, while manual or
+# unsafe plans still terminate as BLOCKED. The four guards
 # (``MAX_EVALUATE_ROUNDS``, same-fingerprint twice, per-persona-once,
-# ``state.deadline_at``) bound the surface so a future Stack 2, which
-# wires the lateral advice into a fresh Ralph job and a new EVALUATE
-# round, cannot loop unboundedly or revisit a stale persona. Without
-# Stack 2 present, ``evaluate_round`` typically increments to 1 in a
-# single session and the fingerprint guard is exercised only on
-# ``--resume`` against the same artifact; both become load-bearing once
-# Stack 2 lands. Naming this PR a "closed loop" was a documentation
-# overstatement caught in code review; the loop *closes* when Stack 2
-# ships, and Stack 1 is the bounded-advisory step that makes Stack 2
-# safe to land.
+# ``state.deadline_at``) bound that closed loop so redispatch cannot loop
+# unboundedly or revisit a stale persona.
 #
 # **Operator-choice cue.** Suffixed onto every recovery-loop BLOCKED
 # message so the operator sees their next move without having to read
@@ -1823,21 +1818,21 @@ class AutoPipeline:
         review: SeedReview | None,
         run_subagent: dict[str, Any] | None,
     ) -> AutoPipelineResult:
-        """Invoke the persona-driven lateral advisor and finalize as BLOCKED.
+        """Invoke the persona-driven lateral advisor and consume its plan.
 
-        Phase 2.2 advisory layer — when ``ouroboros_qa`` rules the run
+        Phase 2.2 recovery layer — when ``ouroboros_qa`` rules the run
         artifact did not satisfy the Seed AC, this method picks a persona
         deterministically from the QA-failure shape (via
         :func:`select_persona_for_qa_failure`) and asks
         ``ouroboros_lateral_think`` for a reframing prompt. The persona's
-        output is persisted on :class:`AutoPipelineState` and surfaced in
-        the final BLOCKED message so the operator (or a future P2.2b
-        automated recovery layer) sees actionable next steps rather than
-        the raw QA differences.
+        output is persisted on :class:`AutoPipelineState` as a typed
+        recovery plan. Dispatchable plans re-enter Ralph; manual or unsafe
+        plans surface actionable BLOCKED guidance instead of raw QA
+        differences.
 
-        Idempotent on resume: same persona + same QA shape hashes to the
-        same ``lateral_input_hash``; a cache hit returns the persisted
-        persona text without re-invoking the tool.
+        Resume is intentionally not a cache replay: previous personas are
+        stored in ``state.personas_invoked`` so a recovered UNSTUCK_LATERAL
+        phase selects a different angle unless a guard has already tripped.
 
         On timeout / handler error / transient adapter error → BLOCKED with
         ``tool_name="lateral_thinker"`` so the resume contract (mapped by
@@ -2008,9 +2003,10 @@ class AutoPipeline:
             state.personas_invoked.append(persona.value)
         self._save(state)
 
-        return self._finalize_lateral(
+        return await self._finalize_lateral(
             state,
             ledger,
+            seed,
             review=review,
             run_subagent=run_subagent,
             qa_score=qa_score,
@@ -2021,10 +2017,11 @@ class AutoPipeline:
             from_cache=False,
         )
 
-    def _finalize_lateral(
+    async def _finalize_lateral(
         self,
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
+        seed: Seed,
         *,
         review: SeedReview | None,
         run_subagent: dict[str, Any] | None,
@@ -2035,25 +2032,17 @@ class AutoPipeline:
         cache_suffix: str,
         from_cache: bool,
     ) -> AutoPipelineResult:
-        """Build the BLOCKED summary that surfaces the persona's reframing.
+        """Consume a lateral recovery plan or block with manual guidance.
 
-        RFC #809 Phase 2.2b — Stack 1 of 2 endpoint. This method is the
-        *final* step of the advisory path: the persona's advice is
-        persisted in ledger/state and the session transitions to
-        BLOCKED. There is no automated Ralph re-dispatch in this PR; the
-        operator inspects the persona reframing and decides their next
-        move (the two-choice cue suffixed below). Stack 2 will replace
-        this terminal block with a Ralph re-dispatch that injects the
-        persona advice into a fresh evolve job and re-enters EVALUATE,
-        at which point the round/fingerprint/persona-once guards land
-        in their load-bearing role. The behavior here is deliberately
-        bounded so Stack 2 can layer on top without rewriting the
-        endpoint semantics.
+        Safe ``ralph_redispatch`` plans are the closed-loop Stack 2 path:
+        the persona's advice is persisted, added to a dispatch-only Seed
+        constraint, and sent through a fresh Ralph handoff that returns to
+        EVALUATE. Manual / unsafe plans remain terminal BLOCKED guidance.
         """
         lateral_suffix = " [lateral cached]" if from_cache else ""
         persona_name = state.last_lateral_persona or "unknown"
         approach = state.last_lateral_approach_summary or ""
-        state.last_recovery_plan = build_lateral_recovery_plan(
+        recovery_plan = build_lateral_recovery_plan(
             qa_score=qa_score,
             qa_verdict=qa_verdict,
             differences=tuple(qa_differences),
@@ -2061,7 +2050,43 @@ class AutoPipeline:
             persona=persona_name,
             approach_summary=approach,
             lateral_text=state.last_lateral_text or "",
-        ).to_dict()
+        )
+        state.last_recovery_plan = recovery_plan.to_dict()
+        self._save(state)
+
+        if self._can_redispatch_recovery_plan(recovery_plan):
+            if self.ralph_starter is None:
+                _prepare_recovery_redispatch(state)
+                state.mark_blocked(
+                    "recovery plan requested Ralph redispatch but no ralph starter is configured; "
+                    f"{_RECOVERY_BLOCKED_CHOICES}",
+                    tool_name="ralph_starter",
+                )
+                self._save(state)
+                return self._result(
+                    state,
+                    ledger,
+                    review=review,
+                    blocker=state.last_error,
+                    run_subagent=run_subagent,
+                )
+            recovery_seed = _seed_with_recovery_constraint(seed, recovery_plan)
+            _prepare_recovery_redispatch(state)
+            state.mark_progress(
+                "consuming lateral recovery plan via fresh Ralph redispatch",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return await self._handoff_to_ralph(
+                state,
+                ledger,
+                recovery_seed,
+                review,
+                run_subagent=run_subagent,
+                reattach_terminal=False,
+                reuse_existing=False,
+            )
+
         summary_parts = [
             f"evaluator did not pass: {qa_verdict} (score {qa_score:.2f}){cache_suffix}",
             f"lateral persona {persona_name}{lateral_suffix}: {approach}"
@@ -2084,6 +2109,15 @@ class AutoPipeline:
         self._save(state)
         return self._result(
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+        )
+
+    @staticmethod
+    def _can_redispatch_recovery_plan(plan: AutoRecoveryPlan) -> bool:
+        """Return True when a persisted plan is safe to consume automatically."""
+        return (
+            plan.action is RecoveryPlanAction.RALPH_REDISPATCH
+            and plan.safe_to_redispatch
+            and bool(plan.instruction.strip())
         )
 
     async def _resume_ralph_handoff(
@@ -2829,6 +2863,36 @@ def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool
     if state.phase is not AutoPhase.RALPH_HANDOFF:
         return False
     return state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
+
+
+def _prepare_recovery_redispatch(state: AutoPipelineState) -> None:
+    """Clear prior Ralph handles so recovery starts a fresh bounded attempt."""
+    state.ralph_job_id = None
+    state.ralph_lineage_id = None
+    state.ralph_dispatch_mode = None
+    state.ralph_job_status = None
+    state.ralph_stop_reason = None
+    state.ralph_current_generation = None
+    state.ralph_last_event_at = None
+    state.run_handoff_guidance = None
+    state.run_handoff_status = "ralph_retry_after_blocker"
+
+
+def _seed_with_recovery_constraint(seed: Seed, plan: AutoRecoveryPlan) -> Seed:
+    """Return a dispatch-only Seed carrying bounded lateral recovery advice.
+
+    The recovery advice must not relax the Seed's goal or acceptance
+    criteria. Encoding it as an additional hard constraint gives Ralph the
+    reframing context while preserving the user-approved ACs that EVALUATE
+    will grade after redispatch.
+    """
+    instruction = plan.instruction.strip()
+    constraint = (
+        "[auto recovery] Previous QA failed. Use this lateral recovery "
+        "instruction to change implementation/verification approach without "
+        f"relaxing the goal or acceptance criteria: {instruction}"
+    )
+    return seed.model_copy(update={"constraints": (*seed.constraints, constraint)})
 
 
 def _first_nonempty(*values: str | None) -> str | None:

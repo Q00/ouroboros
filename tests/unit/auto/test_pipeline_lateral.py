@@ -176,8 +176,9 @@ class _StubLedger:
 def test_unstuck_lateral_phase_in_allowed_transitions() -> None:
     assert AutoPhase.UNSTUCK_LATERAL in _ALLOWED_TRANSITIONS[AutoPhase.EVALUATE]
     # RFC #809 Phase 2.2b — UNSTUCK_LATERAL became a retry dispatcher:
-    # back to EVALUATE for another round under a different persona, or
-    # BLOCKED when a recovery guard trips. SEED_REGENERATE is intentionally
+    # into a fresh RALPH_HANDOFF that returns through EVALUATE, directly back
+    # to EVALUATE for recovered artifacts, or BLOCKED when a recovery guard
+    # trips. SEED_REGENERATE is intentionally
     # absent (see the AutoPhase deferral comment): an automatic Seed
     # rewrite is a reward-hacking surface that mutates the spec the user
     # explicitly agreed to. The pipeline instead surfaces the operator
@@ -189,6 +190,7 @@ def test_unstuck_lateral_phase_in_allowed_transitions() -> None:
     # resume is a separate change.
 
     assert _ALLOWED_TRANSITIONS[AutoPhase.UNSTUCK_LATERAL] == {
+        AutoPhase.RALPH_HANDOFF,
         AutoPhase.EVALUATE,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
@@ -343,10 +345,10 @@ async def test_pipeline_qa_fail_enters_unstuck_lateral_and_blocks_with_persona(t
             suggestions=("try CLI build via swift test",),
         )
 
-    captured_call: dict[str, Any] = {}
+    captured_calls: list[dict[str, Any]] = []
 
     async def lateral_thinker(**kwargs: Any) -> LateralResult:
-        captured_call.update(kwargs)
+        captured_calls.append(dict(kwargs))
         return LateralResult(
             persona="hacker",
             approach_summary="Hacker: Finds unconventional workarounds",
@@ -372,16 +374,79 @@ async def test_pipeline_qa_fail_enters_unstuck_lateral_and_blocks_with_persona(t
     assert "Hacker: Finds unconventional workarounds" in state.last_lateral_approach_summary
     assert "hacker" in (state.last_error or "")
     # Lateral thinker was called with the correct persona
-    assert captured_call["persona"] is ThinkingPersona.HACKER
-    assert "Xcode" in str(captured_call["qa_differences"])
+    assert captured_calls[0]["persona"] is ThinkingPersona.HACKER
+    assert "Xcode" in str(captured_calls[0]["qa_differences"])
     # MCP-facing result fields populated
     assert result.last_lateral_persona == "hacker"
     assert result.last_lateral_text is not None
-    assert state.last_recovery_plan is not None
-    assert state.last_recovery_plan["action"] == "ralph_redispatch"
-    assert state.last_recovery_plan["safe_to_redispatch"] is True
-    assert state.last_recovery_plan["persona"] == "hacker"
-    assert "Reframe the verification path" in state.last_recovery_plan["instruction"]
+    assert state.recovery_guard_tripped == "personas_exhausted"
+    assert state.last_recovery_plan is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_consumes_lateral_plan_with_fresh_ralph_redispatch(tmp_path) -> None:
+    """A dispatchable lateral recovery plan should close the recovery loop.
+
+    First Ralph output fails EVALUATE, lateral advice produces a safe
+    ``ralph_redispatch`` plan, the plan is consumed by a fresh Ralph handoff,
+    and the second Ralph output re-enters EVALUATE and passes.
+    """
+    state = _state_at_run_phase(tmp_path)
+    eval_calls = 0
+    ralph_seeds: list[Seed] = []
+
+    async def evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
+        nonlocal eval_calls
+        eval_calls += 1
+        if eval_calls == 1:
+            return EvaluateResult(
+                passed=False,
+                score=0.30,
+                verdict="fail",
+                differences=("Xcode is not available in the sandbox",),
+                suggestions=("try CLI build via swift test",),
+            )
+        return EvaluateResult(passed=True, score=0.95, verdict="pass")
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:  # noqa: ARG001
+        return LateralResult(
+            persona="hacker",
+            approach_summary="Use a smaller CLI verification path",
+            text="Run the CLI directly and capture stdout instead of relying on Xcode.",
+        )
+
+    async def ralph_starter(seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        ralph_seeds.append(seed)
+        return {
+            "job_id": f"job_ralph_{len(ralph_seeds)}",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+            "result_text": f"artifact {len(ralph_seeds)}",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        evaluator=evaluator,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert eval_calls == 2
+    assert len(ralph_seeds) == 2
+    assert ralph_seeds[1].acceptance_criteria == ralph_seeds[0].acceptance_criteria
+    assert any("[auto recovery]" in constraint for constraint in ralph_seeds[1].constraints)
+    assert any("Run the CLI directly" in constraint for constraint in ralph_seeds[1].constraints)
+    assert state.last_recovery_plan is None
 
 
 @pytest.mark.asyncio
@@ -799,13 +864,23 @@ async def test_pipeline_lateral_resume_with_same_persona_reinvokes_handler(tmp_p
         _seed_generator_unused,
         run_starter=_run_starter_ok,
         reviewer=_PassReviewer(),
-        ralph_starter=_ralph_starter(),
+        ralph_starter=None,
         complete_product=True,
         evaluator=evaluator,
         lateral_thinker=lateral_thinker,
     )
 
-    await pipeline.run(state)
+    state.complete_product = True
+    state.phase = AutoPhase.EVALUATE
+    await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text="artifact",
+        stop_reason="qa failed",
+    )
     assert call_count == 1
     assert state.last_lateral_text == "advice text 1"
 
@@ -856,13 +931,23 @@ async def test_pipeline_lateral_re_runs_when_qa_differences_change(tmp_path) -> 
         _seed_generator_unused,
         run_starter=_run_starter_ok,
         reviewer=_PassReviewer(),
-        ralph_starter=_ralph_starter(),
+        ralph_starter=None,
         complete_product=True,
         evaluator=evaluator,
         lateral_thinker=lateral_thinker,
     )
 
-    await pipeline.run(state)
+    state.complete_product = True
+    state.phase = AutoPhase.EVALUATE
+    await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text="artifact",
+        stop_reason="qa failed",
+    )
     assert call_count == 1
 
     state.phase = AutoPhase.UNSTUCK_LATERAL
@@ -1017,14 +1102,24 @@ async def test_lateral_cache_invalidated_when_evaluate_artifact_changes(tmp_path
         _seed_generator_unused,
         run_starter=_run_starter_ok,
         reviewer=_PassReviewer(),
-        ralph_starter=_ralph_starter(result_text="artifact A"),
+        ralph_starter=None,
         complete_product=True,
         evaluator=evaluator,
         lateral_thinker=lateral_thinker,
     )
 
     # First run: artifact A → QA fail → lateral called, advice cached
-    await pipeline.run(state)
+    state.complete_product = True
+    state.phase = AutoPhase.EVALUATE
+    await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text="artifact A",
+        stop_reason="qa failed",
+    )
     assert eval_calls == 1
     assert lateral_calls == 1
     a_lateral_hash = state.lateral_input_hash
@@ -1040,6 +1135,7 @@ async def test_lateral_cache_invalidated_when_evaluate_artifact_changes(tmp_path
     # evaluate-artifact hash change must invalidate the lateral cache;
     # otherwise "advice for round 1" (about artifact A) would be reused
     # against artifact B.
+    state.complete_product = True
     state.phase = AutoPhase.EVALUATE
     await pipeline._run_evaluate(
         state,
@@ -1408,13 +1504,23 @@ async def test_recovery_personas_invoked_persists_after_lateral(tmp_path) -> Non
         _seed_generator_unused,
         run_starter=_run_starter_ok,
         reviewer=_PassReviewer(),
-        ralph_starter=_ralph_starter(result_text="artifact"),
+        ralph_starter=None,
         complete_product=True,
         evaluator=evaluator,
         lateral_thinker=lateral_thinker,
     )
 
-    await pipeline.run(state)
+    state.complete_product = True
+    state.phase = AutoPhase.EVALUATE
+    await pipeline._run_evaluate(
+        state,
+        ledger=_StubLedger(),
+        seed=_build_seed(),
+        review=None,
+        run_subagent=None,
+        ralph_result_text="artifact",
+        stop_reason="qa failed",
+    )
 
     # The persona selected on this round is now persisted.
     assert state.personas_invoked == [ThinkingPersona.HACKER.value]

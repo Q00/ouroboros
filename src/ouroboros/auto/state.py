@@ -306,14 +306,15 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.FAILED,
     },
     # RFC #809 Phase 2.2b — UNSTUCK_LATERAL is no longer a terminal advisory
-    # phase. It now dispatches one of two outcomes inside the bounded
-    # retry budget: back to EVALUATE for another round under a different
-    # persona, or BLOCKED when a recovery guard trips
-    # (``MAX_EVALUATE_ROUNDS``, duplicate failure fingerprint, persona
-    # exhaustion, or wall-clock budget). SEED_REGENERATE is deliberately
-    # not part of this set — see the ``AutoPhase`` comment block above for
-    # the spec-first rationale behind that omission.
+    # phase. It now dispatches one of three outcomes inside the bounded
+    # retry budget: a fresh RALPH_HANDOFF that re-enters EVALUATE, a direct
+    # EVALUATE re-entry for recovered artifacts, or BLOCKED when a recovery
+    # guard trips (``MAX_EVALUATE_ROUNDS``, duplicate failure fingerprint,
+    # persona exhaustion, or wall-clock budget). SEED_REGENERATE is
+    # deliberately not part of this set — see the ``AutoPhase`` comment
+    # block above for the spec-first rationale behind that omission.
     AutoPhase.UNSTUCK_LATERAL: {
+        AutoPhase.RALPH_HANDOFF,
         AutoPhase.EVALUATE,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
