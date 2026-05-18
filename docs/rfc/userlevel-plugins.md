@@ -492,6 +492,19 @@ events:
 Core MUST NOT emit any new `plugin.hook.*` event until the upstream
 audit-event schema and vendored core copy both include that event name.
 
+### Plugin descriptor/action projection
+
+The plugin manifest also projects into a harness-readable descriptor without
+executing plugin code. This read model is the bridge between manifest validation
+and future conformance checks: it exposes `plugin_id`, schema version, source,
+entrypoint, declared capabilities, declared permissions, lifecycle hooks, audit
+events, and command-level action descriptors.
+
+Descriptor projection is intentionally not a dispatch surface. It MUST NOT import
+plugin modules, invoke entrypoint commands, grant permissions, or widen the v0.3
+hook vocabulary. Runtime permission checks, hook execution, and audit emission
+remain owned by the firewall.
+
 ### Review boundary for follow-up PRs
 
 The hook rollout should remain reviewable:
