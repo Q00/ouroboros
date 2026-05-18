@@ -19,7 +19,7 @@ from ouroboros.plugin.hooks import (
     HOOK_LIFECYCLE_READ_SCOPE,
 )
 from ouroboros.plugin.manifest import load_manifest
-from ouroboros.plugin.trust_store import TrustStore
+from ouroboros.plugin.trust_store import TrustRecord, TrustStore
 from ouroboros.plugin.userlevel_registry import (
     UserLevelProgramRegistry,
 )
@@ -117,6 +117,20 @@ def _hook_manifest_payload(schema_version: str) -> dict:
         },
     ]
     return payload
+
+
+def _grant_trust_scopes(tmp_path: Path, *scopes: str) -> TrustRecord:
+    trust_store = TrustStore(root=tmp_path / "trust")
+    trust = None
+    for scope in scopes:
+        trust = trust_store.grant(
+            plugin="github-pr-ops",
+            version="0.1.0",
+            scope=scope,
+            granted_by="user:test",
+        )
+    assert trust is not None
+    return trust
 
 
 def _fake_runner(
@@ -582,6 +596,143 @@ def test_v03_fail_closed_before_hook_timeout_blocks_without_command_launch(
     serialized = json.dumps(events)
     assert "partial hook stdout" not in serialized
     assert "partial hook stderr" not in serialized
+
+
+def test_v03_fail_closed_before_hook_unparseable_command_blocks_without_launch(
+    tmp_path: Path,
+) -> None:
+    payload = _hook_manifest_payload("0.3")
+    payload["hooks"][0]["entrypoint"]["command"] = "python -m 'unterminated"
+    program = _make_program(tmp_path, payload)
+    trust = _grant_trust_scopes(
+        tmp_path,
+        "github:read",
+        HOOK_LIFECYCLE_POLICY_SCOPE,
+        HOOK_LIFECYCLE_READ_SCOPE,
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-hook-unparseable-closed",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "blocked"
+    assert calls == []
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.blocked",
+    ]
+    assert "not parseable" in events[1]["result"]["message"]
+
+
+def test_v03_fail_open_before_hook_nonzero_records_hashes_and_continues(
+    tmp_path: Path,
+) -> None:
+    payload = _hook_manifest_payload("0.3")
+    payload["hooks"][0]["failure_policy"] = "fail_open"
+    payload["hooks"][0]["permissions"] = [HOOK_LIFECYCLE_READ_SCOPE]
+    payload["permissions"] = [
+        permission
+        for permission in payload["permissions"]
+        if permission["scope"] != HOOK_LIFECYCLE_POLICY_SCOPE
+    ]
+    program = _make_program(tmp_path, payload)
+    trust = _grant_trust_scopes(tmp_path, "github:read", HOOK_LIFECYCLE_READ_SCOPE)
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        if argv[:3] == ["python", "-m", "hook_before"]:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=23,
+                stdout="raw hook stdout",
+                stderr="raw hook stderr",
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-hook-nonzero-open",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "success"
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.failed",
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.completed",
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+    ]
+    failed = events[1]
+    assert "exited with code 23" in failed["result"]["message"]
+    assert failed["provenance"]["returncode"] == "23"
+    assert failed["provenance"]["stdout_sha256"] == hashlib.sha256(b"raw hook stdout").hexdigest()
+    assert failed["provenance"]["stderr_sha256"] == hashlib.sha256(b"raw hook stderr").hexdigest()
+    serialized = json.dumps(events)
+    assert "raw hook stdout" not in serialized
+    assert "raw hook stderr" not in serialized
+
+
+def test_v03_fail_open_after_hook_startup_error_records_failure_after_command(
+    tmp_path: Path,
+) -> None:
+    program = _make_program(tmp_path, _hook_manifest_payload("0.3"))
+    trust = _grant_trust_scopes(
+        tmp_path,
+        "github:read",
+        HOOK_LIFECYCLE_POLICY_SCOPE,
+        HOOK_LIFECYCLE_READ_SCOPE,
+    )
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        if argv[:3] == ["python", "-m", "hook_after"]:
+            raise OSError("hook binary unavailable")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-after-hook-startup-error",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "success"
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.completed",
+        "plugin.hook.invoked",
+        "plugin.hook.failed",
+    ]
+    assert events[-1]["result"]["status"] == "failed"
+    assert "failed to start" in events[-1]["result"]["message"]
 
 
 def test_v03_fail_open_before_hook_timeout_records_failure_and_continues(

@@ -505,7 +505,8 @@ MUST keep green before promoting more hook kinds. The baseline covers:
 - explicit `audit.events` lists that include every runtime-emitted command and
   hook event;
 - lifecycle permission trust-gate failures before any hook dispatch; and
-- timeout/error paths that persist only bounded hashes for hook output.
+- timeout, malformed-entrypoint, non-zero-exit, and startup-error paths that
+  keep hook output bounded to hashes when output exists.
 
 This matrix is a regression baseline, not a new feature surface. It MUST NOT
 promote deferred hook names or change v0.3 schema compatibility by itself.
