@@ -93,6 +93,8 @@ class SeedGenerator:
         ambiguity_score: AmbiguityScore,
         parent_seed: Seed | None = None,
         reflect_output: Any | None = None,
+        *,
+        force: bool = False,
     ) -> Result[Seed, ValidationError | ProviderError]:
         """Generate an immutable Seed from interview state or reflect output.
 
@@ -101,11 +103,19 @@ class SeedGenerator:
         - Gen 2+ (reflect_output provided): Use refined ACs and ontology mutations
           from ReflectEngine. Skip ambiguity gating.
 
+        When ``force=True``, the ambiguity threshold gate is bypassed but every
+        other validation (initial-context summary, extraction, build) still runs.
+        The real ``ambiguity_score.overall_score`` is recorded in metadata so
+        forced seeds carry truthful provenance.
+
         Args:
             state: Completed interview state.
             ambiguity_score: The ambiguity score for the interview.
             parent_seed: Optional parent seed for evolutionary lineage.
             reflect_output: Optional ReflectOutput for Gen 2+ evolution.
+            force: When True, bypass the ambiguity threshold gate. The real
+                score is still stamped into ``SeedMetadata.ambiguity_score``.
+                Defaults to False (gate enforced).
 
         Returns:
             Result containing the generated Seed or error.
@@ -120,8 +130,15 @@ class SeedGenerator:
             ambiguity_score=ambiguity_score.overall_score,
         )
 
-        # Gate on ambiguity score
-        if not ambiguity_score.is_ready_for_seed:
+        # Gate on ambiguity score (skipped when force=True)
+        if force:
+            log.warning(
+                "seed.generation.ambiguity_gate_bypassed",
+                interview_id=state.interview_id,
+                ambiguity_score=ambiguity_score.overall_score,
+                threshold=AMBIGUITY_THRESHOLD,
+            )
+        elif not ambiguity_score.is_ready_for_seed:
             log.warning(
                 "seed.generation.ambiguity_too_high",
                 interview_id=state.interview_id,

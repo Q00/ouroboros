@@ -300,6 +300,124 @@ class TestSeedGeneratorAmbiguityGating:
         assert "summary required" in result.error.message
         mock_adapter.complete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_generate_with_force_bypasses_gate_at_high_score(self) -> None:
+        """force=True bypasses the ambiguity gate even at scores far above threshold."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        high_ambiguity = create_high_ambiguity_score(0.5)
+
+        extraction_response = create_valid_extraction_response()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, high_ambiguity, force=True)
+
+            assert result.is_ok
+            assert isinstance(result.value, Seed)
+            # Provenance: forced seeds carry the real (high) score, not a fabricated one.
+            assert result.value.metadata.ambiguity_score == 0.5
+
+    @pytest.mark.asyncio
+    async def test_generate_with_force_bypasses_just_above_threshold(self) -> None:
+        """force=True succeeds at the boundary just above the gate (score=0.21)."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        boundary = create_high_ambiguity_score(AMBIGUITY_THRESHOLD + 0.01)
+
+        extraction_response = create_valid_extraction_response()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, boundary, force=True)
+
+            assert result.is_ok
+
+    @pytest.mark.asyncio
+    async def test_generate_without_force_still_fails_above_threshold(self) -> None:
+        """Default force=False preserves existing failure when score > threshold."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        above_threshold = create_high_ambiguity_score(AMBIGUITY_THRESHOLD + 0.01)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, above_threshold)
+
+            assert result.is_err
+            assert isinstance(result.error, ValidationError)
+            assert "exceeds threshold" in result.error.message
+
+    @pytest.mark.asyncio
+    async def test_generate_with_force_logs_bypass_warning(self) -> None:
+        """force=True emits a structured warning so bypass is auditable."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        high_ambiguity = create_high_ambiguity_score(0.5)
+
+        extraction_response = create_valid_extraction_response()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            with patch("ouroboros.bigbang.seed_generator.log.warning") as mock_warning:
+                result = await generator.generate(state, high_ambiguity, force=True)
+
+            assert result.is_ok
+            bypass_calls = [
+                call
+                for call in mock_warning.call_args_list
+                if call.args and call.args[0] == "seed.generation.ambiguity_gate_bypassed"
+            ]
+            assert len(bypass_calls) == 1
+            assert bypass_calls[0].kwargs["ambiguity_score"] == 0.5
+            assert bypass_calls[0].kwargs["threshold"] == AMBIGUITY_THRESHOLD
+
+    @pytest.mark.asyncio
+    async def test_generate_with_force_still_requires_initial_context_summary(
+        self,
+    ) -> None:
+        """force=True only bypasses the ambiguity gate, not the summary check."""
+        mock_adapter = AsyncMock()
+        state = InterviewState(
+            interview_id="test_force_with_long_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+        high_ambiguity = create_high_ambiguity_score(0.5)
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+
+        result = await generator.generate(state, high_ambiguity, force=True)
+
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert "summary required" in result.error.message
+
 
 class TestSeedGeneratorExtraction:
     """Test SeedGenerator requirement extraction."""
