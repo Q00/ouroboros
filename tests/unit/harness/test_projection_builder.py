@@ -614,3 +614,77 @@ class TestArtifactAndVerdictProjection:
 
         assert result.run.verdict_id is None
         assert result.verdicts == ()
+
+    def test_artifact_and_verdict_surface_bounded_context_checkpoint_anchors(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            _tool_started(call_id="c_anchor", tool_name="Bash", when=t0),
+            _tool_returned(call_id="c_anchor", tool_name="Bash", when=t0 + timedelta(seconds=1)),
+            BaseEvent(
+                id="evt_anchor_artifact",
+                type="harness.artifact.recorded",
+                timestamp=t0 + timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "call_id": "c_anchor",
+                    "artifact_id": "artifact_anchor",
+                    "context_pack_ref": "ctx://packs/run-1",
+                    "checkpoint_ref": "chk://run-1/step-1",
+                    "raw_context_pack": {"prompt": "must not be projected"},
+                    "checkpoint_payload": "must not be projected",
+                },
+            ),
+            BaseEvent(
+                id="evt_anchor_verdict",
+                type="harness.verdict.recorded",
+                timestamp=t0 + timedelta(seconds=3),
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "scope": "run",
+                    "outcome": "pass",
+                    "evidence_artifact_ids": ["artifact_anchor"],
+                    "context_pack_id": "ctx-pack-1",
+                    "checkpoint_id": "checkpoint-1",
+                },
+            ),
+        ]
+
+        result = build_projection(events, seed_id="seed_abc")
+
+        artifact = result.artifacts[0]
+        assert artifact.metadata["context_pack_ref"] == "ctx://packs/run-1"
+        assert artifact.metadata["checkpoint_ref"] == "chk://run-1/step-1"
+        assert "raw_context_pack" not in artifact.metadata
+        assert "checkpoint_payload" not in artifact.metadata
+
+        verdict = result.verdicts[0]
+        assert verdict.metadata["context_pack_id"] == "ctx-pack-1"
+        assert verdict.metadata["checkpoint_id"] == "checkpoint-1"
+
+    def test_anchor_metadata_ignores_nested_and_oversized_values(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            _tool_started(call_id="c_anchor", tool_name="Bash", when=t0),
+            _tool_returned(call_id="c_anchor", tool_name="Bash", when=t0 + timedelta(seconds=1)),
+            BaseEvent(
+                id="evt_anchor_artifact",
+                type="harness.artifact.recorded",
+                timestamp=t0 + timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "call_id": "c_anchor",
+                    "artifact_id": "artifact_anchor",
+                    "context_pack_ref": {"ref": "nested"},
+                    "checkpoint_ref": "x" * 513,
+                },
+            ),
+        ]
+
+        result = build_projection(events, seed_id="seed_abc")
+
+        artifact = result.artifacts[0]
+        assert "context_pack_ref" not in artifact.metadata
+        assert "checkpoint_ref" not in artifact.metadata

@@ -605,7 +605,11 @@ def _artifact_from_event(
         size_bytes=_optional_int(event.data.get("size_bytes")),
         digest=_optional_str(event.data.get("digest")),
         summary=_optional_str(event.data.get("summary")) or "",
-        metadata={"source_event_id": event.id, "event_type": event.type},
+        metadata={
+            "source_event_id": event.id,
+            "event_type": event.type,
+            **_anchor_metadata(event.data),
+        },
     )
 
 
@@ -634,7 +638,11 @@ def _verdict_from_event(
     missing_artifact_ids = tuple(
         artifact_id for artifact_id in recorded_artifact_ids if artifact_id not in artifact_ids
     )
-    metadata: dict[str, Any] = {"source_event_id": event.id, "event_type": event.type}
+    metadata: dict[str, Any] = {
+        "source_event_id": event.id,
+        "event_type": event.type,
+        **_anchor_metadata(event.data),
+    }
     if missing_artifact_ids:
         metadata["missing_evidence_artifact_ids"] = missing_artifact_ids
         metadata["recorded_evidence_artifact_ids"] = recorded_artifact_ids
@@ -652,6 +660,38 @@ def _verdict_from_event(
         recorded_at=event.timestamp,
         metadata=metadata,
     )
+
+
+def _anchor_metadata(data: dict[str, Any]) -> dict[str, str]:
+    """Extract bounded read-only context/checkpoint anchors from event payloads.
+
+    Anchors are projection metadata only: they identify context packs or
+    checkpoints mentioned by the source event without granting resume authority,
+    mutating state, or introducing a second context model. Values are short
+    string references; raw payloads, nested objects, and oversized values are
+    intentionally ignored.
+    """
+    anchors: dict[str, str] = {}
+    for key in (
+        "context_pack_ref",
+        "context_pack_id",
+        "checkpoint_ref",
+        "checkpoint_id",
+        "checkpoint_uri",
+    ):
+        value = _bounded_anchor_value(data.get(key))
+        if value is not None:
+            anchors[key] = value
+    return anchors
+
+
+def _bounded_anchor_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or len(stripped) > 512:
+        return None
+    return stripped
 
 
 def _verdict_outcome(data: dict[str, Any]) -> VerdictOutcome | None:
