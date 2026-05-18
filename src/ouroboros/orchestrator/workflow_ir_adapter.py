@@ -190,11 +190,13 @@ def workflow_spec_from_plugin_descriptor(
     if not descriptor.actions:
         msg = "Plugin descriptor must contain at least one action to project Workflow IR"
         raise ValueError(msg)
+    _validate_registered_plugin_action_contract(descriptor)
 
     nodes: list[WorkflowNode] = []
     edges: list[WorkflowEdge] = []
+    plugin_id_segment = _identifier_segment(descriptor.plugin_id)
     terminal_node = WorkflowNode(
-        node_id=f"plugin_{_slug(descriptor.plugin_id)}_terminal",
+        node_id=f"plugin_{plugin_id_segment}_terminal",
         kind=NodeKind.TERMINAL,
         owner=NodeOwner.HARNESS,
         name=f"Plugin {descriptor.name} planning complete",
@@ -205,12 +207,17 @@ def workflow_spec_from_plugin_descriptor(
         },
     )
 
-    declared_permission_scopes = tuple(permission.scope for permission in descriptor.permissions_declared)
+    declared_permission_scopes = tuple(
+        permission.scope for permission in descriptor.permissions_declared
+    )
     lifecycle_hook_names = tuple(hook.name for hook in descriptor.lifecycle_hooks)
     capability_names = tuple(capability.name for capability in descriptor.capabilities_declared)
 
     for action in descriptor.actions:
-        node_id = f"plugin_{_slug(descriptor.plugin_id)}_{_slug(action.namespace)}_{_slug(action.name)}"
+        node_id = (
+            f"plugin_{plugin_id_segment}_"
+            f"{_identifier_segment(action.namespace)}_{_identifier_segment(action.name)}"
+        )
         nodes.append(
             WorkflowNode(
                 node_id=node_id,
@@ -270,7 +277,7 @@ def workflow_spec_from_plugin_descriptor(
         }
     )
     spec = WorkflowSpec(
-        spec_id=f"wfspec_plugin_{_slug(descriptor.plugin_id)}",
+        spec_id=f"wfspec_plugin_{plugin_id_segment}",
         source=SourceKind.PLUGIN,
         source_ref=descriptor.plugin_id,
         nodes=(*nodes, terminal_node),
@@ -285,9 +292,33 @@ def workflow_spec_from_plugin_descriptor(
     return spec
 
 
-def _slug(value: str) -> str:
-    normalized = "_".join(part for part in value.strip().replace(":", "_").split() if part)
-    return "".join(char if char.isalnum() or char == "_" else "_" for char in normalized) or "plugin"
+def _validate_registered_plugin_action_contract(descriptor: PluginDescriptor) -> None:
+    """Mirror the registry's registered-plugin action-shape invariants."""
+    namespaces = {action.namespace for action in descriptor.actions}
+    if len(namespaces) != 1:
+        msg = (
+            f"Plugin descriptor {descriptor.plugin_id!r} declares multiple namespaces "
+            f"{sorted(namespaces)}; one plugin must own one namespace"
+        )
+        raise ValueError(msg)
+
+    seen_names: set[str] = set()
+    duplicate_names: list[str] = []
+    for action in descriptor.actions:
+        if action.name in seen_names and action.name not in duplicate_names:
+            duplicate_names.append(action.name)
+        seen_names.add(action.name)
+    if duplicate_names:
+        msg = (
+            f"Plugin descriptor {descriptor.plugin_id!r} declares duplicate command name(s): "
+            f"{sorted(duplicate_names)}"
+        )
+        raise ValueError(msg)
+
+
+def _identifier_segment(value: str) -> str:
+    """Encode one identifier segment without collapsing punctuation or boundaries."""
+    return "u" + value.encode("utf-8").hex()
 
 
 def _normalize_acceptance_criteria(criteria: tuple[str, ...]) -> tuple[str, ...]:
