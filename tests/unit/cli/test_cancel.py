@@ -136,6 +136,17 @@ class TestBareMode:
 
         assert result.exit_code == 0
         assert "Cancelled" in result.output
+        assert mock_es.append.await_count == 2
+        requested_event = mock_es.append.await_args_list[0].args[0]
+        answered_event = mock_es.append.await_args_list[1].args[0]
+        assert requested_event.type == "hitl.requested"
+        assert requested_event.data["kind"] == "destructive_confirmation"
+        assert requested_event.data["source"] == "control_plane"
+        assert requested_event.data["risk_class"] == "destructive"
+        assert requested_event.data["resume_target"] == "cancel:execution:orch_001"
+        assert answered_event.type == "hitl.answered"
+        assert answered_event.aggregate_id == requested_event.aggregate_id
+        assert answered_event.data["approval_decision"] is True
 
     @patch("ouroboros.cli.commands.cancel._get_event_store")
     def test_bare_mode_select_and_decline(self, mock_get_es: AsyncMock) -> None:
@@ -167,6 +178,12 @@ class TestBareMode:
 
         assert result.exit_code == 0
         assert "No executions were modified" in result.output
+        assert mock_es.append.await_count == 2
+        assert mock_es.append.await_args_list[0].args[0].type == "hitl.requested"
+        answered_event = mock_es.append.await_args_list[1].args[0]
+        assert answered_event.type == "hitl.answered"
+        assert answered_event.data["approval_decision"] is False
+        mock_repo.mark_cancelled.assert_not_called()
 
     @patch("ouroboros.cli.commands.cancel._get_event_store")
     def test_bare_mode_invalid_selection(self, mock_get_es: AsyncMock) -> None:
