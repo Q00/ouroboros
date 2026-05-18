@@ -113,6 +113,30 @@ class TestGooseCliLLMAdapter:
         assert "OUROBOROS_LLM_BACKEND" not in env
         assert "OUROBOROS_RUNTIME" not in env
 
+    def test_default_permission_mode_preserves_approval_gate(self) -> None:
+        adapter = GooseCliLLMAdapter(cli_path="/tmp/goose", cwd="/tmp/project")
+
+        assert adapter._permission_mode == "approve"
+        assert adapter._build_env_for_instance()["GOOSE_MODE"] == "approve"
+
+    @pytest.mark.parametrize("mode", ["default", "acceptEdits", "accept_edits", "acceptedits"])
+    def test_safe_permission_aliases_preserve_approval_gate(self, mode: str) -> None:
+        adapter = GooseCliLLMAdapter(
+            cli_path="/tmp/goose", cwd="/tmp/project", permission_mode=mode
+        )
+
+        assert adapter._permission_mode == "approve"
+        assert adapter._build_env_for_instance()["GOOSE_MODE"] == "approve"
+
+    @pytest.mark.parametrize("mode", ["auto", "bypassPermissions", "bypass_permissions"])
+    def test_explicit_bypass_permission_aliases_map_to_auto(self, mode: str) -> None:
+        adapter = GooseCliLLMAdapter(
+            cli_path="/tmp/goose", cwd="/tmp/project", permission_mode=mode
+        )
+
+        assert adapter._permission_mode == "auto"
+        assert adapter._build_env_for_instance()["GOOSE_MODE"] == "auto"
+
     @pytest.mark.asyncio
     async def test_complete_success_from_goose_stream_json(self) -> None:
         adapter = GooseCliLLMAdapter(cli_path="/tmp/goose", cwd="/tmp/project")
