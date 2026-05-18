@@ -315,3 +315,60 @@ def test_health_treats_copilot_as_cli_authenticated_not_openai_key_backend(
     assert result.exit_code == 0
     assert "copilot uses local CLI authentication" in result.output
     assert "OPENAI_API_KEY" not in result.output
+
+
+def test_health_accepts_claude_sdk_default_without_configured_cli(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=None, backend="claude")
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert "Runtime backend" in result.output
+    assert "claude: SDK default" in result.output
+
+
+def test_health_reports_malformed_credentials_without_crashing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=cli)
+    (config_dir / "credentials.yaml").write_text("[]")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "Credentials" in result.output
+    assert "must contain a mapping" in result.output
+
+
+def test_health_reports_malformed_credentials_providers_without_crashing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, cli_path=cli)
+    (config_dir / "credentials.yaml").write_text("providers: []")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "Credentials" in result.output
+    assert "credentials providers must be a mapping" in result.output

@@ -273,7 +273,12 @@ def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
     if configured_cli and configured_cli not in candidates:
         candidates.append(configured_cli)
 
-    if not candidates and capability is not None and capability.cli_name:
+    if (
+        not candidates
+        and backend != "claude"
+        and capability is not None
+        and capability.cli_name
+    ):
         candidates.append(capability.cli_name)
     return candidates
 
@@ -296,6 +301,8 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
 
     capability = get_backend_capability(backend)
     candidates = _candidate_cli_paths(backend, data)
+    if backend == "claude" and not candidates:
+        return _health_row("Runtime backend", "ok", "claude: SDK default")
 
     for candidate in candidates:
         if not candidate:
@@ -381,11 +388,18 @@ def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
         return _health_row("Credentials", "error", f"missing {credentials_path} for {provider}")
 
     try:
-        raw_credentials = yaml.safe_load(credentials_path.read_text()) or {}
+        raw_credentials = yaml.safe_load(credentials_path.read_text())
+        if raw_credentials is None:
+            raw_credentials = {}
     except (OSError, yaml.YAMLError) as exc:
         return _health_row("Credentials", "error", f"cannot read credentials: {exc}")
 
-    provider_config = raw_credentials.get("providers", {}).get(provider, {})
+    if not isinstance(raw_credentials, dict):
+        return _health_row("Credentials", "error", "credentials.yaml must contain a mapping")
+    providers = raw_credentials.get("providers", {})
+    if not isinstance(providers, dict):
+        return _health_row("Credentials", "error", "credentials providers must be a mapping")
+    provider_config = providers.get(provider, {})
     api_key = (
         str(provider_config.get("api_key", "")).strip() if isinstance(provider_config, dict) else ""
     )
