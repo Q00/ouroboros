@@ -367,19 +367,27 @@ class AutoInterviewDriver:
             synthesis = build_safe_default_synthesis(finalization)
             if synthesis and state.interview_session_id:
                 try:
-                    await self._with_timeout(
-                        self.backend.answer(
-                            state.interview_session_id,
-                            synthesis,
-                            last_question=(
-                                "[driver safe-default finalization: "
-                                f"max_rounds={self.max_rounds}]"
+                    synthesis_turn = _validate_turn(
+                        await self._with_timeout(
+                            self.backend.answer(
+                                state.interview_session_id,
+                                synthesis,
+                                last_question=(
+                                    "[driver safe-default finalization: "
+                                    f"max_rounds={self.max_rounds}]"
+                                ),
                             ),
-                        ),
-                        state,
-                        tool_name="interview.safe_default_synthesis",
+                            state,
+                            tool_name="interview.safe_default_synthesis",
+                        )
                     )
-                except Exception as exc:  # noqa: BLE001 - non-blocking transcript sync
+                except Exception as exc:  # noqa: BLE001 - preserve transcript/ledger SSOT
+                    _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                    blocker = (
+                        "safe-default synthesis transcript sync failed; "
+                        f"rolled back defaulted sections: {', '.join(finalization.defaulted_sections)}; "
+                        f"error={exc}"
+                    )
                     log.warning(
                         "auto.interview.safe_default_synthesis_failed",
                         auto_session_id=state.auto_session_id,
@@ -387,10 +395,27 @@ class AutoInterviewDriver:
                         defaulted_sections=finalization.defaulted_sections,
                         error=str(exc),
                     )
-                    state.mark_progress(
-                        "safe-default synthesis transcript sync failed; "
-                        "continuing with persisted auto ledger defaults",
-                        tool_name="interview.safe_default_synthesis",
+                    state.ledger = ledger.to_dict()
+                    state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
+                    record_authoring_backend(state)
+                    self._save(state)
+                    return AutoInterviewResult(
+                        "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
+                    )
+                state.interview_session_id = synthesis_turn.session_id
+                state.pending_question = synthesis_turn.question
+                if not (synthesis_turn.seed_ready or synthesis_turn.completed):
+                    _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                    blocker = (
+                        "safe-default synthesis did not close the persisted interview: "
+                        "backend_done=False, ledger defaults rolled back"
+                    )
+                    state.ledger = ledger.to_dict()
+                    state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
+                    record_authoring_backend(state)
+                    self._save(state)
+                    return AutoInterviewResult(
+                        "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
                     )
             state.ledger = ledger.to_dict()
             state.pending_question = None

@@ -717,6 +717,8 @@ async def test_interview_driver_finalizes_safe_defaults_after_benign_max_rounds(
         session_id: str, text: str, *, last_question: str | None = None
     ) -> InterviewTurn:  # noqa: ARG001
         answers.append(text)
+        if "[safe-default-synthesis]" in text:
+            return InterviewTurn("done", session_id, seed_ready=True, completed=True)
         return InterviewTurn("What else should we know?", session_id, seed_ready=False)
 
     state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
@@ -743,7 +745,7 @@ async def test_interview_driver_finalizes_safe_defaults_after_benign_max_rounds(
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_keeps_defaults_when_synthesis_sync_fails(tmp_path) -> None:
+async def test_interview_driver_rolls_back_defaults_when_synthesis_sync_fails(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What else should we know?", "interview_defaults")
 
@@ -765,12 +767,48 @@ async def test_interview_driver_keeps_defaults_when_synthesis_sync_fails(tmp_pat
 
     result = await driver.run(state, ledger)
 
-    assert result.status == "seed_ready"
-    assert state.interview_completed is True
-    assert ledger.open_gaps() == []
-    assert any(
-        entry.status == LedgerStatus.DEFAULTED
-        for section in ledger.sections.values()
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert "transcript sync failed" in (result.blocker or "")
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
+        for entry in section.entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_when_synthesis_does_not_close_backend(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_defaults")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "Still need one more thing", session_id, seed_ready=False, completed=False
+        )
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.pending_question == "Still need one more thing"
+    assert "did not close the persisted interview" in (result.blocker or "")
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
         for entry in section.entries
     )
 
@@ -3813,6 +3851,8 @@ async def test_convergence_contract_stalled_generic_followups_report_actionable_
         return InterviewTurn("What else should we know?", "interview_contract")
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        if "[safe-default-synthesis]" in text:
+            return InterviewTurn("done", session_id, seed_ready=True, completed=True)
         return InterviewTurn("What else should we know?", session_id)
 
     state = AutoPipelineState(
