@@ -449,7 +449,7 @@ ouroboros config backend [BACKEND]
 
 | Argument | Description |
 |----------|-------------|
-| `BACKEND` | Backend to switch to: `claude` or `codex`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
+| `BACKEND` | Backend to switch to: `claude`, `codex`, `gemini`, `hermes`, or `goose`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
 
 **Examples:**
 
@@ -462,6 +462,9 @@ ouroboros config backend codex
 
 # Switch to Claude Code
 ouroboros config backend claude
+
+# Switch to Hermes
+ouroboros config backend hermes
 ```
 
 ### `config init`
@@ -580,7 +583,39 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** the `status` subcommands return lightweight placeholder summaries. They are useful for smoke testing the command surface, but should not be treated as authoritative orchestration state.
+> **Current state:** `status auto` and `status run` are live read-only status surfaces. `status health`, `status executions`, and `status execution` still return lightweight placeholder summaries on `main` and should not be treated as authoritative orchestration state until their implementation lands.
+
+### `status auto`
+
+Show unified `ooo auto` + Ralph handoff status for an auto session.
+
+```bash
+ouroboros status auto AUTO_SESSION_ID
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `AUTO_SESSION_ID` | Yes | Auto session id to inspect, such as `auto_<hex>` |
+
+### `status run`
+
+Build a read-only Run/Stage/Step projection from persisted events.
+
+```bash
+ouroboros status run [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--session-id TEXT` | Optional orchestrator session ID to project |
+| `--execution-id TEXT` | Optional execution aggregate ID to project |
+| `--seed-id TEXT` | Optional seed ID override for projection labels |
+| `--limit INTEGER` | Optional event count safety cap |
+| `--json` | Emit machine-readable projection JSON |
 
 ### `status health`
 
