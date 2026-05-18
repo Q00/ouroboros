@@ -325,6 +325,12 @@ the contract and keeps review scope small.
 | `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | Deferred |
 | `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin:lifecycle:read` or cleanup-specific scope | Deferred |
 
+`on_error` and `on_cancel` are the terminal-outcome subset of the deferred hook
+vocabulary. The current #939 contract keeps them non-runnable and rejected by
+v0.3 manifests: future promotion may observe terminal wrapper outcomes, but it
+must not mask the original error/cancellation result, grant cleanup authority,
+or add dispatch without a dedicated runtime slice.
+
 The following candidate hooks are intentionally **not** in the v1 hook
 vocabulary:
 

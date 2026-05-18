@@ -327,6 +327,48 @@ def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
     return milestone.value
 
 
+_MILESTONE_RANKS = {
+    "initial": 0,
+    "progress": 1,
+    "refined": 2,
+    "ready": 3,
+}
+
+
+def _maybe_record_lateral_review_advisory(
+    state: InterviewState,
+    *,
+    previous_milestone: str | None,
+    score: AmbiguityScore | None,
+) -> dict[str, Any] | None:
+    """Return advisory meta for a first-time forward milestone transition.
+
+    This helper is intentionally deterministic and side-effect limited: it
+    records that an advisory was emitted for the target milestone, but it does
+    not invoke lateral thinking, block question generation, or alter the
+    interview answer/Seed contract.
+    """
+    current_milestone = _milestone_for_score(score)
+    if previous_milestone is None or current_milestone is None:
+        return None
+
+    previous_rank = _MILESTONE_RANKS.get(previous_milestone)
+    current_rank = _MILESTONE_RANKS.get(current_milestone)
+    if previous_rank is None or current_rank is None or current_rank <= previous_rank:
+        return None
+
+    if current_milestone in state.lateral_review_advised_milestones:
+        return None
+
+    state.note_lateral_review_advisory(current_milestone)
+    return {
+        "lateral_review_recommended": True,
+        "lateral_review_milestone": current_milestone,
+        "lateral_review_from_milestone": previous_milestone,
+        "lateral_review_reason": "first_forward_milestone_transition",
+    }
+
+
 def _compute_transcript_chars(state: InterviewState) -> int:
     """Sum question + user_response length over every round in ``state``.
 
@@ -1880,6 +1922,8 @@ class InterviewHandler:
                         )
                     )
 
+                lateral_review_meta: dict[str, Any] | None = None
+
                 # If answer provided, record it first
                 if answer:
                     if _is_interview_completion_signal(answer):
@@ -2063,6 +2107,17 @@ class InterviewHandler:
                     # answer to the previously-answered question, corrupting
                     # the transcript. Require the caller to supply the
                     # question via ``last_question``.
+                    # If this is the first live ambiguity score, the interview
+                    # is crossing from the implicit starting milestone.  Treat
+                    # the absent stored score as ``initial`` so the normal first
+                    # ``initial -> progress/refined/ready`` transition can
+                    # surface the advisory instead of being skipped forever.
+                    previous_milestone = (
+                        get_milestone(state.ambiguity_score)[0].value
+                        if state.ambiguity_score is not None
+                        else "initial"
+                    )
+
                     if state.rounds[-1].user_response is None:
                         pending_question = last_question or state.rounds[-1].question
                         state.rounds.pop()
@@ -2129,6 +2184,27 @@ class InterviewHandler:
                         # Running them in parallel would give the question
                         # generator stale routing context.
                         live_score = await self._score_interview_state(llm_adapter, state)
+                        lateral_review_meta = _maybe_record_lateral_review_advisory(
+                            state,
+                            previous_milestone=previous_milestone,
+                            score=live_score,
+                        )
+                        if lateral_review_meta is not None and live_score is not None:
+                            from ouroboros.events.interview import (
+                                interview_lateral_review_recommended,
+                            )
+
+                            self._emit_event_bg(
+                                interview_lateral_review_recommended(
+                                    session_id,
+                                    from_milestone=lateral_review_meta[
+                                        "lateral_review_from_milestone"
+                                    ],
+                                    to_milestone=lateral_review_meta["lateral_review_milestone"],
+                                    ambiguity_score=live_score.overall_score,
+                                    round_number=len(state.rounds),
+                                )
+                            )
                         if (
                             live_score is not None
                             and qualifies_for_seed_completion(
@@ -2238,6 +2314,9 @@ class InterviewHandler:
                     # guard meta-directive.  ``is_error`` stays ``False`` so
                     # the auto driver's ``answer()`` path is not raised on.
                     answer_meta.update(_length_guard_meta_fields())
+
+                if lateral_review_meta is not None:
+                    answer_meta.update(lateral_review_meta)
 
                 answer_response_text = f"Session {session_id}\n\n{display_question}"
                 # Q00/ouroboros#831 (diagnostics): response-shape event for

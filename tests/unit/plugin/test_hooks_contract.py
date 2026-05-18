@@ -25,12 +25,15 @@ from ouroboros.plugin.hooks import (
     HOOK_INVOKED_EVENT,
     HOOK_OUTCOME_AUDIT_EVENTS,
     HOOK_RUNTIME_AUDIT_EVENTS,
+    TERMINAL_DEFERRED_HOOK_KINDS,
+    TERMINAL_DEFERRED_HOOK_NAMES,
     DeferredHookKind,
     ExcludedHookKind,
     HookFailurePolicy,
     HookKind,
     is_deferred_hook_kind,
     is_excluded_hook_kind,
+    is_terminal_deferred_hook_kind,
     is_v1_failure_policy,
     is_v1_hook_kind,
 )
@@ -43,6 +46,14 @@ class TestHookKindEnumeration:
             "before_invocation",
             "after_invocation",
         }
+
+    def test_terminal_deferred_hook_set_is_exact(self) -> None:
+        assert {"on_error", "on_cancel"} == TERMINAL_DEFERRED_HOOK_NAMES
+        assert {kind.value for kind in TERMINAL_DEFERRED_HOOK_KINDS} == {
+            "on_error",
+            "on_cancel",
+        }
+        assert {kind.value for kind in DeferredHookKind} > TERMINAL_DEFERRED_HOOK_NAMES
 
     def test_deferred_hook_set_is_exact(self) -> None:
         assert {kind.value for kind in DeferredHookKind} == {
@@ -110,6 +121,14 @@ class TestRoutingHelpers:
         assert not is_v1_hook_kind("before_tool_call")
         assert not is_v1_hook_kind("on_event")
         assert not is_v1_hook_kind("unknown_hook")
+
+    def test_terminal_deferred_hook_kind_router(self) -> None:
+        assert is_terminal_deferred_hook_kind("on_error")
+        assert is_terminal_deferred_hook_kind("on_cancel")
+        assert not is_terminal_deferred_hook_kind("before_tool_call")
+        assert not is_terminal_deferred_hook_kind("before_invocation")
+        assert not is_v1_hook_kind("on_error")
+        assert not is_v1_hook_kind("on_cancel")
 
     def test_deferred_hook_kind_router(self) -> None:
         assert is_deferred_hook_kind("before_tool_call")
