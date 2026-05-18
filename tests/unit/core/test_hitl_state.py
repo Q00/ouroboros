@@ -108,6 +108,31 @@ def test_projects_legacy_schema_v1_plugin_firewall_request_missing_new_fields() 
     assert snapshot.request["payload"] == {"plugin_id": "acme.docs"}
 
 
+def test_rejects_unversioned_plugin_firewall_request_missing_permission_contract() -> None:
+    event = _with_time(
+        BaseEvent(
+            type="hitl.requested",
+            aggregate_type="hitl",
+            aggregate_id="hitl-plugin-unversioned",
+            data={
+                "request_id": "hitl-plugin-unversioned",
+                "session_id": "plugin-session-1",
+                "created_by": "plugin-firewall",
+                "kind": "approval",
+                "source": "plugin_firewall",
+                "risk_class": "material_branch",
+                "question": "Allow plugin acme.docs to use plugin:lifecycle:read?",
+                "resume_target": "plugin-firewall:permission:plugin-session-1",
+                "payload": {"plugin_id": "acme.docs"},
+            },
+        ),
+        0,
+        "evt_plugin_unversioned_requested",
+    )
+
+    assert project_human_input_state([event]) == ()
+
+
 def test_projects_schema_v2_plugin_firewall_request_with_complete_permission_contract() -> None:
     event = _with_time(
         BaseEvent(

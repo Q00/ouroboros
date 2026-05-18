@@ -208,29 +208,31 @@ def _requested_event_matches_contract(event: BaseEvent, request_id: str) -> bool
         if not isinstance(payload, Mapping):
             return False
         timeout_seconds = event.data.get("timeout_seconds")
-        HumanInputRequest.from_persisted_event_data(
-            request_id=request_id,
-            session_id=_required_str(event.data, "session_id", event.id),
-            schema_version=event.data.get("schema_version", 1),
-            run_id=_optional_str(event.data.get("run_id")),
-            invocation_id=_optional_str(event.data.get("invocation_id")),
-            created_by=_required_str(event.data, "created_by", event.id),
-            kind=HumanInputKind(event.data.get("kind")),
-            source=HumanInputSource(event.data.get("source")),
-            risk_class=HumanInputRiskClass(event.data.get("risk_class")),
-            question=_required_str(event.data, "question", event.id),
-            resume_target=_required_str(event.data, "resume_target", event.id),
-            title=_optional_str(event.data.get("title")),
-            body=_optional_str(event.data.get("body")),
-            options=tuple(options),
-            required_permission=_optional_str(event.data.get("required_permission")),
-            timeout_seconds=timeout_seconds if timeout_seconds is not None else None,
-            timeout_action=HumanInputTimeoutAction(
+        request_kwargs: dict[str, Any] = {
+            "request_id": request_id,
+            "session_id": _required_str(event.data, "session_id", event.id),
+            "run_id": _optional_str(event.data.get("run_id")),
+            "invocation_id": _optional_str(event.data.get("invocation_id")),
+            "created_by": _required_str(event.data, "created_by", event.id),
+            "kind": HumanInputKind(event.data.get("kind")),
+            "source": HumanInputSource(event.data.get("source")),
+            "risk_class": HumanInputRiskClass(event.data.get("risk_class")),
+            "question": _required_str(event.data, "question", event.id),
+            "resume_target": _required_str(event.data, "resume_target", event.id),
+            "title": _optional_str(event.data.get("title")),
+            "body": _optional_str(event.data.get("body")),
+            "options": tuple(options),
+            "required_permission": _optional_str(event.data.get("required_permission")),
+            "timeout_seconds": timeout_seconds if timeout_seconds is not None else None,
+            "timeout_action": HumanInputTimeoutAction(
                 event.data.get("timeout_action", HumanInputTimeoutAction.STAY_WAITING.value)
             ),
-            surface=_optional_str(event.data.get("surface")),
-            payload=payload,
-        )
+            "surface": _optional_str(event.data.get("surface")),
+            "payload": payload,
+        }
+        if "schema_version" in event.data:
+            request_kwargs["schema_version"] = event.data["schema_version"]
+        HumanInputRequest.from_persisted_event_data(**request_kwargs)
     except (TypeError, ValueError):
         return False
     return True

@@ -235,6 +235,35 @@ def test_human_input_request_from_schema_v2_plugin_firewall_snapshot_rejects_mis
         human_input_request_from_snapshot(snapshot)
 
 
+def test_human_input_request_from_unversioned_plugin_firewall_snapshot_rejects_missing_fields() -> (
+    None
+):
+    snapshot = HumanInputSnapshot(
+        request_id="hitl-plugin-unversioned",
+        state=HumanInputState.PENDING,
+        request_event_id="evt_plugin_unversioned_requested",
+        updated_event_id="evt_plugin_unversioned_requested",
+        created_at=datetime(2026, 5, 18, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 18, tzinfo=UTC),
+        session_id="plugin-session-1",
+        resume_target="plugin-firewall:permission:plugin-session-1",
+        request={
+            "request_id": "hitl-plugin-unversioned",
+            "session_id": "plugin-session-1",
+            "created_by": "plugin-firewall",
+            "kind": "approval",
+            "source": "plugin_firewall",
+            "risk_class": "material_branch",
+            "question": "Allow plugin acme.docs to use plugin:lifecycle:read?",
+            "resume_target": "plugin-firewall:permission:plugin-session-1",
+            "payload": {"plugin_id": "acme.docs"},
+        },
+    )
+
+    with pytest.raises(HumanInputResumeValidationError, match="cannot be reconstructed"):
+        human_input_request_from_snapshot(snapshot)
+
+
 def test_create_validated_hitl_resume_event_answers_wait_with_malformed_created_at() -> None:
     base_requested = create_hitl_requested_event(_request())
     requested = base_requested.model_copy(

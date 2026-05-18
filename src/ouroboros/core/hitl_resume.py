@@ -82,31 +82,35 @@ def human_input_request_from_snapshot(snapshot: HumanInputSnapshot) -> HumanInpu
 
     data = snapshot.request
     try:
-        return HumanInputRequest.from_persisted_event_data(
-            request_id=_required_str(data, "request_id"),
-            session_id=_required_str(data, "session_id"),
-            schema_version=data.get("schema_version", 1),
-            run_id=_optional_str(data.get("run_id")),
-            invocation_id=_optional_str(data.get("invocation_id")),
-            created_by=_required_str(data, "created_by"),
-            kind=HumanInputKind(_required_str(data, "kind")),
-            source=HumanInputSource(_required_str(data, "source")),
-            risk_class=HumanInputRiskClass(_required_str(data, "risk_class")),
-            question=_required_str(data, "question"),
-            resume_target=_required_str(data, "resume_target"),
-            title=_optional_str(data.get("title")),
-            body=_optional_str(data.get("body")),
-            options=_string_tuple(data.get("options", ())),
-            required_permission=_optional_str(data.get("required_permission")),
-            timeout_seconds=_optional_int(data.get("timeout_seconds")),
-            timeout_action=HumanInputTimeoutAction(
+        request_kwargs = {
+            "request_id": _required_str(data, "request_id"),
+            "session_id": _required_str(data, "session_id"),
+            "run_id": _optional_str(data.get("run_id")),
+            "invocation_id": _optional_str(data.get("invocation_id")),
+            "created_by": _required_str(data, "created_by"),
+            "kind": HumanInputKind(_required_str(data, "kind")),
+            "source": HumanInputSource(_required_str(data, "source")),
+            "risk_class": HumanInputRiskClass(_required_str(data, "risk_class")),
+            "question": _required_str(data, "question"),
+            "resume_target": _required_str(data, "resume_target"),
+            "title": _optional_str(data.get("title")),
+            "body": _optional_str(data.get("body")),
+            "options": _string_tuple(data.get("options", ())),
+            "required_permission": _optional_str(data.get("required_permission")),
+            "timeout_seconds": _optional_int(data.get("timeout_seconds")),
+            "timeout_action": HumanInputTimeoutAction(
                 _optional_str(data.get("timeout_action"))
                 or HumanInputTimeoutAction.STAY_WAITING.value
             ),
-            surface=_optional_str(data.get("surface")),
-            payload=_plain_mapping(data.get("payload", {})),
-            created_at=_datetime_from_payload(data.get("created_at"), fallback=snapshot.created_at),
-        )
+            "surface": _optional_str(data.get("surface")),
+            "payload": _plain_mapping(data.get("payload", {})),
+            "created_at": _datetime_from_payload(
+                data.get("created_at"), fallback=snapshot.created_at
+            ),
+        }
+        if "schema_version" in data:
+            request_kwargs["schema_version"] = data["schema_version"]
+        return HumanInputRequest.from_persisted_event_data(**request_kwargs)
     except (TypeError, ValueError) as exc:
         raise HumanInputResumeValidationError(
             f"HITL request {snapshot.request_id!r} cannot be reconstructed from persisted state"
