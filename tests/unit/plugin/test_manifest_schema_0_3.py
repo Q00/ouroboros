@@ -264,6 +264,10 @@ class TestV03HookAuditEvents:
         payload["hooks"] = [_valid_hook(name="before_invocation")]
         payload["audit"] = {
             "events": [
+                "plugin.invoked",
+                "plugin.permission_used",
+                "plugin.completed",
+                "plugin.failed",
                 "plugin.hook.invoked",
                 "plugin.hook.completed",
                 "plugin.hook.blocked",
@@ -272,6 +276,10 @@ class TestV03HookAuditEvents:
         }
         manifest = load_manifest(_write(tmp_path, payload))
         assert manifest.audit.events == (
+            "plugin.invoked",
+            "plugin.permission_used",
+            "plugin.completed",
+            "plugin.failed",
             "plugin.hook.invoked",
             "plugin.hook.completed",
             "plugin.hook.blocked",
@@ -289,16 +297,39 @@ class TestV03HookAuditEvents:
             load_manifest(_write(tmp_path, payload))
 
         assert exc_info.value.json_pointer == "/audit/events"
+        assert "plugin.invoked" in exc_info.value.got
         assert "plugin.hook.invoked" in exc_info.value.got
         assert "plugin.hook.completed" in exc_info.value.got
 
-    def test_manifest_without_hooks_may_declare_partial_hook_audit_events(
+    def test_manifest_without_hooks_rejects_audit_events_missing_core_runtime_events(
         self, tmp_path: Path
     ) -> None:
         payload = _v03_manifest()
         payload["audit"] = {"events": ["plugin.hook.blocked", "plugin.hook.failed"]}
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/audit/events"
+        assert "plugin.invoked" in exc_info.value.got
+
+    def test_manifest_without_hooks_accepts_core_runtime_events(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload["audit"] = {
+            "events": [
+                "plugin.invoked",
+                "plugin.permission_used",
+                "plugin.completed",
+                "plugin.failed",
+            ]
+        }
         manifest = load_manifest(_write(tmp_path, payload))
-        assert manifest.audit.events == ("plugin.hook.blocked", "plugin.hook.failed")
+        assert manifest.audit.events == (
+            "plugin.invoked",
+            "plugin.permission_used",
+            "plugin.completed",
+            "plugin.failed",
+        )
 
     def test_schema_audit_default_matches_v1_lifecycle_events(self) -> None:
         schema_path = (

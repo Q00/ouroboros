@@ -7,7 +7,7 @@
       "Bumped $id/title/schema_version const from 0.2 to 0.3.",
       "Narrowed hooks[].name enum to the v1 HookKind set: 'before_invocation' and 'after_invocation'. Deferred candidates (before_tool_call, after_tool_call, before_artifact_write, after_artifact_write, on_error, on_cancel) and excluded candidates (before_runtime_start, after_runtime_start, before_state_commit, after_state_commit, on_event, on_rewind) are no longer accepted at the schema layer; refer to src/ouroboros/plugin/hooks.py for the routing helpers and follow-up RFC slices.",
       "Requires hooks[].permissions and requires that array to contain plugin:lifecycle:read or plugin:lifecycle:policy so archived v0.3 JSON Schema and Python loader enforce the same lifecycle permission boundary; fail_closed hooks additionally require plugin:lifecycle:policy as a required top-level permission in the Python loader.",
-      "Allows plugin.hook.blocked / plugin.hook.failed / plugin.hook.invoked / plugin.hook.completed in explicit audit.events declarations; manifests that declare v0.3 hooks must include the complete hook event vocabulary when they override audit.events explicitly."
+      "Allows plugin.hook.blocked / plugin.hook.failed / plugin.hook.invoked / plugin.hook.completed in explicit audit.events declarations; explicit v0.3 audit.events must include the complete runtime-emitted vocabulary for the manifest shape, including core command events and hook events when hooks are declared."
     ],
     "audit-event.schema.json": [
       "Vendored audit-event.schema.json with local 0.3 $id/title/schema_version alignment and complete v1 hook wrapper event names: plugin.hook.invoked, plugin.hook.completed, plugin.hook.blocked, and plugin.hook.failed.",

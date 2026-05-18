@@ -606,27 +606,31 @@ def _validate_hook_audit_events(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Keep explicit v0.3 audit declarations aligned with hook dispatch.
+    """Keep explicit v0.3 audit declarations aligned with runtime dispatch.
 
-    The v0.3 firewall emits ``plugin.hook.invoked`` for every dispatched
-    lifecycle hook and then emits one of the hook terminal events. When a
-    manifest declares hooks and also narrows ``audit.events`` explicitly,
-    the explicit list becomes the runtime contract; accepting a partial
-    hook vocabulary would let the dispatcher produce records outside that
-    contract. Omitted audit blocks use :meth:`AuditSpec.standard_events_for_schema`,
-    which already includes the complete v1 hook event vocabulary.
+    The firewall always emits the core command invocation events for a
+    started command, and the v0.3 firewall additionally emits hook events
+    when lifecycle hooks are declared. When a v0.3 manifest narrows
+    ``audit.events`` explicitly, that list becomes the runtime contract;
+    accepting a partial emitted vocabulary would let the dispatcher produce
+    records outside that contract. Omitted audit blocks use
+    :meth:`AuditSpec.standard_events_for_schema`, which already includes the
+    complete v0.3 lifecycle vocabulary.
     """
 
-    if schema_version != "0.3" or not audit_was_explicit or not hooks:
+    if schema_version != "0.3" or not audit_was_explicit:
         return
-    missing_events = HOOK_EVENT_TYPES.difference(audit.events)
+    required_events = set(AuditSpec.standard_four_events().events)
+    if hooks:
+        required_events.update(HOOK_EVENT_TYPES)
+    missing_events = required_events.difference(audit.events)
     if not missing_events:
         return
     raise PluginManifestError(
-        "v0.3 manifests with hooks must declare the complete hook audit vocabulary",
+        "v0.3 explicit audit.events must include every runtime-emitted event",
         path=str(manifest_path),
         json_pointer="/audit/events",
-        expected=f"events including {sorted(HOOK_EVENT_TYPES)!r}",
+        expected=f"events including {sorted(required_events)!r}",
         got=f"missing {sorted(missing_events)!r} from {list(audit.events)!r}",
     )
 
