@@ -45,11 +45,19 @@ from ouroboros.plugin.digest import (
     UnsupportedFileTypeError,
     canonical_tree_hash,
 )
-from ouroboros.plugin.manifest import PluginManifest
+from ouroboros.plugin.hooks import (
+    HOOK_COMPLETED_EVENT,
+    HOOK_FAILED_EVENT,
+    HOOK_INVOKED_EVENT,
+    HookFailurePolicy,
+    HookKind,
+)
+from ouroboros.plugin.manifest import HookSpec, PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
 
 SCHEMA_VERSION = "0.1"
+HOOK_AUDIT_SCHEMA_VERSION = "0.3"
 DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS = 300.0
 
 EventSink = Callable[[dict], None]
@@ -264,6 +272,7 @@ def _event_envelope(
     permissions_used: Iterable[str] = (),
     result: dict | None = None,
     provenance: dict[str, str] | None = None,
+    schema_version: str = SCHEMA_VERSION,
 ) -> dict:
     """Build an event matching schemas/0.1/audit-event.schema.json.
 
@@ -287,7 +296,7 @@ def _event_envelope(
         if redaction_fired:
             argv_hash = _argv_sha256(list(argv))
     event: dict = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "event_type": event_type,
         "occurred_at": _utc_now_iso(),
         "plugin": {
@@ -307,6 +316,15 @@ def _event_envelope(
     if final_provenance:
         event["provenance"] = final_provenance
     return event
+
+
+
+def _matching_hooks(manifest: PluginManifest, hook_kind: HookKind) -> tuple[HookSpec, ...]:
+    return tuple(hook for hook in manifest.hooks if hook.name == hook_kind.value)
+
+
+def _hook_timeout_seconds(hook: HookSpec) -> float:
+    return float(hook.timeout_seconds or DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS)
 
 
 def _required_permissions(manifest: PluginManifest) -> list[str]:
@@ -511,10 +529,92 @@ def invoke_plugin(
     )
     risks = _scope_risk_index(manifest)
     emitted: list[dict] = []
+    runner = subprocess_runner or subprocess.run
 
     def _emit(event: dict) -> None:
         event_sink(event)
         emitted.append(event)
+
+    def _run_lifecycle_hooks(hook_kind: HookKind) -> tuple[bool, str]:
+        for hook in _matching_hooks(manifest, hook_kind):
+            hook_provenance = {
+                "correlation_id": correlation_id,
+                "hook_name": hook.name,
+                "failure_policy": hook.failure_policy,
+            }
+            _emit(
+                _event_envelope(
+                    event_type=HOOK_INVOKED_EVENT,
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state=trust_state,
+                    permissions_used=hook.permissions,
+                    provenance=hook_provenance,
+                    schema_version=HOOK_AUDIT_SCHEMA_VERSION,
+                )
+            )
+            try:
+                hook_argv = shlex.split(hook.entrypoint.command)
+            except ValueError as exc:
+                hook_argv = []
+                hook_error = f"hook entrypoint is not parseable: {exc}"
+            else:
+                hook_error = ""
+            if not hook_argv and not hook_error:
+                hook_error = "hook entrypoint command is empty after tokenization"
+
+            if not hook_error:
+                try:
+                    runner(
+                        hook_argv,
+                        capture_output=True,
+                        check=False,
+                        timeout=_hook_timeout_seconds(hook),
+                        cwd=str(plugin_home) if plugin_home is not None else None,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    hook_error = (
+                        f"hook {hook.name} timed out after {_hook_timeout_seconds(hook):g}s: "
+                        f"{type(exc).__name__}"
+                    )
+                except OSError as exc:
+                    hook_error = f"hook {hook.name} failed to start: {type(exc).__name__}: {exc}"
+
+            if hook_error:
+                _emit(
+                    _event_envelope(
+                        event_type=HOOK_FAILED_EVENT,
+                        manifest=manifest,
+                        namespace=namespace,
+                        command_name=command_name,
+                        argv=argv,
+                        trust_state=trust_state,
+                        permissions_used=hook.permissions,
+                        result={"status": "failed", "message": hook_error},
+                        provenance=hook_provenance,
+                        schema_version=HOOK_AUDIT_SCHEMA_VERSION,
+                    )
+                )
+                if hook.failure_policy == HookFailurePolicy.FAIL_CLOSED.value:
+                    return False, hook_error
+                continue
+
+            _emit(
+                _event_envelope(
+                    event_type=HOOK_COMPLETED_EVENT,
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state=trust_state,
+                    permissions_used=hook.permissions,
+                    provenance=hook_provenance,
+                    schema_version=HOOK_AUDIT_SCHEMA_VERSION,
+                )
+            )
+        return True, ""
 
     # 0. Disable check — fires before everything, including before the
     # trust check, so a plugin with no `required: true` permissions
@@ -731,6 +831,28 @@ def invoke_plugin(
                 events=tuple(emitted),
             )
 
+    before_ok, before_message = _run_lifecycle_hooks(HookKind.BEFORE_INVOCATION)
+    if not before_ok:
+        message = f"before_invocation hook blocked invocation: {before_message}"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "blocked", "message": message},
+                provenance={"correlation_id": correlation_id, "reason": "hook_failed"},
+            )
+        )
+        return InvocationResult(
+            status="blocked",
+            exit_code=None,
+            message=message,
+            events=tuple(emitted),
+        )
+
     # 3. Emit `plugin.invoked` before launch.
     _emit(
         _event_envelope(
@@ -823,7 +945,6 @@ def invoke_plugin(
             events=tuple(emitted),
         )
     cmd_argv = parsed_argv + [command_name] + list(argv)
-    runner = subprocess_runner or subprocess.run
     # Capture stdout/stderr as **bytes** rather than asking subprocess
     # to decode them. The firewall only ever stores a sha256 hash of
     # those streams (the RFC's bounded-payload contract), so we do
@@ -977,6 +1098,7 @@ def invoke_plugin(
                 },
             )
         )
+        _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
         return InvocationResult(
             status="success",
             exit_code=0,
@@ -1004,6 +1126,7 @@ def invoke_plugin(
                 },
             )
         )
+        _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
         return InvocationResult(
             status="failed",
             exit_code=completed.returncode,
