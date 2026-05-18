@@ -47,8 +47,6 @@ class TestHookKindEnumeration:
             "after_invocation",
         }
 
-
-
     def test_terminal_deferred_hook_set_is_exact(self) -> None:
         assert {"on_error", "on_cancel"} == TERMINAL_DEFERRED_HOOK_NAMES
         assert {kind.value for kind in TERMINAL_DEFERRED_HOOK_KINDS} == {
@@ -123,7 +121,6 @@ class TestRoutingHelpers:
         assert not is_v1_hook_kind("before_tool_call")
         assert not is_v1_hook_kind("on_event")
         assert not is_v1_hook_kind("unknown_hook")
-
 
     def test_terminal_deferred_hook_kind_router(self) -> None:
         assert is_terminal_deferred_hook_kind("on_error")
