@@ -24,6 +24,10 @@ from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
+from ouroboros.auto.safe_defaults import (
+    build_safe_default_synthesis,
+    finalize_safe_defaultable_gaps,
+)
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 log = structlog.get_logger(__name__)
@@ -332,12 +336,70 @@ class AutoInterviewDriver:
             state.pending_question = turn.question
             self._save(state)
 
-        # max_rounds exhausted — one final closure check, then diagnostic blocker.
+        # max_rounds exhausted — one final closure check, then safe-default
+        # finalization for autonomous ``ooo auto``.  The manual
+        # ``ooo interview`` path remains strict/fail-closed in its own driver;
+        # this auto driver is allowed to close missing/weak required sections
+        # when the goal is local, reversible, and covered by the audited
+        # safe-default policy.  This is intentionally after the bounded
+        # interview loop: explicit/backend-provided answers always win first,
+        # and defaults are only the final escape from a benign stalled dialog.
         backend_done = turn.seed_ready or turn.completed
         ledger_done = ledger.is_seed_ready()
         if backend_done and ledger_done:
             state.pending_question = None
             state.interview_completed = True
+            self._save(state)
+            return AutoInterviewResult(
+                "seed_ready", state.interview_session_id, ledger, self.max_rounds
+            )
+
+        finalization = None
+        if not backend_done:
+            finalization = finalize_safe_defaultable_gaps(
+                ledger,
+                goal=state.goal,
+                provenance=f"auto interview max_rounds={self.max_rounds}",
+                pending_question=turn.question,
+                active_profile=getattr(self.answerer, "active_profile", None),
+            )
+        if finalization is not None and finalization.completed and ledger.is_seed_ready():
+            synthesis = build_safe_default_synthesis(finalization)
+            if synthesis and state.interview_session_id:
+                try:
+                    await self._with_timeout(
+                        self.backend.answer(
+                            state.interview_session_id,
+                            synthesis,
+                            last_question=(
+                                "[driver safe-default finalization: "
+                                f"max_rounds={self.max_rounds}]"
+                            ),
+                        ),
+                        state,
+                        tool_name="interview.safe_default_synthesis",
+                    )
+                except Exception as exc:  # noqa: BLE001 - non-blocking transcript sync
+                    log.warning(
+                        "auto.interview.safe_default_synthesis_failed",
+                        auto_session_id=state.auto_session_id,
+                        interview_session_id=state.interview_session_id,
+                        defaulted_sections=finalization.defaulted_sections,
+                        error=str(exc),
+                    )
+                    state.mark_progress(
+                        "safe-default synthesis transcript sync failed; "
+                        "continuing with persisted auto ledger defaults",
+                        tool_name="interview.safe_default_synthesis",
+                    )
+            state.ledger = ledger.to_dict()
+            state.pending_question = None
+            state.interview_completed = True
+            state.mark_progress(
+                "safe-default finalization closed interview gaps: "
+                + ", ".join(finalization.defaulted_sections),
+                tool_name="interview_driver",
+            )
             self._save(state)
             return AutoInterviewResult(
                 "seed_ready", state.interview_session_id, ledger, self.max_rounds
