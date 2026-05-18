@@ -17,6 +17,8 @@ Covers the contract from issue #946 PR-1b:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import json
+from pathlib import Path
 
 import pytest
 
@@ -614,3 +616,53 @@ class TestArtifactAndVerdictProjection:
 
         assert result.run.verdict_id is None
         assert result.verdicts == ()
+
+
+class TestMechanicalEvaluationFixture:
+    def test_fixture_projects_run_step_artifact_verdict_and_source_events(self) -> None:
+        fixture_path = (
+            Path(__file__).parents[2]
+            / "fixtures"
+            / "projection"
+            / "mechanical_evaluation_events.json"
+        )
+        raw_events = json.loads(fixture_path.read_text())
+        events = [
+            BaseEvent(
+                id=item["id"],
+                type=item["type"],
+                timestamp=datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00")),
+                aggregate_type=item["aggregate_type"],
+                aggregate_id=item["aggregate_id"],
+                data=item["data"],
+            )
+            for item in raw_events
+        ]
+
+        result = build_projection(events, seed_id="seed_mechanical_eval")
+
+        assert result.run.seed_id == "seed_mechanical_eval"
+        assert result.run.stage_ids == (result.stages[0].stage_id,)
+        assert result.run.verdict_id == "verdict_mechanical_eval"
+        assert len(result.steps) == 1
+        assert len(result.artifacts) == 1
+        assert len(result.verdicts) == 1
+
+        step = result.steps[0]
+        assert step.kind is StepKind.SHELL_COMMAND
+        assert step.source_event_ids == ("evt_mech_tool_start", "evt_mech_tool_return")
+        assert step.artifact_ids == ("artifact_mechanical_pytest_json",)
+
+        artifact = result.artifacts[0]
+        assert artifact.step_id == step.step_id
+        assert artifact.metadata["source_event_id"] == "evt_mech_artifact"
+
+        verdict = result.verdicts[0]
+        assert verdict.outcome is VerdictOutcome.PASS
+        assert verdict.evidence_event_ids == ("evt_mech_verdict", "evt_mech_artifact")
+        assert verdict.evidence_artifact_ids == ("artifact_mechanical_pytest_json",)
+
+        replayed = build_projection(events, seed_id="seed_mechanical_eval")
+        assert replayed.run.run_id == result.run.run_id
+        assert replayed.stages[0].stage_id == result.stages[0].stage_id
+        assert replayed.steps[0].step_id == step.step_id
