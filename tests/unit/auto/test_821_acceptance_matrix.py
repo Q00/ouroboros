@@ -79,12 +79,13 @@ def _matrix_seed(goal: str) -> Seed:
 async def test_821_acceptance_matrix_short_goals_do_not_stop_at_interview(
     tmp_path, goal: str
 ) -> None:
-    """The #821 six-goal matrix must advance beyond INTERVIEW without legacy gap blockers.
+    """The #821 six-goal matrix must complete a mocked RUN handoff.
 
     The backend is deterministic and local: it keeps asking broad follow-ups until
     the driver has had enough turns to fill the Seed draft ledger, then reports
-    completion.  The run starter is also mocked so this covers the auto pipeline
-    through a downstream RUN handoff without invoking an LLM or external API.
+    completion. The run starter returns durable handles, so each goal must reach
+    COMPLETE with a clean blocker/error state instead of merely ending outside
+    INTERVIEW.
     """
 
     answers: list[str] = []
@@ -134,20 +135,15 @@ async def test_821_acceptance_matrix_short_goals_do_not_stop_at_interview(
         if item
     )
 
-    assert state.phase is not AutoPhase.INTERVIEW
-    assert result.phase != AutoPhase.INTERVIEW.value
-    assert result.status in {
-        AutoPhase.COMPLETE.value,
-        AutoPhase.BLOCKED.value,
-        AutoPhase.FAILED.value,
-    }
+    assert state.phase is AutoPhase.COMPLETE
+    assert result.phase == AutoPhase.COMPLETE.value
+    assert result.status == AutoPhase.COMPLETE.value
+    assert result.blocker is None
+    assert state.last_error is None
     assert state.last_tool_name != "interview_driver"
-    if result.status == AutoPhase.COMPLETE.value:
-        assert state.job_id == "job_821"
-        assert state.execution_id == "exec_821"
-        assert state.run_session_id == "run_821"
-    else:
-        assert state.last_tool_name in {"grade_gate", "run_starter", "ralph_starter", "evaluator"}
+    assert state.job_id == "job_821"
+    assert state.execution_id == "exec_821"
+    assert state.run_session_id == "run_821"
     assert _LEGACY_MAX_ROUNDS_BLOCKER not in terminal_text
     assert _BARE_UNRESOLVED_GAPS not in terminal_text
     assert persisted_ledger.open_gaps() == []

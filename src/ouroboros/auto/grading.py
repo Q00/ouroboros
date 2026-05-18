@@ -335,7 +335,7 @@ def _goal_tokens(value: str) -> set[str]:
     }
     tokens = {
         token
-        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        for token in re.findall(r"[^\W_]+", value.casefold())
         if len(token) >= 2 and token not in stopwords
     }
     if "cli" in tokens:
