@@ -705,6 +705,115 @@ def test_safe_default_non_goals_do_not_make_later_finalization_unsafe() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_finalizes_safe_defaults_after_benign_max_rounds(
+    tmp_path,
+) -> None:
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_defaults")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        if "[safe-default-synthesis]" in text:
+            return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+        return InterviewTurn("What else should we know?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert state.interview_completed is True
+    assert state.pending_question is None
+    assert ledger.open_gaps() == []
+    assert any(
+        entry.status == LedgerStatus.DEFAULTED
+        and entry.key == "runtime_context.safe_default_finalization"
+        for entry in ledger.sections["runtime_context"].entries
+    )
+    assert any("[safe-default-synthesis]" in answer for answer in answers)
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_rolls_back_defaults_when_synthesis_sync_fails(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_defaults")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        if "[safe-default-synthesis]" in text:
+            raise RuntimeError("transcript unavailable")
+        return InterviewTurn("What else should we know?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert "transcript sync failed" in (result.blocker or "")
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
+        for entry in section.entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_when_synthesis_does_not_close_backend(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_defaults")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "Still need one more thing", session_id, seed_ready=False, completed=False
+        )
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.pending_question == "Still need one more thing"
+    assert "did not close the persisted interview" in (result.blocker or "")
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
+        for entry in section.entries
+    )
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_1")
@@ -729,11 +838,8 @@ async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(tmp_
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
     blocker = result.blocker or ""
-    # New mutual-agreement closure gate emits a structured diagnostic naming
-    # both readiness states and the unresolved sections. The auto path no
-    # longer attempts safe-default finalization, so the goal's unsafe-context
-    # words ("production"/"credentials") cannot sneak a closure through —
-    # the diagnostic blocker is the only terminal outcome here.
+    # Safe-default finalization is allowed for benign auto goals, but the
+    # unsafe-context gate must keep production/credential asks blocked.
     assert "without closure" in blocker
     assert "ledger_done=False" in blocker
     assert "open_gaps=" in blocker
@@ -3730,19 +3836,23 @@ async def test_convergence_contract_unsafe_authority_question_blocks(tmp_path) -
 async def test_convergence_contract_stalled_generic_followups_report_actionable_gaps(
     tmp_path,
 ) -> None:
-    """Generic ``What else?`` follow-up loops must blocker on unresolved sections.
+    """Generic benign follow-up loops close via audited safe defaults.
 
     This pins the documented stall pattern from
-    ``docs/auto-interview-convergence-contract.md``: when the backend keeps asking
-    ``What else?`` / ``Any additional context?``-style questions and required
-    sections never resolve, the round-cap blocker has to name the unresolved
-    gaps, not just say that ``max_rounds`` was reached.
+    ``docs/auto-interview-convergence-contract.md`` after #821's autonomy
+    contract: when the backend keeps asking ``What else?``-style questions for a
+    local/reversible goal, the auto driver must not strand the session in
+    INTERVIEW.  It closes safe-defaultable gaps and lets the pipeline continue
+    to Seed generation.  Unsafe or conflicting goals are covered by separate
+    blocking tests.
     """
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What else should we know?", "interview_contract")
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        if "[safe-default-synthesis]" in text:
+            return InterviewTurn("done", session_id, seed_ready=True, completed=True)
         return InterviewTurn("What else should we know?", session_id)
 
     state = AutoPipelineState(
@@ -3759,18 +3869,16 @@ async def test_convergence_contract_stalled_generic_followups_report_actionable_
 
     result = await driver.run(state, ledger)
 
-    blocker = result.blocker or ""
-    assert result.status == "blocked"
-    assert state.phase == AutoPhase.BLOCKED
-    # New diagnostic format names both readiness states and lists the open
-    # gap sections so callers can decide whether to raise max_rounds or
-    # sharpen the goal — preserving the convergence contract that stalls
-    # must surface actionable section names, not just "reached max_rounds".
-    assert "without closure" in blocker
-    assert "open_gaps=" in blocker
-    open_gaps = ledger.open_gaps()
-    assert open_gaps, "stalled generic loop must leave at least one open required gap"
-    assert any(section in blocker for section in open_gaps)
+    assert result.status == "seed_ready"
+    assert state.phase == AutoPhase.INTERVIEW
+    assert state.interview_completed is True
+    assert state.pending_question is None
+    assert ledger.open_gaps() == []
+    assert any(
+        entry.status == LedgerStatus.DEFAULTED
+        for section in ledger.sections.values()
+        for entry in section.entries
+    )
 
 
 @pytest.mark.asyncio

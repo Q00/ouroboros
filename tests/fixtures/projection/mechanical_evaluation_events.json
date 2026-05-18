@@ -1,0 +1,58 @@
+[
+  {
+    "id": "evt_mech_tool_start",
+    "type": "tool.call.started",
+    "timestamp": "2026-05-18T00:00:00Z",
+    "aggregate_type": "execution",
+    "aggregate_id": "exec_mechanical_eval",
+    "data": {
+      "call_id": "mechanical_pytest",
+      "tool_name": "Bash",
+      "args_preview": "pytest tests/unit/harness/test_projection_builder.py"
+    }
+  },
+  {
+    "id": "evt_mech_tool_return",
+    "type": "tool.call.returned",
+    "timestamp": "2026-05-18T00:00:02Z",
+    "aggregate_type": "execution",
+    "aggregate_id": "exec_mechanical_eval",
+    "data": {
+      "call_id": "mechanical_pytest",
+      "tool_name": "Bash",
+      "is_error": false,
+      "duration_ms": 2000,
+      "result_preview": "1 passed"
+    }
+  },
+  {
+    "id": "evt_mech_artifact",
+    "type": "harness.artifact.recorded",
+    "timestamp": "2026-05-18T00:00:03Z",
+    "aggregate_type": "execution",
+    "aggregate_id": "exec_mechanical_eval",
+    "data": {
+      "call_id": "mechanical_pytest",
+      "artifact_id": "artifact_mechanical_pytest_json",
+      "kind": "evidence",
+      "path": "artifacts/mechanical-pytest.json",
+      "media_type": "application/json",
+      "summary": "mechanical pytest evidence"
+    }
+  },
+  {
+    "id": "evt_mech_verdict",
+    "type": "harness.verdict.recorded",
+    "timestamp": "2026-05-18T00:00:04Z",
+    "aggregate_type": "execution",
+    "aggregate_id": "exec_mechanical_eval",
+    "data": {
+      "verdict_id": "verdict_mechanical_eval",
+      "scope": "run",
+      "outcome": "pass",
+      "rationale": "mechanical fixture projected with source evidence",
+      "evidence_event_ids": ["evt_mech_artifact"],
+      "evidence_artifact_ids": ["artifact_mechanical_pytest_json"]
+    }
+  }
+]
