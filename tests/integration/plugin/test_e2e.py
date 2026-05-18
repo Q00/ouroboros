@@ -96,6 +96,7 @@ def _grant_trust(paths: dict[str, Path], scope: str = "github:read") -> None:
 
 
 def _grant_lifecycle_policy_trust(paths: dict[str, Path]) -> None:
+    _grant_trust(paths, scope="plugin:lifecycle:read")
     _grant_trust(paths, scope="plugin:lifecycle:policy")
 
 
@@ -122,7 +123,7 @@ def _enable_v1_lifecycle_hooks(
         {
             "scope": "plugin:lifecycle:read",
             "risk": "read_only",
-            "required": False,
+            "required": True,
             "reason": "Allow v1 lifecycle hook observation during invocation.",
         }
     )
@@ -294,6 +295,7 @@ def test_v1_lifecycle_hooks_wrap_successful_invocation(tmp_path: Path) -> None:
         "plugin.invoked",
         "plugin.permission_used",
         "plugin.permission_used",
+        "plugin.permission_used",
         "plugin.completed",
         "plugin.hook.invoked",
         "plugin.hook.completed",
@@ -372,6 +374,7 @@ def test_fail_open_before_hook_records_failure_and_continues(tmp_path: Path) -> 
         ),
     )
     _grant_trust(paths)
+    _grant_trust(paths, scope="plugin:lifecycle:read")
 
     program, plugin_home = _build_program_for_invocation(paths)
     trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
@@ -400,6 +403,7 @@ def test_fail_open_before_hook_records_failure_and_continues(tmp_path: Path) -> 
         "plugin.hook.invoked",
         "plugin.hook.failed",
         "plugin.invoked",
+        "plugin.permission_used",
         "plugin.permission_used",
         "plugin.completed",
         "plugin.hook.invoked",
@@ -455,6 +459,7 @@ def test_fail_open_after_hook_records_failure_and_preserves_terminal_success(
         "plugin.hook.invoked",
         "plugin.hook.completed",
         "plugin.invoked",
+        "plugin.permission_used",
         "plugin.permission_used",
         "plugin.permission_used",
         "plugin.completed",

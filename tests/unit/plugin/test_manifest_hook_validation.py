@@ -236,3 +236,20 @@ class TestHookLifecyclePermission:
         assert err.json_pointer == "/permissions"
         assert "required=true" in err.expected
         assert HOOK_LIFECYCLE_POLICY_SCOPE in err.expected
+
+    def test_fail_open_lifecycle_permission_must_be_required_top_level(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _hook_manifest()
+        for permission in payload["permissions"]:
+            if permission["scope"] == HOOK_LIFECYCLE_READ_SCOPE:
+                permission["required"] = False
+        payload["hooks"] = [_valid_hook(failure_policy="fail_open")]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        err = exc_info.value
+        assert err.json_pointer == "/permissions"
+        assert "required=true" in err.expected
+        assert HOOK_LIFECYCLE_READ_SCOPE in err.expected

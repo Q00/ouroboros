@@ -450,13 +450,15 @@ def _validate_hook_lifecycle_permission(
     """Require v0.3 lifecycle hooks to declare a v1 lifecycle permission.
 
     ``plugin:lifecycle:read`` remains the permission boundary for
-    observability hooks. Hooks that can veto command execution through
-    ``fail_closed`` must declare the stronger ``plugin:lifecycle:policy``
-    scope and that scope must be a required top-level permission, because
-    the firewall trust gate authorizes required top-level permissions before
-    hook dispatch. Enforce this only for the tightened v0.3 hook contract so
-    supported v0.2 manifests keep their compatibility behavior until that
-    schema version is retired deliberately.
+    observability hooks, and it must be a required top-level permission
+    before the firewall can dispatch those hooks. Hooks that can veto
+    command execution through ``fail_closed`` must declare the stronger
+    ``plugin:lifecycle:policy`` scope and that scope must also be a
+    required top-level permission, because the firewall trust gate authorizes
+    required top-level permissions before hook dispatch. Enforce this only
+    for the tightened v0.3 hook contract so supported v0.2 manifests keep
+    their compatibility behavior until that schema version is retired
+    deliberately.
     """
 
     if schema_version != "0.3" or not is_v1_hook_kind(raw["name"]):
@@ -470,6 +472,17 @@ def _validate_hook_lifecycle_permission(
             json_pointer=f"/hooks/{hook_index}/permissions",
             expected=f"one of {sorted(HOOK_LIFECYCLE_SCOPES)!r} in hooks[].permissions",
             got=permissions,
+        )
+    if not declared_lifecycle_scopes.intersection(declared_required_permission_scopes):
+        raise PluginManifestError(
+            "v0.3 lifecycle hook permission must be required",
+            path=str(manifest_path),
+            json_pointer="/permissions",
+            expected=(
+                "top-level lifecycle permission with required=true for one of "
+                f"{sorted(declared_lifecycle_scopes)!r}"
+            ),
+            got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
         )
     if (
         raw["failure_policy"] != HookFailurePolicy.FAIL_CLOSED.value

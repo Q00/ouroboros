@@ -81,7 +81,7 @@ def _hook_manifest_payload(schema_version: str) -> dict:
             {
                 "scope": HOOK_LIFECYCLE_READ_SCOPE,
                 "risk": "read_only",
-                "required": False,
+                "required": True,
                 "reason": "Allow v1 lifecycle hook observation.",
             }
         )
@@ -297,6 +297,12 @@ def test_v03_hook_manifest_runs_and_emits_hook_events(tmp_path: Path) -> None:
         scope=HOOK_LIFECYCLE_POLICY_SCOPE,
         granted_by="user:test",
     )
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_READ_SCOPE,
+        granted_by="user:test",
+    )
     calls: list[list[str]] = []
 
     def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
@@ -326,6 +332,7 @@ def test_v03_hook_manifest_runs_and_emits_hook_events(tmp_path: Path) -> None:
         "plugin.invoked",
         "plugin.permission_used",
         "plugin.permission_used",
+        "plugin.permission_used",
         "plugin.completed",
         "plugin.hook.invoked",
         "plugin.hook.completed",
@@ -349,6 +356,12 @@ def test_v03_after_hook_runs_after_terminal_failed_event(tmp_path: Path) -> None
         plugin="github-pr-ops",
         version="0.1.0",
         scope=HOOK_LIFECYCLE_POLICY_SCOPE,
+        granted_by="user:test",
+    )
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_READ_SCOPE,
         granted_by="user:test",
     )
 
@@ -380,11 +393,12 @@ def test_v03_after_hook_runs_after_terminal_failed_event(tmp_path: Path) -> None
         "plugin.invoked",
         "plugin.permission_used",
         "plugin.permission_used",
+        "plugin.permission_used",
         "plugin.failed",
         "plugin.hook.invoked",
         "plugin.hook.completed",
     ]
-    assert events[5]["result"]["status"] == "failed"
+    assert events[6]["result"]["status"] == "failed"
 
 
 def test_trust_violation_only_emits_failed_no_invoked(tmp_path: Path) -> None:
