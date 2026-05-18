@@ -16,11 +16,11 @@ What this module owns:
   silently accepting them at manifest-validation time.
 * :class:`HookFailurePolicy` — the v1 failure policies (``fail_open``
   / ``fail_closed``).
-* :data:`HOOK_OUTCOME_AUDIT_EVENTS` — the v1 hook outcome event names
-  currently vendored in the manifest/audit schemas
-  (``plugin.hook.blocked`` / ``plugin.hook.failed``). These are not the
-  full future hook telemetry set; successful hook start/completion
-  events remain deferred until their schema/runtime slice lands.
+* :data:`HOOK_EVENT_TYPES` — the v1 hook event names currently
+  vendored in the manifest/audit schemas and emitted by the firewall
+  lifecycle wrapper (``plugin.hook.invoked``,
+  ``plugin.hook.completed``, ``plugin.hook.blocked``, and
+  ``plugin.hook.failed``).
 * :func:`is_v1_hook_kind` / :func:`is_v1_failure_policy` — helpers
   consumed by manifest validators in follow-up PRs. They live here so
   the contract is the single source of truth.
@@ -31,7 +31,7 @@ What this module does **not** do:
 * Change the manifest schema or the existing :class:`HookSpec`
   dataclass (validators that consume these helpers land in a follow-up
   PR).
-* Emit audit events. The event names are exported as constants only.
+* Add new audit event families beyond the v1 hook lifecycle wrapper.
 * Add or remove permissions. Hook-specific permission emission is a
   future extension per the RFC.
 
@@ -129,17 +129,10 @@ class HookFailurePolicy(StrEnum):
     FAIL_CLOSED = "fail_closed"
 
 
-#: V1 hook outcome event names currently vendored in the
-#: manifest/audit schemas. These are exported as constants so manifest
-#: validators and audit consumers reference the same string set the
-#: wrapper will emit for hook block/failure outcomes when dispatch
-#: lands in a follow-up PR.
-#:
-#: This is deliberately narrower than the full future hook telemetry
-#: vocabulary in ``docs/rfc/userlevel-plugins.md``. Successful
-#: ``plugin.hook.invoked`` / ``plugin.hook.completed`` emission remains
-#: deferred until the upstream audit schema and core runtime wiring both
-#: support those events.
+#: V1 hook event names currently vendored in the manifest/audit schemas.
+#: These are exported as constants so manifest validators, audit
+#: consumers, and the firewall lifecycle wrapper reference the same
+#: string set for hook start, completion, blocked, and failed outcomes.
 HOOK_INVOKED_EVENT: Final[str] = "plugin.hook.invoked"
 HOOK_COMPLETED_EVENT: Final[str] = "plugin.hook.completed"
 HOOK_BLOCKED_EVENT: Final[str] = "plugin.hook.blocked"

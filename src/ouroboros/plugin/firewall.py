@@ -318,7 +318,6 @@ def _event_envelope(
     return event
 
 
-
 def _matching_hooks(manifest: PluginManifest, hook_kind: HookKind) -> tuple[HookSpec, ...]:
     return tuple(hook for hook in manifest.hooks if hook.name == hook_kind.value)
 
@@ -535,6 +534,23 @@ def invoke_plugin(
         event_sink(event)
         emitted.append(event)
 
+    # Coerce stdout/stderr to bytes for hashing, regardless of whether
+    # the runner returned ``bytes`` (real subprocess.run without
+    # ``text=True``) or ``str`` (test fakes that pre-decode). This also
+    # handles partial buffers attached to ``subprocess.TimeoutExpired``.
+    # ``surrogateescape`` round-trips arbitrary byte sequences through
+    # str without raising, matching how Python decodes filesystem paths.
+    def _to_bytes(value: object) -> bytes:
+        if value is None:
+            return b""
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            return value.encode("utf-8", errors="surrogateescape")
+        # Defensive: any other type is treated as empty so we never
+        # crash on an unexpected runner return shape.
+        return b""
+
     def _run_lifecycle_hooks(hook_kind: HookKind) -> tuple[bool, str]:
         for hook in _matching_hooks(manifest, hook_kind):
             hook_provenance = {
@@ -567,14 +583,27 @@ def invoke_plugin(
 
             if not hook_error:
                 try:
-                    runner(
+                    hook_completed = runner(
                         hook_argv,
                         capture_output=True,
                         check=False,
                         timeout=_hook_timeout_seconds(hook),
                         cwd=str(plugin_home) if plugin_home is not None else None,
                     )
+                    hook_stdout = _to_bytes(hook_completed.stdout)
+                    hook_stderr = _to_bytes(hook_completed.stderr)
+                    hook_provenance["returncode"] = str(hook_completed.returncode)
+                    hook_provenance["stdout_sha256"] = hashlib.sha256(hook_stdout).hexdigest()
+                    hook_provenance["stderr_sha256"] = hashlib.sha256(hook_stderr).hexdigest()
+                    if hook_completed.returncode != 0:
+                        hook_error = (
+                            f"hook {hook.name} exited with code {hook_completed.returncode}"
+                        )
                 except subprocess.TimeoutExpired as exc:
+                    hook_stdout = _to_bytes(exc.stdout)
+                    hook_stderr = _to_bytes(exc.stderr)
+                    hook_provenance["stdout_sha256"] = hashlib.sha256(hook_stdout).hexdigest()
+                    hook_provenance["stderr_sha256"] = hashlib.sha256(hook_stderr).hexdigest()
                     hook_error = (
                         f"hook {hook.name} timed out after {_hook_timeout_seconds(hook):g}s: "
                         f"{type(exc).__name__}"
@@ -960,23 +989,6 @@ def invoke_plugin(
     if plugin_home is not None:
         run_kwargs["cwd"] = str(plugin_home)
 
-    # Coerce stdout/stderr to bytes for hashing, regardless of whether
-    # the runner returned ``bytes`` (real subprocess.run without
-    # ``text=True``) or ``str`` (test fakes that pre-decode). This also
-    # handles partial buffers attached to ``subprocess.TimeoutExpired``.
-    # ``surrogateescape`` round-trips arbitrary byte sequences through
-    # str without raising, matching how Python decodes filesystem paths.
-    def _to_bytes(value: object) -> bytes:
-        if value is None:
-            return b""
-        if isinstance(value, bytes):
-            return value
-        if isinstance(value, str):
-            return value.encode("utf-8", errors="surrogateescape")
-        # Defensive: any other type is treated as empty so we never
-        # crash on an unexpected runner return shape.
-        return b""
-
     try:
         completed = runner(cmd_argv, **run_kwargs)
     except FileNotFoundError as exc:
@@ -1080,7 +1092,41 @@ def invoke_plugin(
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
 
-    # 6. Terminal event: completed or failed.
+    after_ok, after_message = _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
+    terminal_provenance = {
+        "correlation_id": correlation_id,
+        "stdout_sha256": stdout_hash,
+        "stderr_sha256": stderr_hash,
+    }
+
+    # 6. Terminal event: completed or failed. after_invocation hooks run
+    # before this event so a fail_closed hook can still control the final
+    # outcome instead of being hidden behind an already-emitted success.
+    if not after_ok:
+        message = f"after_invocation hook blocked invocation result: {after_message}"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "blocked", "message": message},
+                provenance=terminal_provenance | {"reason": "hook_failed"},
+            )
+        )
+        return InvocationResult(
+            status="blocked",
+            exit_code=None,
+            message=message,
+            stdout_sha256=stdout_hash,
+            stderr_sha256=stderr_hash,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
+            events=tuple(emitted),
+        )
+
     if completed.returncode == 0:
         _emit(
             _event_envelope(
@@ -1091,14 +1137,9 @@ def invoke_plugin(
                 argv=argv,
                 trust_state=trust_state,
                 result={"status": "success"},
-                provenance={
-                    "correlation_id": correlation_id,
-                    "stdout_sha256": stdout_hash,
-                    "stderr_sha256": stderr_hash,
-                },
+                provenance=terminal_provenance,
             )
         )
-        _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
         return InvocationResult(
             status="success",
             exit_code=0,
@@ -1108,35 +1149,30 @@ def invoke_plugin(
             stderr_bytes=stderr_bytes,
             events=tuple(emitted),
         )
-    else:
-        message = f"entrypoint exited with code {completed.returncode}"
-        _emit(
-            _event_envelope(
-                event_type="plugin.failed",
-                manifest=manifest,
-                namespace=namespace,
-                command_name=command_name,
-                argv=argv,
-                trust_state=trust_state,
-                result={"status": "failed", "message": message},
-                provenance={
-                    "correlation_id": correlation_id,
-                    "stdout_sha256": stdout_hash,
-                    "stderr_sha256": stderr_hash,
-                },
-            )
+
+    message = f"entrypoint exited with code {completed.returncode}"
+    _emit(
+        _event_envelope(
+            event_type="plugin.failed",
+            manifest=manifest,
+            namespace=namespace,
+            command_name=command_name,
+            argv=argv,
+            trust_state=trust_state,
+            result={"status": "failed", "message": message},
+            provenance=terminal_provenance,
         )
-        _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
-        return InvocationResult(
-            status="failed",
-            exit_code=completed.returncode,
-            message=message,
-            stdout_sha256=stdout_hash,
-            stderr_sha256=stderr_hash,
-            stdout_bytes=stdout_bytes,
-            stderr_bytes=stderr_bytes,
-            events=tuple(emitted),
-        )
+    )
+    return InvocationResult(
+        status="failed",
+        exit_code=completed.returncode,
+        message=message,
+        stdout_sha256=stdout_hash,
+        stderr_sha256=stderr_hash,
+        stdout_bytes=stdout_bytes,
+        stderr_bytes=stderr_bytes,
+        events=tuple(emitted),
+    )
 
 
 __all__ = [
