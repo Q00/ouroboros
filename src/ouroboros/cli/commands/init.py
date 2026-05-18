@@ -305,6 +305,13 @@ async def _run_interview_loop(
             print_error("Response cannot be empty. Please try again.")
             continue
 
+        # Record response before logging a terminal HITL answer: only accepted
+        # interview transitions should become terminal HITL events.
+        record_result = await engine.record_response(state, response, question)
+        if record_result.is_err:
+            print_error(f"Failed to record response: {record_result.error.message}")
+            continue
+
         if not await _append_hitl_events(
             event_store,
             [
@@ -315,12 +322,6 @@ async def _run_interview_loop(
             ],
         ):
             event_store = None
-
-        # Record response
-        record_result = await engine.record_response(state, response, question)
-        if record_result.is_err:
-            print_error(f"Failed to record response: {record_result.error.message}")
-            continue
 
         state = record_result.value
 

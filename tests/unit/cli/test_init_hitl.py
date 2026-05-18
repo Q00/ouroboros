@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -167,6 +168,62 @@ async def test_empty_interview_response_retries_same_hitl_request_without_cancel
     assert {event.data["request_id"] for event in events} == {"hitl_interview_interview_123_1"}
     assert all(event.type != "hitl.cancelled" for event in events)
     assert engine.recorded == [(1, "Useful answer", "What should it do?")]
+    assert final_state.is_complete
+
+
+@pytest.mark.asyncio
+async def test_rejected_interview_response_retries_without_answered_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def ask_next_question(self, state: InterviewState):
+            return Result.ok("What should it do?")
+
+        async def record_response(
+            self,
+            state: InterviewState,
+            user_response: str,
+            question: str,
+        ):
+            self.attempts += 1
+            if self.attempts == 1:
+                return Result.err(SimpleNamespace(message="invalid response"))
+            state.rounds.append(
+                InterviewRound(
+                    round_number=state.current_round_number,
+                    question=question,
+                    user_response=user_response,
+                )
+            )
+            state.status = InterviewStatus.COMPLETED
+            return Result.ok(state)
+
+        async def save_state(self, state: InterviewState):
+            return Result.ok(None)
+
+    responses = iter(["too short", "Useful answer"])
+
+    async def fake_prompt(_prompt: str) -> str:
+        return next(responses)
+
+    monkeypatch.setattr("ouroboros.cli.commands.init.multiline_prompt_async", fake_prompt)
+
+    state = InterviewState(interview_id="interview_123")
+    store = FakeEventStore()
+    engine = FakeEngine()
+
+    final_state = await _run_interview_loop(engine, state, event_store=store)
+
+    events = [event for batch in store.batches for event in batch]
+    assert [event.type for event in events] == [
+        "hitl.requested",
+        "hitl.requested",
+        "hitl.answered",
+    ]
+    assert engine.attempts == 2
     assert final_state.is_complete
 
 
