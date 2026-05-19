@@ -50,13 +50,7 @@ from ouroboros.orchestrator.workflow_lifecycle import (
 from ouroboros.plugin.firewall import invoke_plugin
 from ouroboros.plugin.manifest import load_manifest
 from ouroboros.plugin.userlevel_registry import UserLevelProgramRegistry
-from tests.conformance.workflow_ir.fixtures import (
-    AGENT_EVIDENCE_SCHEMA,
-    AGENT_INPUT_SCHEMA,
-    FIXTURE_EPOCH,
-    harness_terminal,
-    terminal_edge,
-)
+from tests.conformance.workflow_ir.fixtures import FIXTURE_EPOCH, harness_terminal, terminal_edge
 
 PLUGIN_INPUT_SCHEMA = "schema://conformance.plugin.input.v1"
 PLUGIN_EVIDENCE_SCHEMA = "schema://conformance.plugin.evidence.v1"
@@ -277,10 +271,3 @@ def test_blocked_event_carries_plugin_command_identity(blocked_plugin_program) -
     # The blocked message MUST name the missing scope so a CLI surface
     # can render an unambiguous remediation hint.
     assert "conformance:required" in event["result"]["message"]
-
-
-# Quiet pyflakes "unused import" warnings for the shared schema constants:
-# they are documented as the canonical refs the plugin node fixture builds on
-# and are imported here so they remain referenced even if the helper module
-# changes.
-assert AGENT_INPUT_SCHEMA and AGENT_EVIDENCE_SCHEMA

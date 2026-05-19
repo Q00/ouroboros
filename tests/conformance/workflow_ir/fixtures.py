@@ -340,7 +340,14 @@ def positive_legal_transitions() -> LifecycleFixture:
 
 
 def positive_terminal_emitted_once() -> LifecycleFixture:
-    """Terminal-state-emitted-once: exactly one terminal run event per run."""
+    """Terminal-state-emitted-once: exactly one terminal run event per run.
+
+    This fixture intentionally includes only the minimal executable lifecycle
+    rows required to prove terminal cardinality. The fuller
+    ``positive_legal_transitions`` fixture covers the optional
+    ``NODE_SCHEDULED`` state; duplicating scheduling here would make this
+    fixture less focused without adding a new #956 rule assertion.
+    """
     spec = linear_valid_spec()
     events = (
         _evt(spec, WorkflowLifecycleEventType.RUN_CREATED, 0),
