@@ -98,7 +98,7 @@ def test_add_anti_pattern_install_string_rejected(runner: CliRunner, tmp_path: P
 
 
 def test_add_local_path_with_plugin_flag(runner: CliRunner, tmp_path: Path) -> None:
-    """`add <local-repo>` with `--plugin <name>` installs without prompts."""
+    """`add <local-repo>` with `--plugin <name>` installs deterministically."""
     repo_root = tmp_path / "repo"
     _make_repo_layout(repo_root, [REFERENCE_MANIFEST])
     paths = _common_paths(tmp_path)
@@ -125,6 +125,125 @@ def test_add_local_path_with_plugin_flag(runner: CliRunner, tmp_path: Path) -> N
     assert entry.repository is None
     # Plugin home was copied.
     assert (paths["plugin_home_root"] / "github-pr-ops" / "ouroboros.plugin.json").is_file()
+
+
+def test_add_prompts_to_grant_missing_required_permissions(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    manifest = {
+        **REFERENCE_MANIFEST,
+        "permissions": [
+            {
+                "scope": "github:read",
+                "risk": "read_only",
+                "required": True,
+                "reason": "Inspect pull request metadata",
+            },
+        ],
+    }
+    repo_root = tmp_path / "repo"
+    _make_repo_layout(repo_root, [manifest])
+    paths = _common_paths(tmp_path)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+        input="y\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Required permissions:" in result.output
+    assert "github:read" in result.output
+    assert "Inspect pull request metadata" in result.output
+    assert "Grant required permissions now?" in result.output
+
+    record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert record is not None
+    assert record.has_scope("github:read")
+
+
+def test_add_decline_required_permission_prompt_leaves_plugin_installed_untrusted(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    repo_root = tmp_path / "repo"
+    _make_repo_layout(repo_root, [REFERENCE_MANIFEST])
+    paths = _common_paths(tmp_path)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Installed" in result.output
+    assert "run `ooo plugin trust github-pr-ops --scope <scope>` later" in result.output
+    assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
+
+
+def test_add_does_not_prompt_grant_for_destructive_required_permissions(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    manifest = {
+        **REFERENCE_MANIFEST,
+        "permissions": [
+            {
+                "scope": "github:pull_request:write",
+                "risk": "destructive",
+                "required": True,
+                "reason": "Modify pull requests",
+            },
+        ],
+    }
+    repo_root = tmp_path / "repo"
+    _make_repo_layout(repo_root, [manifest])
+    paths = _common_paths(tmp_path)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+        input="y\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Required permissions:" in result.output
+    assert "github:pull_request:write" in result.output
+    assert "destructive scopes require an explicit trust command" in result.output
+    assert "Grant required permissions now?" not in result.output
+    assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
 
 
 def test_add_duplicate_manifest_names_in_catalog_refused(runner: CliRunner, tmp_path: Path) -> None:
@@ -213,6 +332,36 @@ def test_install_local_directory(runner: CliRunner, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "github-pr-ops" in result.output
     assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+
+
+def test_install_local_directory_does_not_prompt_or_grant_required_permissions(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`install` is the non-interactive primitive; trust stays explicit."""
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    paths = _common_paths(tmp_path)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+        input="y\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Required permissions:" not in result.output
+    assert "Grant required permissions now?" not in result.output
+    assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
 
 
 def test_add_persists_absolute_plugin_home_for_relative_root(

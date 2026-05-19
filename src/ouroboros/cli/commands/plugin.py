@@ -42,6 +42,7 @@ from ouroboros.plugin.digest import (
 from ouroboros.plugin.ledger_adapter import wrap_plugin_event
 from ouroboros.plugin.lockfile import DEFAULT_LOCKFILE_PATH, LockEntry, Lockfile
 from ouroboros.plugin.manifest import (
+    Permission,
     PluginManifest,
     PluginManifestError,
     load_manifest,
@@ -1609,6 +1610,107 @@ def _install_one(
     return entry
 
 
+def _missing_required_permissions(
+    *,
+    manifest: PluginManifest,
+    entry: LockEntry,
+    trust: TrustStore,
+) -> list[Permission]:
+    required = [p for p in manifest.permissions if p.required]
+    if not required:
+        return []
+
+    record = trust.read(manifest.name)
+    granted = (
+        {g.scope for g in record.granted_scopes}
+        if record is not None
+        and record.matches_subject(
+            version=manifest.version,
+            source_type=entry.source_type,
+            source_identity=entry.source_identity,
+            artifact_digest=entry.artifact_digest,
+        )
+        else set()
+    )
+    return [p for p in required if p.scope not in granted]
+
+
+def _print_required_permissions(permissions: list[Permission]) -> None:
+    console.print("")
+    console.print("Required permissions:")
+    width = max(len(p.scope) for p in permissions)
+    for permission in permissions:
+        reason = permission.reason.strip() if permission.reason else permission.risk
+        console.print(f"  {permission.scope:<{width}}  {reason}")
+
+
+def _maybe_prompt_grant_required_permissions(
+    *,
+    manifest: PluginManifest,
+    entry: LockEntry,
+    trust: TrustStore,
+) -> None:
+    try:
+        missing = _missing_required_permissions(manifest=manifest, entry=entry, trust=trust)
+    except (ValueError, OSError) as exc:
+        console.print(
+            f"  [yellow]warning[/]: trust file for {manifest.name!r} is unreadable "
+            f"({exc}); required-permission prompt skipped. Re-grant scopes via "
+            f"`ooo plugin trust {manifest.name} --scope <...>` after fixing the file. "
+            f"The firewall blocks invocation until trust is re-granted."
+        )
+        return
+    if not missing:
+        return
+
+    _print_required_permissions(missing)
+    destructive = [p.scope for p in missing if p.risk == "destructive"]
+    if destructive:
+        console.print(
+            "  destructive scopes require an explicit trust command: "
+            f"`ooo plugin trust {manifest.name} --scope <scope>`",
+            markup=False,
+            highlight=False,
+        )
+        return
+
+    try:
+        approved = typer.confirm("Grant required permissions now?", default=False, abort=False)
+    except (EOFError, typer.Abort):
+        approved = False
+    if not approved:
+        console.print(
+            f"  run `ooo plugin trust {manifest.name} --scope <scope>` later",
+            markup=False,
+            highlight=False,
+        )
+        return
+
+    scopes = [p.scope for p in missing]
+    try:
+        record = trust.grant_many_and_clear_disable(
+            plugin=manifest.name,
+            version=manifest.version,
+            scopes=scopes,
+            granted_by="user:cli",
+            source_type=entry.source_type,
+            source_identity=entry.source_identity,
+            artifact_digest=entry.artifact_digest,
+        )
+    except (ValueError, OSError) as exc:
+        print_error(
+            f"could not write trust grant for {manifest.name!r}: {exc}. "
+            f"Inspect the trust file at {trust.root / manifest.name}, then "
+            f"re-run `ooo plugin trust {manifest.name} --scope <...>`."
+        )
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"  granted required scopes: {', '.join(scopes)} "
+        f"({len(record.granted_scopes)} total scope(s))"
+    )
+
+
 @app.command("add")
 def add_command(
     target: Annotated[
@@ -1815,7 +1917,7 @@ def add_command(
             # disk, and no lockfile entry to reflect either.
             artifact_digest = canonical_tree_hash(source_dir)
             with _atomic_install_with_rollback(source_dir, plugin_home):
-                _install_one(
+                installed_entry = _install_one(
                     manifest=manifest,
                     plugin_home=plugin_home,
                     lock=lock,
@@ -1866,6 +1968,11 @@ def add_command(
             new_artifact_digest=artifact_digest,
             trust=trust,
         )
+        _maybe_prompt_grant_required_permissions(
+            manifest=manifest,
+            entry=installed_entry,
+            trust=trust,
+        )
         # An install at any digest also clears the disable record for
         # this subject (per the RFC: "remove ALSO deletes any disable
         # record" and re-trust is the re-enable path). Keep the disable
@@ -1875,12 +1982,6 @@ def add_command(
         # `trust` and `remove` clear it (RFC: "Re-enabling is performed
         # by re-running ooo plugin trust").
         installed.append(f"{manifest.name} {manifest.version}")
-        required = [p.scope for p in manifest.permissions if p.required]
-        if required:
-            console.print(
-                f"  required scopes (run `ooo plugin trust {manifest.name} "
-                f"--scope <scope>`): {', '.join(required)}"
-            )
 
     print_success(f"Installed: {'; '.join(installed)}")
 
