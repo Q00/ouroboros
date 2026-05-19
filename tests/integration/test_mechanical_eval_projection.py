@@ -228,6 +228,7 @@ class TestMechanicalEvaluationFixture:
     ) -> None:
         expected = fixture["expected"]["steps"]
         assert len(result.steps) == len(expected)
+        artifact_ids = {artifact.artifact_id for artifact in result.artifacts}
         kind_lookup = {
             "tool_call": StepKind.TOOL_CALL,
             "shell_command": StepKind.SHELL_COMMAND,
@@ -247,7 +248,7 @@ class TestMechanicalEvaluationFixture:
             assert step.legacy_inferred is False
             # Steps with attached artifacts surface them via artifact_ids.
             for artifact_id in step.artifact_ids:
-                assert artifact_id in {artifact.artifact_id for artifact in result.artifacts}
+                assert artifact_id in artifact_ids
 
     def test_artifact_records_attach_to_steps(
         self,
@@ -283,7 +284,7 @@ class TestMechanicalEvaluationFixture:
                 "this fixture depends on the artifact/verdict slot landing "
                 "(see #946 Wave 1 S1)."
             )
-        assert len(result.verdicts) == 1
+        assert len(result.verdicts) == fixture["expected"]["verdict_count"]
         verdict = result.verdicts[0]
         assert isinstance(verdict, VerdictRecord)
         assert verdict.run_id == result.run.run_id

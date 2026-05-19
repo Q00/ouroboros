@@ -80,6 +80,7 @@ expected:
       name: "Bash"
       ok: true
   artifact_count: 1
+  verdict_count: 1
   verdict:
     scope: "run"
     outcome: "pass"
