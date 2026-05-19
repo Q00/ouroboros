@@ -1134,7 +1134,7 @@ def invoke_plugin(
                 },
             )
         )
-        _run_lifecycle_hooks(HookKind.ON_ERROR)
+        _run_failed_invocation_observability_hooks()
         return InvocationResult(
             status="failed",
             exit_code=126,
