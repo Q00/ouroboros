@@ -608,16 +608,21 @@ least one selector: a positional `RUN_ID` (treated as the execution anchor),
 what the MCP query returns for the same anchor.
 
 ```bash
-ouroboros status run [RUN_ID] [--session-id TEXT | --execution-id TEXT] [OPTIONS]
+ouroboros status run [RUN_ID] [--session-id TEXT] [--execution-id TEXT] [OPTIONS]
 ```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `RUN_ID` | No | Positional execution anchor; maps to `execution_id`. Cannot be combined with `--session-id` or a conflicting `--execution-id` |
 
 **Options:**
 
 | Option | Description |
 |--------|-------------|
-| `RUN_ID` | Optional positional execution anchor; equivalent to `--execution-id`. Cannot be combined with `--session-id` or a conflicting `--execution-id` |
-| `--session-id TEXT` | Orchestrator session ID to project; required unless `RUN_ID` or `--execution-id` is provided |
-| `--execution-id TEXT` | Execution aggregate ID to project; required unless `RUN_ID` or `--session-id` is provided |
+| `--session-id TEXT` | Orchestrator session ID to project; required unless `RUN_ID` or `--execution-id` is provided. May be combined with `--execution-id` when the MCP projection handler needs session narrowing |
+| `--execution-id TEXT` | Execution aggregate ID to project; required unless `RUN_ID` or `--session-id` is provided. May be combined with `--session-id` for session narrowing |
 | `--seed-id TEXT` | Optional seed ID override for projection labels |
 | `--limit INTEGER` | Optional event count safety cap |
 | `--json` | Emit machine-readable projection JSON |
