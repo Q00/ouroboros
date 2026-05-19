@@ -281,6 +281,54 @@ class TestOnErrorDispatch:
         assert terminal_index < min(after_indices)
         assert max(after_indices) < min(on_error_indices)
 
+    def test_timeout_dispatches_after_invocation_before_on_error(self, tmp_path: Path) -> None:
+        program = _register(tmp_path, _payload_with_hooks("after_invocation", "on_error"))
+        trust = _grant_full_trust(tmp_path)
+
+        def runner(argv, *args, **kwargs):  # noqa: ARG001
+            if argv[:2] == ["python", "-m"] and argv[2].startswith("hook_"):
+                return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+            raise subprocess.TimeoutExpired(
+                cmd=argv, timeout=1, output=b"partial stdout", stderr=b"partial stderr"
+            )
+
+        events: list[dict] = []
+        result = invoke_plugin(
+            program,
+            command_name="review",
+            argv=["https://example.com/pr/1"],
+            trust_record=trust,
+            event_sink=events.append,
+            correlation_id="corr-on-error-timeout-order",
+            subprocess_runner=runner,
+        )
+
+        assert result.status == "failed"
+        assert result.exit_code == 124
+        assert result.stdout_bytes == b"partial stdout"
+        assert result.stderr_bytes == b"partial stderr"
+
+        terminal_index = next(
+            index for index, event in enumerate(events) if event["event_type"] == "plugin.failed"
+        )
+        after_indices = [
+            index
+            for index, event in enumerate(events)
+            if event["event_type"].startswith("plugin.hook.")
+            and event["provenance"]["hook_name"] == "after_invocation"
+        ]
+        on_error_indices = [
+            index
+            for index, event in enumerate(events)
+            if event["event_type"].startswith("plugin.hook.")
+            and event["provenance"]["hook_name"] == "on_error"
+        ]
+
+        assert after_indices
+        assert on_error_indices
+        assert terminal_index < min(after_indices)
+        assert max(after_indices) < min(on_error_indices)
+
     def test_no_on_error_hook_declared_does_not_emit_hook_events(self, tmp_path: Path) -> None:
         # Conformance baseline: no on_error/on_cancel hooks declared →
         # no plugin.hook.* events for the failure path.

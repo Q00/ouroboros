@@ -661,6 +661,19 @@ def invoke_plugin(
             )
         return True, ""
 
+    def _run_failed_invocation_observability_hooks() -> None:
+        """Dispatch fail-open observation hooks after a terminal failure.
+
+        Once the plugin command has reached the launched-command phase,
+        every controlled ``plugin.failed`` outcome should expose the same
+        terminal observation surface: ``after_invocation`` first, then
+        ``on_error``. The hooks are fail-open here, so their failures must
+        never replace the original launch/runtime failure returned below.
+        """
+
+        _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
+        _run_lifecycle_hooks(HookKind.ON_ERROR)
+
     # 0. Disable check — fires before everything, including before the
     # trust check, so a plugin with no `required: true` permissions
     # cannot bypass `disable` by having an empty trust subject.
@@ -984,7 +997,7 @@ def invoke_plugin(
                 },
             )
         )
-        _run_lifecycle_hooks(HookKind.ON_ERROR)
+        _run_failed_invocation_observability_hooks()
         return InvocationResult(
             status="failed",
             exit_code=126,
@@ -1005,7 +1018,7 @@ def invoke_plugin(
                 provenance={"correlation_id": correlation_id},
             )
         )
-        _run_lifecycle_hooks(HookKind.ON_ERROR)
+        _run_failed_invocation_observability_hooks()
         return InvocationResult(
             status="failed",
             exit_code=126,
@@ -1046,7 +1059,7 @@ def invoke_plugin(
                 provenance={"correlation_id": correlation_id},
             )
         )
-        _run_lifecycle_hooks(HookKind.ON_ERROR)
+        _run_failed_invocation_observability_hooks()
         return InvocationResult(
             status="failed",
             exit_code=127,
@@ -1086,7 +1099,7 @@ def invoke_plugin(
                 },
             )
         )
-        _run_lifecycle_hooks(HookKind.ON_ERROR)
+        _run_failed_invocation_observability_hooks()
         return InvocationResult(
             status="failed",
             exit_code=124,
