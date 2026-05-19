@@ -34,7 +34,7 @@ the ✅ markers (or the linked PRs) before scheduling new work against a slot.
 | --- | --- | --- |
 | Artifact/Verdict projection | ✅ shipped via #1061. Populate existing `ArtifactRecord` and `VerdictRecord` outputs from persisted evidence/evaluation-like events. | Read-model only; no new evidence schema or verifier policy. |
 | Status JSON CLI | ✅ shipped via #1064. Expose the existing projection query through a thin `ouroboros status run ... --json` surface. | Reuse projection semantics; no cache or writes. |
-| Mechanical-evaluation fixture | open PR #1132. Prove a small execution/evaluation history projects to run, step, artifact, verdict, and source event IDs. | Offline/local fixture only. Landed by the #946 mechanical fixture follow-up. |
+| Mechanical-evaluation fixture | Open in PR #1132 until merged. Prove a small execution/evaluation history projects to run, step, artifact, verdict, and source event IDs. | Offline/local read-model fixture only; EventStore remains the source of truth and this slot does not create a new AgentOS surface. |
 | StepSnapshot/session/runtime views | Add bounded derived views for post-step state, session health, runtime handle, and resume-token metadata. | Later views; do not block artifact/verdict or CLI JSON work. |
 | Context/checkpoint anchors | Surface context pack and checkpoint references as projection metadata. | Read-only anchors only; no resume authority, raw context payloads, checkpoint writes, or second context state model. |
 | Optional exporter sinks | Feed OTEL or other exporters from projections. | Optional/lazy, disabled by default, never source of truth. |
