@@ -432,6 +432,90 @@ def _length_guard_meta_fields() -> dict[str, Any]:
     }
 
 
+def _interview_reasoning_meta(
+    *,
+    state: InterviewState | None,
+    session_id: str | None,
+    phase: str,
+    next_action: str,
+    score: AmbiguityScore | None = None,
+    question: str | None = None,
+    recoverable: bool = False,
+) -> dict[str, Any]:
+    """Build compact interview reasoning metadata for client-side UI surfaces."""
+    answered_rounds = _count_answered_rounds(state) if state is not None else None
+    total_rounds = len(state.rounds) if state is not None else None
+    pending_question = (
+        bool(state.rounds and state.rounds[-1].user_response is None)
+        if state is not None
+        else False
+    )
+    floor_failures: list[str] = []
+    completion_qualified: bool | None = None
+    if score is not None:
+        floor_failures = get_completion_floor_failures(
+            score,
+            is_brownfield=state.is_brownfield if state is not None else False,
+        )
+        completion_qualified = (
+            qualifies_for_seed_completion(
+                score,
+                is_brownfield=state.is_brownfield if state is not None else False,
+            )
+            and not floor_failures
+        )
+
+    lines = [f"phase: {phase}"]
+    if session_id:
+        lines.append(f"session: {session_id}")
+    if answered_rounds is not None and total_rounds is not None:
+        lines.append(f"rounds: {answered_rounds} answered / {total_rounds} total")
+    if state is not None:
+        lines.append(f"brownfield: {str(state.is_brownfield).lower()}")
+        if pending_question:
+            lines.append("pending: waiting for user answer")
+        if state.completion_candidate_streak:
+            lines.append(
+                f"stability: {state.completion_candidate_streak}/{AUTO_COMPLETE_STREAK_REQUIRED}"
+            )
+    if score is not None:
+        lines.append(f"ambiguity: {score.overall_score:.2f}")
+        milestone = _milestone_for_score(score)
+        if milestone:
+            lines.append(f"milestone: {milestone}")
+        if floor_failures:
+            lines.append(f"completion blocked: {'; '.join(floor_failures)}")
+    if question:
+        lines.append(f"question_chars: {len(question)}")
+    if recoverable:
+        lines.append("recoverable: true")
+    lines.append(f"next: {next_action}")
+
+    return {
+        "internal_reasoning": lines,
+        "interview_reasoning": {
+            "phase": phase,
+            "next_action": next_action,
+            "session_id": session_id,
+            "answered_rounds": answered_rounds,
+            "total_rounds": total_rounds,
+            "pending_question": pending_question,
+            "is_brownfield": state.is_brownfield if state is not None else None,
+            "ambiguity_score": score.overall_score if score is not None else None,
+            "milestone": _milestone_for_score(score),
+            "seed_ready": (score.is_ready_for_seed if score is not None else None),
+            "completion_qualified": completion_qualified,
+            "completion_floor_failures": floor_failures,
+            "completion_candidate_streak": (
+                state.completion_candidate_streak if state is not None else None
+            ),
+            "streak_required": AUTO_COMPLETE_STREAK_REQUIRED,
+            "recoverable": recoverable,
+            "question_chars": len(question) if question else None,
+        },
+    }
+
+
 def _ambiguity_warning_for_failed_question(
     score: AmbiguityScore | None,
     *,
@@ -1200,6 +1284,7 @@ class InterviewHandler:
         session_id: str,
         score: AmbiguityScore | None,
         *,
+        state: InterviewState | None = None,
         is_brownfield: bool,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Build an MCP response refusing premature interview completion."""
@@ -1224,6 +1309,13 @@ class InterviewHandler:
                     "ambiguity_score": (score.overall_score if score is not None else None),
                     "milestone": _milestone_for_score(score),
                     "seed_ready": False,
+                    **_interview_reasoning_meta(
+                        state=state,
+                        session_id=session_id,
+                        phase="completion_gate",
+                        next_action="ask another clarification question",
+                        score=score,
+                    ),
                 },
             )
         )
@@ -1286,6 +1378,13 @@ class InterviewHandler:
                     "milestone": _milestone_for_score(score),
                     "seed_ready": score.is_ready_for_seed if score is not None else None,
                     "required_client_gates": REQUIRED_CLIENT_GATES,
+                    **_interview_reasoning_meta(
+                        state=state,
+                        session_id=session_id,
+                        phase="complete",
+                        next_action="generate seed after client gates",
+                        score=score,
+                    ),
                 },
             )
         )
@@ -1451,6 +1550,7 @@ class InterviewHandler:
 
             transcript = ""
             real_session_id = session_id
+            plugin_state: InterviewState | None = None
 
             if action == "start" and initial_context:
                 cwd = arguments.get("cwd") or os.getcwd()
@@ -1480,6 +1580,7 @@ class InterviewHandler:
                     interview_id=interview_id,
                     initial_context=resolved_context.value,
                 )
+                plugin_state = state
                 # Detect brownfield
                 if cwd:
                     from ouroboros.bigbang.explore import detect_brownfield
@@ -1503,6 +1604,7 @@ class InterviewHandler:
                         MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
                     )
                 state = load_result.value
+                plugin_state = state
                 # Record answer into persisted state.
                 # In plugin mode each dispatch = new child session. The child
                 # generates questions but can't write back to server-side state.
@@ -1567,6 +1669,12 @@ class InterviewHandler:
                     "action": action,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",
+                    **_interview_reasoning_meta(
+                        state=plugin_state,
+                        session_id=real_session_id,
+                        phase=f"plugin_{action}",
+                        next_action="wait for OpenCode child interview response",
+                    ),
                     "next_turn_hint": (
                         "When the user answers, pass the child session's "
                         "question text as 'last_question' alongside 'answer' "
@@ -1738,7 +1846,18 @@ class InterviewHandler:
                                     ),
                                 ),
                                 is_error=True,
-                                meta={"session_id": state.interview_id, "recoverable": True},
+                                meta={
+                                    "session_id": state.interview_id,
+                                    "recoverable": True,
+                                    **_interview_reasoning_meta(
+                                        state=state,
+                                        session_id=state.interview_id,
+                                        phase="start_question_failed",
+                                        next_action="resume interview and retry question generation",
+                                        score=live_score,
+                                        recoverable=True,
+                                    ),
+                                },
                             )
                         )
                     # Generic question-generation failure (timeout etc.):
@@ -1762,7 +1881,18 @@ class InterviewHandler:
                                 ),
                             ),
                             is_error=True,
-                            meta={"session_id": state.interview_id, "recoverable": True},
+                            meta={
+                                "session_id": state.interview_id,
+                                "recoverable": True,
+                                **_interview_reasoning_meta(
+                                    state=state,
+                                    session_id=state.interview_id,
+                                    phase="start_question_failed",
+                                    next_action="resume interview and retry question generation",
+                                    score=live_score,
+                                    recoverable=True,
+                                ),
+                            },
                         )
                     )
 
@@ -1813,6 +1943,14 @@ class InterviewHandler:
                     "milestone": _milestone_for_score(live_score),
                     "seed_ready": (
                         live_score.is_ready_for_seed if live_score is not None else None
+                    ),
+                    **_interview_reasoning_meta(
+                        state=state,
+                        session_id=state.interview_id,
+                        phase="start",
+                        next_action="ask user to answer pending question",
+                        score=live_score,
+                        question=question,
                     ),
                 }
                 if is_length_guard:
@@ -1891,6 +2029,14 @@ class InterviewHandler:
                         "seed_ready": (
                             state.ambiguity_score is not None
                             and state.ambiguity_score <= AMBIGUITY_THRESHOLD
+                        ),
+                        **_interview_reasoning_meta(
+                            state=state,
+                            session_id=session_id,
+                            phase="resume_pending",
+                            next_action="ask user to answer pending question",
+                            score=_load_state_ambiguity_score(state),
+                            question=pending_question,
                         ),
                     }
                     if resume_is_length_guard:
@@ -2065,6 +2211,13 @@ class InterviewHandler:
                                             state.completion_candidate_streak
                                         ),
                                         "streak_required": AUTO_COMPLETE_STREAK_REQUIRED,
+                                        **_interview_reasoning_meta(
+                                            state=state,
+                                            session_id=session_id,
+                                            phase="completion_stability_check",
+                                            next_action="confirm done again or answer pending question",
+                                            score=exit_score,
+                                        ),
                                     },
                                 )
                             )
@@ -2098,6 +2251,7 @@ class InterviewHandler:
                         return self._ambiguity_gate_response(
                             session_id,
                             exit_score,
+                            state=state,
                             is_brownfield=state.is_brownfield,
                         )
 
@@ -2268,7 +2422,18 @@ class InterviewHandler:
                                     ),
                                 ),
                                 is_error=True,
-                                meta={"session_id": session_id, "recoverable": True},
+                                meta={
+                                    "session_id": session_id,
+                                    "recoverable": True,
+                                    **_interview_reasoning_meta(
+                                        state=state,
+                                        session_id=session_id,
+                                        phase="next_question_failed",
+                                        next_action="resume interview and retry question generation",
+                                        score=live_score,
+                                        recoverable=True,
+                                    ),
+                                },
                             )
                         )
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
@@ -2326,6 +2491,14 @@ class InterviewHandler:
                     "milestone": _milestone_for_score(live_score),
                     "seed_ready": (
                         live_score.is_ready_for_seed if live_score is not None else None
+                    ),
+                    **_interview_reasoning_meta(
+                        state=state,
+                        session_id=session_id,
+                        phase="answer",
+                        next_action="ask user to answer pending question",
+                        score=live_score,
+                        question=question,
                     ),
                 }
                 if answer_is_length_guard:

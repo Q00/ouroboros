@@ -123,6 +123,15 @@ def _find_event(events: list[BaseEvent], *, event_type: str) -> BaseEvent | None
     return None
 
 
+def _assert_reasoning_meta(meta: dict[str, Any], *, phase: str, session_id: str) -> None:
+    assert meta["interview_reasoning"]["phase"] == phase
+    assert meta["interview_reasoning"]["session_id"] == session_id
+    assert meta["interview_reasoning"]["next_action"]
+    assert isinstance(meta["internal_reasoning"], list)
+    assert f"phase: {phase}" in meta["internal_reasoning"]
+    assert f"session: {session_id}" in meta["internal_reasoning"]
+
+
 @pytest.mark.asyncio
 async def test_start_emits_response_diagnostic_event(tmp_path: Path) -> None:
     """Start path: a normal first question emits the response.emitted event."""
@@ -140,6 +149,13 @@ async def test_start_emits_response_diagnostic_event(tmp_path: Path) -> None:
         {"initial_context": "Build a CLI", "cwd": str(tmp_path)},
     )
     assert outcome.is_ok
+    _assert_reasoning_meta(
+        outcome.value.meta, phase="start", session_id="interview_diagnostics00001"
+    )
+    assert outcome.value.meta["interview_reasoning"]["pending_question"] is True
+    assert outcome.value.meta["interview_reasoning"]["question_chars"] == len(
+        "What is the primary user persona?"
+    )
     await _drain_bg_tasks(handler)
 
     diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
@@ -214,6 +230,12 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
 
     outcome = await handler.handle({"session_id": pending_state.interview_id})
     assert outcome.is_ok
+    _assert_reasoning_meta(
+        outcome.value.meta,
+        phase="resume_pending",
+        session_id=pending_state.interview_id,
+    )
+    assert outcome.value.meta["interview_reasoning"]["pending_question"] is True
     await _drain_bg_tasks(handler)
 
     diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
@@ -300,6 +322,12 @@ async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
         {"session_id": pending_state.interview_id, "answer": "It creates reports."}
     )
     assert outcome.is_ok
+    _assert_reasoning_meta(
+        outcome.value.meta,
+        phase="answer",
+        session_id=pending_state.interview_id,
+    )
+    assert outcome.value.meta["interview_reasoning"]["answered_rounds"] == 1
     assert outcome.value.content[0].text == (
         f"Session {pending_state.interview_id}\n\nWho uses it first?"
     )
