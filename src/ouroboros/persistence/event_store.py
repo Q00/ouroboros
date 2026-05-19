@@ -1035,6 +1035,83 @@ class EventStore:
                 details={"event_type": "lineage.created"},
             ) from e
 
+    async def append_workflow_lifecycle_event(
+        self,
+        lifecycle_event: Any,
+    ) -> None:
+        """Append a workflow IR lifecycle event to the durable event family.
+
+        This is an additive registration of the #956 workflow lifecycle
+        event family. The helper accepts a
+        ``WorkflowLifecycleEvent`` and persists it through the existing
+        :meth:`append` path so no new database column or table is
+        introduced. The event is routed under the
+        ``WORKFLOW_LIFECYCLE_AGGREGATE_TYPE`` aggregate, leaving all other
+        event families untouched.
+
+        Args:
+            lifecycle_event: A
+                :class:`ouroboros.orchestrator.workflow_lifecycle.WorkflowLifecycleEvent`.
+                Imported lazily to avoid an import cycle between
+                ``persistence`` and ``orchestrator``.
+
+        Raises:
+            PersistenceError: If the append operation fails.
+        """
+        from ouroboros.orchestrator.workflow_lifecycle import (
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+            WORKFLOW_LIFECYCLE_EVENT_TYPES,
+            WorkflowLifecycleEvent,
+        )
+
+        if not isinstance(lifecycle_event, WorkflowLifecycleEvent):
+            raise PersistenceError(
+                "append_workflow_lifecycle_event requires a WorkflowLifecycleEvent.",
+                operation="append_workflow_lifecycle_event",
+                details={"received_type": type(lifecycle_event).__name__},
+            )
+
+        base_event = lifecycle_event.to_base_event()
+        # Defensive registration check: every persisted lifecycle row
+        # belongs to the workflow IR family and uses a registered event
+        # type. Foreign or unknown event types must be rejected before
+        # they reach the existing event-store sanitization layer.
+        if base_event.aggregate_type != WORKFLOW_LIFECYCLE_AGGREGATE_TYPE:
+            raise PersistenceError(
+                "Workflow lifecycle event has an unexpected aggregate_type.",
+                operation="append_workflow_lifecycle_event",
+                details={
+                    "expected": WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+                    "received": base_event.aggregate_type,
+                },
+            )
+        if base_event.type not in WORKFLOW_LIFECYCLE_EVENT_TYPES:
+            raise PersistenceError(
+                "Workflow lifecycle event_type is not registered.",
+                operation="append_workflow_lifecycle_event",
+                details={"event_type": base_event.type},
+            )
+        await self.append(base_event)
+
+    async def replay_workflow_lifecycle(
+        self,
+        workflow_id: str,
+    ) -> list[Any]:
+        """Replay durable workflow lifecycle events for a workflow id.
+
+        Returns a list of
+        :class:`ouroboros.orchestrator.workflow_lifecycle.WorkflowLifecycleEvent`
+        instances rehydrated from persisted ``BaseEvent`` rows. Other
+        event families are not consulted.
+        """
+        from ouroboros.orchestrator.workflow_lifecycle import (
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+            WorkflowLifecycleEvent,
+        )
+
+        base_events = await self.replay(WORKFLOW_LIFECYCLE_AGGREGATE_TYPE, workflow_id)
+        return [WorkflowLifecycleEvent.from_base_event(base) for base in base_events]
+
     async def replay_lineage(self, lineage_id: str) -> list[BaseEvent]:
         """Replay all events for a lineage aggregate.
 

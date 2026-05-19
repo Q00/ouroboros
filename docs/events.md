@@ -111,6 +111,58 @@ Emitted periodically during execution with runtime progress.
 | `progress` | `object` | Nested progress state (structure varies by runtime) |
 | `progress.runtime_status` | `string?` | Runtime-reported status when available |
 
+### workflow.run.created / completed / failed / cancelled
+
+Durable lifecycle events for #956 Workflow IR runs. All events share the
+``workflow_ir`` aggregate type and use ``WorkflowSpec.spec_id`` as
+``aggregate_id``. See ``docs/agentos/workflow-ir-v1.md`` for the boundary
+contract; ``#1131`` adds the durable lifecycle family on top.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workflow_id` | `string` | ``WorkflowSpec.spec_id`` (mirrors ``aggregate_id``) |
+| `schema_version` | `int` | Lifecycle schema version (currently `1`) |
+| `timestamp` | `string` | ISO 8601 UTC timestamp |
+| `reason_code` | `string?` | Required on `run.failed` and `run.cancelled` |
+| `refs` | `string[]?` | Bounded ``ControlContract`` / ``IOJournal`` ids — never raw payload |
+
+### workflow.node.scheduled / started / completed / failed / retried
+
+Per-node lifecycle records anchored to a ``WorkflowNode.node_id``.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workflow_id` | `string` | ``WorkflowSpec.spec_id`` (mirrors ``aggregate_id``) |
+| `node_id` | `string` | ``WorkflowNode.node_id`` |
+| `attempt` | `int?` | Node attempt number (>= 1); absent on run-level events |
+| `reason_code` | `string?` | Required on `node.failed` and `node.retried` |
+| `data` | `object?` | Bounded, redacted hints — raw prompt/stdout/stderr/credentials are rejected by validation |
+
+### workflow.edge.traversed
+
+Records that an ``WorkflowEdge.edge_id`` was traversed during execution.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `edge_id` | `string` | ``WorkflowEdge.edge_id`` |
+| `attempt` | `int?` | Source node attempt at traversal time |
+
+### workflow.checkpoint.saved
+
+Links a checkpoint save to its ``CheckpointStore`` reference ids.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `refs` | `string[]` | One or more bounded checkpoint references |
+
+The lifecycle family is registered on the EventStore via
+``append_workflow_lifecycle_event`` / ``replay_workflow_lifecycle``. No
+existing event family is modified. Payloads are size-bounded
+(``MAX_WORKFLOW_LIFECYCLE_DATA_BYTES``) and reject replay-unsafe keys
+(``stdout``, ``stderr``, ``prompt``, ``api_key``, ``token`` and similar
+secret/raw-output names) so durable lifecycle history can be replayed
+without leaking raw payload material.
+
 ## Adding new event types
 
 When introducing a new event type:
