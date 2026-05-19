@@ -33,6 +33,8 @@ from ouroboros.orchestrator.workflow_ir import (
 )
 from ouroboros.orchestrator.workflow_lifecycle import (
     MAX_WORKFLOW_LIFECYCLE_DATA_BYTES,
+    MAX_WORKFLOW_LIFECYCLE_REF_BYTES,
+    MAX_WORKFLOW_LIFECYCLE_REF_COUNT,
     WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
     WORKFLOW_LIFECYCLE_EVENT_TYPES,
     WorkflowLifecycleEvent,
@@ -422,6 +424,77 @@ def test_projection_is_deterministic_across_input_orderings() -> None:
     assert project_workflow_lifecycle(spec.spec_id, mixed) == canonical
 
 
+def test_projection_tie_breaks_same_timestamp_node_attempts() -> None:
+    spec = _spec()
+    timestamp = _t(1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=_t(0),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            attempt=2,
+            refs=("control://contract/node-a/attempt-2",),
+            timestamp=timestamp,
+            data={"hint": "b"},
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            attempt=1,
+            refs=("control://contract/node-a/attempt-1",),
+            timestamp=timestamp,
+            data={"hint": "a"},
+        ),
+    )
+
+    canonical = project_workflow_lifecycle(spec.spec_id, events)
+
+    assert project_workflow_lifecycle(spec.spec_id, tuple(reversed(events))) == canonical
+    assert canonical.node_attempts["node_a"] == 2
+
+
+def test_projection_tie_breaks_same_timestamp_edge_traversals() -> None:
+    spec = _spec()
+    timestamp = _t(1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=_t(0),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_b_end",
+            attempt=1,
+            refs=("io://journal/edge-b-end",),
+            timestamp=timestamp,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_a_b",
+            attempt=1,
+            refs=("io://journal/edge-a-b",),
+            timestamp=timestamp,
+        ),
+    )
+
+    canonical = project_workflow_lifecycle(spec.spec_id, events)
+
+    assert project_workflow_lifecycle(spec.spec_id, tuple(reversed(events))) == canonical
+    assert tuple(record.edge_id for record in canonical.traversed_edges) == (
+        "edge_a_b",
+        "edge_b_end",
+    )
+
+
 @pytest.mark.asyncio
 async def test_round_trip_through_event_store_rebuilds_identical_projection() -> None:
     spec = _spec()
@@ -483,6 +556,50 @@ def test_lifecycle_event_rejects_oversized_payload() -> None:
             workflow_id=spec.spec_id,
             node_id="node_a",
             data=payload,
+        )
+
+
+@pytest.mark.parametrize(
+    "refs",
+    [
+        tuple(
+            f"control://contract/ref-{index}"
+            for index in range(MAX_WORKFLOW_LIFECYCLE_REF_COUNT + 1)
+        ),
+        ("control://contract/" + ("x" * MAX_WORKFLOW_LIFECYCLE_REF_BYTES),),
+        tuple(
+            "control://contract/" + ("x" * (MAX_WORKFLOW_LIFECYCLE_REF_BYTES - 32)) + str(index)
+            for index in range(MAX_WORKFLOW_LIFECYCLE_REF_COUNT)
+        ),
+    ],
+)
+def test_lifecycle_event_rejects_oversized_refs(refs: tuple[str, ...]) -> None:
+    spec = _spec()
+    with pytest.raises(ValidationError, match="refs? exceed"):
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            refs=refs,
+        )
+
+
+@pytest.mark.parametrize(
+    "refs",
+    [
+        ("control://contract/raw-stdout/run-1",),
+        ("io://journal/raw_prompt/run-1",),
+        ("checkpoint://store/api_key/run-1",),
+        ("control://contract/password/value",),
+        ("io://journal/bearer-token/run-1",),
+    ],
+)
+def test_lifecycle_event_rejects_unsafe_refs(refs: tuple[str, ...]) -> None:
+    spec = _spec()
+    with pytest.raises(ValidationError, match="replay-unsafe ref"):
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            refs=refs,
         )
 
 

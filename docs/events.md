@@ -116,7 +116,7 @@ Emitted periodically during execution with runtime progress.
 Durable lifecycle events for #956 Workflow IR runs. All events share the
 ``workflow_ir`` aggregate type and use ``WorkflowSpec.spec_id`` as
 ``aggregate_id``. See ``docs/agentos/workflow-ir-v1.md`` for the boundary
-contract; ``#1131`` adds the durable lifecycle family on top.
+contract; ``#1134`` adds the durable lifecycle family on top.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -158,10 +158,10 @@ Links a checkpoint save to its ``CheckpointStore`` reference ids.
 The lifecycle family is registered on the EventStore via
 ``append_workflow_lifecycle_event`` / ``replay_workflow_lifecycle``. No
 existing event family is modified. Payloads are size-bounded
-(``MAX_WORKFLOW_LIFECYCLE_DATA_BYTES``) and reject replay-unsafe keys
-(``stdout``, ``stderr``, ``prompt``, ``api_key``, ``token`` and similar
-secret/raw-output names) so durable lifecycle history can be replayed
-without leaking raw payload material.
+(``MAX_WORKFLOW_LIFECYCLE_DATA_BYTES``), refs are count/per-ref/serialized
+size-bounded, and both reject replay-unsafe names (``stdout``, ``stderr``,
+``prompt``, ``api_key``, ``token`` and similar secret/raw-output names) so
+durable lifecycle history can be replayed without leaking raw payload material.
 
 ## Adding new event types
 

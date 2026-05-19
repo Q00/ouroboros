@@ -28,6 +28,9 @@ from ouroboros.orchestrator.workflow_ir import (
 
 WORKFLOW_LIFECYCLE_SCHEMA_VERSION: Final[int] = 1
 MAX_WORKFLOW_LIFECYCLE_DATA_BYTES: Final[int] = 8192
+MAX_WORKFLOW_LIFECYCLE_REF_COUNT: Final[int] = 16
+MAX_WORKFLOW_LIFECYCLE_REF_BYTES: Final[int] = 512
+MAX_WORKFLOW_LIFECYCLE_REFS_BYTES: Final[int] = 4096
 
 WORKFLOW_LIFECYCLE_AGGREGATE_TYPE: Final[str] = "workflow_ir"
 """EventStore aggregate-type bucket for #956 Workflow IR lifecycle events.
@@ -168,8 +171,21 @@ _EVENT_SORT_ORDER: Final[dict[WorkflowLifecycleEventType, int]] = {
 }
 
 
-def _event_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int, str]:
-    return (event.timestamp, _EVENT_SORT_ORDER[event.event_type], event.event_type.value)
+def _event_sort_key(
+    event: WorkflowLifecycleEvent,
+) -> tuple[datetime, int, str, str, str, str, int, str, tuple[str, ...], str]:
+    return (
+        event.timestamp,
+        _EVENT_SORT_ORDER[event.event_type],
+        event.event_type.value,
+        event.workflow_id,
+        event.node_id or "",
+        event.edge_id or "",
+        event.attempt or 0,
+        event.reason_code or "",
+        event.refs,
+        _canonical_json(event.data),
+    )
 
 
 def _run_boundary_group_order(
@@ -332,6 +348,27 @@ def _is_replay_unsafe_key(key: str) -> bool:
     return normalized in _REPLAY_UNSAFE_KEYS or normalized.endswith(_REPLAY_UNSAFE_SUFFIXES)
 
 
+def _canonical_json(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = {key: json.loads(_canonical_json(item)) for key, item in value.items()}
+    elif isinstance(value, tuple):
+        value = [json.loads(_canonical_json(item)) for item in value]
+    return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
+
+
+def _is_replay_unsafe_ref(ref: str) -> bool:
+    normalized = ref.strip().lower()
+    tokenized = "".join(character if character.isalnum() else "_" for character in normalized)
+    tokens = tuple(token for token in tokenized.split("_") if token)
+    candidates = {tokenized, *tokens}
+    candidates.update(
+        "_".join(tokens[start:end])
+        for start in range(len(tokens))
+        for end in range(start + 1, len(tokens) + 1)
+    )
+    return any(_is_replay_unsafe_key(candidate) for candidate in candidates)
+
+
 def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
     if value is None or isinstance(value, str | int | bool):
         return value
@@ -380,7 +417,7 @@ def _normalize_data(value: Mapping[str, Any]) -> Mapping[str, FrozenJsonValue]:
         msg = "Workflow lifecycle data must be a mapping"
         raise TypeError(msg)
     normalized = _normalize_json_value("data", value, "data")
-    encoded = json.dumps(normalized, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    encoded = _canonical_json(normalized).encode("utf-8")
     if len(encoded) > MAX_WORKFLOW_LIFECYCLE_DATA_BYTES:
         msg = f"Workflow lifecycle data exceeds {MAX_WORKFLOW_LIFECYCLE_DATA_BYTES} bytes"
         raise ValueError(msg)
@@ -395,12 +432,26 @@ def _normalize_refs(values: Iterable[str]) -> tuple[str, ...]:
     normalized: list[str] = []
     seen: set[str] = set()
     for index, value in enumerate(values):
+        if index >= MAX_WORKFLOW_LIFECYCLE_REF_COUNT:
+            msg = f"Workflow lifecycle refs exceed {MAX_WORKFLOW_LIFECYCLE_REF_COUNT} entries"
+            raise ValueError(msg)
         ref = _normalize_non_blank(f"refs[{index}]", value)
+        ref_bytes = ref.encode("utf-8")
+        if len(ref_bytes) > MAX_WORKFLOW_LIFECYCLE_REF_BYTES:
+            msg = f"Workflow lifecycle ref exceeds {MAX_WORKFLOW_LIFECYCLE_REF_BYTES} bytes"
+            raise ValueError(msg)
+        if _is_replay_unsafe_ref(ref):
+            msg = f"Workflow lifecycle refs must not persist replay-unsafe ref {ref!r}"
+            raise ValueError(msg)
         if ref in seen:
             msg = f"Workflow lifecycle refs must be unique: {ref!r}"
             raise ValueError(msg)
         seen.add(ref)
         normalized.append(ref)
+    encoded = _canonical_json(normalized).encode("utf-8")
+    if len(encoded) > MAX_WORKFLOW_LIFECYCLE_REFS_BYTES:
+        msg = f"Workflow lifecycle refs exceed {MAX_WORKFLOW_LIFECYCLE_REFS_BYTES} bytes"
+        raise ValueError(msg)
     return tuple(normalized)
 
 
@@ -1043,6 +1094,9 @@ def project_workflow_lifecycle(
 
 __all__ = [
     "MAX_WORKFLOW_LIFECYCLE_DATA_BYTES",
+    "MAX_WORKFLOW_LIFECYCLE_REF_BYTES",
+    "MAX_WORKFLOW_LIFECYCLE_REF_COUNT",
+    "MAX_WORKFLOW_LIFECYCLE_REFS_BYTES",
     "WORKFLOW_LIFECYCLE_AGGREGATE_TYPE",
     "WORKFLOW_LIFECYCLE_EVENT_TYPES",
     "WORKFLOW_LIFECYCLE_SCHEMA_VERSION",
