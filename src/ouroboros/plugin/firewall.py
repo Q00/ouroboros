@@ -661,38 +661,6 @@ def invoke_plugin(
             )
         return True, ""
 
-    # 0a. Cancellation short-circuit — fires before everything else so a
-    # caller-driven cancel signal cannot race the trust check, the
-    # confirmation gate, or the entrypoint launch. The terminal
-    # ``plugin.failed`` event records the original cancel cause and
-    # observability ``on_cancel`` hooks (fail-open, observation-only)
-    # run after the terminal event so a hook failure can never mask
-    # the cancellation cause that already reached the caller.
-    if cancellation_requested:
-        message = (
-            f"plugin {manifest.name!r} invocation cancelled before launch "
-            f"(correlation_id={correlation_id!r})"
-        )
-        _emit(
-            _event_envelope(
-                event_type="plugin.failed",
-                manifest=manifest,
-                namespace=namespace,
-                command_name=command_name,
-                argv=argv,
-                trust_state=trust_state,
-                result={"status": "failed", "message": message},
-                provenance={"correlation_id": correlation_id, "reason": "cancelled"},
-            )
-        )
-        _run_lifecycle_hooks(HookKind.ON_CANCEL)
-        return InvocationResult(
-            status="failed",
-            exit_code=None,
-            message=message,
-            events=tuple(emitted),
-        )
-
     # 0. Disable check — fires before everything, including before the
     # trust check, so a plugin with no `required: true` permissions
     # cannot bypass `disable` by having an empty trust subject.
@@ -877,6 +845,39 @@ def invoke_plugin(
                 message=message,
                 events=tuple(emitted),
             )
+
+    # 1a. Cancellation short-circuit — evaluated only after disable,
+    # digest/tamper verification, and required-permission trust gates
+    # have passed. It still fires before confirmation, before_invocation,
+    # plugin.invoked, permission_used emission, and command launch. The
+    # terminal ``plugin.failed`` event records the original cancel cause
+    # and observability ``on_cancel`` hooks (fail-open, observation-only)
+    # run after the terminal event so a hook failure can never mask the
+    # cancellation cause that already reached the caller.
+    if cancellation_requested:
+        message = (
+            f"plugin {manifest.name!r} invocation cancelled before launch "
+            f"(correlation_id={correlation_id!r})"
+        )
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={"correlation_id": correlation_id, "reason": "cancelled"},
+            )
+        )
+        _run_lifecycle_hooks(HookKind.ON_CANCEL)
+        return InvocationResult(
+            status="failed",
+            exit_code=None,
+            message=message,
+            events=tuple(emitted),
+        )
 
     # 2. Confirmation gate (locked Q2 — ONE prompt, command-level).
     if command.requires_confirmation:

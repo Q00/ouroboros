@@ -27,6 +27,7 @@ from ouroboros.plugin.hooks import (
     HOOK_EVENT_TYPES,
     HOOK_LIFECYCLE_POLICY_SCOPE,
     HOOK_LIFECYCLE_READ_SCOPE,
+    TERMINAL_OBSERVABILITY_HOOK_NAMES,
 )
 from ouroboros.plugin.manifest import (
     SUPPORTED_SCHEMA_VERSIONS,
@@ -212,6 +213,49 @@ class TestV03HookLifecyclePermissionSchema:
             load_manifest(_write(tmp_path, payload))
 
         assert exc_info.value.json_pointer == "/hooks/0/permissions"
+
+    @pytest.mark.parametrize("hook_name", sorted(TERMINAL_OBSERVABILITY_HOOK_NAMES))
+    def test_terminal_observability_hook_requires_read_not_policy(
+        self, tmp_path: Path, hook_name: str
+    ) -> None:
+        payload = _v03_manifest()
+        payload["permissions"] = [
+            permission
+            for permission in payload["permissions"]
+            if permission["scope"] != HOOK_LIFECYCLE_READ_SCOPE
+        ]
+        payload["hooks"] = [
+            _valid_hook(name=hook_name, failure_policy="fail_open")
+            | {"permissions": [HOOK_LIFECYCLE_POLICY_SCOPE]}
+        ]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/hooks/0/permissions"
+        assert HOOK_LIFECYCLE_READ_SCOPE in exc_info.value.expected
+
+    @pytest.mark.parametrize("hook_name", sorted(TERMINAL_OBSERVABILITY_HOOK_NAMES))
+    def test_terminal_observability_hook_requires_top_level_read(
+        self, tmp_path: Path, hook_name: str
+    ) -> None:
+        payload = _v03_manifest()
+        payload["permissions"] = [
+            {
+                **permission,
+                "required": False,
+            }
+            if permission["scope"] == HOOK_LIFECYCLE_READ_SCOPE
+            else permission
+            for permission in payload["permissions"]
+        ]
+        payload["hooks"] = [_valid_hook(name=hook_name, failure_policy="fail_open")]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/permissions"
+        assert HOOK_LIFECYCLE_READ_SCOPE in exc_info.value.expected
 
 
 class TestV02Compatibility:

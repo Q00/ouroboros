@@ -37,6 +37,7 @@ from ouroboros.plugin.hooks import (
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
     HOOK_LIFECYCLE_POLICY_SCOPE,
+    HOOK_LIFECYCLE_READ_SCOPE,
     HOOK_LIFECYCLE_SCOPES,
     TERMINAL_OBSERVABILITY_HOOK_NAMES,
     HookFailurePolicy,
@@ -561,6 +562,25 @@ def _validate_hook_lifecycle_permission(
     if schema_version != "0.3" or not is_v1_hook_kind(raw["name"]):
         return
     permissions = raw.get("permissions", ())
+    if raw["name"] in TERMINAL_OBSERVABILITY_HOOK_NAMES:
+        if HOOK_LIFECYCLE_READ_SCOPE not in permissions:
+            raise PluginManifestError(
+                "v0.3 terminal observability hook must declare plugin:lifecycle:read",
+                path=str(manifest_path),
+                json_pointer=f"/hooks/{hook_index}/permissions",
+                expected=f"{HOOK_LIFECYCLE_READ_SCOPE!r} in hooks[].permissions",
+                got=permissions,
+            )
+        if HOOK_LIFECYCLE_READ_SCOPE not in declared_required_permission_scopes:
+            raise PluginManifestError(
+                "v0.3 terminal observability hook read permission must be required",
+                path=str(manifest_path),
+                json_pointer="/permissions",
+                expected=(f"top-level {HOOK_LIFECYCLE_READ_SCOPE!r} permission with required=true"),
+                got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
+            )
+        return
+
     declared_lifecycle_scopes = HOOK_LIFECYCLE_SCOPES.intersection(permissions)
     if not declared_lifecycle_scopes:
         raise PluginManifestError(
