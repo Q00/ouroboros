@@ -602,21 +602,39 @@ ouroboros status auto AUTO_SESSION_ID
 ### `status run`
 
 Build a read-only Run/Stage/Step projection from persisted events. Provide at
-least one selector: `--session-id` or `--execution-id`.
+least one selector: a positional `RUN_ID` (treated as the execution anchor),
+`--execution-id`, or `--session-id`. The command is a thin surface over the
+`ouroboros_query_projection` MCP tool — `--json` output is byte-identical to
+what the MCP query returns for the same anchor.
 
 ```bash
-ouroboros status run (--session-id TEXT | --execution-id TEXT) [OPTIONS]
+ouroboros status run [RUN_ID] [--session-id TEXT] [--execution-id TEXT] [OPTIONS]
 ```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `RUN_ID` | No | Positional execution anchor; maps to `execution_id`. Cannot be combined with `--session-id` or a conflicting `--execution-id` |
 
 **Options:**
 
 | Option | Description |
 |--------|-------------|
-| `--session-id TEXT` | Orchestrator session ID to project; required unless `--execution-id` is provided |
-| `--execution-id TEXT` | Execution aggregate ID to project; required unless `--session-id` is provided |
+| `--session-id TEXT` | Orchestrator session ID to project; required unless `RUN_ID` or `--execution-id` is provided. May be combined with `--execution-id` when the MCP projection handler needs session narrowing |
+| `--execution-id TEXT` | Execution aggregate ID to project; required unless `RUN_ID` or `--session-id` is provided. May be combined with `--session-id` for session narrowing |
 | `--seed-id TEXT` | Optional seed ID override for projection labels |
 | `--limit INTEGER` | Optional event count safety cap |
 | `--json` | Emit machine-readable projection JSON |
+
+**Exit codes** (Wave-1 #946 S2 contract):
+
+| Code | Meaning |
+|------|---------|
+| `0` | Projection rendered successfully |
+| `1` | Generic projection failure surfaced by the MCP handler |
+| `2` | Unknown run anchor — no events match the requested `RUN_ID` / selectors |
+| `64` | Malformed input — missing selectors or conflicting `RUN_ID` / option combination |
 
 ### `status health`
 

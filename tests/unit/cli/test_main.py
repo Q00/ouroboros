@@ -364,13 +364,15 @@ class TestStatusRunProjectionCommand:
             from ouroboros.core.types import Result
             from ouroboros.mcp.errors import MCPToolError
 
-            return Result.err(MCPToolError("session_id or execution_id is required"))
+            return Result.err(MCPToolError("projection backend exploded"))
 
         with patch("ouroboros.cli.commands.status.ProjectionQueryHandler.handle", fake_handle):
-            result = runner.invoke(app, ["status", "run", "--json"])
+            result = runner.invoke(app, ["status", "run", "--execution-id", "exec_x", "--json"])
 
+        # Handler-side errors that are not the dedicated "unknown run" path
+        # remain on exit code 1 — see Wave-1 #946 S2 exit-code contract.
         assert result.exit_code == 1
-        assert "session_id or execution_id is required" in result.output
+        assert "projection backend exploded" in result.output
 
 
 class TestWorkflowIRCommands:
