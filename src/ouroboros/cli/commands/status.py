@@ -117,8 +117,35 @@ def auto(
     typer.echo(_format_auto_status(state), nl=False)
 
 
+# Exit codes for `ouroboros status run`. These mirror Wave-1 #946 S2:
+#   * ``0`` — projection rendered successfully.
+#   * ``2`` — run anchor (run_id / execution_id / session_id) is unknown.
+#   * ``64`` — malformed input (missing or conflicting selectors).
+# Any other handler failure surfaces as exit code ``1`` so existing callers
+# that already special-case generic failure keep working.
+_STATUS_RUN_EXIT_OK = 0
+_STATUS_RUN_EXIT_GENERIC_ERROR = 1
+_STATUS_RUN_EXIT_UNKNOWN_RUN = 2
+_STATUS_RUN_EXIT_MALFORMED_INPUT = 64
+
+
+def _is_unknown_run_error(message: str) -> bool:
+    lowered = message.lower()
+    return "no events found" in lowered
+
+
 @app.command(name="run")
 def run_projection(
+    run_id: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[RUN_ID]",
+            help=(
+                "Optional run anchor (execution aggregate ID). Equivalent to "
+                "passing --execution-id; mutually exclusive with --session-id."
+            ),
+        ),
+    ] = None,
     session_id: Annotated[
         str | None,
         typer.Option("--session-id", help="Optional orchestrator session ID to project."),
@@ -140,7 +167,35 @@ def run_projection(
         typer.Option("--json", help="Emit machine-readable projection JSON."),
     ] = False,
 ) -> None:
-    """Build a read-only Run/Stage/Step projection from persisted events."""
+    """Build a read-only Run/Stage/Step projection from persisted events.
+
+    The CLI is a thin surface over ``ouroboros_query_projection``: the same
+    run anchor returns byte-identical JSON between the MCP query and this
+    command when ``--json`` is set. Exit codes follow the Wave-1 #946 S2
+    convention (``0`` ok, ``2`` unknown run, ``64`` malformed input).
+    """
+
+    if run_id is not None:
+        if execution_id is not None and execution_id != run_id:
+            print_error(
+                "Run projection failed: RUN_ID and --execution-id refer to "
+                "different anchors; provide only one."
+            )
+            raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+        if session_id is not None:
+            print_error(
+                "Run projection failed: RUN_ID positional cannot be combined "
+                "with --session-id; pass either a run anchor or a session."
+            )
+            raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+        execution_id = run_id
+
+    if session_id is None and execution_id is None:
+        print_error(
+            "Run projection failed: a RUN_ID (execution anchor), "
+            "--execution-id, or --session-id is required."
+        )
+        raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
 
     arguments: dict[str, Any] = {}
     if session_id is not None:
@@ -154,8 +209,11 @@ def run_projection(
 
     result = asyncio.run(ProjectionQueryHandler().handle(arguments))
     if result.is_err:
-        print_error(f"Run projection failed: {result.error}")
-        raise typer.Exit(1)
+        message = str(result.error)
+        print_error(f"Run projection failed: {message}")
+        if _is_unknown_run_error(message):
+            raise typer.Exit(_STATUS_RUN_EXIT_UNKNOWN_RUN)
+        raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR)
 
     tool_result = result.value
     if json_output:
