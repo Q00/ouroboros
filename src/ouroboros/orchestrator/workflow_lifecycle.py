@@ -28,6 +28,19 @@ from ouroboros.orchestrator.workflow_ir import (
 
 WORKFLOW_LIFECYCLE_SCHEMA_VERSION: Final[int] = 1
 MAX_WORKFLOW_LIFECYCLE_DATA_BYTES: Final[int] = 8192
+MAX_WORKFLOW_LIFECYCLE_REF_COUNT: Final[int] = 16
+MAX_WORKFLOW_LIFECYCLE_REF_BYTES: Final[int] = 512
+MAX_WORKFLOW_LIFECYCLE_REFS_BYTES: Final[int] = 4096
+
+WORKFLOW_LIFECYCLE_AGGREGATE_TYPE: Final[str] = "workflow_ir"
+"""EventStore aggregate-type bucket for #956 Workflow IR lifecycle events.
+
+This is the durable event-family anchor that pairs with
+``WorkflowLifecycleEvent.to_base_event()``. It is intentionally distinct
+from the runtime ``execution`` / ``session`` aggregates so existing event
+families are untouched and downstream projections can filter the
+lifecycle stream without scanning unrelated families.
+"""
 
 _REPLAY_UNSAFE_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -105,6 +118,12 @@ class WorkflowRunLifecycleState(StrEnum):
     CANCELLED = "cancelled"
 
 
+WORKFLOW_LIFECYCLE_EVENT_TYPES: Final[frozenset[str]] = frozenset(
+    member.value for member in WorkflowLifecycleEventType
+)
+"""Stable set of event-type strings persisted by the lifecycle family."""
+
+
 _NODE_EVENT_TYPES: Final[frozenset[WorkflowLifecycleEventType]] = frozenset(
     {
         WorkflowLifecycleEventType.NODE_SCHEDULED,
@@ -152,8 +171,21 @@ _EVENT_SORT_ORDER: Final[dict[WorkflowLifecycleEventType, int]] = {
 }
 
 
-def _event_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int, str]:
-    return (event.timestamp, _EVENT_SORT_ORDER[event.event_type], event.event_type.value)
+def _event_sort_key(
+    event: WorkflowLifecycleEvent,
+) -> tuple[datetime, int, str, str, str, str, int, str, tuple[str, ...], str]:
+    return (
+        event.timestamp,
+        _EVENT_SORT_ORDER[event.event_type],
+        event.event_type.value,
+        event.workflow_id,
+        event.node_id or "",
+        event.edge_id or "",
+        event.attempt or 0,
+        event.reason_code or "",
+        event.refs,
+        _canonical_json(event.data),
+    )
 
 
 def _run_boundary_group_order(
@@ -316,6 +348,27 @@ def _is_replay_unsafe_key(key: str) -> bool:
     return normalized in _REPLAY_UNSAFE_KEYS or normalized.endswith(_REPLAY_UNSAFE_SUFFIXES)
 
 
+def _canonical_json(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = {key: json.loads(_canonical_json(item)) for key, item in value.items()}
+    elif isinstance(value, tuple):
+        value = [json.loads(_canonical_json(item)) for item in value]
+    return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
+
+
+def _is_replay_unsafe_ref(ref: str) -> bool:
+    normalized = ref.strip().lower()
+    tokenized = "".join(character if character.isalnum() else "_" for character in normalized)
+    tokens = tuple(token for token in tokenized.split("_") if token)
+    candidates = {tokenized, *tokens}
+    candidates.update(
+        "_".join(tokens[start:end])
+        for start in range(len(tokens))
+        for end in range(start + 1, len(tokens) + 1)
+    )
+    return any(_is_replay_unsafe_key(candidate) for candidate in candidates)
+
+
 def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
     if value is None or isinstance(value, str | int | bool):
         return value
@@ -364,7 +417,7 @@ def _normalize_data(value: Mapping[str, Any]) -> Mapping[str, FrozenJsonValue]:
         msg = "Workflow lifecycle data must be a mapping"
         raise TypeError(msg)
     normalized = _normalize_json_value("data", value, "data")
-    encoded = json.dumps(normalized, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    encoded = _canonical_json(normalized).encode("utf-8")
     if len(encoded) > MAX_WORKFLOW_LIFECYCLE_DATA_BYTES:
         msg = f"Workflow lifecycle data exceeds {MAX_WORKFLOW_LIFECYCLE_DATA_BYTES} bytes"
         raise ValueError(msg)
@@ -379,12 +432,26 @@ def _normalize_refs(values: Iterable[str]) -> tuple[str, ...]:
     normalized: list[str] = []
     seen: set[str] = set()
     for index, value in enumerate(values):
+        if index >= MAX_WORKFLOW_LIFECYCLE_REF_COUNT:
+            msg = f"Workflow lifecycle refs exceed {MAX_WORKFLOW_LIFECYCLE_REF_COUNT} entries"
+            raise ValueError(msg)
         ref = _normalize_non_blank(f"refs[{index}]", value)
+        ref_bytes = ref.encode("utf-8")
+        if len(ref_bytes) > MAX_WORKFLOW_LIFECYCLE_REF_BYTES:
+            msg = f"Workflow lifecycle ref exceeds {MAX_WORKFLOW_LIFECYCLE_REF_BYTES} bytes"
+            raise ValueError(msg)
+        if _is_replay_unsafe_ref(ref):
+            msg = f"Workflow lifecycle refs must not persist replay-unsafe ref {ref!r}"
+            raise ValueError(msg)
         if ref in seen:
             msg = f"Workflow lifecycle refs must be unique: {ref!r}"
             raise ValueError(msg)
         seen.add(ref)
         normalized.append(ref)
+    encoded = _canonical_json(normalized).encode("utf-8")
+    if len(encoded) > MAX_WORKFLOW_LIFECYCLE_REFS_BYTES:
+        msg = f"Workflow lifecycle refs exceed {MAX_WORKFLOW_LIFECYCLE_REFS_BYTES} bytes"
+        raise ValueError(msg)
     return tuple(normalized)
 
 
@@ -540,12 +607,58 @@ class WorkflowLifecycleEvent(BaseModel, frozen=True):
     def to_base_event(self) -> BaseEvent:
         return BaseEvent(
             type=self.event_type.value,
-            aggregate_type="workflow_ir",
+            aggregate_type=WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
             timestamp=self.timestamp,
             aggregate_id=self.aggregate_id,
             data=self.to_event_data(),
             event_version=self.schema_version,
         )
+
+    @classmethod
+    def from_base_event(cls, base: BaseEvent) -> WorkflowLifecycleEvent:
+        """Rehydrate a lifecycle event from a persisted ``BaseEvent``.
+
+        Foreign event families are rejected so callers can safely pass a
+        mixed EventStore replay and surface a clear error if a row is
+        misrouted.
+        """
+        if base.aggregate_type != WORKFLOW_LIFECYCLE_AGGREGATE_TYPE:
+            msg = (
+                "BaseEvent is not from the workflow lifecycle family: "
+                f"aggregate_type={base.aggregate_type!r}"
+            )
+            raise ValueError(msg)
+        if base.type not in WORKFLOW_LIFECYCLE_EVENT_TYPES:
+            msg = f"BaseEvent type {base.type!r} is not a workflow lifecycle event type"
+            raise ValueError(msg)
+
+        payload = dict(base.data)
+        payload.pop("workflow_id", None)
+        payload.pop("schema_version", None)
+        payload.pop("timestamp", None)
+        timestamp = base.timestamp
+        if isinstance(timestamp, datetime) and (
+            timestamp.tzinfo is None or timestamp.utcoffset() is None
+        ):
+            # ``BaseEvent`` is created from EventStore rows whose SQLite
+            # backend drops tzinfo on roundtrip. Lifecycle events are
+            # canonically UTC, so reattach UTC before re-validating.
+            timestamp = timestamp.replace(tzinfo=UTC)
+        kwargs: dict[str, Any] = {
+            "event_type": WorkflowLifecycleEventType(base.type),
+            "workflow_id": base.aggregate_id,
+            "schema_version": base.event_version or WORKFLOW_LIFECYCLE_SCHEMA_VERSION,
+            "timestamp": timestamp,
+        }
+        for key in ("node_id", "edge_id", "attempt", "reason_code"):
+            if key in payload:
+                kwargs[key] = payload[key]
+        refs = payload.get("refs")
+        if refs is not None:
+            kwargs["refs"] = tuple(refs) if not isinstance(refs, tuple) else refs
+        if "data" in payload and payload["data"] is not None:
+            kwargs["data"] = payload["data"]
+        return cls(**kwargs)
 
 
 def lifecycle_event_for_spec(
@@ -853,18 +966,153 @@ def validate_workflow_lifecycle_conformance(
     )
 
 
+class WorkflowEdgeTraversalRecord(BaseModel, frozen=True):
+    """Projected record of a single edge traversal."""
+
+    edge_id: str
+    attempt: int | None = None
+    timestamp: datetime
+
+
+class WorkflowCheckpointRecord(BaseModel, frozen=True):
+    """Projected record of a single checkpoint save."""
+
+    refs: tuple[str, ...]
+    timestamp: datetime
+
+
+class WorkflowLifecycleProjection(BaseModel, frozen=True):
+    """Deterministic projection of a lifecycle event slice.
+
+    The projection is intentionally bounded: it carries no raw payload,
+    only durable, replay-safe identifiers (``ControlContract`` /
+    ``CheckpointStore`` / ``IOJournal`` refs already live on
+    :class:`WorkflowLifecycleEvent`). Two replays of the same event slice
+    produce the same projection, modulo input ordering — see
+    :func:`project_workflow_lifecycle`.
+    """
+
+    workflow_id: str
+    run_state: WorkflowRunLifecycleState | None = None
+    terminal_reason_code: str | None = None
+    node_states: Mapping[str, WorkflowNodeLifecycleState] = Field(default_factory=dict)
+    node_attempts: Mapping[str, int] = Field(default_factory=dict)
+    traversed_edges: tuple[WorkflowEdgeTraversalRecord, ...] = Field(default_factory=tuple)
+    checkpoints: tuple[WorkflowCheckpointRecord, ...] = Field(default_factory=tuple)
+    event_count: int = 0
+
+    def is_terminal(self) -> bool:
+        return self.run_state in {
+            WorkflowRunLifecycleState.COMPLETED,
+            WorkflowRunLifecycleState.FAILED,
+            WorkflowRunLifecycleState.CANCELLED,
+        }
+
+
+def project_workflow_lifecycle(
+    workflow_id: str,
+    events: Iterable[WorkflowLifecycleEvent],
+) -> WorkflowLifecycleProjection:
+    """Deterministically project a lifecycle event slice into a summary.
+
+    The projection rebuilds the same lifecycle slice regardless of input
+    iteration order: events are filtered to ``workflow_id`` and sorted by
+    the same canonical key used elsewhere in this module.
+    """
+    workflow_id = _normalize_non_blank("workflow_id", workflow_id)
+    scoped = tuple(
+        sorted(
+            (event for event in events if event.workflow_id == workflow_id),
+            key=_event_sort_key,
+        )
+    )
+
+    node_states: dict[str, WorkflowNodeLifecycleState] = {}
+    node_attempts: dict[str, int] = {}
+    traversed_edges: list[WorkflowEdgeTraversalRecord] = []
+    checkpoints: list[WorkflowCheckpointRecord] = []
+    run_state: WorkflowRunLifecycleState | None = None
+    terminal_reason_code: str | None = None
+
+    for event in scoped:
+        if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
+            # Fresh run boundary resets the projection so a replay of a
+            # restart segment converges on the latest run only.
+            node_states = {}
+            node_attempts = {}
+            traversed_edges = []
+            checkpoints = []
+            run_state = WorkflowRunLifecycleState.CREATED
+            terminal_reason_code = None
+            continue
+        if event.event_type is WorkflowLifecycleEventType.RUN_COMPLETED:
+            run_state = WorkflowRunLifecycleState.COMPLETED
+            terminal_reason_code = event.reason_code
+            continue
+        if event.event_type is WorkflowLifecycleEventType.RUN_FAILED:
+            run_state = WorkflowRunLifecycleState.FAILED
+            terminal_reason_code = event.reason_code
+            continue
+        if event.event_type is WorkflowLifecycleEventType.RUN_CANCELLED:
+            run_state = WorkflowRunLifecycleState.CANCELLED
+            terminal_reason_code = event.reason_code
+            continue
+        if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
+            node_states[event.node_id] = _NODE_STATE_BY_EVENT[event.event_type]
+            if event.attempt is not None:
+                node_attempts[event.node_id] = event.attempt
+            continue
+        if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED and event.edge_id:
+            traversed_edges.append(
+                WorkflowEdgeTraversalRecord(
+                    edge_id=event.edge_id,
+                    attempt=event.attempt,
+                    timestamp=event.timestamp,
+                )
+            )
+            continue
+        if event.event_type is WorkflowLifecycleEventType.CHECKPOINT_SAVED:
+            checkpoints.append(
+                WorkflowCheckpointRecord(
+                    refs=event.refs,
+                    timestamp=event.timestamp,
+                )
+            )
+            continue
+
+    return WorkflowLifecycleProjection(
+        workflow_id=workflow_id,
+        run_state=run_state,
+        terminal_reason_code=terminal_reason_code,
+        node_states=MappingProxyType(dict(node_states)),
+        node_attempts=MappingProxyType(dict(node_attempts)),
+        traversed_edges=tuple(traversed_edges),
+        checkpoints=tuple(checkpoints),
+        event_count=len(scoped),
+    )
+
+
 __all__ = [
     "MAX_WORKFLOW_LIFECYCLE_DATA_BYTES",
+    "MAX_WORKFLOW_LIFECYCLE_REF_BYTES",
+    "MAX_WORKFLOW_LIFECYCLE_REF_COUNT",
+    "MAX_WORKFLOW_LIFECYCLE_REFS_BYTES",
+    "WORKFLOW_LIFECYCLE_AGGREGATE_TYPE",
+    "WORKFLOW_LIFECYCLE_EVENT_TYPES",
     "WORKFLOW_LIFECYCLE_SCHEMA_VERSION",
+    "WorkflowCheckpointRecord",
     "WorkflowConformanceIssue",
     "WorkflowConformanceReport",
+    "WorkflowEdgeTraversalRecord",
     "WorkflowLifecycleEvent",
     "WorkflowLifecycleEventType",
+    "WorkflowLifecycleProjection",
     "WorkflowNodeLifecycleState",
     "WorkflowRunLifecycleState",
     "completed_node_ids",
     "effective_node_states",
     "lifecycle_event_for_spec",
     "next_runnable_node_ids",
+    "project_workflow_lifecycle",
     "validate_workflow_lifecycle_conformance",
 ]
