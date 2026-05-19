@@ -469,6 +469,7 @@ def invoke_plugin(
     expected_source_identity: str | None = None,
     expected_artifact_digest: str | None = None,
     is_disabled: bool = False,
+    cancellation_requested: bool = False,
 ) -> InvocationResult:
     """Invoke a UserLevel plugin command through the firewall.
 
@@ -506,6 +507,13 @@ def invoke_plugin(
             unconditionally. RFC: "the firewall MUST consult the disable
             record before any invocation, independently of whether trust
             records exist".
+        cancellation_requested: When True, the firewall short-circuits
+            the invocation: no command entrypoint is launched, the
+            terminal ``plugin.failed`` event records reason
+            ``cancelled``, and observability ``on_cancel`` hooks (if any)
+            run after the terminal event. The hook dispatch is fail-open
+            by contract — a hook failure cannot mask the original
+            cancellation cause from the returned ``InvocationResult``.
 
     Returns:
         `InvocationResult` with status, exit code, sha256 hashes of
@@ -652,6 +660,38 @@ def invoke_plugin(
                 )
             )
         return True, ""
+
+    # 0a. Cancellation short-circuit — fires before everything else so a
+    # caller-driven cancel signal cannot race the trust check, the
+    # confirmation gate, or the entrypoint launch. The terminal
+    # ``plugin.failed`` event records the original cancel cause and
+    # observability ``on_cancel`` hooks (fail-open, observation-only)
+    # run after the terminal event so a hook failure can never mask
+    # the cancellation cause that already reached the caller.
+    if cancellation_requested:
+        message = (
+            f"plugin {manifest.name!r} invocation cancelled before launch "
+            f"(correlation_id={correlation_id!r})"
+        )
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={"correlation_id": correlation_id, "reason": "cancelled"},
+            )
+        )
+        _run_lifecycle_hooks(HookKind.ON_CANCEL)
+        return InvocationResult(
+            status="failed",
+            exit_code=None,
+            message=message,
+            events=tuple(emitted),
+        )
 
     # 0. Disable check — fires before everything, including before the
     # trust check, so a plugin with no `required: true` permissions
@@ -943,6 +983,7 @@ def invoke_plugin(
                 },
             )
         )
+        _run_lifecycle_hooks(HookKind.ON_ERROR)
         return InvocationResult(
             status="failed",
             exit_code=126,
@@ -963,6 +1004,7 @@ def invoke_plugin(
                 provenance={"correlation_id": correlation_id},
             )
         )
+        _run_lifecycle_hooks(HookKind.ON_ERROR)
         return InvocationResult(
             status="failed",
             exit_code=126,
@@ -1003,6 +1045,7 @@ def invoke_plugin(
                 provenance={"correlation_id": correlation_id},
             )
         )
+        _run_lifecycle_hooks(HookKind.ON_ERROR)
         return InvocationResult(
             status="failed",
             exit_code=127,
@@ -1042,6 +1085,7 @@ def invoke_plugin(
                 },
             )
         )
+        _run_lifecycle_hooks(HookKind.ON_ERROR)
         return InvocationResult(
             status="failed",
             exit_code=124,
@@ -1076,6 +1120,7 @@ def invoke_plugin(
                 },
             )
         )
+        _run_lifecycle_hooks(HookKind.ON_ERROR)
         return InvocationResult(
             status="failed",
             exit_code=126,
@@ -1135,6 +1180,10 @@ def invoke_plugin(
         )
     )
     _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
+    # ``on_error`` runs strictly after the terminal ``plugin.failed`` event
+    # and after the v0.3 ``after_invocation`` hook, so a hook failure can
+    # never mask the non-zero exit cause that already reached the caller.
+    _run_lifecycle_hooks(HookKind.ON_ERROR)
     return InvocationResult(
         status="failed",
         exit_code=completed.returncode,

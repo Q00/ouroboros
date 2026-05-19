@@ -322,14 +322,19 @@ the contract and keeps review scope small.
 | `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin:tool:observe` | Deferred |
 | `before_artifact_write` | Before artifact service writes plugin-provided output | Policy / mutation gate | `fail_closed` | artifact-specific write permission | Deferred |
 | `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin:artifact:observe` | Deferred |
-| `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | Deferred |
-| `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin:lifecycle:read` or cleanup-specific scope | Deferred |
+| `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | **Included** |
+| `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin:lifecycle:read` (cleanup side effects deferred to a future `plugin:lifecycle:cleanup` scope) | **Included** |
 
-`on_error` and `on_cancel` are the terminal-outcome subset of the deferred hook
-vocabulary. The current #939 contract keeps them non-runnable and rejected by
-v0.3 manifests: future promotion may observe terminal wrapper outcomes, but it
-must not mask the original error/cancellation result, grant cleanup authority,
-or add dispatch without a dedicated runtime slice.
+`on_error` and `on_cancel` are the terminal-outcome subset of the v1 hook
+vocabulary, promoted out of the deferred bucket by Wave 1 PR E (#1131, refs
+#939 scope decision). They run only after the firewall has emitted the
+terminal `plugin.failed` event for the corresponding command lifecycle, are
+gated by the read-only `plugin:lifecycle:read` permission, and must declare
+`fail_open` — a hook failure cannot mask the original error/cancel cause that
+already reached the caller through the `InvocationResult` and the terminal
+audit event. Cleanup side effects remain explicitly out of scope; a future
+`plugin:lifecycle:cleanup` permission will gate that surface in a separate
+RFC slice.
 
 The following candidate hooks are intentionally **not** in the v1 hook
 vocabulary:

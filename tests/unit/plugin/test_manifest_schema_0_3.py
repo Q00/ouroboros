@@ -134,8 +134,6 @@ class TestV03HookEnum:
             "after_tool_call",
             "before_artifact_write",
             "after_artifact_write",
-            "on_error",
-            "on_cancel",
         ],
     )
     def test_deferred_name_rejected_at_schema_layer(

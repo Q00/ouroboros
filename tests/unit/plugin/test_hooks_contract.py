@@ -27,6 +27,8 @@ from ouroboros.plugin.hooks import (
     HOOK_RUNTIME_AUDIT_EVENTS,
     TERMINAL_DEFERRED_HOOK_KINDS,
     TERMINAL_DEFERRED_HOOK_NAMES,
+    TERMINAL_OBSERVABILITY_HOOK_KINDS,
+    TERMINAL_OBSERVABILITY_HOOK_NAMES,
     DeferredHookKind,
     ExcludedHookKind,
     HookFailurePolicy,
@@ -34,6 +36,7 @@ from ouroboros.plugin.hooks import (
     is_deferred_hook_kind,
     is_excluded_hook_kind,
     is_terminal_deferred_hook_kind,
+    is_terminal_observability_hook_kind,
     is_v1_failure_policy,
     is_v1_hook_kind,
 )
@@ -41,28 +44,37 @@ from ouroboros.plugin.hooks import (
 
 class TestHookKindEnumeration:
     def test_v1_hook_set_is_exact(self) -> None:
-        # The RFC lists exactly these two hooks as "Included" in v1.
+        # PR #1131 promotes the terminal observability hooks into v1 so
+        # ``HookKind`` now lists exactly four "Included" hooks.
         assert {kind.value for kind in HookKind} == {
             "before_invocation",
             "after_invocation",
-        }
-
-    def test_terminal_deferred_hook_set_is_exact(self) -> None:
-        assert {"on_error", "on_cancel"} == TERMINAL_DEFERRED_HOOK_NAMES
-        assert {kind.value for kind in TERMINAL_DEFERRED_HOOK_KINDS} == {
             "on_error",
             "on_cancel",
         }
-        assert {kind.value for kind in DeferredHookKind} > TERMINAL_DEFERRED_HOOK_NAMES
+
+    def test_terminal_observability_hook_set_is_exact(self) -> None:
+        assert {"on_error", "on_cancel"} == TERMINAL_OBSERVABILITY_HOOK_NAMES
+        assert {kind.value for kind in TERMINAL_OBSERVABILITY_HOOK_KINDS} == {
+            "on_error",
+            "on_cancel",
+        }
+        assert set(HookKind) >= TERMINAL_OBSERVABILITY_HOOK_KINDS
+
+    def test_terminal_deferred_hook_set_is_empty_after_promotion(self) -> None:
+        # The deferred-bucket aliases survive for one release as empty
+        # frozensets so downstream importers keep working.
+        assert frozenset() == TERMINAL_DEFERRED_HOOK_KINDS
+        assert frozenset() == TERMINAL_DEFERRED_HOOK_NAMES
 
     def test_deferred_hook_set_is_exact(self) -> None:
+        # ``on_error`` / ``on_cancel`` were lifted out of the deferred
+        # bucket by PR #1131; the remaining names stay deferred.
         assert {kind.value for kind in DeferredHookKind} == {
             "before_tool_call",
             "after_tool_call",
             "before_artifact_write",
             "after_artifact_write",
-            "on_error",
-            "on_cancel",
         }
 
     def test_excluded_hook_set_is_exact(self) -> None:
@@ -118,23 +130,37 @@ class TestRoutingHelpers:
     def test_v1_hook_kind_router(self) -> None:
         assert is_v1_hook_kind("before_invocation")
         assert is_v1_hook_kind("after_invocation")
+        # Terminal observability hooks were promoted into v1 by PR #1131.
+        assert is_v1_hook_kind("on_error")
+        assert is_v1_hook_kind("on_cancel")
         assert not is_v1_hook_kind("before_tool_call")
         assert not is_v1_hook_kind("on_event")
         assert not is_v1_hook_kind("unknown_hook")
 
-    def test_terminal_deferred_hook_kind_router(self) -> None:
-        assert is_terminal_deferred_hook_kind("on_error")
-        assert is_terminal_deferred_hook_kind("on_cancel")
+    def test_terminal_deferred_hook_kind_router_is_empty(self) -> None:
+        # The deferred-bucket router stays exported for one release but
+        # returns ``False`` for every input after the promotion.
+        assert not is_terminal_deferred_hook_kind("on_error")
+        assert not is_terminal_deferred_hook_kind("on_cancel")
         assert not is_terminal_deferred_hook_kind("before_tool_call")
         assert not is_terminal_deferred_hook_kind("before_invocation")
-        assert not is_v1_hook_kind("on_error")
-        assert not is_v1_hook_kind("on_cancel")
+
+    def test_terminal_observability_hook_kind_router(self) -> None:
+        assert is_terminal_observability_hook_kind("on_error")
+        assert is_terminal_observability_hook_kind("on_cancel")
+        assert not is_terminal_observability_hook_kind("before_invocation")
+        assert not is_terminal_observability_hook_kind("after_invocation")
+        assert not is_terminal_observability_hook_kind("before_tool_call")
+        assert not is_terminal_observability_hook_kind("unknown_hook")
 
     def test_deferred_hook_kind_router(self) -> None:
         assert is_deferred_hook_kind("before_tool_call")
         assert is_deferred_hook_kind("after_artifact_write")
         assert not is_deferred_hook_kind("before_invocation")
         assert not is_deferred_hook_kind("on_event")
+        # on_error / on_cancel are no longer deferred.
+        assert not is_deferred_hook_kind("on_error")
+        assert not is_deferred_hook_kind("on_cancel")
 
     def test_excluded_hook_kind_router(self) -> None:
         assert is_excluded_hook_kind("before_runtime_start")

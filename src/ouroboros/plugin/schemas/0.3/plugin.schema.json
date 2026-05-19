@@ -269,6 +269,40 @@
           {
             "if": {
               "properties": {
+                "name": {
+                  "const": "on_error"
+                }
+              },
+              "required": ["name"]
+            },
+            "then": {
+              "properties": {
+                "failure_policy": {
+                  "const": "fail_open"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "name": {
+                  "const": "on_cancel"
+                }
+              },
+              "required": ["name"]
+            },
+            "then": {
+              "properties": {
+                "failure_policy": {
+                  "const": "fail_open"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
                 "failure_policy": {
                   "const": "fail_closed"
                 }
@@ -291,7 +325,9 @@
             "type": "string",
             "enum": [
               "before_invocation",
-              "after_invocation"
+              "after_invocation",
+              "on_error",
+              "on_cancel"
             ]
           },
           "description": {
