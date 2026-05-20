@@ -1178,11 +1178,8 @@ class EventStore:
                 # SQL during recovery) can still fail strict rehydration —
                 # skip and log so the rest of the slice remains usable.
                 # The raw exception text can echo back replay-unsafe payload
-                # keys (e.g. ``api_key`` values surfaced inside Pydantic
-                # ``ValidationError`` messages) when the malformed row was
-                # populated from a poisoned source, so emit the exception
-                # *class* plus a bounded summary instead of the unbounded
-                # ``str(exc)``.
+                # values when the malformed row was populated from a poisoned
+                # source, so emit only safe metadata and the exception class.
                 logger.warning(
                     "event_store.replay_workflow_lifecycle.skip_malformed",
                     extra={
@@ -1190,7 +1187,6 @@ class EventStore:
                         "event_type": getattr(base, "type", None),
                         "aggregate_id": getattr(base, "aggregate_id", None),
                         "error": type(exc).__name__,
-                        "error_summary": str(exc)[:200],
                     },
                 )
                 continue

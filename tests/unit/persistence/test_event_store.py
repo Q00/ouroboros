@@ -1,6 +1,7 @@
 """Unit tests for ouroboros.persistence.event_store module."""
 
 import asyncio
+import logging
 
 import pytest
 
@@ -1152,8 +1153,10 @@ class TestWorkflowIRAppendGuard:
 class TestReplayWorkflowLifecycleResilience:
     """Test that replay_workflow_lifecycle() tolerates malformed rows."""
 
-    async def test_replay_skips_malformed_rows(self, event_store: EventStore) -> None:
-        """A row that fails ``from_base_event`` must not crash the replay."""
+    async def test_replay_skips_malformed_rows_without_logging_payload_values(
+        self, event_store: EventStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Malformed replay rows are skipped without logging poisoned payload values."""
         from ouroboros.orchestrator.workflow_lifecycle import (
             WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
             WorkflowLifecycleEvent,
@@ -1161,30 +1164,48 @@ class TestReplayWorkflowLifecycleResilience:
         )
         from ouroboros.persistence.schema import events_table
 
+        sentinel_secret = "sentinel-secret-replay-leak"
+        workflow_id = "wfspec_resilient"
         # Insert one valid lifecycle event via the supported helper.
         valid_event = WorkflowLifecycleEvent(
             event_type=WorkflowLifecycleEventType.RUN_CREATED,
-            workflow_id="wfspec_resilient",
+            workflow_id=workflow_id,
         )
         await event_store.append_workflow_lifecycle_event(valid_event)
 
         # Insert one malformed row directly, bypassing append()'s new guard.
         # This simulates a row written before the guard was in place or by an
-        # out-of-band recovery tool. ``workflow.run.failed`` requires a
-        # ``reason_code`` per ``WorkflowLifecycleEvent._validate_shape``, so a
-        # row missing it raises a Pydantic ``ValidationError`` during
-        # rehydration even though the BaseEvent itself is well-formed and
-        # lives in the same aggregate_id slice as the valid event.
+        # out-of-band recovery tool. A non-string ``reason_code`` raises a
+        # Pydantic ``ValidationError`` during rehydration; its string form can
+        # include the raw input value, so the replay warning must not log it.
         malformed = BaseEvent(
             type="workflow.run.failed",
             aggregate_type=WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
-            aggregate_id="wfspec_resilient",
-            data={"workflow_id": "wfspec_resilient"},
+            aggregate_id=workflow_id,
+            data={"workflow_id": workflow_id, "reason_code": {"value": sentinel_secret}},
         )
         assert event_store._engine is not None  # type: ignore[attr-defined]
         async with event_store._engine.begin() as conn:  # type: ignore[attr-defined]
             await conn.execute(events_table.insert().values(**malformed.to_db_dict()))
 
         # Replay must return only the valid event without raising.
-        replayed = await event_store.replay_workflow_lifecycle("wfspec_resilient")
+        caplog.set_level(logging.WARNING, logger="ouroboros.persistence.event_store")
+        replayed = await event_store.replay_workflow_lifecycle(workflow_id)
         assert replayed == [valid_event]
+
+        skip_records = [
+            record
+            for record in caplog.records
+            if record.getMessage() == "event_store.replay_workflow_lifecycle.skip_malformed"
+        ]
+        assert len(skip_records) == 1
+        record = skip_records[0]
+        assert record.event_type == "workflow.run.failed"
+        assert record.aggregate_id == workflow_id
+        assert record.error == "ValidationError"
+        assert not hasattr(record, "error_summary")
+
+        captured_log_text = "\n".join(
+            [record.getMessage(), *(str(value) for value in vars(record).values())]
+        )
+        assert sentinel_secret not in captured_log_text
