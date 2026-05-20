@@ -204,6 +204,7 @@ class AutoPipelineResult:
     last_lateral_text: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
+    defaulted_sections: tuple[str, ...] = ()
     blocker: str | None = None
     stop_reason_code: str | None = None
     runtime_backend: str | None = None
@@ -2597,6 +2598,7 @@ class AutoPipeline:
             last_lateral_text=state.last_lateral_text,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
+            defaulted_sections=tuple(ledger.summary().get("defaulted_sections", ())),
             blocker=blocker or state.last_error,
             stop_reason_code=state.last_error_code,
             runtime_backend=state.runtime_backend,
