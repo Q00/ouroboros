@@ -9,8 +9,9 @@ Per the locked boundary paragraph in ``docs/agentos/workflow-ir-v1.md``:
 the default boundary fixture pairs a validated ``WorkflowSpec`` with
 synthetic ``EventStore`` rows to prove source-event linkage, and it must
 not add dispatch, cache, persistence, or projection-record embedding to
-the IR. No production source file under ``src/`` is modified to make
-these tests pass.
+the IR. The only production-source dependency is the existing projection
+builder API used to derive stable step identifiers; the tests do not add
+runtime behavior.
 """
 
 from __future__ import annotations
