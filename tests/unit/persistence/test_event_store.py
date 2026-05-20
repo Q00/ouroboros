@@ -1110,6 +1110,50 @@ class TestWorkflowIRAppendGuard:
         replayed = await event_store.replay_workflow_lifecycle("wfspec_guarded")
         assert replayed == [event]
 
+    async def test_append_batch_rejects_workflow_ir_event(
+        self, event_store: EventStore
+    ) -> None:
+        """append_batch() must refuse raw workflow_ir BaseEvents.
+
+        Without the batch-side guard, a caller could bypass the
+        ``WorkflowLifecycleEvent`` redaction blocklist by wrapping a raw
+        ``BaseEvent`` with ``aggregate_type="workflow_ir"`` inside a list
+        and calling :meth:`EventStore.append_batch`. The batch guard must
+        run BEFORE any DB insert so a single bad row refuses the whole
+        transaction and the surrounding benign events are also dropped.
+        """
+        from ouroboros.orchestrator.workflow_lifecycle import (
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+        )
+
+        benign = BaseEvent(
+            type="test.event",
+            aggregate_type="test",
+            aggregate_id="batch-benign",
+            data={"ok": True},
+        )
+        bypass = BaseEvent(
+            type="workflow.run.created",
+            aggregate_type=WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+            aggregate_id="wfspec_batch_bypass",
+            data={"workflow_id": "wfspec_batch_bypass", "secret": "leak"},
+        )
+
+        with pytest.raises(PersistenceError) as exc_info:
+            await event_store.append_batch([benign, bypass])
+        message = str(exc_info.value)
+        assert "append_workflow_lifecycle_event" in message
+        assert "cannot be batched" in message
+
+        # Neither the guarded workflow_ir row nor the surrounding benign
+        # row may be persisted: the guard must run before the DB insert.
+        guarded_rows = await event_store.replay(
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE, "wfspec_batch_bypass"
+        )
+        assert guarded_rows == []
+        benign_rows = await event_store.replay("test", "batch-benign")
+        assert benign_rows == []
+
 
 class TestReplayWorkflowLifecycleResilience:
     """Test that replay_workflow_lifecycle() tolerates malformed rows."""

@@ -11,9 +11,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, event, func, or_, select, text
+
+if TYPE_CHECKING:
+    from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -368,6 +371,28 @@ class EventStore:
                 invalid_event,
                 operation="append_batch",
                 index=invalid_index,
+            )
+
+        # Mirror the ``append()`` workflow_ir guard so callers cannot bypass
+        # the ``WorkflowLifecycleEvent`` redaction blocklist by batching raw
+        # ``BaseEvent`` instances. Lifecycle persistence must go through
+        # :meth:`append_workflow_lifecycle_event`, which validates payloads
+        # at the Pydantic boundary before delegating to :meth:`append`.
+        # This check runs BEFORE any DB insert so a single bad row in the
+        # batch refuses the entire transaction.
+        from ouroboros.orchestrator.workflow_lifecycle import (
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+        )
+
+        workflow_ir_events = [
+            e for e in events if e.aggregate_type == WORKFLOW_LIFECYCLE_AGGREGATE_TYPE
+        ]
+        if workflow_ir_events:
+            raise PersistenceError(
+                "Workflow IR lifecycle events must be persisted via "
+                "append_workflow_lifecycle_event() and cannot be batched.",
+                operation="append_batch",
+                details={"count": len(workflow_ir_events)},
             )
 
         for attempt in range(3):
@@ -1062,7 +1087,7 @@ class EventStore:
 
     async def append_workflow_lifecycle_event(
         self,
-        lifecycle_event: Any,
+        lifecycle_event: WorkflowLifecycleEvent,
     ) -> None:
         """Append a workflow IR lifecycle event to the durable event family.
 
@@ -1126,7 +1151,7 @@ class EventStore:
     async def replay_workflow_lifecycle(
         self,
         workflow_id: str,
-    ) -> list[Any]:
+    ) -> list[WorkflowLifecycleEvent]:
         """Replay durable workflow lifecycle events for a workflow id.
 
         Returns a list of
@@ -1142,7 +1167,7 @@ class EventStore:
         )
 
         base_events = await self.replay(WORKFLOW_LIFECYCLE_AGGREGATE_TYPE, workflow_id)
-        rehydrated: list[Any] = []
+        rehydrated: list[WorkflowLifecycleEvent] = []
         for base in base_events:
             try:
                 rehydrated.append(WorkflowLifecycleEvent.from_base_event(base))
@@ -1152,13 +1177,20 @@ class EventStore:
                 # rows from before that guard (or rows inserted via direct
                 # SQL during recovery) can still fail strict rehydration —
                 # skip and log so the rest of the slice remains usable.
+                # The raw exception text can echo back replay-unsafe payload
+                # keys (e.g. ``api_key`` values surfaced inside Pydantic
+                # ``ValidationError`` messages) when the malformed row was
+                # populated from a poisoned source, so emit the exception
+                # *class* plus a bounded summary instead of the unbounded
+                # ``str(exc)``.
                 logger.warning(
                     "event_store.replay_workflow_lifecycle.skip_malformed",
                     extra={
                         "event_id": getattr(base, "id", None),
                         "event_type": getattr(base, "type", None),
                         "aggregate_id": getattr(base, "aggregate_id", None),
-                        "error": str(exc),
+                        "error": type(exc).__name__,
+                        "error_summary": str(exc)[:200],
                     },
                 )
                 continue
