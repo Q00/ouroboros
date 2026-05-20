@@ -33,7 +33,6 @@ MAX_WORKFLOW_LIFECYCLE_REF_BYTES: Final[int] = 512
 MAX_WORKFLOW_LIFECYCLE_REFS_BYTES: Final[int] = 4096
 MAX_WORKFLOW_LIFECYCLE_WORKFLOW_ID_LEN: Final[int] = 256
 MAX_WORKFLOW_LIFECYCLE_REASON_CODE_LEN: Final[int] = 1024
-MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES: Final[int] = 64
 MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS: Final[int] = 512
 _MAX_NESTING_DEPTH: Final[int] = 32
 
@@ -559,12 +558,6 @@ class WorkflowLifecycleEvent(BaseModel, frozen=True):
             msg = "Workflow lifecycle refs must be an iterable of strings"
             raise TypeError(msg)
         materialized = tuple(value)
-        if len(materialized) > MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES:
-            msg = (
-                f"Workflow lifecycle refs exceed "
-                f"{MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES} entries"
-            )
-            raise ValueError(msg)
         for index, ref in enumerate(materialized):
             if isinstance(ref, str) and len(ref) > MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS:
                 msg = (
@@ -1143,7 +1136,6 @@ __all__ = [
     "MAX_WORKFLOW_LIFECYCLE_REF_COUNT",
     "MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS",
     "MAX_WORKFLOW_LIFECYCLE_REFS_BYTES",
-    "MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES",
     "MAX_WORKFLOW_LIFECYCLE_WORKFLOW_ID_LEN",
     "WORKFLOW_LIFECYCLE_AGGREGATE_TYPE",
     "WORKFLOW_LIFECYCLE_EVENT_TYPES",

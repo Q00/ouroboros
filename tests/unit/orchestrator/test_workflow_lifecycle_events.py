@@ -37,7 +37,6 @@ from ouroboros.orchestrator.workflow_lifecycle import (
     MAX_WORKFLOW_LIFECYCLE_REF_BYTES,
     MAX_WORKFLOW_LIFECYCLE_REF_COUNT,
     MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS,
-    MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES,
     MAX_WORKFLOW_LIFECYCLE_WORKFLOW_ID_LEN,
     WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
     WORKFLOW_LIFECYCLE_EVENT_TYPES,
@@ -690,13 +689,22 @@ def test_lifecycle_event_rejects_oversized_workflow_id() -> None:
 
 
 def test_lifecycle_event_rejects_too_many_refs_entries() -> None:
-    """Ref count above the hardened ceiling is rejected at the validator."""
+    """Ref count above ``MAX_WORKFLOW_LIFECYCLE_REF_COUNT`` is rejected.
+
+    Exercises the pre-existing per-event ref-count ceiling (the operative
+    bound is ``MAX_WORKFLOW_LIFECYCLE_REF_COUNT``). The input size is the
+    smallest value that trips the limit so a regression that loosens the
+    bound by even one slot is caught.
+    """
     spec = _spec()
     refs = tuple(
         f"control://contract/ref-{index}"
-        for index in range(MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES + 1)
+        for index in range(MAX_WORKFLOW_LIFECYCLE_REF_COUNT + 1)
     )
-    with pytest.raises(ValidationError, match="refs exceed"):
+    with pytest.raises(
+        ValidationError,
+        match=f"refs exceed {MAX_WORKFLOW_LIFECYCLE_REF_COUNT} entries",
+    ):
         WorkflowLifecycleEvent(
             event_type=WorkflowLifecycleEventType.RUN_CREATED,
             workflow_id=spec.spec_id,
