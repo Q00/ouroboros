@@ -3956,9 +3956,7 @@ async def test_max_rounds_genuine_deadlock_still_blocks(tmp_path) -> None:
     async def answer(
         session_id: str, text: str, *, last_question: str | None = None
     ) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn(
-            "Still need more info", session_id, seed_ready=False, completed=False
-        )
+        return InterviewTurn("Still need more info", session_id, seed_ready=False, completed=False)
 
     state = AutoPipelineState(
         goal="Deploy the service to production and configure the required credentials",
