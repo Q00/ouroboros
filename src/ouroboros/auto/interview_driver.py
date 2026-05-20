@@ -354,6 +354,17 @@ class AutoInterviewDriver:
                 "seed_ready", state.interview_session_id, ledger, self.max_rounds
             )
 
+        open_gaps = ledger.open_gaps()
+        log.info(
+            "auto.interview.safe_default.entered",
+            auto_session_id=state.auto_session_id,
+            backend_done=backend_done,
+            ledger_done=ledger_done,
+            open_gaps=list(open_gaps),
+            ambiguity_score=turn.ambiguity_score,
+            max_rounds=self.max_rounds,
+        )
+
         finalization = None
         if not backend_done:
             finalization = finalize_safe_defaultable_gaps(
@@ -363,8 +374,30 @@ class AutoInterviewDriver:
                 pending_question=turn.question,
                 active_profile=getattr(self.answerer, "active_profile", None),
             )
+        else:
+            log.info(
+                "auto.interview.safe_default.skipped_backend_done",
+                auto_session_id=state.auto_session_id,
+                open_gaps=list(open_gaps),
+            )
+
+        if finalization is not None:
+            if not finalization.defaulted_sections and not finalization.unsafe_gaps:
+                log.info(
+                    "auto.interview.safe_default.no_gaps_to_default",
+                    auto_session_id=state.auto_session_id,
+                    ledger_done=ledger_done,
+                )
+            if finalization.unsafe_gaps:
+                log.info(
+                    "auto.interview.safe_default.unsafe_context_observed",
+                    auto_session_id=state.auto_session_id,
+                    unsafe_gaps=finalization.unsafe_gaps,
+                )
+
         if finalization is not None and finalization.completed and ledger.is_seed_ready():
             synthesis = build_safe_default_synthesis(finalization)
+            synthesis_pushed = False
             if synthesis and state.interview_session_id:
                 try:
                     synthesis_turn = _validate_turn(
@@ -381,6 +414,7 @@ class AutoInterviewDriver:
                             tool_name="interview.safe_default_synthesis",
                         )
                     )
+                    synthesis_pushed = True
                 except Exception as exc:  # noqa: BLE001 - preserve transcript/ledger SSOT
                     _revert_safe_default_entries(ledger, finalization.defaulted_sections)
                     blocker = (
@@ -394,6 +428,7 @@ class AutoInterviewDriver:
                         interview_session_id=state.interview_session_id,
                         defaulted_sections=finalization.defaulted_sections,
                         error=str(exc),
+                        synthesis_pushed=False,
                     )
                     state.ledger = ledger.to_dict()
                     state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
@@ -417,6 +452,12 @@ class AutoInterviewDriver:
                     return AutoInterviewResult(
                         "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
                     )
+            log.info(
+                "auto.interview.safe_default.closed",
+                auto_session_id=state.auto_session_id,
+                defaulted_sections=finalization.defaulted_sections,
+                synthesis_pushed=synthesis_pushed,
+            )
             state.ledger = ledger.to_dict()
             state.pending_question = None
             state.interview_completed = True
@@ -436,6 +477,15 @@ class AutoInterviewDriver:
             ambiguity_part = "ambiguity_score=unknown"
         open_gaps = ledger.open_gaps()
         gaps_part = f"open_gaps={open_gaps}" if open_gaps else "open_gaps=[]"
+        if ledger_done:
+            log.info(
+                "auto.interview.mutual_agreement_deadlock_at_max_rounds",
+                auto_session_id=state.auto_session_id,
+                backend_done=backend_done,
+                ledger_done=ledger_done,
+                open_gaps=list(open_gaps),
+                ambiguity_score=turn.ambiguity_score,
+            )
         blocker = (
             f"auto interview reached max_rounds={self.max_rounds} without closure: "
             f"backend_done={backend_done} ({ambiguity_part}), "
