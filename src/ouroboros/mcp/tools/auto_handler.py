@@ -1267,6 +1267,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     meta["ledger_provenance"] = {
         source: list(sections) for source, sections in result.ledger_provenance.items()
     }
+    meta["defaulted_sections"] = list(result.defaulted_sections)
     meta["evidence_backed_sections"] = list(result.evidence_backed_sections)
     meta["assumption_only_sections"] = list(result.assumption_only_sections)
     return meta

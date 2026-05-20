@@ -485,6 +485,7 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "run_session_id": "session_1",
         "pending_question": "Which runtime should be used?",
         "ledger_provenance": {},
+        "defaulted_sections": [],
         "evidence_backed_sections": [],
         "assumption_only_sections": [],
     }
@@ -1343,6 +1344,37 @@ def test_auto_handler_meta_exposes_run_reconciliation_fields() -> None:
     assert meta["run_reconciliation_status"] == "unsupported"
     assert meta["run_reconciliation_source"] == "generic"
     assert meta["run_reconciled_at"] == "2026-05-07T00:00:00+00:00"
+
+
+def test_auto_handler_meta_exposes_defaulted_sections_as_list() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _result_meta
+
+    meta = _result_meta(
+        AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+            defaulted_sections=("runtime_context", "failure_modes"),
+        )
+    )
+
+    assert meta["defaulted_sections"] == ["runtime_context", "failure_modes"]
+
+
+def test_auto_handler_meta_preserves_empty_defaulted_sections() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _result_meta
+
+    meta = _result_meta(
+        AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+        )
+    )
+
+    assert meta["defaulted_sections"] == []
 
 
 @pytest.mark.asyncio
