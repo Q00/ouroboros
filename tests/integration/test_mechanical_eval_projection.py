@@ -16,12 +16,9 @@ Scope:
       :class:`BaseEvent` rows and runs the read-only
       :class:`ProjectionBuilder` over them, never invoking a live
       runtime.
-    * No production code is modified. This PR depends on the already
-      landed artifact/verdict projection populator
-      (``projection_builder._artifact_from_event`` /
-      ``_verdict_from_event``). If that populator is missing in a
-      future replay environment, ``pytest.skip`` is raised with a
-      clear reason rather than failing the suite.
+    * Artifact and verdict projection are required: the fixture asserts
+      populated :class:`ArtifactRecord` and :class:`VerdictRecord`
+      rows rather than accepting a missing populator.
 
 Refs: #1131, #946.
 """
@@ -256,12 +253,6 @@ class TestMechanicalEvaluationFixture:
         result: ProjectionBuildResult,
     ) -> None:
         expected_count = fixture["expected"]["artifact_count"]
-        if not result.artifacts and expected_count:
-            pytest.skip(
-                "ArtifactRecord populator missing from projection builder; "
-                "this fixture depends on the artifact/verdict slot landing "
-                "(see #946 Wave 1 S1)."
-            )
         assert len(result.artifacts) == expected_count
         step_ids = {step.step_id for step in result.steps}
         for artifact in result.artifacts:
@@ -278,12 +269,6 @@ class TestMechanicalEvaluationFixture:
         result: ProjectionBuildResult,
     ) -> None:
         expected = fixture["expected"]["verdict"]
-        if not result.verdicts:
-            pytest.skip(
-                "VerdictRecord populator missing from projection builder; "
-                "this fixture depends on the artifact/verdict slot landing "
-                "(see #946 Wave 1 S1)."
-            )
         assert len(result.verdicts) == fixture["expected"]["verdict_count"]
         verdict = result.verdicts[0]
         assert isinstance(verdict, VerdictRecord)
