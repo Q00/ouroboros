@@ -698,8 +698,7 @@ def test_lifecycle_event_rejects_too_many_refs_entries() -> None:
     """
     spec = _spec()
     refs = tuple(
-        f"control://contract/ref-{index}"
-        for index in range(MAX_WORKFLOW_LIFECYCLE_REF_COUNT + 1)
+        f"control://contract/ref-{index}" for index in range(MAX_WORKFLOW_LIFECYCLE_REF_COUNT + 1)
     )
     with pytest.raises(
         ValidationError,
