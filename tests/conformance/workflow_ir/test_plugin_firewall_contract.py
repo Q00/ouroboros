@@ -31,6 +31,7 @@ from __future__ import annotations
 from datetime import timedelta
 import json
 from pathlib import Path
+from typing import Protocol
 
 import pytest
 
@@ -89,6 +90,10 @@ _BLOCKED_PLUGIN_MANIFEST: dict = {
         "command": "python -m conformance_blocked_plugin",
     },
 }
+
+
+class _PluginInvocationResult(Protocol):
+    status: str
 
 
 @pytest.fixture()
@@ -156,10 +161,70 @@ def test_blocked_invocation_emits_only_plugin_failed(blocked_plugin_program) -> 
     assert "plugin.completed" not in event_types
 
 
+def _workflow_history_from_plugin_result(
+    *,
+    spec: WorkflowSpec,
+    node_id: str,
+    result: _PluginInvocationResult,
+) -> tuple[WorkflowLifecycleEvent, ...]:
+    """Project a plugin firewall result into the harness lifecycle contract.
+
+    This helper is intentionally local to the conformance fixture: v1 does
+    not add live plugin dispatch or production projection behavior. It pins
+    the rule a future harness adapter must preserve — only an explicit
+    ``status='success'`` may become ``NODE_COMPLETED``. Permission-denied
+    blocked results stay on the failure path and carry a discriminating
+    ``plugin_blocked`` reason code.
+    """
+    status = result.status
+    if status == "success":
+        return (
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.RUN_CREATED,
+                workflow_id=spec.spec_id,
+                timestamp=FIXTURE_EPOCH,
+            ),
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+                workflow_id=spec.spec_id,
+                node_id=node_id,
+                attempt=1,
+                timestamp=FIXTURE_EPOCH + timedelta(seconds=1),
+            ),
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+                workflow_id=spec.spec_id,
+                timestamp=FIXTURE_EPOCH + timedelta(seconds=2),
+            ),
+        )
+    reason_code = "plugin_blocked" if status == "blocked" else f"plugin_{status}"
+    return (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=FIXTURE_EPOCH,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_FAILED,
+            workflow_id=spec.spec_id,
+            node_id=node_id,
+            attempt=1,
+            reason_code=reason_code,
+            timestamp=FIXTURE_EPOCH + timedelta(seconds=1),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_FAILED,
+            workflow_id=spec.spec_id,
+            reason_code=reason_code,
+            timestamp=FIXTURE_EPOCH + timedelta(seconds=2),
+        ),
+    )
+
+
 def test_blocked_invocation_cannot_present_as_node_completion(
     blocked_plugin_program,
 ) -> None:
-    """A blocked plugin invocation cannot be encoded as NODE_COMPLETED.
+    """A blocked plugin invocation is projected as failure, never completion.
 
     This is the load-bearing #1131 contract: when the harness projects
     plugin-firewall outcomes into Workflow IR lifecycle rows, it MUST map
@@ -167,19 +232,6 @@ def test_blocked_invocation_cannot_present_as_node_completion(
     reason_code). Encoding a blocked invocation as ``NODE_COMPLETED``
     would silently project a permission denial as a successful run, which
     is exactly the boundary #939 + #956 are designed to prevent.
-
-    We assert this by:
-      1. Running the firewall and recording its blocked status.
-      2. Building a *legal* lifecycle history that maps the blocked
-         outcome to ``NODE_FAILED`` + ``RUN_FAILED`` — conformance check
-         must accept it.
-      3. Building an *illegal* lifecycle history that maps the same
-         blocked outcome to ``NODE_COMPLETED`` + ``RUN_COMPLETED`` — the
-         workflow validator/spec construction will not raise (the graph
-         shape is fine), but the lifecycle is semantically wrong, so the
-         harness MUST refuse to emit it. We enforce this with an
-         assertion that the firewall result.status is NOT 'success', i.e.
-         no caller can derive a 'completed' lifecycle from this result.
     """
     events: list[dict] = []
     result = invoke_plugin(
@@ -199,43 +251,25 @@ def test_blocked_invocation_cannot_present_as_node_completion(
     spec_result = validate_workflow(spec)
     assert spec_result.ok, f"plugin-node spec must validate cleanly; got {spec_result.errors!r}"
 
-    # 2. Legal projection: blocked -> NODE_FAILED + RUN_FAILED(blocked).
-    blocked_history = (
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.RUN_CREATED,
-            workflow_id=spec.spec_id,
-            timestamp=FIXTURE_EPOCH,
-        ),
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.NODE_FAILED,
-            workflow_id=spec.spec_id,
-            node_id="plugin_task",
-            attempt=1,
-            reason_code="plugin_blocked",
-            timestamp=FIXTURE_EPOCH + timedelta(seconds=1),
-        ),
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.RUN_FAILED,
-            workflow_id=spec.spec_id,
-            reason_code="plugin_blocked",
-            timestamp=FIXTURE_EPOCH + timedelta(seconds=2),
-        ),
+    # 2. Harness projection contract: blocked -> NODE_FAILED + RUN_FAILED.
+    blocked_history = _workflow_history_from_plugin_result(
+        spec=spec,
+        node_id="plugin_task",
+        result=result,
     )
+    projected_types = tuple(event.event_type for event in blocked_history)
+    assert WorkflowLifecycleEventType.NODE_FAILED in projected_types
+    assert WorkflowLifecycleEventType.RUN_FAILED in projected_types
+    assert WorkflowLifecycleEventType.NODE_COMPLETED not in projected_types
+    assert WorkflowLifecycleEventType.RUN_COMPLETED not in projected_types
+    assert blocked_history[1].reason_code == "plugin_blocked"
+    assert blocked_history[2].reason_code == "plugin_blocked"
+
+    # 3. The projected blocked lifecycle remains legal Workflow IR history.
     report = validate_workflow_lifecycle_conformance(spec, blocked_history)
     assert report.ok, (
         "legal blocked projection (NODE_FAILED + RUN_FAILED) must conform; "
         f"got errors={[i.code for i in report.errors]!r}"
-    )
-
-    # 3. The illegal projection is blocked at the source: a caller cannot
-    # build a 'completed' lifecycle from a 'blocked' InvocationResult
-    # because the firewall never reports success on the blocked path. The
-    # assertion below is the single chokepoint the rest of the harness
-    # depends on — if it ever fails, plugin permission denials could
-    # silently project as successful node completions.
-    assert result.status != "success", (
-        "BLOCKED plugin invocations cannot be projected as NODE_COMPLETED — "
-        "the firewall must never return status='success' on the blocked path."
     )
 
 
