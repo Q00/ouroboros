@@ -270,7 +270,12 @@ class EventStore:
             async with self._engine.begin() as conn:
                 await conn.run_sync(metadata.create_all)
 
-    async def append(self, event: BaseEvent) -> None:
+    async def append(
+        self,
+        event: BaseEvent,
+        *,
+        _skip_workflow_ir_guard: bool = False,
+    ) -> None:
         """Append an event to the store.
 
         The operation is wrapped in a transaction for atomicity.
@@ -289,6 +294,26 @@ class EventStore:
             )
         if not isinstance(event, BaseEvent):
             self._raise_invalid_append_input(event, operation="append")
+
+        # Guard the workflow IR lifecycle family from direct raw appends:
+        # ``WorkflowLifecycleEvent`` enforces the replay-unsafe key blocklist
+        # at the Pydantic model boundary, so a caller that constructs a raw
+        # ``BaseEvent`` with ``aggregate_type="workflow_ir"`` would bypass
+        # that redaction. Route lifecycle persistence exclusively through
+        # :meth:`append_workflow_lifecycle_event`. The internal-only
+        # ``_skip_workflow_ir_guard`` flag is used by that helper after it has
+        # already validated the event via ``WorkflowLifecycleEvent``.
+        if event.aggregate_type == "workflow_ir" and not _skip_workflow_ir_guard:
+            raise PersistenceError(
+                "Workflow IR lifecycle events must be persisted via "
+                "append_workflow_lifecycle_event() to preserve the "
+                "WorkflowLifecycleEvent redaction guard.",
+                operation="append",
+                details={
+                    "aggregate_type": event.aggregate_type,
+                    "event_type": event.type,
+                },
+            )
 
         for attempt in range(3):
             try:
@@ -1091,7 +1116,12 @@ class EventStore:
                 operation="append_workflow_lifecycle_event",
                 details={"event_type": base_event.type},
             )
-        await self.append(base_event)
+        # Bypass the ``workflow_ir`` guard in :meth:`append` because the
+        # caller-side ``WorkflowLifecycleEvent`` validation above is the
+        # authoritative redaction boundary. The guard exists to refuse
+        # *direct* raw appends; this helper has already enforced the
+        # equivalent invariants.
+        await self.append(base_event, _skip_workflow_ir_guard=True)
 
     async def replay_workflow_lifecycle(
         self,
@@ -1104,13 +1134,35 @@ class EventStore:
         instances rehydrated from persisted ``BaseEvent`` rows. Other
         event families are not consulted.
         """
+        from pydantic import ValidationError
+
         from ouroboros.orchestrator.workflow_lifecycle import (
             WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
             WorkflowLifecycleEvent,
         )
 
         base_events = await self.replay(WORKFLOW_LIFECYCLE_AGGREGATE_TYPE, workflow_id)
-        return [WorkflowLifecycleEvent.from_base_event(base) for base in base_events]
+        rehydrated: list[Any] = []
+        for base in base_events:
+            try:
+                rehydrated.append(WorkflowLifecycleEvent.from_base_event(base))
+            except (ValueError, ValidationError) as exc:
+                # A malformed row must not crash the entire replay. The
+                # :meth:`append` guard prevents new bypasses, but historical
+                # rows from before that guard (or rows inserted via direct
+                # SQL during recovery) can still fail strict rehydration —
+                # skip and log so the rest of the slice remains usable.
+                logger.warning(
+                    "event_store.replay_workflow_lifecycle.skip_malformed",
+                    extra={
+                        "event_id": getattr(base, "id", None),
+                        "event_type": getattr(base, "type", None),
+                        "aggregate_id": getattr(base, "aggregate_id", None),
+                        "error": str(exc),
+                    },
+                )
+                continue
+        return rehydrated
 
     async def replay_lineage(self, lineage_id: str) -> list[BaseEvent]:
         """Replay all events for a lineage aggregate.

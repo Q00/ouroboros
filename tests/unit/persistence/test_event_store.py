@@ -1057,3 +1057,96 @@ class TestEventStoreTransactions:
         events = await event_store.replay("test", "tx-test")
         assert len(events) == 1
         assert events[0].data["committed"] is True
+
+
+class TestWorkflowIRAppendGuard:
+    """Test the workflow_ir aggregate-type guard on EventStore.append()."""
+
+    async def test_append_rejects_raw_workflow_ir_event(
+        self, event_store: EventStore
+    ) -> None:
+        """append() must refuse raw BaseEvents on the workflow_ir aggregate.
+
+        ``WorkflowLifecycleEvent`` enforces a replay-unsafe key blocklist at
+        its Pydantic boundary. A caller that constructs a raw ``BaseEvent``
+        with ``aggregate_type="workflow_ir"`` must not be able to bypass
+        that guard via :meth:`EventStore.append`.
+        """
+        bypass = BaseEvent(
+            type="workflow.run.created",
+            aggregate_type="workflow_ir",
+            aggregate_id="wfspec_bypass",
+            data={"workflow_id": "wfspec_bypass", "secret": "leak"},
+        )
+        with pytest.raises(PersistenceError) as exc_info:
+            await event_store.append(bypass)
+        assert "append_workflow_lifecycle_event" in str(exc_info.value)
+
+        # The guarded row must not be persisted.
+        from ouroboros.orchestrator.workflow_lifecycle import (
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+        )
+
+        rows = await event_store.replay(
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE, "wfspec_bypass"
+        )
+        assert rows == []
+
+    async def test_append_workflow_lifecycle_event_still_persists(
+        self, event_store: EventStore
+    ) -> None:
+        """The dedicated lifecycle helper must keep working end-to-end."""
+        from ouroboros.orchestrator.workflow_lifecycle import (
+            WorkflowLifecycleEvent,
+            WorkflowLifecycleEventType,
+        )
+
+        event = WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id="wfspec_guarded",
+        )
+        await event_store.append_workflow_lifecycle_event(event)
+
+        replayed = await event_store.replay_workflow_lifecycle("wfspec_guarded")
+        assert replayed == [event]
+
+
+class TestReplayWorkflowLifecycleResilience:
+    """Test that replay_workflow_lifecycle() tolerates malformed rows."""
+
+    async def test_replay_skips_malformed_rows(self, event_store: EventStore) -> None:
+        """A row that fails ``from_base_event`` must not crash the replay."""
+        from ouroboros.orchestrator.workflow_lifecycle import (
+            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+            WorkflowLifecycleEvent,
+            WorkflowLifecycleEventType,
+        )
+        from ouroboros.persistence.schema import events_table
+
+        # Insert one valid lifecycle event via the supported helper.
+        valid_event = WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id="wfspec_resilient",
+        )
+        await event_store.append_workflow_lifecycle_event(valid_event)
+
+        # Insert one malformed row directly, bypassing append()'s new guard.
+        # This simulates a row written before the guard was in place or by an
+        # out-of-band recovery tool. ``workflow.run.failed`` requires a
+        # ``reason_code`` per ``WorkflowLifecycleEvent._validate_shape``, so a
+        # row missing it raises a Pydantic ``ValidationError`` during
+        # rehydration even though the BaseEvent itself is well-formed and
+        # lives in the same aggregate_id slice as the valid event.
+        malformed = BaseEvent(
+            type="workflow.run.failed",
+            aggregate_type=WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
+            aggregate_id="wfspec_resilient",
+            data={"workflow_id": "wfspec_resilient"},
+        )
+        assert event_store._engine is not None  # type: ignore[attr-defined]
+        async with event_store._engine.begin() as conn:  # type: ignore[attr-defined]
+            await conn.execute(events_table.insert().values(**malformed.to_db_dict()))
+
+        # Replay must return only the valid event without raising.
+        replayed = await event_store.replay_workflow_lifecycle("wfspec_resilient")
+        assert replayed == [valid_event]
