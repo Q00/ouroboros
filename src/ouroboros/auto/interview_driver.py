@@ -491,7 +491,11 @@ class AutoInterviewDriver:
             f"backend_done={backend_done} ({ambiguity_part}), "
             f"ledger_done={ledger_done} ({gaps_part})"
         )
-        state.mark_blocked(blocker, tool_name="interview_driver")
+        state.mark_blocked(
+            blocker,
+            tool_name="interview_driver",
+            error_code="interview_max_rounds_exhausted",
+        )
         record_authoring_backend(state)
         self._save(state)
         return AutoInterviewResult(

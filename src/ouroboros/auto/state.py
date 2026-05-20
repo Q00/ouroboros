@@ -422,6 +422,10 @@ class AutoPipelineState:
     pending_question: str | None = None
     last_tool_name: str | None = None
     last_error: str | None = None
+    last_error_code: str | None = None
+    # Canonical stop-reason code for the most recent blocker, when one of the
+    # documented codes applies. None for blockers without a canonical code
+    # (those keep using the free-form ``last_error`` string).
     last_authoring_backend: str | None = None
     last_progress_message: str = "created"
     phase_started_at: str = field(default_factory=utc_now_iso)
@@ -600,9 +604,16 @@ class AutoPipelineState:
         """Move a session back to a valid recoverable phase."""
         self.transition(next_phase, message)
 
-    def mark_blocked(self, message: str, *, tool_name: str | None = None) -> None:
+    def mark_blocked(
+        self,
+        message: str,
+        *,
+        tool_name: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
         """Transition to blocked with actionable diagnostics."""
         self.last_tool_name = tool_name
+        self.last_error_code = error_code
         self.transition(AutoPhase.BLOCKED, message, error=message)
 
     def mark_failed(self, message: str, *, tool_name: str | None = None) -> None:
@@ -867,6 +878,7 @@ class AutoPipelineState:
         payload.setdefault("last_lateral_text", None)
         payload.setdefault("lateral_input_hash", None)
         payload.setdefault("active_domain_profile_name", None)
+        payload.setdefault("last_error_code", None)
         # RFC #809 Phase 2.2b — closed-loop recovery counters. Default the
         # three new fields so a pre-P2.2b state file loads as a fresh
         # recovery budget (round 0, no fingerprints, no personas tried).
@@ -1183,6 +1195,7 @@ class AutoPipelineState:
             "pending_question",
             "last_tool_name",
             "last_error",
+            "last_error_code",
             "active_domain_profile_name",
         )
         for field_name in optional_string_fields:

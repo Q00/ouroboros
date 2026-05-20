@@ -204,6 +204,7 @@ class AutoPipelineResult:
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
+    stop_reason_code: str | None = None
     runtime_backend: str | None = None
     opencode_mode: str | None = None
     invoked_by: str = "direct"
@@ -497,6 +498,7 @@ class AutoPipeline:
                     state.mark_blocked(
                         f"interview phase exceeded {interview_phase_timeout:.0f}s",
                         tool_name="interview_driver",
+                        error_code="interview_phase_deadline",
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
@@ -2594,6 +2596,7 @@ class AutoPipeline:
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
+            stop_reason_code=state.last_error_code,
             runtime_backend=state.runtime_backend,
             opencode_mode=state.opencode_mode,
             invoked_by=state.invoked_by(),
