@@ -204,8 +204,7 @@ class ProjectionBuilder:
         ended_at = self._last_event_at
 
         step_ids_by_slot_key = {
-            slot_key: stable_step_id(source_key, *_slot_parts(slot_key))
-            for slot_key in self._steps
+            slot_key: stable_step_id(source_key, *_slot_parts(slot_key)) for slot_key in self._steps
         }
         valid_step_ids = frozenset(step_ids_by_slot_key.values())
         artifacts = tuple(
