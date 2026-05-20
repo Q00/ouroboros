@@ -1,0 +1,86 @@
+# Mechanical-evaluation projection fixture (S3 of #946 follow-up sequence).
+#
+# This fixture describes the smallest deterministic execution + evaluation
+# history that should project to every v1 projection record family
+# (Run / Stage / Step / Artifact / Verdict) with source_event_ids populated.
+#
+# Slot: "Mechanical-evaluation fixture" — see
+# docs/agentos/projection-followups.md.
+#
+# Refs: #1131, #946.
+#
+# Scope guarantee:
+#   - 100% offline. No LLM call. No network. No external credentials.
+#   - Drives projection rebuild from a synthetic in-memory event slice,
+#     not from a live runtime — projection records are rebuildable
+#     read-models, per docs/agentos/projection-v1-scope.md.
+
+goal: "Project a one-write + one-pytest mechanical run into v1 records"
+
+# The synthetic history the fixture replays. The integration test
+# materializes these entries into ouroboros.events.base.BaseEvent rows
+# with stable identifiers so the projection builder produces a
+# byte-stable record bundle.
+seed_id: "seed_mechanical_eval_minimal"
+execution_id: "exec_mech_eval_minimal"
+
+# Two paired tool calls drive the run: one file write (Edit tool ->
+# StepKind.TOOL_CALL) and one shell command (Bash tool with `pytest
+# --collect-only` -> StepKind.SHELL_COMMAND). One harness artifact
+# attaches to the shell step, and one run-scope verdict references the
+# artifact as evidence.
+steps:
+  - call_id: "call_write_hello"
+    family: "tool"
+    tool_name: "Edit"
+    args_preview: "path=tmp/hello.txt"
+    result_preview: "ok"
+    duration_ms: 7
+    is_error: false
+  - call_id: "call_pytest_collect"
+    family: "tool"
+    tool_name: "Bash"
+    args_preview: "pytest --collect-only -q"
+    result_preview: "collected 0 items"
+    duration_ms: 42
+    is_error: false
+
+artifacts:
+  - artifact_id: "artifact_pytest_collect"
+    step_call_id: "call_pytest_collect"
+    step_family: "tool"
+    kind: "evidence"
+    path: "artifacts/pytest-collect.txt"
+    media_type: "text/plain"
+    summary: "pytest --collect-only output"
+
+verdicts:
+  - verdict_id: "verdict_run_mechanical_pass"
+    scope: "run"
+    outcome: "pass"
+    rationale: "mechanical checks passed"
+    evidence_artifact_ids:
+      - "artifact_pytest_collect"
+
+# Expectations the integration test enforces against the projected
+# bundle. They are recorded here so the fixture documents the contract
+# without re-reading the Python builder.
+expected:
+  run:
+    seed_id: "seed_mechanical_eval_minimal"
+    stage_count: 1
+  stage:
+    kind: "execute"
+    step_count: 2
+  steps:
+    - kind: "tool_call"
+      name: "Edit"
+      ok: true
+    - kind: "shell_command"
+      name: "Bash"
+      ok: true
+  artifact_count: 1
+  verdict_count: 1
+  verdict:
+    scope: "run"
+    outcome: "pass"
