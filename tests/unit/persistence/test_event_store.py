@@ -1062,9 +1062,7 @@ class TestEventStoreTransactions:
 class TestWorkflowIRAppendGuard:
     """Test the workflow_ir aggregate-type guard on EventStore.append()."""
 
-    async def test_append_rejects_raw_workflow_ir_event(
-        self, event_store: EventStore
-    ) -> None:
+    async def test_append_rejects_raw_workflow_ir_event(self, event_store: EventStore) -> None:
         """append() must refuse raw BaseEvents on the workflow_ir aggregate.
 
         ``WorkflowLifecycleEvent`` enforces a replay-unsafe key blocklist at
@@ -1087,9 +1085,7 @@ class TestWorkflowIRAppendGuard:
             WORKFLOW_LIFECYCLE_AGGREGATE_TYPE,
         )
 
-        rows = await event_store.replay(
-            WORKFLOW_LIFECYCLE_AGGREGATE_TYPE, "wfspec_bypass"
-        )
+        rows = await event_store.replay(WORKFLOW_LIFECYCLE_AGGREGATE_TYPE, "wfspec_bypass")
         assert rows == []
 
     async def test_append_workflow_lifecycle_event_still_persists(
@@ -1110,9 +1106,7 @@ class TestWorkflowIRAppendGuard:
         replayed = await event_store.replay_workflow_lifecycle("wfspec_guarded")
         assert replayed == [event]
 
-    async def test_append_batch_rejects_workflow_ir_event(
-        self, event_store: EventStore
-    ) -> None:
+    async def test_append_batch_rejects_workflow_ir_event(self, event_store: EventStore) -> None:
         """append_batch() must refuse raw workflow_ir BaseEvents.
 
         Without the batch-side guard, a caller could bypass the
