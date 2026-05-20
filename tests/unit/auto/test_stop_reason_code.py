@@ -139,6 +139,7 @@ async def test_blockers_without_canonical_code_leave_stop_reason_code_none(tmp_p
     Uses a pre-blocked state at SEED_GENERATION (grade_gate style) to exercise
     the ``_result()`` path without touching the interview-layer call sites.
     """
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("interview must not run when already blocked")
 
