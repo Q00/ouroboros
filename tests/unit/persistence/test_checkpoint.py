@@ -231,6 +231,38 @@ class TestCheckpointStorePathTraversal:
         expected = checkpoint_store._base_path / "checkpoint_x___PWNED.json"
         assert expected.exists()
 
+    def test_colon_in_seed_id_is_sanitized(self, checkpoint_store: CheckpointStore) -> None:
+        """Regression (#1155): a colon-bearing seed_id (e.g. an MCP cancel-checkpoint
+        id) is sanitized so the checkpoint is writable on Windows (WinError 123)."""
+        seed_id = "ouroboros_agent_process_cancel:mcp_job:job_19a927b41098"
+        cp = CheckpointData.create(seed_id, "phase1", {"a": 1})
+        result = checkpoint_store.save(cp)
+        assert result.is_ok
+        # Colons -> underscores -> a filename valid on every platform.
+        expected = (
+            checkpoint_store._base_path
+            / "checkpoint_ouroboros_agent_process_cancel_mcp_job_job_19a927b41098.json"
+        )
+        assert expected.exists()
+        # And it round-trips through load() (which re-sanitizes identically).
+        load_result = checkpoint_store.load(seed_id)
+        assert load_result.is_ok
+        assert load_result.value.phase == "phase1"
+
+    @pytest.mark.parametrize("reserved", [":", "*", "?", '"', "<", ">", "|"])
+    def test_windows_reserved_chars_are_sanitized(
+        self, checkpoint_store: CheckpointStore, reserved: str
+    ) -> None:
+        """seed_ids with Windows-reserved filename characters are sanitized so the
+        on-disk checkpoint path is valid on Windows."""
+        cp = CheckpointData.create(f"seed{reserved}id", "phase1", {"a": 1})
+        result = checkpoint_store.save(cp)
+        assert result.is_ok
+        # The reserved char must not survive into the filename.
+        path = checkpoint_store._get_checkpoint_path(f"seed{reserved}id")
+        assert reserved not in path.name
+        assert path.exists()
+
     def test_traversal_does_not_escape_base_dir(self, checkpoint_store: CheckpointStore) -> None:
         """No checkpoint file is created outside the base directory."""
         cp = CheckpointData.create("../../../etc/passwd", "phase1", {})

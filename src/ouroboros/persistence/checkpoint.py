@@ -183,8 +183,9 @@ class CheckpointStore:
     def _sanitize_seed_id(seed_id: str, *, max_len: int | None = None) -> str:
         """Sanitize seed_id to prevent path traversal attacks.
 
-        Strips null bytes, removes path separators and parent-directory
-        sequences, and caps length so that the **full** checkpoint
+        Strips null bytes, removes path separators, Windows-reserved
+        filename characters and parent-directory sequences, and caps
+        length so that the **full** checkpoint
         filename (prefix + seed + suffix) stays within the 255-byte
         filesystem limit.  When truncation is needed a SHA-256 hash
         fragment is appended to keep the mapping collision-resistant.
@@ -211,8 +212,13 @@ class CheckpointStore:
         # so that inputs like "x/../../PWNED" are neutralised.
         sanitized = sanitized.replace("..", "")
 
-        # Replace path separators with underscores
-        sanitized = re.sub(r"[/\\]", "_", sanitized)
+        # Replace path separators AND Windows-reserved filename characters
+        # (: * ? " < > |) with underscores. On POSIX only "/" is illegal in a
+        # filename, but Windows forbids these too; without stripping them a
+        # colon-bearing seed_id (e.g. an MCP cancel-checkpoint id like
+        # "..._cancel:mcp_job:job_<id>") yields an invalid path and the write
+        # fails with WinError 123. See https://github.com/Q00/ouroboros/issues/1155
+        sanitized = re.sub(r'[/\\:*?"<>|]', "_", sanitized)
 
         # Cap length to the remaining filename budget.
         # When truncation is required, append a hash suffix for collision resistance.
