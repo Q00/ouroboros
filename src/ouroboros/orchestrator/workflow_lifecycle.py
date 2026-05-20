@@ -31,6 +31,11 @@ MAX_WORKFLOW_LIFECYCLE_DATA_BYTES: Final[int] = 8192
 MAX_WORKFLOW_LIFECYCLE_REF_COUNT: Final[int] = 16
 MAX_WORKFLOW_LIFECYCLE_REF_BYTES: Final[int] = 512
 MAX_WORKFLOW_LIFECYCLE_REFS_BYTES: Final[int] = 4096
+MAX_WORKFLOW_LIFECYCLE_WORKFLOW_ID_LEN: Final[int] = 256
+MAX_WORKFLOW_LIFECYCLE_REASON_CODE_LEN: Final[int] = 1024
+MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES: Final[int] = 64
+MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS: Final[int] = 512
+_MAX_NESTING_DEPTH: Final[int] = 32
 
 WORKFLOW_LIFECYCLE_AGGREGATE_TYPE: Final[str] = "workflow_ir"
 """EventStore aggregate-type bucket for #956 Workflow IR lifecycle events.
@@ -369,7 +374,13 @@ def _is_replay_unsafe_ref(ref: str) -> bool:
     return any(_is_replay_unsafe_key(candidate) for candidate in candidates)
 
 
-def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
+def _normalize_json_value(name: str, value: Any, path: str, _depth: int = 0) -> JsonValue:
+    if _depth > _MAX_NESTING_DEPTH:
+        msg = (
+            f"Workflow lifecycle {name} value at {path} exceeds maximum nesting depth "
+            f"of {_MAX_NESTING_DEPTH}"
+        )
+        raise ValueError(msg)
     if value is None or isinstance(value, str | int | bool):
         return value
     if isinstance(value, float):
@@ -385,11 +396,11 @@ def _normalize_json_value(name: str, value: Any, path: str) -> JsonValue:
             if _is_replay_unsafe_key(key):
                 msg = f"Workflow lifecycle {name} must not persist replay-unsafe key {key!r}"
                 raise ValueError(msg)
-            normalized[key] = _normalize_json_value(name, item, f"{path}.{key}")
+            normalized[key] = _normalize_json_value(name, item, f"{path}.{key}", _depth + 1)
         return normalized
     if isinstance(value, list | tuple):
         return [
-            _normalize_json_value(name, item, f"{path}[{index}]")
+            _normalize_json_value(name, item, f"{path}[{index}]", _depth + 1)
             for index, item in enumerate(value)
         ]
     msg = f"Workflow lifecycle {name} value at {path} must be JSON serializable"
@@ -514,12 +525,30 @@ class WorkflowLifecycleEvent(BaseModel, frozen=True):
     @field_validator("workflow_id")
     @classmethod
     def _workflow_id_non_blank(cls, value: str) -> str:
-        return _normalize_non_blank("workflow_id", value)
+        normalized = _normalize_non_blank("workflow_id", value)
+        if len(normalized) > MAX_WORKFLOW_LIFECYCLE_WORKFLOW_ID_LEN:
+            msg = (
+                f"Workflow lifecycle workflow_id exceeds "
+                f"{MAX_WORKFLOW_LIFECYCLE_WORKFLOW_ID_LEN} characters"
+            )
+            raise ValueError(msg)
+        return normalized
 
     @field_validator("node_id", "edge_id", "reason_code")
     @classmethod
     def _optional_fields_non_blank(cls, value: str | None, info: Any) -> str | None:
-        return _normalize_optional_non_blank(str(info.field_name), value)
+        normalized = _normalize_optional_non_blank(str(info.field_name), value)
+        if (
+            normalized is not None
+            and info.field_name == "reason_code"
+            and len(normalized) > MAX_WORKFLOW_LIFECYCLE_REASON_CODE_LEN
+        ):
+            msg = (
+                f"Workflow lifecycle reason_code exceeds "
+                f"{MAX_WORKFLOW_LIFECYCLE_REASON_CODE_LEN} characters"
+            )
+            raise ValueError(msg)
+        return normalized
 
     @field_validator("refs", mode="before")
     @classmethod
@@ -529,7 +558,22 @@ class WorkflowLifecycleEvent(BaseModel, frozen=True):
         if isinstance(value, str) or not isinstance(value, Iterable):
             msg = "Workflow lifecycle refs must be an iterable of strings"
             raise TypeError(msg)
-        return _normalize_refs(value)
+        materialized = tuple(value)
+        if len(materialized) > MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES:
+            msg = (
+                f"Workflow lifecycle refs exceed "
+                f"{MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES} entries"
+            )
+            raise ValueError(msg)
+        for index, ref in enumerate(materialized):
+            if isinstance(ref, str) and len(ref) > MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS:
+                msg = (
+                    f"Workflow lifecycle refs exceed "
+                    f"{MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS} characters "
+                    f"at index {index}"
+                )
+                raise ValueError(msg)
+        return _normalize_refs(materialized)
 
     @field_validator("data", mode="before")
     @classmethod
@@ -1094,9 +1138,13 @@ def project_workflow_lifecycle(
 
 __all__ = [
     "MAX_WORKFLOW_LIFECYCLE_DATA_BYTES",
+    "MAX_WORKFLOW_LIFECYCLE_REASON_CODE_LEN",
     "MAX_WORKFLOW_LIFECYCLE_REF_BYTES",
     "MAX_WORKFLOW_LIFECYCLE_REF_COUNT",
+    "MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS",
     "MAX_WORKFLOW_LIFECYCLE_REFS_BYTES",
+    "MAX_WORKFLOW_LIFECYCLE_REFS_ENTRIES",
+    "MAX_WORKFLOW_LIFECYCLE_WORKFLOW_ID_LEN",
     "WORKFLOW_LIFECYCLE_AGGREGATE_TYPE",
     "WORKFLOW_LIFECYCLE_EVENT_TYPES",
     "WORKFLOW_LIFECYCLE_SCHEMA_VERSION",
