@@ -369,6 +369,8 @@ class AutoPipelineState:
     max_repair_rounds: int = 5
     interview_session_id: str | None = None
     interview_completed: bool = False
+    # PR-B1 / #821: "ledger_only" when interview closed on ledger consensus while backend refused; None otherwise.
+    interview_closure_mode: str | None = None
     seed_id: str | None = None
     seed_path: str | None = None
     seed_origin: SeedOrigin = SeedOrigin.NONE
@@ -879,6 +881,7 @@ class AutoPipelineState:
         payload.setdefault("lateral_input_hash", None)
         payload.setdefault("active_domain_profile_name", None)
         payload.setdefault("last_error_code", None)
+        payload.setdefault("interview_closure_mode", None)
         # RFC #809 Phase 2.2b — closed-loop recovery counters. Default the
         # three new fields so a pre-P2.2b state file loads as a fresh
         # recovery budget (round 0, no fingerprints, no personas tried).
@@ -1197,6 +1200,7 @@ class AutoPipelineState:
             "last_error",
             "last_error_code",
             "active_domain_profile_name",
+            "interview_closure_mode",
         )
         for field_name in optional_string_fields:
             value = getattr(self, field_name)

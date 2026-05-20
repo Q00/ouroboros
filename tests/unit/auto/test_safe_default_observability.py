@@ -71,13 +71,14 @@ def _ledger_all_filled_except(
 
 @pytest.mark.asyncio
 async def test_safe_default_logs_no_gaps_to_default(tmp_path) -> None:
-    """Ledger already seed-ready but backend keeps asking → mutual-agreement deadlock path.
+    """Ledger already seed-ready but backend keeps asking → ledger-only closure path (PR-B1).
 
     The driver enters the safe-default fallback block after max_rounds with
     backend_done=False and ledger_done=True.  ``finalize_safe_defaultable_gaps``
     returns an empty defaulted_sections (no gaps to fill), so the driver emits
-    ``no_gaps_to_default``.  Because ledger_done=True at the final blocker path
-    the driver also emits ``mutual_agreement_deadlock_at_max_rounds``.
+    ``no_gaps_to_default``.  PR-B1 / #821: because ledger_done=True and
+    backend_done=False, the driver now takes the ledger-only closure path and
+    emits ``ledger_only_closure`` instead of blocking.
     """
     # Ledger is fully filled — is_seed_ready() returns True from round 0.
     ledger = _ledger_all_filled_except()
@@ -106,11 +107,11 @@ async def test_safe_default_logs_no_gaps_to_default(tmp_path) -> None:
     events = [e["event"] for e in captured]
     assert "auto.interview.safe_default.entered" in events
     assert "auto.interview.safe_default.no_gaps_to_default" in events
-    assert "auto.interview.mutual_agreement_deadlock_at_max_rounds" in events
+    assert "auto.interview.ledger_only_closure" in events
 
-    # Behaviour unchanged: blocked because backend never agreed.
-    assert result.status == "blocked"
-    assert "without closure" in (result.blocker or "")
+    # PR-B1 / #821: ledger-only consensus closes the interview rather than blocking.
+    assert result.status == "seed_ready"
+    assert state.interview_closure_mode == "ledger_only"
 
 
 # ---------------------------------------------------------------------------

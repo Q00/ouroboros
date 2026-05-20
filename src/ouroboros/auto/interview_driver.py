@@ -477,6 +477,29 @@ class AutoInterviewDriver:
             ambiguity_part = "ambiguity_score=unknown"
         open_gaps = ledger.open_gaps()
         gaps_part = f"open_gaps={open_gaps}" if open_gaps else "open_gaps=[]"
+        # PR-B1 / #821: ledger-only consensus — structural completeness overrides backend stylistic
+        # ambiguity at max_rounds. Recorded as non-blocking advisory via interview_closure_mode so
+        # the result envelope surfaces the closure mode.
+        if ledger_done and not backend_done:
+            log.info(
+                "auto.interview.ledger_only_closure",
+                auto_session_id=state.auto_session_id,
+                ambiguity_score=turn.ambiguity_score,
+                open_gaps=list(open_gaps),
+                interview_session_id=state.interview_session_id,
+            )
+            state.pending_question = None
+            state.interview_completed = True
+            state.interview_closure_mode = "ledger_only"
+            state.mark_progress(
+                f"interview closed on ledger-only consensus at round {self.max_rounds}"
+                f" (backend ambiguity={turn.ambiguity_score})",
+                tool_name="interview_driver",
+            )
+            self._save(state)
+            return AutoInterviewResult(
+                "seed_ready", state.interview_session_id, ledger, self.max_rounds
+            )
         if ledger_done:
             log.info(
                 "auto.interview.mutual_agreement_deadlock_at_max_rounds",

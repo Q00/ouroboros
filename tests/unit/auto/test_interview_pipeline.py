@@ -1514,14 +1514,11 @@ async def test_interview_driver_blocks_when_backend_never_marks_ready(tmp_path) 
 
     result = await driver.run(state, ledger)
 
-    assert result.status == "blocked"
-    blocker = result.blocker or ""
-    # Ledger is pre-filled (`_fill_ready`) so ledger_done is True, but the
-    # mock backend never sends a completion flag — the mutual-agreement gate
-    # refuses closure and emits the structured diagnostic naming both states.
-    assert "without closure" in blocker
-    assert "backend_done=False" in blocker
-    assert "ledger_done=True" in blocker
+    # PR-B1 / #821: ledger pre-filled + backend never closes → ledger-only closure, not blocked.
+    assert result.status == "seed_ready"
+    assert state.interview_completed is True
+    assert state.interview_closure_mode == "ledger_only"
+    assert state.phase != AutoPhase.BLOCKED
 
 
 @pytest.mark.asyncio
@@ -3919,3 +3916,64 @@ async def test_pipeline_normalizes_persisted_seed_artifact_on_resume(tmp_path) -
     criteria_text = "\n".join(resumed_seed.acceptance_criteria)
     assert "Final report includes auto session id" not in criteria_text
     assert "CLI exits 2 on invalid flags" in criteria_text
+
+
+@pytest.mark.asyncio
+async def test_max_rounds_ledger_only_consensus_closes_interview(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_ledger_only")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "Still not sure", session_id, seed_ready=False, completed=False, ambiguity_score=0.45
+        )
+
+    state = AutoPipelineState(goal=_fully_specified_hello_goal(), cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    assert ledger.is_seed_ready(), "pre-condition: goal text must pre-fill the ledger"
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=2,
+        timeout_seconds=5,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert state.interview_completed is True
+    assert state.interview_closure_mode == "ledger_only"
+    assert state.phase != AutoPhase.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_max_rounds_genuine_deadlock_still_blocks(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_deadlock")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "Still need more info", session_id, seed_ready=False, completed=False
+        )
+
+    state = AutoPipelineState(
+        goal="Deploy the service to production and configure the required credentials",
+        cwd=str(tmp_path),
+    )
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=2,
+        timeout_seconds=5,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_closure_mode is None
+    assert "max_rounds" in (result.blocker or "")

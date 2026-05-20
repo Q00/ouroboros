@@ -178,6 +178,7 @@ class AutoPipelineResult:
     run_subagent: dict[str, Any] | None = None
     current_round: int = 0
     pending_question: str | None = None
+    interview_closure_mode: str | None = None
     last_progress_message: str | None = None
     last_progress_at: str | None = None
     last_grade: str | None = None
@@ -2572,6 +2573,7 @@ class AutoPipeline:
             run_subagent=run_subagent or state.run_subagent or None,
             current_round=state.current_round,
             pending_question=state.pending_question,
+            interview_closure_mode=state.interview_closure_mode,
             last_progress_message=state.last_progress_message,
             last_progress_at=state.last_progress_at,
             last_grade=state.last_grade,
