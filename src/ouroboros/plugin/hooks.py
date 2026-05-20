@@ -56,6 +56,23 @@ class HookKind(StrEnum):
     #: entrypoint invocations only.
     AFTER_INVOCATION = "after_invocation"
 
+    #: Observability-only hook that runs after the firewall has emitted
+    #: a terminal ``plugin.failed`` event. The hook receives a bounded,
+    #: redacted payload; its exit code, output, or failure can never
+    #: mask the original error cause, which has already reached the
+    #: caller through the terminal event and the returned
+    #: ``InvocationResult``. Must declare ``fail_open`` and is gated by
+    #: the read-only ``plugin:lifecycle:read`` permission.
+    ON_ERROR = "on_error"
+
+    #: Observability-only hook that runs after a cancellation signal
+    #: forced the firewall to emit a terminal ``plugin.failed`` event
+    #: with reason ``cancelled``. Same fail-open / observation-only /
+    #: bounded-payload contract as :data:`ON_ERROR`; cleanup side
+    #: effects are explicitly out of scope and must wait for a
+    #: separate ``plugin:lifecycle:cleanup`` permission to be defined.
+    ON_CANCEL = "on_cancel"
+
 
 class DeferredHookKind(StrEnum):
     """Hook names deferred to follow-up RFC slices.
@@ -78,25 +95,31 @@ class DeferredHookKind(StrEnum):
     AFTER_TOOL_CALL = "after_tool_call"
     BEFORE_ARTIFACT_WRITE = "before_artifact_write"
     AFTER_ARTIFACT_WRITE = "after_artifact_write"
-    ON_ERROR = "on_error"
-    ON_CANCEL = "on_cancel"
 
 
-TERMINAL_DEFERRED_HOOK_KINDS: Final[frozenset[DeferredHookKind]] = frozenset(
-    {DeferredHookKind.ON_ERROR, DeferredHookKind.ON_CANCEL}
+#: Frozen subset of :class:`HookKind` that observes terminal plugin-wrapper
+#: outcomes only. ``on_error`` runs after the firewall emits a terminal
+#: ``plugin.failed`` event; ``on_cancel`` runs after an explicit cancellation
+#: signal forces the wrapper to fail with cause ``cancelled``. Both are
+#: observation-only: their failure cannot mask the original error/cancel cause,
+#: and they are constrained to ``fail_open`` at the manifest layer.
+TERMINAL_OBSERVABILITY_HOOK_KINDS: Final[frozenset[HookKind]] = frozenset(
+    {HookKind.ON_ERROR, HookKind.ON_CANCEL}
 )
-"""Deferred hooks that observe terminal plugin-wrapper outcomes only.
 
-These hooks are contractually distinct from tool-call and artifact/state
-interception hooks. They may eventually observe errors or cancellation, but they
-are not v1 hooks, cannot mask the original error/cancel result, and are not
-accepted by v0.3 manifests.
-"""
-
-TERMINAL_DEFERRED_HOOK_NAMES: Final[frozenset[str]] = frozenset(
-    hook.value for hook in TERMINAL_DEFERRED_HOOK_KINDS
+TERMINAL_OBSERVABILITY_HOOK_NAMES: Final[frozenset[str]] = frozenset(
+    hook.value for hook in TERMINAL_OBSERVABILITY_HOOK_KINDS
 )
-"""String names for deferred terminal outcome hooks."""
+"""String names for v1 terminal observability hooks."""
+
+#: Backward-compatible aliases for the original #1129 export. ``on_error`` and
+#: ``on_cancel`` are no longer deferred; the empty frozensets keep downstream
+#: importers from breaking while the new
+#: :data:`TERMINAL_OBSERVABILITY_HOOK_KINDS` /
+#: :data:`TERMINAL_OBSERVABILITY_HOOK_NAMES` exports describe the promoted v1
+#: vocabulary.
+TERMINAL_DEFERRED_HOOK_KINDS: Final[frozenset[DeferredHookKind]] = frozenset()
+TERMINAL_DEFERRED_HOOK_NAMES: Final[frozenset[str]] = frozenset()
 
 
 class ExcludedHookKind(StrEnum):
@@ -196,11 +219,26 @@ def is_deferred_hook_kind(value: str) -> bool:
 def is_terminal_deferred_hook_kind(value: str) -> bool:
     """Return True iff ``value`` names a deferred terminal outcome hook.
 
-    ``on_error`` and ``on_cancel`` are intentionally kept outside the v1
-    manifest/runtime vocabulary. This helper gives validators, docs, and future
-    migration code a precise contract bucket without making the hooks runnable.
+    Retained as a backward-compatible no-op routing helper after PR #1131 / #939
+    Wave 1-E promoted ``on_error`` and ``on_cancel`` into the v1 manifest
+    vocabulary. Manifests should consume :func:`is_v1_hook_kind` or the new
+    :func:`is_terminal_observability_hook_kind` helper instead — this function
+    now returns ``False`` for every input.
     """
     return value in TERMINAL_DEFERRED_HOOK_NAMES
+
+
+def is_terminal_observability_hook_kind(value: str) -> bool:
+    """Return True iff ``value`` names a v1 terminal observability hook.
+
+    ``on_error`` and ``on_cancel`` are observation-only lifecycle hooks: they
+    receive bounded, redacted payloads after the firewall has emitted the
+    terminal ``plugin.failed`` event, and their failures cannot mask the
+    original error or cancel cause. Validators and runtime dispatch reference
+    :data:`TERMINAL_OBSERVABILITY_HOOK_NAMES` through this helper so the
+    contract intent is observable at every call site.
+    """
+    return value in TERMINAL_OBSERVABILITY_HOOK_NAMES
 
 
 def is_excluded_hook_kind(value: str) -> bool:
@@ -238,6 +276,8 @@ __all__ = [
     "HOOK_RUNTIME_AUDIT_EVENTS",
     "TERMINAL_DEFERRED_HOOK_KINDS",
     "TERMINAL_DEFERRED_HOOK_NAMES",
+    "TERMINAL_OBSERVABILITY_HOOK_KINDS",
+    "TERMINAL_OBSERVABILITY_HOOK_NAMES",
     "DeferredHookKind",
     "ExcludedHookKind",
     "HookFailurePolicy",
@@ -246,6 +286,7 @@ __all__ = [
     "is_excluded_hook_kind",
     "is_hook_lifecycle_scope",
     "is_terminal_deferred_hook_kind",
+    "is_terminal_observability_hook_kind",
     "is_v1_failure_policy",
     "is_v1_hook_kind",
 ]

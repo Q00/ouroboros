@@ -37,7 +37,9 @@ from ouroboros.plugin.hooks import (
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
     HOOK_LIFECYCLE_POLICY_SCOPE,
+    HOOK_LIFECYCLE_READ_SCOPE,
     HOOK_LIFECYCLE_SCOPES,
+    TERMINAL_OBSERVABILITY_HOOK_NAMES,
     HookFailurePolicy,
     HookKind,
     is_deferred_hook_kind,
@@ -560,6 +562,25 @@ def _validate_hook_lifecycle_permission(
     if schema_version != "0.3" or not is_v1_hook_kind(raw["name"]):
         return
     permissions = raw.get("permissions", ())
+    if raw["name"] in TERMINAL_OBSERVABILITY_HOOK_NAMES:
+        if HOOK_LIFECYCLE_READ_SCOPE not in permissions:
+            raise PluginManifestError(
+                "v0.3 terminal observability hook must declare plugin:lifecycle:read",
+                path=str(manifest_path),
+                json_pointer=f"/hooks/{hook_index}/permissions",
+                expected=f"{HOOK_LIFECYCLE_READ_SCOPE!r} in hooks[].permissions",
+                got=permissions,
+            )
+        if HOOK_LIFECYCLE_READ_SCOPE not in declared_required_permission_scopes:
+            raise PluginManifestError(
+                "v0.3 terminal observability hook read permission must be required",
+                path=str(manifest_path),
+                json_pointer="/permissions",
+                expected=(f"top-level {HOOK_LIFECYCLE_READ_SCOPE!r} permission with required=true"),
+                got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
+            )
+        return
+
     declared_lifecycle_scopes = HOOK_LIFECYCLE_SCOPES.intersection(permissions)
     if not declared_lifecycle_scopes:
         raise PluginManifestError(
@@ -676,6 +697,11 @@ def _validate_failure_policy(
     )
 
 
+_OBSERVATION_ONLY_V03_HOOK_NAMES: frozenset[str] = frozenset(
+    {HookKind.AFTER_INVOCATION.value, *TERMINAL_OBSERVABILITY_HOOK_NAMES}
+)
+
+
 def _validate_after_invocation_policy(
     hook_name: str,
     failure_policy: str,
@@ -684,25 +710,27 @@ def _validate_after_invocation_policy(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Keep v0.3 after_invocation hooks observability-only.
+    """Keep v0.3 observation-only hooks from acquiring veto authority.
 
-    v0.3 lifecycle permissions are read-only, so after-invocation hooks
-    may observe the completed outcome but must not be able to veto or
-    rewrite it through a fail-closed policy. v0.2 compatibility is left
-    unchanged; those hooks load but runtime dispatch remains disabled.
+    v0.3 lifecycle permissions are read-only, so terminal observability
+    hooks (``after_invocation`` plus the additive ``on_error`` /
+    ``on_cancel`` hooks from PR #1131) may observe the completed outcome
+    but must not be able to veto or rewrite it through a fail-closed
+    policy. v0.2 compatibility is left unchanged; those hooks load but
+    runtime dispatch remains disabled.
     """
 
     if (
         schema_version != "0.3"
-        or hook_name != HookKind.AFTER_INVOCATION.value
+        or hook_name not in _OBSERVATION_ONLY_V03_HOOK_NAMES
         or failure_policy != HookFailurePolicy.FAIL_CLOSED.value
     ):
         return
     raise PluginManifestError(
-        "v0.3 after_invocation hooks must use fail_open",
+        f"v0.3 {hook_name} hooks must use fail_open",
         path=str(manifest_path),
         json_pointer=f"/hooks/{hook_index}/failure_policy",
-        expected="'fail_open' for v0.3 after_invocation hooks",
+        expected=f"'fail_open' for v0.3 {hook_name} hooks",
         got=failure_policy,
     )
 

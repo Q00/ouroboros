@@ -268,26 +268,35 @@ Every UserLevel plugin command flows through one wrapper —
 
 The wrapper's responsibilities, in order:
 
-1. **Pre-invocation trust check.** If any `required: true` permission is not
+1. **Disable and install-subject gates.** If the plugin is disabled, or if
+   the installed `plugin_home` digest cannot be verified against the trusted
+   subject, emit only `plugin.failed` and refuse to run plugin-controlled
+   code.
+2. **Pre-invocation trust check.** If any `required: true` permission is not
    trusted, emit only `plugin.failed` with `result.status="blocked"` and a
    message naming the missing scope and the exact `ooo plugin trust ...`
    command to run (the canonical CLI entrypoint for the lifecycle commands;
    `ouroboros` is not a separate user-facing command). **No `plugin.invoked`
    is emitted** — the plugin never started.
-2. **Confirmation gate.** If the resolved command has
+3. **Caller-supplied cancellation check.** If `invoke_plugin` is called with
+   `cancellation_requested=True`, emit terminal `plugin.failed` with reason
+   `cancelled`, then run `on_cancel` observability hooks if declared. This is
+   the current bounded API surface; wiring a production cancellation source
+   into that parameter is separate integration work.
+4. **Confirmation gate.** If the resolved command has
    `requires_confirmation: true`, show a single confirmation prompt. Per
    [Q00/ouroboros-plugins#9 Q2](https://github.com/Q00/ouroboros-plugins/issues/9),
    this is the only confirmation; permission risk is handled at trust grant
    time.
-3. **Emit `plugin.invoked`** before launching the entrypoint subprocess.
-4. **Emit `plugin.permission_used`** for each `required: true` permission
+5. **Emit `plugin.invoked`** before launching the entrypoint subprocess.
+6. **Emit `plugin.permission_used`** for each `required: true` permission
    declared in the manifest. Optional permissions (`required: false`) are
    not emitted by default in v0; this is the deliberately coarse Option (a)
    from #729's spec. The path to graduate to per-call granular emission
    (stderr-line or sidecar file) is open but not implemented.
-5. **Run entrypoint** out-of-process (subprocess via the manifest's declared
+7. **Run entrypoint** out-of-process (subprocess via the manifest's declared
    command).
-6. **Emit `plugin.completed` or `plugin.failed`** with `result.status` and
+8. **Emit `plugin.completed` or `plugin.failed`** with `result.status` and
    the subprocess exit code.
 
 Audit events conform to
@@ -322,14 +331,18 @@ the contract and keeps review scope small.
 | `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin:tool:observe` | Deferred |
 | `before_artifact_write` | Before artifact service writes plugin-provided output | Policy / mutation gate | `fail_closed` | artifact-specific write permission | Deferred |
 | `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin:artifact:observe` | Deferred |
-| `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | Deferred |
-| `on_cancel` | When a plugin invocation is cancelled | Observability / cleanup hint | `fail_open`; cleanup side effects require explicit permission | `plugin:lifecycle:read` or cleanup-specific scope | Deferred |
+| `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | **Included** |
+| `on_cancel` | When a plugin invocation is cancelled | Observability / cancellation summary | `fail_open`; MUST NOT perform cleanup side effects | `plugin:lifecycle:read` | **Included** |
 
-`on_error` and `on_cancel` are the terminal-outcome subset of the deferred hook
-vocabulary. The current #939 contract keeps them non-runnable and rejected by
-v0.3 manifests: future promotion may observe terminal wrapper outcomes, but it
-must not mask the original error/cancellation result, grant cleanup authority,
-or add dispatch without a dedicated runtime slice.
+`on_error` and `on_cancel` are the terminal-outcome subset of the v1 hook
+vocabulary, promoted out of the deferred bucket by Wave 1 PR E (#1131, refs
+#939 scope decision). They run only after the firewall has emitted the
+terminal `plugin.failed` event for the corresponding command lifecycle, are
+gated by the read-only `plugin:lifecycle:read` permission, and must declare
+`fail_open` — a hook failure cannot mask the original error/cancel cause that
+already reached the caller through the `InvocationResult` and the terminal
+audit event. Cleanup side effects remain explicitly out of scope for this
+v0.3 terminal observability surface.
 
 The following candidate hooks are intentionally **not** in the v1 hook
 vocabulary:
@@ -358,6 +371,7 @@ plugin.permission_used*
 entrypoint subprocess
 plugin.completed | plugin.failed
 after_invocation hook(s)
+on_error hook(s), only for failed launched commands
 return InvocationResult
 ```
 
@@ -383,6 +397,19 @@ denial, confirmation rejection, or a `fail_closed` `before_invocation` block.
 Those outcomes are represented by `plugin.failed` for trust/confirmation
 denials or by `plugin.hook.blocked` / `plugin.hook.failed` for hook failures,
 as applicable.
+
+`on_error` is scoped to failed launched commands and command-launch/runtime
+failures. For a launched command that exits non-zero and declares both
+`after_invocation` and `on_error`, the order is strictly `plugin.failed`,
+then `after_invocation` hook events, then `on_error` hook events.
+
+`on_cancel` runs only when the `invoke_plugin` caller supplies
+`cancellation_requested=True` and only after the disable gate,
+`plugin_home` digest/tamper verification, and required-permission trust check
+have passed. It runs after the terminal cancelled `plugin.failed` event and
+before confirmation, `before_invocation`, `plugin.invoked`, permission
+emission, or command launch. It MUST NOT run for disabled, untrusted, or
+tampered plugins.
 
 ### Failure and timeout policy
 
