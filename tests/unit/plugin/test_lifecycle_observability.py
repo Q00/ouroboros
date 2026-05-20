@@ -665,9 +665,7 @@ class TestTerminalFailClosedRuntimeGuard:
     fail-open.
     """
 
-    def test_on_error_fail_closed_is_blocked_and_subprocess_skipped(
-        self, tmp_path: Path
-    ) -> None:
+    def test_on_error_fail_closed_is_blocked_and_subprocess_skipped(self, tmp_path: Path) -> None:
         program = _forge_fail_closed_terminal_hook(tmp_path, "on_error")
         trust = _grant_full_trust(tmp_path)
 
@@ -676,12 +674,8 @@ class TestTerminalFailClosedRuntimeGuard:
         def runner(argv, *args, **kwargs):  # noqa: ARG001
             if argv[:2] == ["python", "-m"] and argv[2].startswith("hook_"):
                 hook_calls.append(list(argv))
-                return subprocess.CompletedProcess(
-                    args=argv, returncode=0, stdout=b"", stderr=b""
-                )
-            return subprocess.CompletedProcess(
-                args=argv, returncode=42, stdout=b"", stderr=b""
-            )
+                return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(args=argv, returncode=42, stdout=b"", stderr=b"")
 
         events: list[dict] = []
         result = invoke_plugin(
@@ -699,9 +693,7 @@ class TestTerminalFailClosedRuntimeGuard:
         assert result.exit_code == 42
         assert "exited with code 42" in result.message
 
-        terminal_failed = [
-            event for event in events if event["event_type"] == "plugin.failed"
-        ]
+        terminal_failed = [event for event in events if event["event_type"] == "plugin.failed"]
         assert len(terminal_failed) == 1
         assert terminal_failed[0]["result"]["message"] == result.message
 
@@ -709,17 +701,12 @@ class TestTerminalFailClosedRuntimeGuard:
         assert hook_calls == []
 
         # A plugin.hook.blocked audit event is emitted for the forged hook.
-        blocked = [
-            event for event in events if event["event_type"] == HOOK_BLOCKED_EVENT
-        ]
+        blocked = [event for event in events if event["event_type"] == HOOK_BLOCKED_EVENT]
         assert blocked, "fail_closed terminal hook must emit plugin.hook.blocked"
         assert blocked[0]["provenance"]["hook_name"] == "on_error"
         assert blocked[0]["provenance"]["hook_kind"] == "on_error"
         assert blocked[0]["provenance"]["failure_policy"] == "fail_closed"
-        assert (
-            blocked[0]["provenance"]["reason"]
-            == "terminal_observability_must_be_fail_open"
-        )
+        assert blocked[0]["provenance"]["reason"] == "terminal_observability_must_be_fail_open"
         assert blocked[0]["result"]["status"] == "blocked"
 
         # The block must not produce plugin.hook.invoked / .completed for
@@ -730,9 +717,7 @@ class TestTerminalFailClosedRuntimeGuard:
         # And the original failure is not masked: no extra plugin.failed.
         assert names.count("plugin.failed") == 1
 
-    def test_on_cancel_fail_closed_is_blocked_and_subprocess_skipped(
-        self, tmp_path: Path
-    ) -> None:
+    def test_on_cancel_fail_closed_is_blocked_and_subprocess_skipped(self, tmp_path: Path) -> None:
         program = _forge_fail_closed_terminal_hook(tmp_path, "on_cancel")
         trust = _grant_full_trust(tmp_path)
 
@@ -742,13 +727,9 @@ class TestTerminalFailClosedRuntimeGuard:
         def runner(argv, *args, **kwargs):  # noqa: ARG001
             if argv[:2] == ["python", "-m"] and argv[2].startswith("hook_"):
                 hook_calls.append(list(argv))
-                return subprocess.CompletedProcess(
-                    args=argv, returncode=0, stdout=b"", stderr=b""
-                )
+                return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
             command_calls.append(list(argv))
-            return subprocess.CompletedProcess(
-                args=argv, returncode=0, stdout=b"", stderr=b""
-            )
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
 
         events: list[dict] = []
         result = invoke_plugin(
@@ -765,9 +746,7 @@ class TestTerminalFailClosedRuntimeGuard:
         # Original cancel cause preserved end-to-end.
         assert result.status == "failed"
         assert "cancelled" in result.message
-        terminal_failed = [
-            event for event in events if event["event_type"] == "plugin.failed"
-        ]
+        terminal_failed = [event for event in events if event["event_type"] == "plugin.failed"]
         assert len(terminal_failed) == 1
         assert terminal_failed[0]["provenance"]["reason"] == "cancelled"
         assert terminal_failed[0]["result"]["message"] == result.message
@@ -778,17 +757,12 @@ class TestTerminalFailClosedRuntimeGuard:
         assert command_calls == []
 
         # plugin.hook.blocked is emitted with the forged-hook provenance.
-        blocked = [
-            event for event in events if event["event_type"] == HOOK_BLOCKED_EVENT
-        ]
+        blocked = [event for event in events if event["event_type"] == HOOK_BLOCKED_EVENT]
         assert blocked, "fail_closed terminal hook must emit plugin.hook.blocked"
         assert blocked[0]["provenance"]["hook_name"] == "on_cancel"
         assert blocked[0]["provenance"]["hook_kind"] == "on_cancel"
         assert blocked[0]["provenance"]["failure_policy"] == "fail_closed"
-        assert (
-            blocked[0]["provenance"]["reason"]
-            == "terminal_observability_must_be_fail_open"
-        )
+        assert blocked[0]["provenance"]["reason"] == "terminal_observability_must_be_fail_open"
         assert blocked[0]["result"]["status"] == "blocked"
 
         names = [event["event_type"] for event in events]
