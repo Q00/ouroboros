@@ -60,6 +60,8 @@ Guidelines:
 - Write for a PM audience — avoid technical jargon unless necessary
 - Be specific and actionable — avoid vague statements
 - Preserve all information from the interview — do not invent requirements
+- Preserve uncertainty explicitly: keep tentative claims in Assumptions and
+  unresolved/stakeholder-dependent/unknown items in Decide Later
 - Use the interview conversation to add context and nuance beyond the \
 structured seed data
 - Keep the tone professional but accessible

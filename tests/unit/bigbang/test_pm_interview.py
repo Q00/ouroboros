@@ -18,7 +18,12 @@ from ouroboros.bigbang.interview import (
     InterviewState,
     InterviewStatus,
 )
-from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_interview import (
+    _EXTRACTION_SYSTEM_PROMPT,
+    _PM_SYSTEM_PROMPT_PREFIX,
+    PM_UNCERTAINTY_GUIDANCE,
+    PMInterviewEngine,
+)
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
@@ -32,6 +37,22 @@ from ouroboros.providers.base import (
     CompletionResponse,
     UsageInfo,
 )
+
+
+class TestPMUncertaintyGuidance:
+    """Regression coverage for PM uncertainty guidance (#1153)."""
+
+    def test_pm_interviewer_prompt_tells_users_not_to_invent_certainty(self) -> None:
+        """PM interviews explicitly preserve uncertainty instead of forcing guesses."""
+        assert PM_UNCERTAINTY_GUIDANCE in _PM_SYSTEM_PROMPT_PREFIX
+        assert "do not invent certainty" in _PM_SYSTEM_PROMPT_PREFIX
+        assert "decide-later items" in _PM_SYSTEM_PROMPT_PREFIX
+
+    def test_pm_extraction_prompt_preserves_unknowns_as_unresolved(self) -> None:
+        """Extraction keeps unknown/stakeholder-dependent answers out of confirmed requirements."""
+        assert "unknown answers" in _EXTRACTION_SYSTEM_PROMPT
+        assert "confirmed" in _EXTRACTION_SYSTEM_PROMPT
+        assert "decide_later_items" in _EXTRACTION_SYSTEM_PROMPT
 
 
 def _mock_completion(content: str = "What problem does this solve?") -> CompletionResponse:

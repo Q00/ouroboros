@@ -21,6 +21,7 @@ from ouroboros.bigbang.pm_completion import (
     build_pm_completion_summary,
     maybe_complete_pm_interview,
 )
+from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
@@ -513,6 +514,7 @@ async def _run_pm_interview(
             raise typer.Exit(code=1)
         state = state_result.value
         print_success(f"Interview started (session: {state.interview_id})")
+        print_info(PM_UNCERTAINTY_GUIDANCE)
 
         # Save pm_meta so --resume can find it later
         _save_cli_pm_meta(state.interview_id, engine)

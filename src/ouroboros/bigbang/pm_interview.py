@@ -55,11 +55,21 @@ from ouroboros.providers.base import (
 
 log = structlog.get_logger()
 
+PM_UNCERTAINTY_GUIDANCE = (
+    "If a product question is not settled, do not invent certainty. "
+    "Treat uncertain answers as explicit PM signal: record assumptions when "
+    "the user is making a tentative claim, or decide-later items when the "
+    "answer depends on missing information, a stakeholder decision, or a "
+    "future product choice."
+)
+
 _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
-_PM_SYSTEM_PROMPT_PREFIX = """\
+_PM_SYSTEM_PROMPT_PREFIX = f"""\
 You are a Product Requirements interviewer helping a PM define their product.
 
 Focus on: goal, user stories, constraints, success criteria, assumptions.
+
+{PM_UNCERTAINTY_GUIDANCE}
 
 """
 
@@ -71,7 +81,10 @@ _OPENING_QUESTION = (
 
 _EXTRACTION_SYSTEM_PROMPT = """\
 You are a requirements extraction engine. Given a PM interview transcript,
-extract structured product requirements.
+extract structured product requirements. Preserve uncertainty explicitly: do not
+turn uncertain, stakeholder-dependent, or unknown answers into confirmed
+requirements. Put tentative claims in assumptions and unresolved choices in
+decide_later_items.
 
 Respond ONLY with valid JSON in this exact format:
 {

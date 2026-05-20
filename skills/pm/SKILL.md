@@ -58,6 +58,11 @@ After every MCP response, do these three things:
 
 Print the MCP content text to the user first.
 
+Tell users they do not need to invent speculative answers. If a question is
+unknown, stakeholder-dependent, too broad, or safer to decide later, route it
+through the existing assumptions / decide-later / deferred mechanisms instead
+of presenting it as a confirmed requirement.
+
 Then check: does `meta.ask_user_question` exist?
 
 - **YES** → Pass it directly to `AskUserQuestion`:
@@ -70,7 +75,9 @@ Then check: does `meta.ask_user_question` exist?
   - If `meta.skip_eligible == true`: add a skip option based on `meta.classification`:
     - `classification == "decide_later"` → add option `{"label": "Decide later", "description": "Skip — will be recorded as an open item in the PRD"}`
     - `classification == "deferred"` → add option `{"label": "Defer to dev", "description": "Skip — this technical decision will be deferred to the development phase"}`
-  - Generate 2-3 suggested answers as the other options.
+  - Generate 2-3 suggested answers as the other options. Include a non-speculative
+    uncertainty option when appropriate, such as `Not sure yet — record as an
+    assumption or decide-later item`.
 
 **C. Relay answer back:**
 
