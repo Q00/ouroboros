@@ -204,7 +204,7 @@ class ProjectionBuilder:
         ended_at = self._last_event_at
 
         step_ids_by_slot_key = {
-            slot_key: _stable_step_id(source_key, *_slot_parts(slot_key))
+            slot_key: stable_step_id(source_key, *_slot_parts(slot_key))
             for slot_key in self._steps
         }
         valid_step_ids = frozenset(step_ids_by_slot_key.values())
@@ -310,7 +310,7 @@ class ProjectionBuilder:
             schema_version=PROJECTION_SCHEMA_VERSION,
             step_id=previous.step_id
             if previous is not None
-            else _stable_step_id("pending", "tool", call_id),
+            else stable_step_id("pending", "tool", call_id),
             run_id="run_placeholder",  # rewritten in build()
             stage_id="stage_placeholder",
             kind=kind,
@@ -348,7 +348,7 @@ class ProjectionBuilder:
             schema_version=PROJECTION_SCHEMA_VERSION,
             step_id=previous.step_id
             if previous is not None
-            else _stable_step_id("pending", "llm", call_id),
+            else stable_step_id("pending", "llm", call_id),
             run_id="run_placeholder",  # rewritten in build()
             stage_id="stage_placeholder",
             kind=StepKind.MODEL_CALL,
@@ -541,7 +541,7 @@ def _slot_key(family: str, call_id: str) -> str:
     return f"{family}:{call_id}"
 
 
-def _stable_step_id(source_key: str, family: str, call_id: str) -> str:
+def stable_step_id(source_key: str, family: str, call_id: str) -> str:
     digest = uuid5(
         NAMESPACE_URL,
         f"ouroboros:harness:step:{source_key}:{family}:{call_id}",
@@ -591,7 +591,7 @@ def _artifact_from_event(
     if call_id is None:
         return None
     family = _optional_str(event.data.get("step_family")) or "tool"
-    step_id = _stable_step_id(source_key, family, call_id)
+    step_id = stable_step_id(source_key, family, call_id)
     artifact_id = _optional_str(event.data.get("artifact_id")) or _stable_artifact_id(
         source_key, event.id
     )
@@ -767,7 +767,7 @@ def _step_from_start_only(
             metadata["args_preview"] = preview
     return StepRecord(
         schema_version=PROJECTION_SCHEMA_VERSION,
-        step_id=_stable_step_id("pending", family, call_id),
+        step_id=stable_step_id("pending", family, call_id),
         run_id=run_id,
         stage_id=stage_id,
         kind=kind,
@@ -785,4 +785,5 @@ __all__ = [
     "ProjectionBuildResult",
     "ProjectionBuilder",
     "build_projection",
+    "stable_step_id",
 ]

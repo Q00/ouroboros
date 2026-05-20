@@ -21,7 +21,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.harness.projection import StepKind, VerdictOutcome
 from ouroboros.harness.projection_builder import (
     ProjectionBuilder,
-    _stable_step_id,
+    stable_step_id,
 )
 from ouroboros.orchestrator.workflow_ir import (
     EdgeKind,
@@ -250,7 +250,8 @@ def test_projection_identifiers_match_workflow_ir_plan() -> None:
     # 3. One StepRecord whose step_id matches the IR-derived stable id.
     assert len(result.steps) == 1, [step.name for step in result.steps]
     step = result.steps[0]
-    expected_step_id = _stable_step_id("execution:exec_ir_proj", "tool", "run_tool_node")
+    # Source key derived from aggregate_id="exec_ir_proj" in _tool_started/_tool_returned helpers.
+    expected_step_id = stable_step_id("execution:exec_ir_proj", "tool", "run_tool_node")
     assert step.step_id == expected_step_id, (
         "WorkflowNode.node_id must derive a deterministic StepRecord.step_id "
         "via the documented call_id mapping"
@@ -384,7 +385,7 @@ def test_projection_builds_when_events_reference_unknown_node_id() -> None:
     )
     # The projection's step_id is derivable, but the IR has no node it
     # corresponds to.
-    expected_step_id = _stable_step_id("execution:exec_ir_proj", "tool", "ghost_node")
+    expected_step_id = stable_step_id("execution:exec_ir_proj", "tool", "ghost_node")
     assert ghost_step.step_id == expected_step_id
     assert "ghost_node" not in {node.node_id for node in spec.nodes}
 
