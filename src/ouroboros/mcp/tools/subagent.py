@@ -658,8 +658,15 @@ def build_generate_seed_subagent(
     ambiguity_score: float | None = None,
     transcript: str = "",
     client_gates: tuple[str, ...] = (),
+    force: bool = False,
 ) -> SubagentPayload:
-    """Build subagent payload for seed generation from interview."""
+    """Build subagent payload for seed generation from interview.
+
+    When ``force=True``, the prompt explicitly tells the subagent that the
+    ambiguity-score gate has been bypassed by deliberate caller opt-in (mirrors
+    the CLI ``init`` "Generate Seed anyway" path) so the subagent does not
+    re-impose the threshold check on its end.
+    """
     from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = load_agent_prompt("seed-architect")
@@ -671,6 +678,16 @@ def build_generate_seed_subagent(
     transcript_section = ""
     if transcript:
         transcript_section = f"\n## Interview Transcript\n{transcript}\n"
+
+    force_note = ""
+    if force:
+        force_note = (
+            "\n## Ambiguity Gate Bypassed\n"
+            "The caller has explicitly bypassed the ambiguity-score threshold. "
+            "Generate the seed even if the score exceeds 0.2; the real score "
+            "is still recorded in seed metadata for provenance. Do not refuse "
+            "on ambiguity grounds.\n"
+        )
 
     prompt = f"""{system_prompt}
 
@@ -684,7 +701,7 @@ criteria, ontology schema, evaluation principles, and exit conditions.
 
 ## Session ID
 {session_id}
-{ambiguity_note}{transcript_section}
+{ambiguity_note}{transcript_section}{force_note}
 Extract all requirements from the interview conversation and produce a
 complete YAML seed specification. The seed should be precise enough for
 autonomous execution."""
@@ -693,6 +710,7 @@ autonomous execution."""
         "session_id": session_id,
         "ambiguity_score": ambiguity_score,
         "client_gates": client_gates,
+        "force": force,
     }
 
     return build_subagent_payload(

@@ -847,7 +847,8 @@ class GenerateSeedHandler:
             description=(
                 "Generate an immutable Seed from a completed interview session. "
                 "The seed contains structured requirements (goal, constraints, acceptance criteria) "
-                "extracted from the interview conversation. Generation requires ambiguity_score <= 0.2."
+                "extracted from the interview conversation. Generation requires ambiguity_score <= 0.2 "
+                "unless force=true is passed to deliberately bypass the gate."
             ),
             parameters=(
                 MCPToolParameter(
@@ -876,6 +877,18 @@ class GenerateSeedHandler:
                     required=False,
                     items={"type": "string"},
                 ),
+                MCPToolParameter(
+                    name="force",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Bypass the ambiguity-score threshold and generate the seed even "
+                        "when ambiguity_score > 0.2. Mirrors the CLI 'Generate Seed anyway' "
+                        "opt-in: the real score is still recorded in seed metadata for "
+                        "provenance, and the bypass is emitted to the audit log. "
+                        "Defaults to false."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -901,6 +914,7 @@ class GenerateSeedHandler:
             )
 
         ambiguity_score_value = arguments.get("ambiguity_score")
+        force = bool(arguments.get("force", False))
         client_gate_status = get_client_gate_status(arguments)
         client_gate_error = _client_gate_error(client_gate_status)
         if client_gate_error is not None:
@@ -910,7 +924,14 @@ class GenerateSeedHandler:
             "mcp.tool.generate_seed",
             session_id=session_id,
             ambiguity_score=ambiguity_score_value,
+            force=force,
         )
+        if force:
+            log.warning(
+                "mcp.tool.generate_seed.force_bypass",
+                session_id=session_id,
+                caller_ambiguity_score=ambiguity_score_value,
+            )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -939,7 +960,7 @@ class GenerateSeedHandler:
             if effective_score is None:
                 effective_score = interview_state.ambiguity_score  # persisted
 
-            if not interview_state.is_complete:
+            if not interview_state.is_complete and not force:
                 answered_rounds = [r for r in interview_state.rounds if r.user_response is not None]
                 if effective_score is not None:
                     # Have a score — enforce threshold
@@ -948,7 +969,8 @@ class GenerateSeedHandler:
                             MCPToolError(
                                 f"Ambiguity score {effective_score:.2f} exceeds "
                                 f"threshold {_THRESHOLD}. Continue interviewing "
-                                f"to reduce ambiguity before seed generation.",
+                                f"to reduce ambiguity before seed generation, "
+                                f"or pass force=true to bypass the gate.",
                                 tool_name="ouroboros_generate_seed",
                             )
                         )
@@ -970,6 +992,7 @@ class GenerateSeedHandler:
                 ambiguity_score=effective_score,
                 transcript=transcript,
                 client_gates=client_gate_status["accepted_client_gates"],
+                force=force,
             )
             await emit_subagent_dispatched_event(
                 self.event_store,
@@ -982,6 +1005,7 @@ class GenerateSeedHandler:
                     "session_id": session_id,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",
+                    "force": force,
                     **client_gate_status,
                 },
             )
@@ -1064,8 +1088,10 @@ class GenerateSeedHandler:
                 model=get_clarification_model(self.llm_backend),
             )
 
-            # Generate seed
-            seed_result = await generator.generate(state, ambiguity_score)
+            # Generate seed; force bypasses the ambiguity threshold gate inside
+            # SeedGenerator.generate while still stamping the real score into
+            # SeedMetadata for provenance.
+            seed_result = await generator.generate(state, ambiguity_score, force=force)
 
             if seed_result.is_err:
                 error = seed_result.error
@@ -1113,6 +1139,7 @@ class GenerateSeedHandler:
                         "seed_id": seed.metadata.seed_id,
                         "interview_id": seed.metadata.interview_id,
                         "ambiguity_score": seed.metadata.ambiguity_score,
+                        "force": force,
                         **client_gate_status,
                     },
                 )
