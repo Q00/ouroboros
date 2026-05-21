@@ -6468,7 +6468,6 @@ class TestParallelACExecutor:
             dependency_edges=[{"ac_index": 1, "depends_on": (0,)}],
         )
 
-
     @pytest.mark.asyncio
     async def test_externally_satisfied_ac_blocked_when_dependency_failed(self) -> None:
         """Externally satisfied ACs must be BLOCKED when an upstream dep failed.

@@ -5230,14 +5230,10 @@ Files present:
                         verifier_verdict.passed if verifier_verdict is not None else False
                     ),
                     verifier_reasons=(
-                        list(verifier_verdict.reasons)
-                        if verifier_verdict is not None
-                        else []
+                        list(verifier_verdict.reasons) if verifier_verdict is not None else []
                     ),
                     verifier_failure_class=(
-                        verifier_verdict.failure_class
-                        if verifier_verdict is not None
-                        else None
+                        verifier_verdict.failure_class if verifier_verdict is not None else None
                     ),
                 )
                 result_final_message = (
