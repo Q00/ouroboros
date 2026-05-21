@@ -157,13 +157,14 @@ def _resolve_cli_project_dir(
     seed: "Seed",
     seed_file: Path,
     *,
-    seed_data: dict[str, Any],
+    seed_data: dict[str, Any] | None = None,
     project_dir: Path | None = None,
 ) -> Path:
     """Resolve the project directory for CLI execution and verification."""
     if project_dir is not None:
         return project_dir.expanduser().resolve()
 
+    seed_data = seed_data or {}
     seed_base = seed_file.parent.resolve()
     metadata_project_dir = _resolve_raw_metadata_project_dir(seed_data, stable_base=seed_base)
     if metadata_project_dir is not None:
