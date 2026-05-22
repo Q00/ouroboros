@@ -8,6 +8,7 @@ seed metadata, and the bypass is emitted to the audit log.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -279,6 +280,118 @@ class TestInProcessPathForce:
         await handler.handle({"session_id": "sess-C", "force": 1})
 
         assert spy.calls[0]["force"] is True
+
+
+# ---------------------------------------------------------------------------
+# In-process success path stamps ``force`` into result metadata
+# ---------------------------------------------------------------------------
+
+
+class _SuccessfulGeneratorSpy:
+    """Returns ``Result.ok(fake_seed)`` so the handler reaches the success
+    branch that builds the public response metadata.
+
+    The fake seed only exposes the attributes the handler reads
+    (``metadata.seed_id``, ``metadata.interview_id``,
+    ``metadata.ambiguity_score``, ``goal``, ``to_dict()``); nothing else
+    about real :class:`Seed` serialization is under test here.
+    """
+
+    def __init__(self, *, seed_id: str, interview_id: str, ambiguity: float, goal: str) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._seed = SimpleNamespace(
+            metadata=SimpleNamespace(
+                seed_id=seed_id,
+                interview_id=interview_id,
+                ambiguity_score=ambiguity,
+            ),
+            goal=goal,
+            to_dict=lambda: {
+                "goal": goal,
+                "metadata": {"seed_id": seed_id, "interview_id": interview_id},
+            },
+        )
+
+    async def generate(
+        self,
+        state: InterviewState,
+        ambiguity_score: AmbiguityScore,
+        *,
+        force: bool = False,
+        **_: object,
+    ) -> Result:
+        self.calls.append(
+            {
+                "session_id": state.interview_id,
+                "score": ambiguity_score.overall_score,
+                "force": force,
+            }
+        )
+        return Result.ok(self._seed)
+
+
+class TestInProcessSuccessPathMeta:
+    """In-process success path echoes ``force`` into the MCP response meta.
+
+    These tests exercise the public response contract added at
+    ``authoring_handlers.py`` where the success branch returns ``meta`` with
+    ``{"seed_id", "interview_id", "ambiguity_score", "force", ...}``. The
+    :class:`_GeneratorSpy` cases above short-circuit on ``ValidationError``
+    before this branch runs, so without these tests the success-path
+    metadata contract is uncovered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_force_true_echoed_in_success_meta(self) -> None:
+        spy = _SuccessfulGeneratorSpy(
+            seed_id="seed-force-on",
+            interview_id="sess-success-force",
+            ambiguity=0.85,
+            goal="bypass gate via force",
+        )
+        state = _stored_ambiguity_state(session_id="sess-success-force", score=0.85)
+        handler = GenerateSeedHandler(
+            interview_engine=_InterviewEngineStub(state),
+            seed_generator=spy,  # type: ignore[arg-type]
+            llm_adapter=object(),  # type: ignore[arg-type]
+        )
+
+        result = await handler.handle({"session_id": "sess-success-force", "force": True})
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["force"] is True
+        assert meta["seed_id"] == "seed-force-on"
+        assert meta["interview_id"] == "sess-success-force"
+        # The real (high) ambiguity score is preserved in metadata even
+        # though the gate was bypassed — provenance is intact.
+        assert meta["ambiguity_score"] == pytest.approx(0.85)
+        assert spy.calls == [{"session_id": "sess-success-force", "score": 0.85, "force": True}]
+
+    @pytest.mark.asyncio
+    async def test_force_false_echoed_in_success_meta(self) -> None:
+        spy = _SuccessfulGeneratorSpy(
+            seed_id="seed-default",
+            interview_id="sess-success-noforce",
+            ambiguity=0.1,
+            goal="gated happy path",
+        )
+        state = _stored_ambiguity_state(session_id="sess-success-noforce", score=0.1)
+        handler = GenerateSeedHandler(
+            interview_engine=_InterviewEngineStub(state),
+            seed_generator=spy,  # type: ignore[arg-type]
+            llm_adapter=object(),  # type: ignore[arg-type]
+        )
+
+        result = await handler.handle({"session_id": "sess-success-noforce"})
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["force"] is False
+        assert meta["seed_id"] == "seed-default"
+        assert meta["interview_id"] == "sess-success-noforce"
+        assert meta["ambiguity_score"] == pytest.approx(0.1)
+        assert spy.calls == [{"session_id": "sess-success-noforce", "score": 0.1, "force": False}]
 
 
 # ---------------------------------------------------------------------------
