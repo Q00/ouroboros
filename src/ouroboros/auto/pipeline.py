@@ -1348,6 +1348,41 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
+            # L5-a / #1157: when Ralph terminates with ``oscillation_detected``
+            # and the session has a wired lateral thinker in complete-product
+            # mode, route through UNSTUCK_LATERAL first instead of bailing
+            # straight to BLOCKED. Mirrors the EVALUATE → UNSTUCK_LATERAL
+            # path at ``_evaluate_after_qa``. Other Ralph stop_reasons
+            # (iteration_timeout, wall_clock_exhausted, grade_regressing,
+            # max_generations reached) continue to BLOCKED unchanged because
+            # those terminals are budget exhaustions rather than
+            # spec-reframe candidates.
+            if (
+                stop_reason == "oscillation_detected"
+                and self.lateral_thinker is not None
+                and state.complete_product
+            ):
+                state.transition(
+                    AutoPhase.UNSTUCK_LATERAL,
+                    "Ralph oscillation_detected; invoking lateral persona for reframing",
+                )
+                self._save(state)
+                return await self._run_lateral(
+                    state,
+                    ledger,
+                    seed,
+                    qa_score=0.0,
+                    qa_verdict="oscillation_detected",
+                    qa_differences=(
+                        "Ralph oscillated between grade states without converging on A grade.",
+                    ),
+                    qa_suggestions=(
+                        "Reframe the Seed acceptance criteria so the grade oscillation pattern cannot recur.",
+                    ),
+                    cache_suffix="",
+                    review=review,
+                    run_subagent=run_subagent,
+                )
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(

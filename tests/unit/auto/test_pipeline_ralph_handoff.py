@@ -198,12 +198,14 @@ def test_state_machine_allows_run_to_ralph_handoff() -> None:
 
 
 def test_state_machine_allows_ralph_handoff_terminal_transitions() -> None:
-    """RALPH_HANDOFF must reach COMPLETE/BLOCKED/FAILED. EVALUATE is the
-    intermediate verification gate added by RFC #809 Phase 2.1, but it is
-    not itself terminal — the assertion checks that every direct successor
-    of RALPH_HANDOFF is either terminal or the EVALUATE bridge."""
+    """RALPH_HANDOFF must reach COMPLETE/BLOCKED/FAILED plus the EVALUATE
+    bridge added by RFC #809 Phase 2.1 and the UNSTUCK_LATERAL bridge
+    added by L5-a / #1157 (oscillation_detected routes through lateral
+    persona advisor first when complete_product + lateral_thinker are
+    wired)."""
     assert _ALLOWED_TRANSITIONS[AutoPhase.RALPH_HANDOFF] == {
         AutoPhase.EVALUATE,
+        AutoPhase.UNSTUCK_LATERAL,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
