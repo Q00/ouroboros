@@ -14,6 +14,12 @@
     "entrypoint"
   ],
   "additionalProperties": false,
+  "patternProperties": {
+    "^x-[a-z0-9][a-z0-9-]*$": {
+      "type": "object",
+      "description": "Namespaced extension metadata preserved for forward-compatible loaders."
+    }
+  },
   "properties": {
     "schema_version": {
       "type": "string",
@@ -77,6 +83,12 @@
         "type": "object",
         "required": ["namespace", "name", "summary", "usage", "risk"],
         "additionalProperties": false,
+        "patternProperties": {
+          "^x-[a-z0-9][a-z0-9-]*$": {
+            "type": "object",
+            "description": "Namespaced command extension metadata for forward-compatible loaders."
+          }
+        },
         "properties": {
           "namespace": {
             "type": "string",
@@ -125,6 +137,51 @@
                 }
               }
             }
+          },
+          "permissions": {
+            "type": "array",
+            "description": "Command-specific permission scopes. Every scope must also be declared in top-level permissions[].scope so the core trust boundary remains authoritative.",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9:-]*$"
+            },
+            "uniqueItems": true
+          },
+          "upstream": {
+            "type": "object",
+            "description": "Opaque upstream capability/source metadata for AgentOS assimilation. Preserved by loaders but not trusted for execution policy.",
+            "additionalProperties": true
+          },
+          "artifacts": {
+            "type": "object",
+            "description": "Opaque artifact contract hints for AgentOS assimilation. Preserved by loaders but not trusted for path authorization.",
+            "additionalProperties": true
+          },
+          "handoff": {
+            "type": "object",
+            "description": "Opaque handoff contract hints for AgentOS continuation. Preserved by loaders but not trusted for dispatch.",
+            "additionalProperties": true
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86400,
+            "description": "Command timeout hint in seconds; dispatchers may apply a stricter runtime cap."
+          },
+          "result_states": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["completed", "blocked", "failed", "cancelled"]
+            },
+            "uniqueItems": true,
+            "minItems": 1,
+            "description": "Declared terminal states the command adapter may emit."
+          },
+          "redaction": {
+            "type": "object",
+            "description": "Opaque redaction policy hints for produced artifacts/provenance.",
+            "additionalProperties": true
           }
         }
       }
