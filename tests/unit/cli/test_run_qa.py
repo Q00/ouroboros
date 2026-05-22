@@ -159,6 +159,33 @@ def test_resolve_cli_project_dir_keeps_seed_relative_metadata_project_dir(
     )
 
 
+@pytest.mark.parametrize("metadata_field", ["project_dir", "working_directory"])
+def test_resolve_cli_project_dir_rejects_raw_metadata_project_escape(
+    tmp_path: Path, metadata_field: str
+) -> None:
+    """Raw metadata project fields must not silently fall back after rejection."""
+    seed_file = tmp_path / "seeds" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    outside_project = tmp_path / "outside-project"
+    seed_data = {
+        **VALID_SEED_DATA,
+        "metadata": {
+            **VALID_SEED_DATA["metadata"],
+            metadata_field: str(outside_project),
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    with patch("ouroboros.cli.commands.run.print_error") as mock_print:
+        with pytest.raises(typer.Exit) as exc_info:
+            _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+
+    assert exc_info.value.exit_code == 1
+    assert mock_print.call_count == 1
+    assert "escapes" in mock_print.call_args[0][0]
+
+
 def test_resolve_cli_project_dir_uses_parent_when_context_reference_is_file(
     tmp_path: Path,
 ) -> None:

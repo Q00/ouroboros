@@ -127,11 +127,20 @@ def _resolve_raw_metadata_project_dir(
     if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
         return None
 
-    return resolve_path_against_base(
+    resolved = resolve_path_against_base(
         raw_project_dir,
         stable_base=stable_base,
         enforce_containment=True,
     )
+    if resolved is None:
+        print_error(
+            "Seed metadata encodes a project_dir/working_directory path that escapes "
+            f"the seed stable project directory ({stable_base}). Refusing to fall back "
+            "silently — edit the seed metadata to use a path inside the seed directory "
+            "or rerun with --project-dir pointing at the target project."
+        )
+        raise typer.Exit(1)
+    return resolved
 
 
 def _resolve_brownfield_target_dir(seed_data: dict[str, Any]) -> Path | None:
