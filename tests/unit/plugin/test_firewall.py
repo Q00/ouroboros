@@ -792,6 +792,58 @@ def test_v03_fail_open_before_hook_timeout_records_failure_and_continues(
     assert "timed out" in events[1]["result"]["message"]
 
 
+def test_plugin_subprocess_receives_immutable_home_runtime_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin dispatch must not mutate installed plugin bytes by default.
+
+    Python module entrypoints create ``__pycache__`` unless bytecode writes are
+    disabled. The firewall also gives plugins a workspace/output contract so
+    runtime artifacts can land outside the trusted plugin_home digest subject.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    plugin_home = tmp_path / "installed-plugin"
+    plugin_home.mkdir()
+    user_cwd = tmp_path / "workspace"
+    user_cwd.mkdir()
+    monkeypatch.chdir(user_cwd)
+    captured: dict = {}
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
+        captured["argv"] = argv
+        captured["cwd"] = kwargs.get("cwd")
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="{}", stderr="")
+
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=lambda _event: None,
+        correlation_id="corr-runtime-env",
+        subprocess_runner=runner,
+        plugin_home=plugin_home,
+    )
+
+    assert result.status == "success"
+    assert captured["cwd"] == str(plugin_home)
+    env = captured["env"]
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["OUROBOROS_PLUGIN_HOME"] == str(plugin_home)
+    assert env["OUROBOROS_PLUGIN_WORKDIR"] == str(user_cwd)
+    assert env["OUROBOROS_PLUGIN_OUTPUT_DIR"] == str(
+        user_cwd / ".ouroboros" / "plugin-artifacts" / "github-pr-ops"
+    )
+
+
 def test_trust_violation_only_emits_failed_no_invoked(tmp_path: Path) -> None:
     """Test 2: missing required scope → ONLY plugin.failed (status=blocked).
 
