@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import inspect
 import threading
 import time
@@ -52,6 +53,10 @@ from ouroboros.auto.state import (
 )
 from ouroboros.core.seed import Seed
 from ouroboros.resilience.lateral import ThinkingPersona
+from ouroboros.runtime.watchdog import (
+    WATCHDOG_STOP_REASON_CODE,
+    Watchdog,
+)
 
 # RFC #809 Phase 2.2b — Stack 1 of 2 scope and invariants.
 #
@@ -284,6 +289,14 @@ class AutoPipeline:
     # the raw QA differences. See :class:`HandlerLateralThinker` in
     # adapters.py for the production wiring.
     lateral_thinker: LateralThinker | None = None
+    # L2-2 / #1172: wall-clock watchdog for the session. ``None`` means
+    # no watchdog (legacy behaviour). When wired, the pipeline checks
+    # ``watchdog.check(...)`` at ``run()`` entry; on fire the session
+    # transitions to BLOCKED with
+    # ``stop_reason_code = "watchdog_wall_clock_exceeded"``. The cancel
+    # event has already been appended to the EventStore by the watchdog
+    # itself, so the pipeline does no further side effect on fire.
+    watchdog: Watchdog | None = None
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
@@ -303,6 +316,16 @@ class AutoPipeline:
             if state.ledger
             else SeedDraftLedger.from_goal(state.goal)
         )
+        # L2-2 / #1172: wall-clock watchdog check.
+        # Runs once per ``run()`` entry — both fresh sessions whose
+        # ``created_at`` is too long ago (resume after budget elapsed)
+        # and live sessions whose execution chose to re-enter the loop
+        # are caught here. The watchdog appends its ``runtime.watchdog.cancel``
+        # event itself; the pipeline only translates the decision into
+        # the BLOCKED transition + envelope ``stop_reason_code``.
+        watchdog_result = await self._check_watchdog(state, ledger)
+        if watchdog_result is not None:
+            return watchdog_result
         if self.skip_run and not state.skip_run:
             state.skip_run = True
         # Q00/ouroboros#773 (review-3): ``complete_product`` is durable session
@@ -1081,6 +1104,53 @@ class AutoPipeline:
             # timeout and no-handle paths share this same retry slot.
             self._save(state)
             retried = True
+
+    async def _check_watchdog(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+    ) -> AutoPipelineResult | None:
+        """L2-2 / #1172: wall-clock watchdog check at ``run()`` entry.
+
+        Returns:
+
+        - ``None`` if no watchdog is wired, or the watchdog did not
+          fire — the pipeline proceeds normally.
+        - A BLOCKED :class:`AutoPipelineResult` if the watchdog fired —
+          ``state.last_error_code`` is set to
+          :data:`WATCHDOG_STOP_REASON_CODE` so the envelope surface
+          (already plumbed by L4 / #1151) reports the typed terminal.
+
+        The watchdog itself owns the EventStore-side ``runtime.watchdog.cancel``
+        append; this helper only converts a returned ``WatchdogDecision``
+        into pipeline state transitions.
+        """
+        if self.watchdog is None:
+            return None
+        try:
+            started_at = datetime.fromisoformat(state.created_at)
+        except (TypeError, ValueError):
+            # A malformed ``created_at`` is a pre-watchdog state-validation
+            # concern; do not let the watchdog crash the run.
+            return None
+        decision = await self.watchdog.check(
+            session_id=state.auto_session_id,
+            session_started_at=started_at,
+        )
+        if decision is None:
+            return None
+        blocker = (
+            f"runtime watchdog cancelled session after "
+            f"{decision.elapsed_seconds}s (budget "
+            f"{decision.configured_budget_seconds}s)"
+        )
+        state.mark_blocked(
+            blocker,
+            tool_name="runtime_watchdog",
+            error_code=WATCHDOG_STOP_REASON_CODE,
+        )
+        self._save(state)
+        return self._result(state, ledger, blocker=state.last_error)
 
     def _deadline_capped_timeout(self, state: AutoPipelineState, phase_timeout: float) -> float:
         """Return ``phase_timeout`` capped by the remaining pipeline deadline.
