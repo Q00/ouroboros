@@ -1270,6 +1270,10 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     meta["defaulted_sections"] = list(result.defaulted_sections)
     meta["evidence_backed_sections"] = list(result.evidence_backed_sections)
     meta["assumption_only_sections"] = list(result.assumption_only_sections)
+    meta["assumption_sources"] = [
+        {"text": record.text, "source": record.source, "confidence": record.confidence}
+        for record in result.assumption_sources
+    ]
     return meta
 
 

@@ -1933,6 +1933,7 @@ def test_format_result_omits_evidence_block_when_unknown() -> None:
 @pytest.mark.asyncio
 async def test_auto_handler_meta_exposes_ledger_provenance_breakdown(monkeypatch) -> None:
     async def fake_run(self, arguments):  # noqa: ARG001
+        from ouroboros.auto.ledger import AssumptionRecord
         from ouroboros.auto.pipeline import AutoPipelineResult
 
         return AutoPipelineResult(
@@ -1946,6 +1947,13 @@ async def test_auto_handler_meta_exposes_ledger_provenance_breakdown(monkeypatch
             },
             evidence_backed_sections=("actors", "goal", "runtime_context"),
             assumption_only_sections=("constraints",),
+            assumption_sources=(
+                AssumptionRecord(
+                    text="Use existing project patterns",
+                    source="conservative_default",
+                    confidence=0.85,
+                ),
+            ),
         )
 
     monkeypatch.setattr(AutoHandler, "_run", fake_run)
@@ -1961,6 +1969,13 @@ async def test_auto_handler_meta_exposes_ledger_provenance_breakdown(monkeypatch
     }
     assert meta["evidence_backed_sections"] == ["actors", "goal", "runtime_context"]
     assert meta["assumption_only_sections"] == ["constraints"]
+    assert meta["assumption_sources"] == [
+        {
+            "text": "Use existing project patterns",
+            "source": "conservative_default",
+            "confidence": 0.85,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1990,6 +2005,19 @@ async def test_auto_handler_meta_always_emits_provenance_keys_when_empty(monkeyp
     assert meta["ledger_provenance"] == {}
     assert meta["evidence_backed_sections"] == []
     assert meta["assumption_only_sections"] == []
+    assert meta["assumption_sources"] == []
+
+
+def test_auto_public_api_exports_assumption_record() -> None:
+    from ouroboros.auto import AssumptionRecord
+
+    record = AssumptionRecord(
+        text="Use existing project patterns", source="assumption", confidence=0.7
+    )
+
+    assert record.text == "Use existing project patterns"
+    assert record.source == "assumption"
+    assert record.confidence == 0.7
 
 
 def test_auto_save_seed_encodes_path_traversal_seed_id_inside_seed_dir(

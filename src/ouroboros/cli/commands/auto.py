@@ -749,6 +749,14 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
             console.print("Assumptions:")
             for item in result.assumptions:
                 console.print(f"  - {item}")
+        if result.assumption_sources:
+            console.print("Assumption sources:")
+            for record in result.assumption_sources:
+                console.print(
+                    f"  - source={_rich_escape(record.source)}; "
+                    f"confidence={record.confidence:.2f}; "
+                    f"text={_rich_escape(record.text)}"
+                )
         if result.non_goals:
             console.print("Non-goals:")
             for item in result.non_goals:
