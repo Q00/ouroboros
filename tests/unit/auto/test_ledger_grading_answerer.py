@@ -2328,3 +2328,152 @@ def test_auto_answerer_allows_qualified_compliance_policy_features() -> None:
         answer = answerer.answer(question, ledger)
         assert answer.blocker is None, question
         assert answer.source != AutoAnswerSource.BLOCKER, question
+
+
+# ---------------------------------------------------------------------------
+# PR-C2 / #1157: assumption_sources() — additive provenance surface.
+# ---------------------------------------------------------------------------
+
+
+def test_assumption_sources_returns_records_for_all_three_assumption_class_sources() -> None:
+    """``assumption_sources()`` must surface ``ASSUMPTION``, ``INFERENCE``,
+    and ``CONSERVATIVE_DEFAULT`` entries with their source tag intact.
+    ``assumptions()`` continues to return only the ``ASSUMPTION`` subset
+    (backwards-compatibility guard)."""
+    from ouroboros.auto.ledger import AssumptionRecord
+
+    ledger = SeedDraftLedger.from_goal("Build a tiny local CLI")
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.assumption",
+            value="Primary actor is a single local developer",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "outputs",
+        LedgerEntry(
+            key="outputs.inference",
+            value="Outputs are stdout-only",
+            source=LedgerSource.INFERENCE,
+            confidence=0.6,
+            status=LedgerStatus.INFERRED,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.conservative_default",
+            value="Use existing project patterns",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.85,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    records = ledger.assumption_sources()
+    assert all(isinstance(rec, AssumptionRecord) for rec in records)
+    by_text = {rec.text: rec for rec in records}
+
+    assert by_text["Primary actor is a single local developer"].source == "assumption"
+    assert by_text["Outputs are stdout-only"].source == "inference"
+    assert by_text["Use existing project patterns"].source == "conservative_default"
+
+    # confidence is preserved verbatim per entry.
+    assert by_text["Primary actor is a single local developer"].confidence == 0.7
+    assert by_text["Outputs are stdout-only"].confidence == 0.6
+    assert by_text["Use existing project patterns"].confidence == 0.85
+
+    # Backwards-compat guard: ``assumptions()`` is unchanged in scope —
+    # only the ASSUMPTION-source entry appears there.
+    assert ledger.assumptions() == ["Primary actor is a single local developer"]
+
+
+def test_assumption_sources_skips_inactive_and_evidence_backed_entries() -> None:
+    """Entries with WEAK / CONFLICTING / BLOCKED status are excluded
+    (active-set semantics, matching ``_values_for_sources``). Evidence-backed
+    sources (USER_GOAL / REPO_FACT / USER_PREFERENCE / NON_GOAL) are also
+    excluded — they are not assumption-class."""
+    ledger = SeedDraftLedger.from_goal("Build a tiny local CLI")
+    # WEAK assumption — must be skipped.
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.assumption_weak",
+            value="Weak placeholder text",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.3,
+            status=LedgerStatus.WEAK,
+        ),
+    )
+    # CONFLICTING inference — must be skipped.
+    ledger.add_entry(
+        "outputs",
+        LedgerEntry(
+            key="outputs.conflict",
+            value="Conflicting inferred output shape",
+            source=LedgerSource.INFERENCE,
+            confidence=0.5,
+            status=LedgerStatus.CONFLICTING,
+        ),
+    )
+    # USER_PREFERENCE is evidence-backed — must be skipped regardless of status.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.user_pref",
+            value="User explicitly said no new deps",
+            source=LedgerSource.USER_PREFERENCE,
+            confidence=1.0,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+    # An active conservative_default — must be the only thing returned.
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime_context.conservative_default",
+            value="Existing repository runtime",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.85,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    records = ledger.assumption_sources()
+    assert [rec.text for rec in records] == ["Existing repository runtime"]
+    assert records[0].source == "conservative_default"
+
+
+def test_assumption_sources_dedupes_same_text_across_sections() -> None:
+    """Same-text deduplication uses the same normalization as
+    :meth:`assumptions` so the textual surface stays in lockstep with
+    :meth:`assumptions` for the ASSUMPTION subset."""
+    ledger = SeedDraftLedger.from_goal("Build a tiny local CLI")
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.dup_assumption",
+            value="Single local CLI user",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "inputs",
+        LedgerEntry(
+            key="inputs.dup_assumption",
+            value="single local cli user",  # case-insensitive duplicate
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    records = ledger.assumption_sources()
+    assert len(records) == 1
+    assert records[0].text == "Single local CLI user"

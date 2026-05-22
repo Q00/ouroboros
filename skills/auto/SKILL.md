@@ -94,4 +94,16 @@ When `result.status == "seed_ready"`, `result.interview_closure_mode` distinguis
 
 Genuine-deadlock and partial-unsafe outcomes do **not** set `interview_closure_mode`; they reach a `blocked` terminal with the matching `stop_reason_code` above instead.
 
+### Assumption-source provenance (PR-C2 / #1157)
+
+`result.assumptions: tuple[str, ...]` (the existing list of assumption texts) is now accompanied by `result.assumption_sources: tuple[AssumptionRecord, ...]`, where each `AssumptionRecord` is a frozen dataclass with:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `text` | `str` | The assumption text (same surface as the corresponding `assumptions` entry where present). |
+| `source` | `str` | One of `"assumption"` (auto-answerer fallback), `"inference"` (model reasoning), `"conservative_default"` (safe-default policy). These are the three assumption-class `LedgerSource` values that produce `assumption_only_sections`. |
+| `confidence` | `float` | Per-entry confidence as recorded by the ledger. |
+
+`assumption_sources` is a *broader* surface than `assumptions` — it includes inference- and conservative-default-class entries that `assumptions` (filtered to `LedgerSource.ASSUMPTION` only) does not surface. Callers wanting to know *which assumptions the system made on the user's behalf* should read `assumption_sources`; callers preserving the older string-only contract continue to read `assumptions`.
+
 The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. Use `--complete-product` to drive the full Interview → Seed → Run → Ralph → Product chain on a single `ooo auto` invocation; the chained Ralph loop honors the same wall-clock deadline as the parent auto session (`--timeout`). The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.

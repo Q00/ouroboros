@@ -165,6 +165,13 @@ class _StubLedger:
     def assumptions(self) -> list[str]:
         return []
 
+    def assumption_sources(self) -> list[Any]:
+        # PR-C2 / #1157: stub satisfies the additive provenance surface
+        # consumed by ``AutoPipeline._result()``. Returns an empty list for
+        # the same reason ``assumptions()`` does — this stub is for tests
+        # that do not exercise ledger content.
+        return []
+
     def non_goals(self) -> list[str]:
         return []
 

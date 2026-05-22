@@ -1304,6 +1304,77 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pipeline_result_surfaces_assumption_sources_with_provenance(tmp_path) -> None:
+    """PR-C2 / #1157: ``AutoPipelineResult.assumption_sources`` carries the
+    ledger's assumption-class entries with the source tag intact. The legacy
+    ``assumptions`` field stays exactly as it was — only the additive
+    ``assumption_sources`` surface broadens to inference- and
+    conservative-default-class entries."""
+    from ouroboros.auto.ledger import AssumptionRecord
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_assumptions")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    # Add one entry from each of the three assumption-class sources. The
+    # ASSUMPTION entry has unique text so the legacy ``assumptions`` field
+    # still surfaces it.
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.auto_assumption",
+            value="Primary actor is a single local developer",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "outputs",
+        LedgerEntry(
+            key="outputs.inference_extra",
+            value="Outputs are stdout-only by inference",
+            source=LedgerSource.INFERENCE,
+            confidence=0.6,
+            status=LedgerStatus.INFERRED,
+        ),
+    )
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+
+    # ``assumption_sources`` is a tuple of ``AssumptionRecord``s with the
+    # source tag intact for every assumption-class entry.
+    assert all(isinstance(rec, AssumptionRecord) for rec in result.assumption_sources)
+    by_text = {rec.text: rec for rec in result.assumption_sources}
+    assert by_text["Primary actor is a single local developer"].source == "assumption"
+    assert by_text["Outputs are stdout-only by inference"].source == "inference"
+    # ``_fill_ready`` populates eight sections via CONSERVATIVE_DEFAULT, so at
+    # least one conservative-default record must surface alongside the
+    # explicit ASSUMPTION/INFERENCE entries above.
+    assert any(rec.source == "conservative_default" for rec in result.assumption_sources)
+
+    # Backwards-compat guard: ``assumptions`` continues to return only the
+    # ASSUMPTION-source subset as plain strings (no shape change).
+    assert "Primary actor is a single local developer" in result.assumptions
+    assert "Outputs are stdout-only by inference" not in result.assumptions
+
+
+@pytest.mark.asyncio
 async def test_pipeline_uses_explicit_goal_facts_before_completed_interview(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("done", "interview_hello", seed_ready=True, completed=True)
