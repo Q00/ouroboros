@@ -488,6 +488,7 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "defaulted_sections": [],
         "evidence_backed_sections": [],
         "assumption_only_sections": [],
+        "assumption_sources": [],
     }
 
 
