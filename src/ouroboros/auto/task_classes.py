@@ -18,14 +18,28 @@ Design constraints honored:
   not via re-curating a training corpus.
 - **Decoupled from `domain_profile.DomainProfile`.** The existing
   `DomainProfile` is a *meta-domain* concept (coding / research /
-  design); task classes are *within-meta-domain* shapes (cli / webhook
-  / game-2d / ...). Both layers can coexist.
+  design) and carries cross-domain machinery (`repo_context_extractor`,
+  `intent_classifier`, `vague_terms`, `detector`, `verifiable_predicates`,
+  `safe_defaults`). Task classes are *within-meta-domain* shapes
+  (cli / webhook / game-2d / ...) and carry only shape-specific data
+  (completion mode, default AC, probe-kind hints). The two taxonomies
+  are orthogonal; `safe_defaults` remains intentionally on the
+  meta-domain layer and is not duplicated here. The earlier #1171
+  schema sketch listed `safe_defaults` as a per-class field, but on
+  implementation review that field is meta-domain-scoped (e.g.
+  "default to pytest" applies to all coding task classes equally) and
+  belongs on `DomainProfile`, not on this catalog.
 - **`default_ac_template` is `tuple[str, ...]` matching
   `Seed.acceptance_criteria` exactly.** No new AC dataclass is needed
   because the Seed already accepts plain strings.
 - **`runtime_probe_kinds` is a `tuple[str, ...]` placeholder.** L3 is
   still pending its minimal-substrate audit; the strings stay
   human-readable for now and become a typed enum when L3 lands.
+- **Serialization uses underscored identifiers** (`web_service`,
+  `data_pipeline`, `game_2d`, `refactor_in_place`) so `TaskClass.value`
+  is a valid Python identifier and a JSON-safe ledger key. Prose docs
+  in #1157 / #1171 may render the same names with hyphens; both refer
+  to the same class.
 """
 
 from __future__ import annotations
