@@ -293,3 +293,44 @@ async def test_pipeline_with_disabled_watchdog_never_fires(tmp_path) -> None:
 
     assert result.status == "complete"
     assert appender.events == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_auto_handler_wires_watchdog_to_event_store(tmp_path) -> None:
+    """Production MCP AutoHandler wiring must make the L2 watchdog active.
+
+    A resumed session whose persisted ``created_at`` is already beyond the
+    default 4h wall-clock budget should block before interview/seed work and
+    persist the watchdog cancel event to the handler's EventStore.
+    """
+
+    from ouroboros.mcp.tools.auto_handler import AutoHandler
+    from ouroboros.persistence.event_store import EventStore
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.created_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+    store.save(state)
+
+    event_store = EventStore("sqlite+aiosqlite:///:memory:")
+    await event_store.initialize()
+    try:
+        result = await AutoHandler(store=store, event_store=event_store).handle(
+            {"resume": state.auto_session_id}
+        )
+
+        assert result.is_ok
+        value = result.value
+        assert value.is_error is True
+        assert value.meta["status"] == "blocked"
+        assert value.meta["stop_reason_code"] == WATCHDOG_STOP_REASON_CODE
+
+        events = await event_store.query_events(
+            aggregate_id=state.auto_session_id,
+            event_type=WATCHDOG_CANCEL_EVENT_TYPE,
+        )
+        assert len(events) == 1
+        assert events[0].aggregate_type == WATCHDOG_AGGREGATE_TYPE
+        assert events[0].data["reason"] == "wall_clock_exceeded"
+    finally:
+        await event_store.close()

@@ -85,6 +85,8 @@ from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.runtime.controls import load_runtime_controls
+from ouroboros.runtime.watchdog import Watchdog
 
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
 
@@ -102,6 +104,7 @@ class AutoHandler:
     opencode_mode: str | None = field(default=None, repr=False)
     mcp_manager: object | None = field(default=None, repr=False)
     mcp_tool_prefix: str = ""
+    event_store: EventStore | None = field(default=None, repr=False)
     ralph_handler_factory: Callable[[str | None, str | None], RalphHandler] | None = field(
         default=None, repr=False
     )
@@ -473,6 +476,12 @@ class AutoHandler:
                 opencode_mode=opencode_mode,
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
+        watchdog_event_store = self.event_store or EventStore()
+        await watchdog_event_store.initialize()
+        watchdog = Watchdog(
+            controls=load_runtime_controls(None),
+            event_appender=watchdog_event_store,
+        )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -493,8 +502,13 @@ class AutoHandler:
             complete_product=complete_product,
             evaluator=evaluator,
             lateral_thinker=lateral_thinker,
+            watchdog=watchdog,
         )
-        return await pipeline.run(state)
+        try:
+            return await pipeline.run(state)
+        finally:
+            if self.event_store is None:
+                await watchdog_event_store.close()
 
 
 @dataclass
@@ -548,6 +562,7 @@ class StartAutoHandler:
             opencode_mode=self.opencode_mode,
             mcp_manager=self.mcp_manager,
             mcp_tool_prefix=self.mcp_tool_prefix,
+            event_store=self._event_store,
             ralph_handler_factory=self.ralph_handler_factory,
         )
 
@@ -1200,6 +1215,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     if handoff_only:
         meta["presentation_status"] = _presentation_status(result)
         meta["product_status"] = "not_verified_complete"
+    if result.stop_reason_code is not None:
+        meta["stop_reason_code"] = result.stop_reason_code
     if result.execution_job_status:
         meta["execution_job_status"] = result.execution_job_status
     if result.execution_job_error:

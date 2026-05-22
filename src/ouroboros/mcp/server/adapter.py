@@ -1714,6 +1714,7 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             mcp_manager=auto_mcp_manager,
             mcp_tool_prefix=auto_mcp_prefix,
+            event_store=event_store,
             ralph_handler_factory=build_ralph_handler,
         ),
         StartAutoHandler(
