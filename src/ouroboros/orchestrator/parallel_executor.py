@@ -1270,9 +1270,27 @@ def _runtime_messages_support_test_claim(
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
+        # Candidate test commands are drawn from two transcript-grounded
+        # sources: (1) ``commands_run`` evidence entries already proven against
+        # the transcript, and (2) the Bash message's own recorded command. The
+        # latter is backed by definition — it is the literal invocation in the
+        # transcript — so a real ``pytest <file>`` run can support a node-id
+        # ``tests_passed`` claim even when the agent did not also echo that
+        # exact command into its ``commands_run`` evidence.
+        #
+        # These are NOT three independent checks. For a per-message candidate
+        # the ``_runtime_message_supports_command_claim`` gate below is
+        # tautological — the candidate is that message's own command, so it
+        # trivially supports itself. The anti-fabrication guarantee is carried
+        # entirely by the downstream gates: ``_message_contains_test_success``
+        # (reads only structured runtime output, never agent narration) and
+        # ``_test_command_targets_claim`` (anchors the claim's node-id/file to
+        # the recorded command + proof text). The ``_looks_like_test_command``
+        # filter still excludes non-test commands from this candidate source.
+        candidate_commands = (*backed_commands, *_runtime_message_command_values(message))
         matching_commands = tuple(
             candidate
-            for candidate in backed_commands
+            for candidate in candidate_commands
             if _looks_like_test_command(candidate)
             and _runtime_message_supports_command_claim(candidate, message)
         )
