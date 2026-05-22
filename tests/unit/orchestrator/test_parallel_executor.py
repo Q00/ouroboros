@@ -1155,16 +1155,10 @@ def test_command_claim_rejects_grep_filtered_run_as_clean_command() -> None:
         type="tool",
         content="Bash command started",
         tool_name="Bash",
-        data={
-            "tool_input": {
-                "command": "pytest tests/unit/test_foo.py | grep passed"
-            }
-        },
+        data={"tool_input": {"command": "pytest tests/unit/test_foo.py | grep passed"}},
     )
 
-    assert not _runtime_messages_support_command_claim(
-        "pytest tests/unit/test_foo.py", (message,)
-    )
+    assert not _runtime_messages_support_command_claim("pytest tests/unit/test_foo.py", (message,))
 
 
 def test_command_claim_rejects_grep_filtered_run_as_tests_passed_claim() -> None:
@@ -1179,11 +1173,7 @@ def test_command_claim_rejects_grep_filtered_run_as_tests_passed_claim() -> None
         type="tool",
         content="Bash command started",
         tool_name="Bash",
-        data={
-            "tool_input": {
-                "command": "pytest tests/unit/test_foo.py -x | grep PASSED"
-            }
-        },
+        data={"tool_input": {"command": "pytest tests/unit/test_foo.py -x | grep PASSED"}},
     )
 
     assert not _runtime_messages_support_command_claim(
@@ -1206,9 +1196,7 @@ def test_command_claim_rejects_wc_collapsed_run_as_clean_command() -> None:
         data={"tool_input": {"command": "pytest tests/unit/test_foo.py | wc -l"}},
     )
 
-    assert not _runtime_messages_support_command_claim(
-        "pytest tests/unit/test_foo.py", (message,)
-    )
+    assert not _runtime_messages_support_command_claim("pytest tests/unit/test_foo.py", (message,))
 
 
 def test_command_claim_rejects_tee_redirected_run_as_clean_command() -> None:
@@ -1223,16 +1211,10 @@ def test_command_claim_rejects_tee_redirected_run_as_clean_command() -> None:
         type="tool",
         content="Bash command started",
         tool_name="Bash",
-        data={
-            "tool_input": {
-                "command": "pytest tests/unit/test_foo.py | tee pytest.log"
-            }
-        },
+        data={"tool_input": {"command": "pytest tests/unit/test_foo.py | tee pytest.log"}},
     )
 
-    assert not _runtime_messages_support_command_claim(
-        "pytest tests/unit/test_foo.py", (message,)
-    )
+    assert not _runtime_messages_support_command_claim("pytest tests/unit/test_foo.py", (message,))
 
 
 class TestProfileAwareDecompositionAudit:
