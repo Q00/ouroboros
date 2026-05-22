@@ -599,20 +599,22 @@ class AutoPipeline:
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
                     # L1-d / #1171: derive the task class from the already-
                     # standardized ledger and prepend the catalog's default
-                    # AC template to the Seed. Single-match → apply; ambiguous
-                    # or unmatched → leave the user's AC untouched (the
-                    # interview-driver disambiguation hook is L1-c, separate
-                    # PR). ``state.active_task_class`` is set only on a
-                    # successful single-match application so the envelope
-                    # surfaces exactly what actually fired.
+                    # AC template to the Seed. Single match → apply that class;
+                    # unmatched → apply the safe LIBRARY fallback from L1-b;
+                    # ambiguous → leave the user's AC untouched until the
+                    # L1-c interview-driver disambiguation hook resolves it.
+                    # ``state.active_task_class`` is set only when a concrete
+                    # class/fallback actually fired, so the envelope does not
+                    # pretend an unresolved ambiguous class was active.
                     _inference = derive_domain_from_ledger(ledger)
-                    if _inference.is_single and _inference.single is not None:
-                        _applied = apply_default_ac_template(seed, _inference.single)
+                    _task_class = _inference.single
+                    if _task_class is not None:
+                        _applied = apply_default_ac_template(seed, _task_class)
                         if _applied.injected_ac:
                             seed = _applied.seed
                             state.seed_id = seed.metadata.seed_id
                             state.seed_artifact = seed.to_dict()
-                        state.active_task_class = _inference.single.value
+                        state.active_task_class = _task_class.value
                 except TimeoutError as exc:
                     if self._enforce_deadline(state):
                         record_authoring_backend(state)

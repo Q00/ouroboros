@@ -1119,9 +1119,7 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
     # prepended to the Seed before the repairer runs, so the *user*
     # entry is no longer at index [0]; locate it by content instead.
     repaired_entries = [
-        item
-        for item in state.seed_artifact["acceptance_criteria"]
-        if "The CLI" in item
+        item for item in state.seed_artifact["acceptance_criteria"] if "The CLI" in item
     ]
     assert repaired_entries, "expected to find the repaired user-supplied CLI AC"
     repaired_acceptance = repaired_entries[0]

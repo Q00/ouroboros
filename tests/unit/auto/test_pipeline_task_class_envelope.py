@@ -5,8 +5,8 @@ Asserts:
   is populated when the ledger unambiguously matches a single class.
 - The Seed passed downstream has the catalog's ``default_ac_template``
   prepended to ``acceptance_criteria``.
-- An ambiguous ledger leaves ``active_task_class`` as None and AC
-  untouched.
+- An unmatched ledger applies the safe LIBRARY fallback; an ambiguous
+  ledger leaves ``active_task_class`` as None and AC untouched.
 """
 
 from __future__ import annotations
@@ -112,6 +112,28 @@ def _cli_ledger() -> SeedDraftLedger:
     return ledger
 
 
+def _unmatched_ledger() -> SeedDraftLedger:
+    """Build a seed-ready ledger with no task-class-specific signals."""
+    ledger = SeedDraftLedger.from_goal("Improve the project")
+    _add(ledger, "actors", "Repository maintainer", "actors.generic")
+    _add(ledger, "inputs", "Existing repository context", "inputs.generic")
+    _add(ledger, "outputs", "Documented code changes", "outputs.generic")
+    _add(ledger, "constraints", "Use existing project patterns", "constraints.generic")
+    _add(ledger, "non_goals", "No unrelated redesign", "non_goals.generic")
+    _add(
+        ledger,
+        "acceptance_criteria",
+        "Changed behavior is covered by tests",
+        "acceptance_criteria.generic",
+    )
+    _add(ledger, "verification_plan", "Run targeted tests", "verification_plan.generic")
+    _add(ledger, "failure_modes", "Regression in existing behavior", "failure_modes.generic")
+    _add(
+        ledger, "runtime_context", "Existing repository test environment", "runtime_context.generic"
+    )
+    return ledger
+
+
 def _ambiguous_ledger() -> SeedDraftLedger:
     """Build a ledger that matches BOTH CLI and WEBHOOK — ambiguous."""
     ledger = SeedDraftLedger.from_goal("Build a CLI that also receives webhooks")
@@ -189,6 +211,52 @@ async def test_envelope_carries_active_task_class_on_single_match(tmp_path) -> N
         )
     # The user's original AC remains present after the template.
     assert "`habit list` prints stable stdout containing created habits" in ac
+
+
+@pytest.mark.asyncio
+async def test_envelope_uses_library_fallback_when_unmatched(tmp_path) -> None:
+    """Unmatched inference applies the L1-b safe LIBRARY fallback instead
+    of silently skipping default AC injection."""
+    profile = TASK_CLASS_CATALOG[TaskClass.LIBRARY]
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_envelope_unmatched")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    user_ac = ("Changed behavior is covered by tests",)
+
+    async def generate_seed(_session_id: str) -> Seed:
+        return _build_seed(ac=user_ac)
+
+    state = AutoPipelineState(goal="Improve the project", cwd=str(tmp_path))
+    ledger = _unmatched_ledger()
+    state.ledger = ledger.to_dict()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.active_task_class == TaskClass.LIBRARY.value
+    ac = state.seed_artifact["acceptance_criteria"]
+    for index, expected in enumerate(profile.default_ac_template):
+        # The pipeline may wrap generic/library AC in execution-oriented
+        # phrasing, but it preserves the injected template text as the
+        # original requirement payload.
+        assert expected.removesuffix(".").replace(" are ", " ") in ac[index]
+    assert len(ac) >= len(profile.default_ac_template) + 1
+    assert any("Changed behavior" in item and "tests" in item for item in ac)
 
 
 @pytest.mark.asyncio
