@@ -17,7 +17,7 @@
   "patternProperties": {
     "^x-[a-z0-9][a-z0-9-]*$": {
       "type": "object",
-      "description": "Namespaced extension metadata preserved for forward-compatible loaders."
+      "description": "Namespaced extension metadata accepted for forward-compatible loaders."
     }
   },
   "properties": {
@@ -86,7 +86,7 @@
         "patternProperties": {
           "^x-[a-z0-9][a-z0-9-]*$": {
             "type": "object",
-            "description": "Namespaced command extension metadata for forward-compatible loaders."
+            "description": "Namespaced command extension metadata accepted for forward-compatible loaders."
           }
         },
         "properties": {
