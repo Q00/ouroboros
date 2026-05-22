@@ -1128,6 +1128,60 @@ def test_command_claim_supports_command_with_output_redirection_and_pager_pipe()
     )
 
 
+def test_command_claim_supports_inner_command_after_safe_preamble_with_output_plumbing() -> None:
+    """Safe shell preambles still peel presentation-only output plumbing."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    "/bin/bash -lc 'cd /workspace && python -m ruff check "
+                    "src/foo.py tests/test_foo.py 2>&1 | tail -20'"
+                )
+            }
+        },
+    )
+
+    assert _runtime_messages_support_command_claim(
+        "python -m ruff check src/foo.py tests/test_foo.py",
+        (message,),
+    )
+
+
+def test_command_claim_rejects_inner_command_after_safe_preamble_with_grep_filter() -> None:
+    """Shell-wrapper peeling must not strip evidence-transforming filters."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "/bin/bash -lc 'cd /workspace && pytest tests/test_foo.py | grep PASSED'"
+            }
+        },
+    )
+
+    assert not _runtime_messages_support_command_claim("pytest tests/test_foo.py", (message,))
+
+
+def test_test_invocation_supports_shell_preamble_with_output_plumbing() -> None:
+    """``tests_passed`` matching keeps shell-wrapper parity with commands_run."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "/bin/bash -lc 'cd /workspace && pytest tests/test_foo.py 2>&1 | tail -20'"
+            }
+        },
+    )
+
+    assert _runtime_messages_support_command_claim("pytest tests/test_foo.py", (message,))
+
+
 def test_command_claim_keeps_meaningful_pipeline_segments() -> None:
     """Only output-filter pipes are stripped; real pipelines are not over-matched."""
     message = AgentMessage(
