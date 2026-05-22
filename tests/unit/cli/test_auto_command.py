@@ -550,6 +550,11 @@ def test_print_result_show_ledger_renders_assumption_sources() -> None:
                 source="conservative_default",
                 confidence=0.85,
             ),
+            AssumptionRecord(
+                text="Use [project] defaults",
+                source="assumption[ledger]",
+                confidence=0.7,
+            ),
         ),
     )
 
@@ -557,6 +562,9 @@ def test_print_result_show_ledger_renders_assumption_sources() -> None:
 
     assert "Assumption sources:" in output
     assert ("source=conservative_default; confidence=0.85; text=Existing patterns") in output
+    assert (
+        "source=assumption[ledger]; confidence=0.70; text=Use [project] defaults"
+    ) in output
 
 
 def test_print_status_resume_capability_partial() -> None:
