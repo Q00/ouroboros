@@ -118,10 +118,10 @@ class _PassReviewer(SeedReviewer):
 class _StubLedger:
     """Minimal ledger stub for direct ``_run_evaluate`` calls.
 
-    The pipeline only calls ``summary()``, ``assumptions()``, and ``non_goals()``
-    on the ledger inside ``_result()`` (via ``ledger.summary()``). All return
-    empty so the test focuses on EVALUATE transition behaviour rather than
-    ledger-summary coverage."""
+    The pipeline calls ``summary()``, ``assumptions()``, ``assumption_sources()``
+    (PR-C2 / #1157), and ``non_goals()`` on the ledger inside ``_result()``. All
+    return empty so the test focuses on EVALUATE transition behaviour rather
+    than ledger-summary coverage."""
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -131,6 +131,9 @@ class _StubLedger:
         }
 
     def assumptions(self) -> list[str]:
+        return []
+
+    def assumption_sources(self) -> list[Any]:
         return []
 
     def non_goals(self) -> list[str]:

@@ -103,6 +103,29 @@ _RESOLVED_STATUSES: frozenset[LedgerStatus] = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class AssumptionRecord:
+    """Auditable provenance for an assumption-class ledger entry.
+
+    Surfaced via :meth:`SeedDraftLedger.assumption_sources` and
+    :attr:`ouroboros.auto.pipeline.AutoPipelineResult.assumption_sources`
+    so callers can distinguish *what the system assumed for them* from
+    *what the user/repo confirmed*. PR-C2 of #1157.
+
+    ``source`` is the string form of one of the assumption-class
+    :class:`LedgerSource` values — ``assumption`` (auto-answerer
+    fallback), ``inference`` (model reasoning), or
+    ``conservative_default`` (safe-default policy). These three are
+    precisely the sources that, per :data:`_EVIDENCE_BACKED_SOURCES`,
+    are not evidence-backed and therefore contribute to
+    ``assumption_only_sections`` in :meth:`SeedDraftLedger.summary`.
+    """
+
+    text: str
+    source: str
+    confidence: float
+
+
 @dataclass(slots=True)
 class LedgerEntry:
     """A single machine-readable fact in the Seed Draft Ledger."""
@@ -409,6 +432,55 @@ class SeedDraftLedger:
     def assumptions(self) -> list[str]:
         """Return assumption entry values."""
         return self._values_for_sources({LedgerSource.ASSUMPTION})
+
+    def assumption_sources(self) -> list[AssumptionRecord]:
+        """Return active assumption-class entries with provenance attached.
+
+        PR-C2 / #1157: auditable companion to :meth:`assumptions` (which
+        returns plain ``list[str]`` for backwards-compatible callers). The
+        returned records cover every active entry whose source is one of
+        the three assumption-class :class:`LedgerSource` values —
+        ``ASSUMPTION``, ``INFERENCE``, ``CONSERVATIVE_DEFAULT`` — i.e. the
+        sources that produce ``assumption_only_sections`` in
+        :meth:`summary`. Entries whose status is in
+        :data:`_INACTIVE_STATUSES` (WEAK / CONFLICTING / BLOCKED) are
+        excluded, matching the active-set semantics used by
+        :meth:`_values_for_sources`.
+
+        Same-text deduplication uses the same normalization as
+        :meth:`_values_for_sources` so the textual surface stays in lockstep
+        with :meth:`assumptions` for the ``LedgerSource.ASSUMPTION`` subset.
+        """
+        sources = {
+            LedgerSource.ASSUMPTION,
+            LedgerSource.INFERENCE,
+            LedgerSource.CONSERVATIVE_DEFAULT,
+        }
+        resolved: dict[tuple[str, str], AssumptionRecord] = {}
+        for section in self.sections.values():
+            for entry in section.entries:
+                if entry.source not in sources or entry.status in _INACTIVE_STATUSES:
+                    continue
+                source_str = (
+                    entry.source.value
+                    if isinstance(entry.source, LedgerSource)
+                    else str(entry.source)
+                )
+                resolved[(section.name, entry.key)] = AssumptionRecord(
+                    text=entry.value,
+                    source=source_str,
+                    confidence=entry.confidence,
+                )
+
+        seen: set[str] = set()
+        out: list[AssumptionRecord] = []
+        for record in resolved.values():
+            normalized = _normalize_conflict_value(record.text)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            out.append(record)
+        return out
 
     def non_goals(self) -> list[str]:
         """Return non-goal entry values."""

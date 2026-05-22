@@ -29,7 +29,7 @@ from ouroboros.auto.handoff_contract import (
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
-from ouroboros.auto.ledger import SeedDraftLedger
+from ouroboros.auto.ledger import AssumptionRecord, SeedDraftLedger
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON, mirror_ralph_job_events
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.recovery_plan import (
@@ -203,6 +203,10 @@ class AutoPipelineResult:
     last_lateral_approach_summary: str | None = None
     last_lateral_text: str | None = None
     assumptions: tuple[str, ...] = ()
+    # PR-C2 / #1157: auditable companion to ``assumptions`` that carries the
+    # ledger source (``assumption`` / ``inference`` / ``conservative_default``)
+    # and confidence per entry. Additive — ``assumptions`` is unchanged.
+    assumption_sources: tuple[AssumptionRecord, ...] = ()
     non_goals: tuple[str, ...] = ()
     defaulted_sections: tuple[str, ...] = ()
     blocker: str | None = None
@@ -2597,6 +2601,7 @@ class AutoPipeline:
             last_lateral_approach_summary=state.last_lateral_approach_summary,
             last_lateral_text=state.last_lateral_text,
             assumptions=tuple(ledger.assumptions()),
+            assumption_sources=tuple(ledger.assumption_sources()),
             non_goals=tuple(ledger.non_goals()),
             defaulted_sections=tuple(ledger.summary().get("defaulted_sections", ())),
             blocker=blocker or state.last_error,
