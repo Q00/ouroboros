@@ -71,7 +71,8 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 
 | Layer | Code | Surface | Meaning |
 |---|---|---|---|
-| Interview | `interview_max_rounds_exhausted` | `last_error_code`, `result.stop_reason_code` | Auto interview ran `max_interview_rounds` without ledger+backend mutual closure or safe-default fallback. |
+| Interview | `interview_max_rounds_exhausted` | `last_error_code`, `result.stop_reason_code` | Auto interview ran `max_interview_rounds` without ledger+backend mutual closure, no section was safely defaultable, and no partial defaults applied — i.e. genuine deadlock with nothing the policy could close. |
+| Interview | `interview_unsafe_gaps_remain` | `last_error_code`, `result.stop_reason_code` | Auto interview ran `max_interview_rounds` with at least one section safely defaultable and at least one section remaining unsafe (e.g. CONFLICTING ledger entry, production/credential context). Partial defaults are rolled back so the persisted transcript and ledger stay aligned; resume can address the unsafe gap and re-run. |
 | Interview | `interview_phase_deadline` | `last_error_code`, `result.stop_reason_code` | Interview phase exceeded its per-phase timeout. |
 | Ralph | `iteration_timeout` | blocker text + (future) `result.stop_reason_code` | A single Ralph iteration exceeded its per-iteration timeout. |
 | Ralph | `wall_clock_exhausted` | blocker text + (future) `result.stop_reason_code` | The Ralph wall-clock budget was exhausted before convergence. |
@@ -80,5 +81,17 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 | Ralph | `max_generations reached` | blocker text + (future) `result.stop_reason_code` | Ralph hit its configured generation cap before reaching A grade. |
 
 Blockers without a canonical code keep using the free-form ``last_error`` text. Ralph-layer codes are surfaced via blocker text today; their result-envelope promotion is tracked as a follow-up.
+
+### Interview closure mode taxonomy
+
+When `result.status == "seed_ready"`, `result.interview_closure_mode` distinguishes how the interview was closed:
+
+| Value | Meaning |
+|---|---|
+| `None` | Mutual agreement — both the backend and the ledger declared the seed ready in the same round. The default healthy path. |
+| `"ledger_only"` | PR-B1 / #1148: `max_rounds` hit; the ledger was structurally complete but the backend refused to declare closure. The interview closes on ledger-only consensus. Defaulted sections (if any) are tagged in `result.defaulted_sections`. |
+| `"safe_default"` | PR-B2: `max_rounds` hit; the safe-default policy successfully filled every remaining required gap with auditable assumptions. Synthesis was pushed back into the persisted transcript so the seed generator sees the same assumptions the ledger records. Defaulted sections are tagged in `result.defaulted_sections`. |
+
+Genuine-deadlock and partial-unsafe outcomes do **not** set `interview_closure_mode`; they reach a `blocked` terminal with the matching `stop_reason_code` above instead.
 
 The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. Use `--complete-product` to drive the full Interview → Seed → Run → Ralph → Product chain on a single `ooo auto` invocation; the chained Ralph loop honors the same wall-clock deadline as the parent auto session (`--timeout`). The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.

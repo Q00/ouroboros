@@ -735,6 +735,10 @@ async def test_interview_driver_finalizes_safe_defaults_after_benign_max_rounds(
     assert result.status == "seed_ready"
     assert state.interview_completed is True
     assert state.pending_question is None
+    # PR-B2 / #821: the safe-default closure path now tags the envelope so
+    # callers can distinguish it from mutual_agreement (None) and ledger_only.
+    assert state.interview_closure_mode == "safe_default"
+    assert state.last_error_code is None
     assert ledger.open_gaps() == []
     assert any(
         entry.status == LedgerStatus.DEFAULTED
@@ -742,6 +746,78 @@ async def test_interview_driver_finalizes_safe_defaults_after_benign_max_rounds(
         for entry in ledger.sections["runtime_context"].entries
     )
     assert any("[safe-default-synthesis]" in answer for answer in answers)
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_with_unsafe_gaps_when_partially_defaultable(
+    tmp_path,
+) -> None:
+    """PR-B2 / #821: a benign goal where one ledger section is CONFLICTING yields
+    partial safe-default at ``max_rounds`` — some sections defaultable, others
+    not. The driver must roll back the partial defaults (synthesis was never
+    pushed to the backend so leaving them would diverge from the persisted
+    transcript), record the typed ``interview_unsafe_gaps_remain`` stop code,
+    and not set ``interview_closure_mode`` (blocked outcomes do not carry it).
+    """
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_partial")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    # Seed a CONFLICTING entry on one section so it is per-section unsafe
+    # without triggering the goal-level unsafe-context gate (the goal is
+    # benign). The other gap sections remain safely defaultable, so
+    # ``finalize_safe_defaultable_gaps`` produces both ``defaulted_sections``
+    # and ``unsafe_gaps`` — the exact partial-safe shape PR-B2 routes.
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.contradiction",
+            value="Two recorded answers disagree on whether to allow new deps.",
+            source=LedgerSource.USER_PREFERENCE,
+            confidence=1.0,
+            status=LedgerStatus.CONFLICTING,
+        ),
+    )
+    assert "constraints" in ledger.open_gaps()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    blocker = result.blocker or ""
+    assert "partial safe-default closure" in blocker
+    assert "rolled back" in blocker
+    # The new typed code distinguishes partial-safe from the genuine deadlock
+    # (``interview_max_rounds_exhausted``) and from the per-phase timeout
+    # (``interview_phase_deadline``).
+    assert state.last_error_code == "interview_unsafe_gaps_remain"
+    # Result envelope must not report a closure_mode on a blocked outcome.
+    assert state.interview_closure_mode is None
+    # Rollback invariant: no safe-default entries remain in the ledger.
+    assert not any(
+        entry.key.endswith(".safe_default_finalization")
+        for section in ledger.sections.values()
+        for entry in section.entries
+    ), "partial safe-default rollback must remove all defaulted entries"
+    # The CONFLICTING entry itself is preserved (it is user-recorded data the
+    # caller may need on resume to address the unsafe gap).
+    assert any(
+        entry.key == "constraints.contradiction" for entry in ledger.sections["constraints"].entries
+    )
 
 
 @pytest.mark.asyncio
@@ -844,6 +920,12 @@ async def test_interview_driver_keeps_unsafe_gaps_blocking_after_max_rounds(tmp_
     assert "ledger_done=False" in blocker
     assert "open_gaps=" in blocker
     assert not ledger.is_seed_ready()
+    # PR-B2 regression guard: a goal whose unsafe-context gate marks ALL gaps
+    # unsafe (no defaultable_sections produced) must continue to use the
+    # generic ``interview_max_rounds_exhausted`` code, NOT the new partial-safe
+    # code ``interview_unsafe_gaps_remain``.
+    assert state.last_error_code == "interview_max_rounds_exhausted"
+    assert state.interview_closure_mode is None
 
 
 @pytest.mark.asyncio

@@ -461,6 +461,10 @@ class AutoInterviewDriver:
             state.ledger = ledger.to_dict()
             state.pending_question = None
             state.interview_completed = True
+            # PR-B2 / #821: tag the envelope so callers can distinguish a
+            # safe-default-applied closure from a backend-confirmed close
+            # (``mutual_agreement``) and from PR-B1's ``ledger_only`` path.
+            state.interview_closure_mode = "safe_default"
             state.mark_progress(
                 "safe-default finalization closed interview gaps: "
                 + ", ".join(finalization.defaulted_sections),
@@ -500,6 +504,47 @@ class AutoInterviewDriver:
             return AutoInterviewResult(
                 "seed_ready", state.interview_session_id, ledger, self.max_rounds
             )
+        # PR-B2 / #821: partial safe-default closure — some required gaps were
+        # safely defaultable, but at least one remained unsafe at max_rounds.
+        # Distinguish from the generic "nothing was defaultable" path with a
+        # dedicated structured event and a typed stop_reason_code so callers
+        # can resume with the unsafe gap context surfaced. Roll back the
+        # partial defaults because synthesis was never pushed to the backend
+        # transcript (same invariant as the synthesis-failure rollback above):
+        # leaving entries in the ledger that the persisted interview does not
+        # mirror would diverge on resume.
+        if (
+            finalization is not None
+            and finalization.defaulted_sections
+            and finalization.unsafe_gaps
+        ):
+            log.info(
+                "auto.interview.safe_default_partial_unsafe_gaps",
+                auto_session_id=state.auto_session_id,
+                defaulted_sections=finalization.defaulted_sections,
+                unsafe_gaps=finalization.unsafe_gaps,
+                ambiguity_score=turn.ambiguity_score,
+                interview_session_id=state.interview_session_id,
+            )
+            _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+            blocker = (
+                f"auto interview reached max_rounds={self.max_rounds} with "
+                f"partial safe-default closure (rolled back): "
+                f"defaultable={list(finalization.defaulted_sections)}, "
+                f"unsafe_remaining={list(finalization.unsafe_gaps)}"
+            )
+            state.ledger = ledger.to_dict()
+            state.mark_blocked(
+                blocker,
+                tool_name="interview_driver",
+                error_code="interview_unsafe_gaps_remain",
+            )
+            record_authoring_backend(state)
+            self._save(state)
+            return AutoInterviewResult(
+                "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
+            )
+
         if ledger_done:
             log.info(
                 "auto.interview.mutual_agreement_deadlock_at_max_rounds",
