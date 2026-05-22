@@ -6,9 +6,10 @@
 # acceptance gate verifies the artifact (`completion_mode`,
 # `runtime_probe_kinds`).
 #
-# These values must round-trip with the L1 TaskClassProfile catalog —
-# `tests/canonical/test_canonical.py::test_scenario_completion_mode_matches_catalog`
-# enforces the constraint.
+# These values are validated for shape only at L0-a. Cross-validation
+# that they round-trip through the L1 `TaskClassProfile` catalog
+# (#1173) lands in a follow-up sub-PR; the round-trip test is not yet
+# present in `tests/canonical/test_canonical.py`.
 
 domain_class: cli
 completion_mode: product_complete
