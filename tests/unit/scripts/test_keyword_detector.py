@@ -84,6 +84,20 @@ class TestFirstTimePrefs:
         with patch.object(_mod.Path, "home", return_value=tmp_path):
             assert is_first_time() is True
 
+    def test_malformed_prefs_stays_first_time_despite_install_markers(self, tmp_path):
+        # Intentional asymmetry guard: a malformed prefs.json (valid JSON that
+        # parses to a non-dict) stays first-time even when install markers are
+        # present, because re-running welcome rewrites the corrupt file cleanly.
+        # Pins the contract so the malformed branch is not "fixed" by routing
+        # it through _has_prior_install_state().
+        ouro_dir = tmp_path / ".ouroboros"
+        ouro_dir.mkdir()
+        (ouro_dir / "config.yaml").write_text("version: 1\n")
+        (ouro_dir / "prefs.json").write_text('["not", "a", "dict"]')
+
+        with patch.object(_mod.Path, "home", return_value=tmp_path):
+            assert is_first_time() is True
+
 
 class TestDetectKeywords:
     def test_ooo_qa_detected(self):

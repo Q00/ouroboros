@@ -177,6 +177,9 @@ def _has_prior_install_state() -> bool:
     a user who configured Ouroboros but never finished (or skipped) the welcome
     is otherwise treated as first-time forever and re-nagged on every prompt.
     Any of these install signals means the user is past first-touch.
+
+    This helper deliberately has no ``try/except`` of its own: any exception
+    propagates to ``is_first_time``'s handler, which fails open to first-time.
     """
     ouro_dir = Path.home() / ".ouroboros"
     markers = ("config.yaml", "credentials.yaml", "ouroboros.db")
@@ -201,6 +204,11 @@ def is_first_time() -> bool:
             return not _has_prior_install_state()
         prefs = json.loads(prefs_path.read_text())
         if not isinstance(prefs, dict):
+            # Intentional asymmetry vs. the missing-prefs branch above: a
+            # malformed prefs.json stays first-time even when install markers
+            # exist. A corrupt prefs file is a stronger signal than orphan
+            # markers — re-running welcome rewrites it cleanly — so do NOT
+            # route this through _has_prior_install_state().
             return True
         if prefs.get("welcomeCompleted") or prefs.get("welcomeShown"):
             return False
