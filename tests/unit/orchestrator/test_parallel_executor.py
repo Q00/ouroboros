@@ -5113,6 +5113,84 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_node_id_claim_backed_only_by_non_test_command(
+        self, tmp_path
+    ) -> None:
+        """The new candidate source must not let a non-test command back a test claim.
+
+        Guards the message-command candidate path added for node-id ``tests_passed``
+        support: a Bash message whose command merely prints a fake success line
+        (``cat fake_results.txt`` whose output is ``test_x.py::test_y passed``) is
+        not a test command, so ``_looks_like_test_command`` must exclude it and the
+        node-id claim stays unsupported (FABRICATION_SUSPECTED) — even though the
+        recorded output literally contains the node-id-plus-"passed" marker.
+        """
+        source_file = tmp_path / "string_utils.py"
+        source_file.write_text("def slugify(text):\n    return text\n", encoding="utf-8")
+
+        fake_command = "cat fake_results.txt"
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["string_utils.py"],\n'
+                f'  "commands_run": ["{fake_command}"],\n'
+                '  "tests_passed": ["test_slugify.py::test_spaces"]\n'
+                "}\n"
+                "```",
+                native_session_id="session-node-id-non-test-command-only",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {source_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(source_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Bash: {fake_command}",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": fake_command},
+                            "output": "test_slugify.py::test_spaces passed",
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create slugify and pytest coverage.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "tests_passed:" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+
+    @pytest.mark.asyncio
     async def test_fat_harness_verifier_rejects_unittest_summary_missing_from_runtime(
         self, tmp_path
     ) -> None:
