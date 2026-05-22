@@ -295,6 +295,12 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     },
     AutoPhase.RALPH_HANDOFF: {
         AutoPhase.EVALUATE,
+        # L5-a / #1157: Ralph terminal with ``oscillation_detected`` routes
+        # through UNSTUCK_LATERAL first when a lateral_thinker is wired in
+        # complete-product mode, mirroring the EVALUATE → UNSTUCK_LATERAL
+        # path. Other Ralph stop_reasons (budget-exhaustion terminals) fall
+        # through to BLOCKED directly.
+        AutoPhase.UNSTUCK_LATERAL,
         AutoPhase.COMPLETE,
         AutoPhase.BLOCKED,
         AutoPhase.FAILED,
