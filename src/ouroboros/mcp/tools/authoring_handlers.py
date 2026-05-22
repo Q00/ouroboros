@@ -960,6 +960,13 @@ class GenerateSeedHandler:
             if effective_score is None:
                 effective_score = interview_state.ambiguity_score  # persisted
 
+            # force=True intentionally bypasses BOTH the ambiguity threshold
+            # AND the "no score / no answered rounds" completeness guard for
+            # this plugin path — broader than #1107's domain-layer scope, but
+            # matches the CLI ``init`` "Generate Seed anyway" opt-in which
+            # forwards the same flag past the same guards. The real ambiguity
+            # score is still recorded in seed metadata for provenance and the
+            # bypass is emitted to the audit log.
             if not interview_state.is_complete and not force:
                 answered_rounds = [r for r in interview_state.rounds if r.user_response is not None]
                 if effective_score is not None:
