@@ -225,6 +225,16 @@ class AutoPipelineResult:
     ledger_provenance: dict[str, tuple[str, ...]] = field(default_factory=dict)
     evidence_backed_sections: tuple[str, ...] = ()
     assumption_only_sections: tuple[str, ...] = ()
+    # L3-2 / #1176: runtime acceptance evidence captured by the
+    # ``probe_runner`` callback wired on ``AutoPipeline``. Empty when
+    # no probe runner was provided (the L0 manual harness invokes
+    # probes from the test fixture rather than through this surface)
+    # or when ``active_task_class`` is None. Each entry is a frozen
+    # :class:`ouroboros.orchestrator.runtime_evidence.RuntimeEvidence`
+    # instance — the verifier (a future follow-up) reads it as a
+    # grade input; for now the envelope just surfaces it for
+    # observers.
+    runtime_probe_evidence: tuple[Any, ...] = ()
 
 
 @dataclass(slots=True)
@@ -284,15 +294,32 @@ class AutoPipeline:
     # the raw QA differences. See :class:`HandlerLateralThinker` in
     # adapters.py for the production wiring.
     lateral_thinker: LateralThinker | None = None
+    # L3-2 / #1176: optional async callback that invokes runtime probes
+    # for the active task class after the artifact exists. Signature:
+    # ``async (state) -> tuple[RuntimeEvidence, ...]``. When ``None``,
+    # the pipeline does not invoke probes — the L0 manual harness
+    # owns probe invocation in the test fixture. The pipeline only
+    # caches the returned evidence and surfaces it via
+    # :attr:`AutoPipelineResult.runtime_probe_evidence`.
+    probe_runner: Callable[[AutoPipelineState], Awaitable[tuple[Any, ...]]] | None = None
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
+    # L3-2 / #1176: per-``run()`` cache for the runtime probe evidence
+    # surfaced on ``AutoPipelineResult``. Populated on first invocation
+    # of the ``probe_runner`` callback so multiple ``_result()`` returns
+    # within a single run share the same evidence tuple.
+    _last_probe_evidence: tuple[Any, ...] = field(default=(), init=False, repr=False)
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
         self._last_emitted_phase = None
         self._last_emitted_grade = None
         self._last_emitted_repair = None
+        # L3-2 / #1176: clear any cached probe evidence from a prior
+        # run so a re-used ``AutoPipeline`` instance does not leak
+        # the previous session's evidence onto a new ``_result()``.
+        self._last_probe_evidence = ()
         # Push the same progress callback down into the interview driver so
         # the longest-running phase (auto interview rounds) emits live
         # snapshots through the same observer contract instead of forcing
@@ -1444,7 +1471,34 @@ class AutoPipeline:
             f"{message_prefix} ({stop_reason or 'qa passed'})",
         )
         self._save(state)
+        # L3-2 / #1176: capture runtime probe evidence at the COMPLETE
+        # transition so the envelope surfaces *what actually ran* on
+        # PRODUCT_COMPLETE outcomes. ``_invoke_probe_runner`` is a no-op
+        # when no ``probe_runner`` was wired (default).
+        await self._invoke_probe_runner(state)
         return self._result(state, ledger, review=review, run_subagent=run_subagent)
+
+    async def _invoke_probe_runner(self, state: AutoPipelineState) -> None:
+        """L3-2 / #1176: invoke the wired ``probe_runner`` once per run
+        and cache the resulting :class:`RuntimeEvidence` tuple on
+        ``self._last_probe_evidence``. Subsequent ``_result()`` calls
+        within the same run pick up the same evidence without
+        re-invoking the (possibly subprocess-heavy) probes.
+
+        Exceptions from the runner are caught and replaced with an
+        empty evidence tuple — probes are advisory in v1; a runner
+        crash must not turn a PRODUCT_COMPLETE outcome into a
+        FAILED outcome. The advisory contract upgrade to *grade-input*
+        is a v2 expansion path (#1176).
+        """
+        if self.probe_runner is None or self._last_probe_evidence:
+            return
+        try:
+            evidence = await self.probe_runner(state)
+        except Exception:  # noqa: BLE001 - advisory probe must not crash the pipeline
+            self._last_probe_evidence = ()
+            return
+        self._last_probe_evidence = tuple(evidence) if evidence else ()
 
     async def _run_evaluate(
         self,
@@ -2665,6 +2719,7 @@ class AutoPipeline:
             ledger_provenance=ledger_provenance,
             evidence_backed_sections=tuple(summary.get("evidence_backed_sections", ())),
             assumption_only_sections=tuple(summary.get("assumption_only_sections", ())),
+            runtime_probe_evidence=self._last_probe_evidence,
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:
