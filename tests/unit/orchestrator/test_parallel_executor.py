@@ -1099,6 +1099,49 @@ def test_command_claim_rejects_inner_command_after_non_setup_preamble() -> None:
     )
 
 
+def test_command_claim_supports_command_with_output_redirection_and_pager_pipe() -> None:
+    """A clean ``commands_run`` claim matches a run wrapped in ``2>&1 | tail``.
+
+    Regression: agents routinely run ``<cmd> 2>&1 | tail -20`` while citing the
+    clean ``<cmd>`` in evidence. The trailing redirection and output-only pager
+    pipe must not block the match (which previously failed the whole AC as
+    FABRICATION_SUSPECTED).
+    """
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    "python -m ruff check src/poc/structure_extractor.py "
+                    "tests/test_structure_and_draft_substance.py 2>&1 | tail -20"
+                )
+            }
+        },
+    )
+
+    assert _runtime_messages_support_command_claim(
+        "python -m ruff check src/poc/structure_extractor.py "
+        "tests/test_structure_and_draft_substance.py",
+        (message,),
+    )
+
+
+def test_command_claim_keeps_meaningful_pipeline_segments() -> None:
+    """Only output-filter pipes are stripped; real pipelines are not over-matched."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": "python gen.py | python process.py"}},
+    )
+
+    # ``process.py`` is not an output filter, so the pipe stays and the partial
+    # ``python gen.py`` claim is not proven by this runtime command.
+    assert not _runtime_messages_support_command_claim("python gen.py", (message,))
+
+
 class TestProfileAwareDecompositionAudit:
     @pytest.mark.asyncio
     async def test_level_started_event_records_active_decomposition_profile(self) -> None:

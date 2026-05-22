@@ -1056,6 +1056,47 @@ def _looks_like_unittest_command(command: str) -> bool:
     return _unittest_command_invocation(command) is not None
 
 
+# Output-only shell filters: a trailing pipe into one of these is presentation
+# or paging, not the work an evidence claim is about.
+_OUTPUT_FILTER_COMMANDS = frozenset(
+    {"tail", "head", "cat", "less", "more", "tee", "wc", "grep", "egrep", "fgrep"}
+)
+
+# Trailing shell output redirection (``2>&1``, ``> log``, ``2> err``, ``&> out``).
+_TRAILING_REDIRECT_RE = re.compile(
+    r"\s*(?:[0-9]*>{1,2}\s*(?:&[0-9]+|[^\s|]+)|&>{1,2}\s*[^\s|]+)\s*$"
+)
+
+
+def _strip_command_output_plumbing(command: str) -> str:
+    """Return a command with trailing output redirection and pager pipes removed.
+
+    Agents routinely run ``<cmd> 2>&1 | tail -20`` while their ``commands_run``
+    evidence cites the clean ``<cmd>``. The trailing redirection and the
+    output-only filter pipe are presentation plumbing, not the work being
+    claimed, so they must not block a match. Deliberately conservative: only
+    trailing output redirections and pipes into a known output-filter command
+    are dropped, so meaningful pipelines (``a | python process.py``) are kept.
+    """
+    text = command.strip()
+    if not text:
+        return text
+    # Peel output-only filter pipes from the tail (``... | tail -n 20``).
+    while "|" in text:
+        head, _, tail_segment = text.rpartition("|")
+        tail_tokens = tail_segment.split()
+        if tail_tokens and tail_tokens[0].lower() in _OUTPUT_FILTER_COMMANDS:
+            text = head.strip()
+            continue
+        break
+    # Peel trailing output redirections, possibly several (``2>&1 > log``).
+    prev: str | None = None
+    while prev != text:
+        prev = text
+        text = _TRAILING_REDIRECT_RE.sub("", text).strip()
+    return text
+
+
 def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
     """Return normalized command forms that a concise evidence claim may use.
 
@@ -1075,6 +1116,14 @@ def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
     test_invocation = _test_command_invocation(command)
     if test_invocation and test_invocation not in aliases:
         aliases.append(test_invocation)
+    # A recorded command may append output plumbing (``... 2>&1 | tail -20``)
+    # that a concise ``commands_run`` claim omits. Add plumbing-stripped variants
+    # so the two still match. Alias matching stays exact (set intersection), so
+    # this does not widen proof to arbitrary substrings.
+    for base in tuple(aliases):
+        stripped = _normalized_evidence_text(_strip_command_output_plumbing(base))
+        if stripped and stripped not in aliases:
+            aliases.append(stripped)
     return tuple(aliases)
 
 
