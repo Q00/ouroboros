@@ -2388,6 +2388,14 @@ class AutoPipeline:
                 self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
+            # L5-a / #1157: the live ``_handoff_to_ralph`` path routes
+            # ``oscillation_detected`` through ``UNSTUCK_LATERAL`` when a
+            # lateral thinker is wired. The resume path intentionally does
+            # not yet plumb lateral recovery — instead it BLOCKED-s with
+            # ``tool_name="ralph_starter"``, which ``_recoverable_phase_for_tool``
+            # maps back to ``RALPH_HANDOFF`` so a re-resume retries Ralph
+            # from scratch rather than stranding the session. Extending
+            # lateral recovery into the resume path is reserved for L5-b.
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
@@ -2510,6 +2518,13 @@ class AutoPipeline:
                 self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
+            # L5-a / #1157: re-attach observes an already-dispatched Ralph
+            # job's terminal status and does not currently plumb
+            # ``oscillation_detected`` through ``UNSTUCK_LATERAL``. Falling
+            # through to BLOCKED with ``tool_name="ralph_starter"`` keeps
+            # the session resumable (``_recoverable_phase_for_tool`` maps
+            # ralph_starter back to RALPH_HANDOFF). Lateral recovery on
+            # the re-attach branch is reserved for L5-b.
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
