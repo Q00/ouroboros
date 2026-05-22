@@ -32,7 +32,12 @@ uv run pytest tests/canonical/ -v
 
 This validates that every scenario directory has the required
 fixture files in the right shape. It does **not** invoke
-`ouroboros_auto`. Use this to catch fixture rot.
+`ouroboros_auto`. Use this to catch fixture rot. The run ends with a
+copyable status line per scenario, for example:
+
+```text
+CANONICAL cli-todo: shape_valid domain=cli completion=product_complete probes=headless_run,stdout_golden budget=1800s live=deferred_l0b
+```
 
 ### Full live run (manual, costs LLM tokens)
 

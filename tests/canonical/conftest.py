@@ -79,6 +79,26 @@ class CanonicalScenario:
         return None
 
 
+def format_canonical_summary_line(scenario: CanonicalScenario) -> str:
+    """Return the copyable one-line status for a canonical scenario.
+
+    L0-a has no live ``ouroboros_auto`` invocation yet, so the summary
+    deliberately reports the current shape-check terminal instead of
+    pretending PRODUCT_COMPLETE has been exercised. The live terminal
+    can replace ``shape_valid`` in L0-b without changing the copyable
+    line contract.
+    """
+    probe_text = ",".join(scenario.runtime_probe_kinds) or "none"
+    return (
+        f"CANONICAL {scenario.slug}: shape_valid "
+        f"domain={scenario.domain_class} "
+        f"completion={scenario.completion_mode} "
+        f"probes={probe_text} "
+        f"budget={scenario.wall_clock_budget_seconds}s "
+        f"live=deferred_l0b"
+    )
+
+
 def _iter_scenario_dirs() -> Iterator[Path]:
     """Yield each ``tests/canonical/<slug>/`` directory in stable order."""
     for entry in sorted(_CANONICAL_ROOT.iterdir()):
@@ -192,3 +212,18 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:  # type: ignore[na
         scenarios,
         ids=[s.slug for s in scenarios],
     )
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:  # type: ignore[name-defined]
+    """Emit one copyable status line per canonical scenario.
+
+    This is the #1170 L0-a manual-reporting contract: after a maintainer
+    runs ``pytest tests/canonical/ -v``, the terminal output contains a
+    stable line that can be pasted into an SSOT or PR progress comment.
+    """
+    scenarios = tuple(_load_scenario(d) for d in _iter_scenario_dirs())
+    if not scenarios:
+        return
+    terminalreporter.write_sep("-", "canonical scenario summary")
+    for scenario in scenarios:
+        terminalreporter.write_line(format_canonical_summary_line(scenario))
