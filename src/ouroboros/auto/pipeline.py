@@ -1348,41 +1348,16 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            # L5-a / #1157: when Ralph terminates with ``oscillation_detected``
-            # and the session has a wired lateral thinker in complete-product
-            # mode, route through UNSTUCK_LATERAL first instead of bailing
-            # straight to BLOCKED. Mirrors the EVALUATE → UNSTUCK_LATERAL
-            # path at ``_evaluate_after_qa``. Other Ralph stop_reasons
-            # (iteration_timeout, wall_clock_exhausted, grade_regressing,
-            # max_generations reached) continue to BLOCKED unchanged because
-            # those terminals are budget exhaustions rather than
-            # spec-reframe candidates.
-            if (
-                stop_reason == "oscillation_detected"
-                and self.lateral_thinker is not None
-                and state.complete_product
-            ):
-                state.transition(
-                    AutoPhase.UNSTUCK_LATERAL,
-                    "Ralph oscillation_detected; invoking lateral persona for reframing",
-                )
-                self._save(state)
-                return await self._run_lateral(
-                    state,
-                    ledger,
-                    seed,
-                    qa_score=0.0,
-                    qa_verdict="oscillation_detected",
-                    qa_differences=(
-                        "Ralph oscillated between grade states without converging on A grade.",
-                    ),
-                    qa_suggestions=(
-                        "Reframe the Seed acceptance criteria so the grade oscillation pattern cannot recur.",
-                    ),
-                    cache_suffix="",
-                    review=review,
-                    run_subagent=run_subagent,
-                )
+            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
+                state,
+                ledger,
+                stop_reason=stop_reason,
+                seed=seed,
+                review=review,
+                run_subagent=run_subagent,
+            )
+            if lateral_result is not None:
+                return lateral_result
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(
@@ -1846,6 +1821,72 @@ class AutoPipeline:
         self._save(state)
         return self._result(
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+        )
+
+    def _recover_seed_for_lateral(
+        self,
+        state: AutoPipelineState,
+        seed: Seed | None,
+    ) -> Seed | None:
+        if seed is not None:
+            return seed
+        if not state.seed_artifact:
+            return None
+        return self._normalize_execution_seed(state, Seed.from_dict(state.seed_artifact))
+
+    async def _maybe_route_ralph_oscillation_to_lateral(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        stop_reason: str | None,
+        seed: Seed | None,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+    ) -> AutoPipelineResult | None:
+        """Apply the L5-a Ralph oscillation → UNSTUCK_LATERAL contract.
+
+        Ralph terminal status is consumed in three places: fresh handoff,
+        resume polling, and re-attach observation. L5-a is a producer/consumer
+        contract over the terminal ``stop_reason``, so all three consumers
+        must route ``oscillation_detected`` through the same existing lateral
+        recovery substrate when the session is complete-product and a lateral
+        thinker is wired. Other blocked stop reasons remain direct BLOCKED
+        terminals because they represent budget exhaustion, not a spec
+        reframe candidate.
+        """
+        if (
+            stop_reason != "oscillation_detected"
+            or self.lateral_thinker is None
+            or not (state.complete_product or self.complete_product)
+        ):
+            return None
+        if self.complete_product and not state.complete_product:
+            state.complete_product = True
+        recovered_seed = self._recover_seed_for_lateral(state, seed)
+        if recovered_seed is None:
+            return None
+
+        state.transition(
+            AutoPhase.UNSTUCK_LATERAL,
+            "Ralph oscillation_detected; invoking lateral persona for reframing",
+        )
+        self._save(state)
+        return await self._run_lateral(
+            state,
+            ledger,
+            recovered_seed,
+            qa_score=0.0,
+            qa_verdict="oscillation_detected",
+            qa_differences=(
+                "Ralph oscillated between grade states without converging on A grade.",
+            ),
+            qa_suggestions=(
+                "Reframe the Seed acceptance criteria so the grade oscillation pattern cannot recur.",
+            ),
+            cache_suffix="",
+            review=review,
+            run_subagent=run_subagent,
         )
 
     async def _run_lateral(
@@ -2388,14 +2429,16 @@ class AutoPipeline:
                 self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            # L5-a / #1157: the live ``_handoff_to_ralph`` path routes
-            # ``oscillation_detected`` through ``UNSTUCK_LATERAL`` when a
-            # lateral thinker is wired. The resume path intentionally does
-            # not yet plumb lateral recovery — instead it BLOCKED-s with
-            # ``tool_name="ralph_starter"``, which ``_recoverable_phase_for_tool``
-            # maps back to ``RALPH_HANDOFF`` so a re-resume retries Ralph
-            # from scratch rather than stranding the session. Extending
-            # lateral recovery into the resume path is reserved for L5-b.
+            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
+                state,
+                ledger,
+                stop_reason=stop_reason,
+                seed=seed,
+                review=review,
+                run_subagent=None,
+            )
+            if lateral_result is not None:
+                return lateral_result
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
@@ -2518,13 +2561,16 @@ class AutoPipeline:
                 self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            # L5-a / #1157: re-attach observes an already-dispatched Ralph
-            # job's terminal status and does not currently plumb
-            # ``oscillation_detected`` through ``UNSTUCK_LATERAL``. Falling
-            # through to BLOCKED with ``tool_name="ralph_starter"`` keeps
-            # the session resumable (``_recoverable_phase_for_tool`` maps
-            # ralph_starter back to RALPH_HANDOFF). Lateral recovery on
-            # the re-attach branch is reserved for L5-b.
+            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
+                state,
+                ledger,
+                stop_reason=stop_reason,
+                seed=None,
+                review=None,
+                run_subagent=None,
+            )
+            if lateral_result is not None:
+                return lateral_result
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
