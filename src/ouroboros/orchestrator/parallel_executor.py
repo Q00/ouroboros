@@ -906,8 +906,17 @@ def _looks_like_test_command(command: str) -> bool:
 
 
 def _test_command_invocation(command: str) -> str | None:
-    """Return the backed inner test invocation for a direct or wrapped command."""
-    normalized = command.strip().lower()
+    """Return the backed inner test invocation for a direct or wrapped command.
+
+    Output plumbing (``2>&1``, ``| tail -20``) is peeled first so a clean
+    invocation can be extracted from a ``<cmd> 2>&1 | tail -20`` runtime
+    command. ``_strip_command_output_plumbing`` is deliberately narrow — only
+    presentation-only tails are peeled — so an evidence-altering filter such
+    as ``| grep passed`` survives the strip and is rejected downstream by
+    ``_test_invocation_from_prefix`` rather than being silently dropped.
+    """
+    stripped = _strip_command_output_plumbing(command)
+    normalized = stripped.lower()
     if not normalized:
         return None
 
@@ -1012,13 +1021,24 @@ def _strip_env_prefix(parts: list[str]) -> list[str]:
 
 
 def _test_invocation_from_prefix(command: str) -> str | None:
-    """Return a normalized test invocation only when it starts the command text."""
+    """Return a normalized test invocation only when it starts the command text.
+
+    Refuses to extract from commands that still contain a residual shell pipe
+    after presentation plumbing has been peeled (``pytest x | grep passed``).
+    A residual pipe means the runtime command is followed by an
+    evidence-transforming filter (``grep`` / ``wc`` / ``tee``); treating the
+    bare prefix as the clean test invocation there would let a filtered run
+    silently back a clean ``tests_passed`` / ``commands_run`` claim via the
+    ``startswith`` widening in ``_runtime_message_supports_command_claim``.
+    """
     try:
         parts = shlex.split(command)
     except ValueError:
         parts = command.replace('"', "").replace("'", "").split()
     parts = _strip_env_prefix(parts)
     if not parts:
+        return None
+    if "|" in parts:
         return None
 
     if parts[0] in {"pytest", "py.test", "tox", "nox"}:
@@ -1058,9 +1078,15 @@ def _looks_like_unittest_command(command: str) -> bool:
 
 # Output-only shell filters: a trailing pipe into one of these is presentation
 # or paging, not the work an evidence claim is about.
-_OUTPUT_FILTER_COMMANDS = frozenset(
-    {"tail", "head", "cat", "less", "more", "tee", "wc", "grep", "egrep", "fgrep"}
-)
+#
+# Deliberately narrow: only filters that pass the output stream through (or
+# truncate it positionally) are allowed. ``grep``/``egrep``/``fgrep`` are
+# excluded because they can hide failure lines and make a filtered run back a
+# clean ``commands_run`` / ``tests_passed`` claim (e.g. ``pytest ... | grep
+# passed``). ``tee`` and ``wc`` are excluded for the same reason: ``tee`` can
+# redirect the stream and ``wc`` collapses it to a count, both of which alter
+# what the runtime would have observed and so weaken anti-fabrication.
+_OUTPUT_FILTER_COMMANDS = frozenset({"tail", "head", "cat", "less", "more"})
 
 # Trailing shell output redirection (``2>&1``, ``> log``, ``2> err``, ``&> out``).
 _TRAILING_REDIRECT_RE = re.compile(
@@ -1073,10 +1099,21 @@ def _strip_command_output_plumbing(command: str) -> str:
 
     Agents routinely run ``<cmd> 2>&1 | tail -20`` while their ``commands_run``
     evidence cites the clean ``<cmd>``. The trailing redirection and the
-    output-only filter pipe are presentation plumbing, not the work being
-    claimed, so they must not block a match. Deliberately conservative: only
-    trailing output redirections and pipes into a known output-filter command
-    are dropped, so meaningful pipelines (``a | python process.py``) are kept.
+    output-only pager pipe are presentation plumbing, not the work being
+    claimed, so they must not block a match. Deliberately conservative:
+
+    - Only trailing output redirections (``2>&1``, ``> log``, ``2> err``,
+      ``&> out``) and pipes into a pager-style filter listed in
+      ``_OUTPUT_FILTER_COMMANDS`` (``tail``/``head``/``cat``/``less``/``more``)
+      are dropped. These pass the underlying stream through (or truncate it
+      positionally), so the runtime evidence is unchanged in kind.
+    - Filters that *transform* the stream — ``grep`` family, ``wc``, ``tee`` —
+      are intentionally not stripped, because they can hide failure lines,
+      collapse the stream to a count, or divert it to a file, which would let
+      a filtered run back a clean ``commands_run`` / ``tests_passed`` claim.
+    - Meaningful pipelines such as ``a | python process.py`` are kept, so a
+      partial ``a`` claim is still not proven by an ``a | python process.py``
+      runtime command.
     """
     text = command.strip()
     if not text:
