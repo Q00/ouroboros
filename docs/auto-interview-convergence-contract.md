@@ -7,7 +7,9 @@ blocker.
 
 This contract is intentionally domain-agnostic.  It describes how the auto
 interview behaves for broad benign work, unsafe work, and stalled loops without
-encoding prompt-specific defaults.
+encoding prompt-specific defaults. It is a Track B `ooo auto` convergence
+contract, not an AgentOS substrate, projection, runtime tier-gate, or plugin
+lifecycle contract.
 
 ## Required-section outcomes
 
