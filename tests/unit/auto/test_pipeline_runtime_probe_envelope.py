@@ -6,9 +6,8 @@ Pins:
   the envelope ``runtime_probe_evidence`` empty — backwards-compat.
 - A wired ``probe_runner`` is invoked at the COMPLETE transition;
   the returned ``RuntimeEvidence`` tuple surfaces on the envelope.
-- A ``probe_runner`` that raises is caught and surfaces an empty
-  tuple — probes are advisory in v1; a runner crash must not turn
-  PRODUCT_COMPLETE into FAILED.
+- A ``probe_runner`` failure or explicit probe FAIL blocks PRODUCT_COMPLETE
+  instead of allowing a false complete result.
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
@@ -223,10 +223,8 @@ async def test_envelope_carries_probe_evidence_when_runner_wired(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_envelope_empty_when_runner_raises(tmp_path) -> None:
-    """Probes are advisory in v1: a runner crash must NOT propagate —
-    the pipeline catches and surfaces an empty evidence tuple while
-    keeping the PRODUCT_COMPLETE outcome intact."""
+async def test_runner_exception_blocks_product_complete(tmp_path) -> None:
+    """Runner infrastructure failure must not become false PRODUCT_COMPLETE."""
 
     async def probe_runner(state: AutoPipelineState) -> tuple[RuntimeEvidence, ...]:  # noqa: ARG001
         raise RuntimeError("probe binary missing — should NOT crash the pipeline")
@@ -259,5 +257,128 @@ async def test_envelope_empty_when_runner_raises(tmp_path) -> None:
 
     result = await pipeline.run(state)
 
-    assert result.status == "complete"
+    assert result.status == "blocked"
+    assert (
+        result.blocker
+        == "runtime probe runner failed: probe binary missing — should NOT crash the pipeline"
+    )
+    assert state.last_tool_name == "probe_runner"
     assert result.runtime_probe_evidence == ()
+
+
+@pytest.mark.asyncio
+async def test_failed_probe_blocks_product_complete_and_surfaces_evidence(tmp_path) -> None:
+    """Explicit probe FAIL weakens the completion grade to BLOCKED."""
+
+    async def probe_runner(state: AutoPipelineState) -> tuple[RuntimeEvidence, ...]:  # noqa: ARG001
+        return (
+            RuntimeEvidence(
+                probe_kind="headless_run",
+                passed=False,
+                summary="headless run exit_code=2 (duration 0.01s)",
+                duration_seconds=0.01,
+                payload={"exit_code": 2, "outcome": "completed"},
+            ),
+        )
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_pe4", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(_session_id: str) -> Seed:
+        return _seed()
+
+    state = _state_at_clean_start(tmp_path)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        reviewer=_PassReviewer(),
+        run_starter=_run_starter_ok,
+        ralph_starter=_ralph_starter_completed,
+        complete_product=True,
+        store=AutoStore(tmp_path),
+        probe_runner=probe_runner,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.blocker == "runtime probe failed: headless run exit_code=2 (duration 0.01s)"
+    assert state.last_tool_name == "probe_runner"
+    assert len(result.runtime_probe_evidence) == 1
+    assert result.runtime_probe_evidence[0].passed is False
+
+
+@pytest.mark.asyncio
+async def test_evaluate_complete_path_invokes_probe_runner(tmp_path) -> None:
+    """EVALUATE-pass COMPLETE path also carries runtime evidence."""
+    invocations: list[str] = []
+
+    async def probe_runner(state: AutoPipelineState) -> tuple[RuntimeEvidence, ...]:
+        invocations.append(state.phase.value)
+        return (
+            RuntimeEvidence(
+                probe_kind="headless_run",
+                passed=True,
+                summary="headless run exit_code=0 (duration 0.01s)",
+            ),
+        )
+
+    async def evaluator(_seed: Seed, _artifact: str) -> EvaluateResult:
+        return EvaluateResult(
+            score=0.95,
+            verdict="pass",
+            passed=True,
+            differences=(),
+            suggestions=(),
+        )
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_pe5", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(_session_id: str) -> Seed:
+        return _seed()
+
+    async def ralph_starter(_seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "job_id": "job_probe_eval",
+            "lineage_id": "ralph-probe-eval",
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": None,
+            "result_text": "artifact ready",
+        }
+
+    state = _state_at_clean_start(tmp_path)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        reviewer=_PassReviewer(),
+        run_starter=_run_starter_ok,
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        evaluator=evaluator,
+        store=AutoStore(tmp_path),
+        probe_runner=probe_runner,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert len(result.runtime_probe_evidence) == 1
+    assert invocations == ["evaluate"]

@@ -51,6 +51,7 @@ from ouroboros.auto.state import (
     utc_now_iso,
 )
 from ouroboros.core.seed import Seed
+from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 from ouroboros.resilience.lateral import ThinkingPersona
 
 # RFC #809 Phase 2.2b — Stack 1 of 2 scope and invariants.
@@ -112,6 +113,7 @@ Evaluator = Callable[[Seed, str], Awaitable[EvaluateResult]]
 # QA-failure shape + run artifact, returns a typed LateralResult. See
 # HandlerLateralThinker for the production implementation.
 LateralThinker = Callable[..., Awaitable[LateralResult]]
+RuntimeProbeRunner = Callable[[AutoPipelineState], Awaitable[tuple[RuntimeEvidence, ...]]]
 
 # Ralph stop_reason values that map to a recoverable BLOCKED auto phase
 # rather than a hard FAILED. Pinned by Q00/ouroboros#773 and asserted by
@@ -226,15 +228,13 @@ class AutoPipelineResult:
     evidence_backed_sections: tuple[str, ...] = ()
     assumption_only_sections: tuple[str, ...] = ()
     # L3-2 / #1176: runtime acceptance evidence captured by the
-    # ``probe_runner`` callback wired on ``AutoPipeline``. Empty when
-    # no probe runner was provided (the L0 manual harness invokes
-    # probes from the test fixture rather than through this surface)
-    # or when ``active_task_class`` is None. Each entry is a frozen
-    # :class:`ouroboros.orchestrator.runtime_evidence.RuntimeEvidence`
-    # instance — the verifier (a future follow-up) reads it as a
-    # grade input; for now the envelope just surfaces it for
-    # observers.
-    runtime_probe_evidence: tuple[Any, ...] = ()
+    # ``probe_runner`` callback wired on ``AutoPipeline``. Empty when no
+    # probe runner was provided (backwards compatibility) or when the
+    # caller intentionally had no bound runtime probe. When present,
+    # failing evidence blocks PRODUCT_COMPLETE before the result envelope
+    # is returned, so this field is both surface evidence and a completion
+    # grade input rather than a passive annotation.
+    runtime_probe_evidence: tuple[RuntimeEvidence, ...] = ()
 
 
 @dataclass(slots=True)
@@ -297,11 +297,10 @@ class AutoPipeline:
     # L3-2 / #1176: optional async callback that invokes runtime probes
     # for the active task class after the artifact exists. Signature:
     # ``async (state) -> tuple[RuntimeEvidence, ...]``. When ``None``,
-    # the pipeline does not invoke probes — the L0 manual harness
-    # owns probe invocation in the test fixture. The pipeline only
-    # caches the returned evidence and surfaces it via
-    # :attr:`AutoPipelineResult.runtime_probe_evidence`.
-    probe_runner: Callable[[AutoPipelineState], Awaitable[tuple[Any, ...]]] | None = None
+    # the pipeline does not invoke probes — the L0 manual harness owns
+    # probe invocation in the test fixture. When configured, probe FAIL
+    # blocks PRODUCT_COMPLETE before the result envelope is returned.
+    probe_runner: RuntimeProbeRunner | None = None
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
@@ -309,7 +308,7 @@ class AutoPipeline:
     # surfaced on ``AutoPipelineResult``. Populated on first invocation
     # of the ``probe_runner`` callback so multiple ``_result()`` returns
     # within a single run share the same evidence tuple.
-    _last_probe_evidence: tuple[Any, ...] = field(default=(), init=False, repr=False)
+    _last_probe_evidence: tuple[RuntimeEvidence, ...] = field(default=(), init=False, repr=False)
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
@@ -1465,40 +1464,48 @@ class AutoPipeline:
                 ralph_result_text=ralph_result_text,
                 stop_reason=stop_reason,
             )
+        probe_blocker = await self._complete_runtime_probe_blocker(state)
+        if probe_blocker is not None:
+            return self._result(
+                state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
+            )
         message_prefix = "resumed ralph loop completed" if resumed else "ralph loop completed"
         state.transition(
             AutoPhase.COMPLETE,
             f"{message_prefix} ({stop_reason or 'qa passed'})",
         )
         self._save(state)
-        # L3-2 / #1176: capture runtime probe evidence at the COMPLETE
-        # transition so the envelope surfaces *what actually ran* on
-        # PRODUCT_COMPLETE outcomes. ``_invoke_probe_runner`` is a no-op
-        # when no ``probe_runner`` was wired (default).
-        await self._invoke_probe_runner(state)
         return self._result(state, ledger, review=review, run_subagent=run_subagent)
 
-    async def _invoke_probe_runner(self, state: AutoPipelineState) -> None:
-        """L3-2 / #1176: invoke the wired ``probe_runner`` once per run
-        and cache the resulting :class:`RuntimeEvidence` tuple on
-        ``self._last_probe_evidence``. Subsequent ``_result()`` calls
-        within the same run pick up the same evidence without
-        re-invoking the (possibly subprocess-heavy) probes.
+    async def _complete_runtime_probe_blocker(self, state: AutoPipelineState) -> str | None:
+        """Run configured runtime probes and return a PRODUCT_COMPLETE blocker.
 
-        Exceptions from the runner are caught and replaced with an
-        empty evidence tuple — probes are advisory in v1; a runner
-        crash must not turn a PRODUCT_COMPLETE outcome into a
-        FAILED outcome. The advisory contract upgrade to *grade-input*
-        is a v2 expansion path (#1176).
+        L3-2 / #1176 makes runtime evidence a completion-grade input: when
+        a runner is wired, each PRODUCT_COMPLETE transition first captures
+        runtime evidence and any explicit probe FAIL downgrades the terminal
+        from COMPLETE to BLOCKED. Missing runner remains a backwards-compatible
+        no-op because binding/command-source ownership lives outside this
+        envelope slice. Runner exceptions are treated as infrastructure
+        blockers instead of false PRODUCT_COMPLETE success.
         """
         if self.probe_runner is None or self._last_probe_evidence:
-            return
+            return None
         try:
             evidence = await self.probe_runner(state)
-        except Exception:  # noqa: BLE001 - advisory probe must not crash the pipeline
-            self._last_probe_evidence = ()
-            return
+        except Exception as exc:  # noqa: BLE001 - surface probe infrastructure failure
+            msg = f"runtime probe runner failed: {exc}"
+            state.mark_blocked(msg, tool_name="probe_runner")
+            self._save(state)
+            return msg
         self._last_probe_evidence = tuple(evidence) if evidence else ()
+        failures = tuple(item for item in self._last_probe_evidence if not item.passed)
+        if not failures:
+            return None
+        summary = "; ".join(item.summary for item in failures[:3])
+        msg = f"runtime probe failed: {summary}" if summary else "runtime probe failed"
+        state.mark_blocked(msg, tool_name="probe_runner")
+        self._save(state)
+        return msg
 
     async def _run_evaluate(
         self,
@@ -1856,6 +1863,11 @@ class AutoPipeline:
         cache_suffix = " [cached]" if from_cache else ""
         if passed:
             state.last_recovery_plan = None
+            probe_blocker = await self._complete_runtime_probe_blocker(state)
+            if probe_blocker is not None:
+                return self._result(
+                    state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
+                )
             state.transition(
                 AutoPhase.COMPLETE,
                 f"evaluator passed: {verdict} (score {score:.2f}){cache_suffix}"
