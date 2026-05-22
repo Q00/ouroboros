@@ -24,8 +24,19 @@ class _FakeLogger:
         self.events.append(("info", event, kwargs))
 
 
-def _write_wrapper(path: Path) -> Path:
-    path.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 32 + b"zeude codex-wrapper")
+MACHO_64_MAGIC = b"\xcf\xfa\xed\xfe"
+ELF_MAGIC = b"\x7fELF"
+OFFICIAL_RUST_CODEX_MARKER = b"OpenAI Codex codex-rs 0.132.0"
+
+
+def _write_official_rust_codex(path: Path, *, magic: bytes) -> Path:
+    path.write_bytes(magic + b"\0" * 64 + OFFICIAL_RUST_CODEX_MARKER)
+    path.chmod(0o755)
+    return path
+
+
+def _write_wrapper(path: Path, *, magic: bytes = MACHO_64_MAGIC) -> Path:
+    path.write_bytes(magic + b"\0" * 32 + b"zeude codex-wrapper")
     path.chmod(0o755)
     return path
 
@@ -37,29 +48,30 @@ def _write_script(path: Path) -> Path:
 
 
 class TestIsWrapperBinary:
-    def test_official_rust_macho_codex_is_not_wrapper(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("magic", [MACHO_64_MAGIC, ELF_MAGIC])
+    def test_official_rust_codex_is_not_wrapper(self, tmp_path: Path, magic: bytes) -> None:
         """Native OpenAI Codex Rust binaries must not be rejected as wrappers."""
-        codex = tmp_path / "codex"
-        codex.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 64 + b"OpenAI Codex codex-rs 0.132.0")
-        codex.chmod(0o755)
+        codex = _write_official_rust_codex(tmp_path / "codex", magic=magic)
 
         assert is_wrapper_binary(str(codex)) is False
 
-    def test_known_compiled_codex_wrapper_is_wrapper(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("magic", [MACHO_64_MAGIC, ELF_MAGIC])
+    def test_known_compiled_codex_wrapper_is_wrapper(
+        self, tmp_path: Path, magic: bytes
+    ) -> None:
         """Compiled candidates still need a wrapper-specific marker to be rejected."""
-        wrapper = _write_wrapper(tmp_path / "codex-wrapper")
+        wrapper = _write_wrapper(tmp_path / "codex-wrapper", magic=magic)
 
         assert is_wrapper_binary(str(wrapper)) is True
 
 
 class TestResolveCodexCliPath:
+    @pytest.mark.parametrize("magic", [MACHO_64_MAGIC, ELF_MAGIC])
     def test_keeps_official_rust_codex_without_wrapper_warning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, magic: bytes
     ) -> None:
         """Mach-O/ELF Codex Rust binaries should resolve as real CLI targets."""
-        codex = tmp_path / "codex"
-        codex.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 64 + b"OpenAI Codex codex-rs 0.132.0")
-        codex.chmod(0o755)
+        codex = _write_official_rust_codex(tmp_path / "codex", magic=magic)
         logger = _FakeLogger()
 
         monkeypatch.setenv("PATH", str(tmp_path))
