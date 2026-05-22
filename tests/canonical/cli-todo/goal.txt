@@ -1,0 +1,1 @@
+Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory.
