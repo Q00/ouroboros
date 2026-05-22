@@ -5,9 +5,10 @@ value has exactly one :class:`TaskClassProfile`, each profile's
 ``default_ac_template`` is a non-empty tuple of plain strings, and
 each ``default_completion_mode`` resolves to the documented enum.
 
-They do **not** exercise domain inference (that's L1-b) or AC
-injection (that's L1-c). Adding a new task class without a matching
-unit test below will fail ``test_task_classes_match_catalog``.
+They do **not** exercise domain inference (that's L1-b),
+interview-driver disambiguation (that's L1-c), or AC injection
+(that's L1-d). Adding a new task class without a matching unit test
+below will fail ``test_task_classes_match_catalog``.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ def test_catalog_entry_shape(task_class: TaskClass) -> None:
     assert profile.name == task_class.value
     assert isinstance(profile.default_completion_mode, CompletionMode)
     # AC template must be a non-empty tuple of plain strings — matches
-    # ``Seed.acceptance_criteria``'s shape exactly so L1-c can prepend
+    # ``Seed.acceptance_criteria``'s shape exactly so L1-d can prepend
     # entries without any type coercion.
     assert isinstance(profile.default_ac_template, tuple)
     assert profile.default_ac_template, f"{task_class.value} has empty default_ac_template"
