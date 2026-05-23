@@ -35,8 +35,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
-from pathlib import Path
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -569,10 +569,13 @@ def invoke_plugin(
         # Installed plugin homes are immutable trust subjects. Prevent Python
         # entrypoints from creating __pycache__ in plugin_home and provide a
         # stable workspace/output contract for runtime artifacts.
-        env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         workdir = Path.cwd()
         env.setdefault("OUROBOROS_PLUGIN_WORKDIR", str(workdir))
-        env.setdefault("OUROBOROS_PLUGIN_OUTPUT_DIR", str(workdir / ".ouroboros" / "plugin-artifacts" / manifest.name))
+        env.setdefault(
+            "OUROBOROS_PLUGIN_OUTPUT_DIR",
+            str(workdir / ".ouroboros" / "plugin-artifacts" / manifest.name),
+        )
         if plugin_home is not None:
             env.setdefault("OUROBOROS_PLUGIN_HOME", str(plugin_home))
         return env

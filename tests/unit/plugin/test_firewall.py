@@ -814,6 +814,7 @@ def test_plugin_subprocess_receives_immutable_home_runtime_environment(
     user_cwd = tmp_path / "workspace"
     user_cwd.mkdir()
     monkeypatch.chdir(user_cwd)
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "0")
     captured: dict = {}
 
     def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
