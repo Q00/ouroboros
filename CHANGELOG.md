@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **run/mcp**: Make fat-harness acceptance opt-in via `seed.orchestrator.execution_mode: fat_harness` for fresh CLI/MCP seed execution. Missing/blank execution mode now uses the default runner again until seed authoring and QA guidance consistently emit profile-compatible typed evidence for every AC. This mitigates layered scaffold AC failures reported in #1202.
+
 ### Added
 - **providers**: GitHub Copilot CLI adapter (`CopilotCliLLMAdapter`) — first-class peer of Codex/Gemini/OpenCode adapters. Switch with `OUROBOROS_LLM_BACKEND=copilot`. Uses local `copilot -p` non-interactive mode with `GH_TOKEN`/`GITHUB_TOKEN` auth, hard tool envelope via `--available-tools`+`--allow-tool`+`--add-dir`, sandbox-class permission mapping, JSONL stream parsing, recursion guard via shared `_OUROBOROS_DEPTH` counter (max depth 5), and auth-error short-circuit on `401`/missing-token detections. Optional install: `pip install ouroboros-ai[copilot]` (the Copilot CLI itself is installed externally).
 - **opencode**: Subagent bridge plugin (`src/ouroboros/opencode/plugin/ouroboros-bridge.ts`) — routes MCP `ouroboros_*` tool calls with a `_subagent` parameter into OpenCode's native Task subagent panes via `session.promptAsync`. Fire-and-forget dispatch returns from the hook in ~10ms, eliminating the blocking 200s+ latency of the previous `session.prompt` approach. Installed automatically by `ouroboros setup`. See [OpenCode Subagent Bridge](docs/guides/opencode-subagent-bridge.md).

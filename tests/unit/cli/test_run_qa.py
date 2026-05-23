@@ -216,9 +216,9 @@ def test_resolve_cli_project_dir_uses_parent_when_context_reference_is_file(
     )
 
 
-def test_resolve_fat_harness_mode_defaults_to_enabled() -> None:
-    """The #920 PR-5 default flip enables fat-harness without seed opt-in."""
-    assert _resolve_fat_harness_mode(VALID_SEED_DATA) is True
+def test_resolve_fat_harness_mode_defaults_to_disabled() -> None:
+    """Fresh runs use the default runner unless the seed opts into fat-harness."""
+    assert _resolve_fat_harness_mode(VALID_SEED_DATA) is False
 
 
 def test_resolve_fat_harness_mode_accepts_fat_harness_execution_mode() -> None:
@@ -251,12 +251,12 @@ def test_resolve_resume_fat_harness_mode_uses_persisted_contract() -> None:
     assert _resolve_resume_fat_harness_mode(seed_data, {"fat_harness_mode": False}) is False
 
 
-def test_resolve_resume_fat_harness_mode_migrates_missing_contract_conservatively() -> None:
-    """Only explicit historical legacy selectors resume ungated when contract is absent."""
-    legacy_seed = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "legacy"}}
+def test_resolve_resume_fat_harness_mode_migrates_missing_contract_to_default_runner() -> None:
+    """Only explicit fat-harness selectors resume with verifier-gated acceptance."""
+    fat_harness_seed = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "fat_harness"}}
 
-    assert _resolve_resume_fat_harness_mode(legacy_seed, {}) is False
-    assert _resolve_resume_fat_harness_mode(VALID_SEED_DATA, {}) is True
+    assert _resolve_resume_fat_harness_mode(fat_harness_seed, {}) is True
+    assert _resolve_resume_fat_harness_mode(VALID_SEED_DATA, {}) is False
 
 
 def test_resolve_max_decomposition_depth_defaults_to_two(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,12 +444,12 @@ async def test_run_orchestrator_passes_resolved_execution_caps_to_runner(tmp_pat
 
     assert mock_runner_cls.call_args.kwargs["max_decomposition_depth"] == 3
     assert mock_runner_cls.call_args.kwargs["max_parallel_workers"] == 7
-    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is True
+    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
 
 
 @pytest.mark.asyncio
-async def test_run_orchestrator_passes_default_fat_harness_mode_to_runner(tmp_path: Path) -> None:
-    """The default #920 PR-5 path selects fat-harness without seed opt-in."""
+async def test_run_orchestrator_passes_default_runner_mode_to_runner(tmp_path: Path) -> None:
+    """The default path leaves fat-harness disabled unless the seed opts in."""
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
 
@@ -488,7 +488,7 @@ async def test_run_orchestrator_passes_default_fat_harness_mode_to_runner(tmp_pa
         mock_event_store_cls.return_value.initialize = AsyncMock()
         await _run_orchestrator(seed_file)
 
-    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is True
+    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
 
 
 @pytest.mark.asyncio

@@ -240,7 +240,7 @@ class TestExecuteSeedHandler:
         assert resumed.is_ok
         assert legacy_resumed.is_ok
         assert missing_contract_resumed.is_ok
-        assert captured_modes == [True, True, False, True]
+        assert captured_modes == [False, True, False, False]
 
     async def test_handle_rejects_removed_legacy_execution_mode(self) -> None:
         """MCP execute_seed matches the CLI removal of the legacy selector."""
@@ -289,7 +289,7 @@ class TestExecuteSeedHandler:
         )
 
         assert result.is_err
-        assert "execution_mode is no longer configurable" in str(result.error)
+        assert "execution_mode must be 'fat_harness' when set" in str(result.error)
 
     async def test_handle_reports_execution_handler_config_error(self) -> None:
         """Config failures should surface with execution-handler context."""

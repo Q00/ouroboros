@@ -102,15 +102,16 @@ def _validate_fresh_execution_mode(
         return Result.err(
             MCPToolError(
                 "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
-                "typed evidence plus verifier PASS is now required for acceptance.",
+                "omit the selector for the default runner or set execution_mode='fat_harness' "
+                "to opt in to typed evidence plus verifier PASS acceptance.",
                 tool_name=tool_name,
             )
         )
     if execution_mode not in (None, "", "fat_harness"):
         return Result.err(
             MCPToolError(
-                "seed.orchestrator.execution_mode is no longer configurable after "
-                f"the fat-harness default flip (got {execution_mode!r}).",
+                "seed.orchestrator.execution_mode must be 'fat_harness' when set "
+                f"(got {execution_mode!r}).",
                 tool_name=tool_name,
             )
         )
@@ -498,13 +499,13 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # Create checkpoint store for execution state persistence
                 checkpoint_store = CheckpointStore()
                 checkpoint_store.initialize()
-                fat_harness_mode = True
+                fat_harness_mode = execution_mode == "fat_harness"
                 if is_resume:
                     persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
                     if isinstance(persisted_fat_harness_mode, bool):
                         fat_harness_mode = persisted_fat_harness_mode
                     else:
-                        fat_harness_mode = execution_mode != "legacy"
+                        fat_harness_mode = execution_mode == "fat_harness"
 
                 # Create orchestrator runner
                 runner = OrchestratorRunner(
