@@ -6047,6 +6047,8 @@ class TestParallelACExecutor:
 
         log_mock.warning.assert_any_call(
             "parallel_executor.ac.verifier_rejected",
+            session_id="orch_123",
+            execution_id="",
             ac_index=0,
             depth=0,
             reason="Fat-harness verifier failed (claimed test command did not support the AC).",
@@ -6884,6 +6886,7 @@ class TestParallelACExecutor:
         log_mock.info.assert_any_call(
             "parallel_executor.dependency_graph",
             session_id="orch_dependency_log",
+            execution_id="exec_dependency_log",
             total_acs=2,
             dependency_edges=[{"ac_index": 1, "depends_on": (0,)}],
         )

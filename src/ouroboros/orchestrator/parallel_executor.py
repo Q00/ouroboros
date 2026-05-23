@@ -3537,6 +3537,7 @@ class ParallelACExecutor:
         log.info(
             "parallel_executor.dependency_graph",
             session_id=session_id,
+            execution_id=execution_id,
             total_acs=total_acs,
             dependency_edges=dependency_edges,
         )
@@ -5415,6 +5416,8 @@ Files present:
                 success = False
                 log.warning(
                     "parallel_executor.ac.verifier_rejected",
+                    session_id=session_id,
+                    execution_id=execution_id,
                     ac_index=ac_index,
                     depth=depth,
                     reason=fat_harness_error,
