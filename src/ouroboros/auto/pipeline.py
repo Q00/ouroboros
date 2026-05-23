@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.blocker_attribution import record_authoring_backend
+from ouroboros.auto.domain_inference import derive_domain_from_ledger
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
 from ouroboros.auto.grading import GradeGate, deterministic_floor
@@ -50,6 +51,7 @@ from ouroboros.auto.state import (
     SeedOrigin,
     utc_now_iso,
 )
+from ouroboros.auto.task_class_application import apply_default_ac_template
 from ouroboros.core.seed import Seed
 from ouroboros.resilience.lateral import ThinkingPersona
 
@@ -179,6 +181,10 @@ class AutoPipelineResult:
     current_round: int = 0
     pending_question: str | None = None
     interview_closure_mode: str | None = None
+    # L1-d / L1-e / #1171: active task class derived from the ledger and
+    # used to inject default AC templates into the Seed. None when the
+    # inference was ambiguous, unmatched, or skipped (legacy paths).
+    active_task_class: str | None = None
     last_progress_message: str | None = None
     last_progress_at: str | None = None
     last_grade: str | None = None
@@ -591,6 +597,24 @@ class AutoPipeline:
                     state.seed_id = seed.metadata.seed_id
                     state.seed_artifact = seed.to_dict()
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
+                    # L1-d / #1171: derive the task class from the already-
+                    # standardized ledger and prepend the catalog's default
+                    # AC template to the Seed. Single match → apply that class;
+                    # unmatched → apply the safe LIBRARY fallback from L1-b;
+                    # ambiguous → leave the user's AC untouched until the
+                    # L1-c interview-driver disambiguation hook resolves it.
+                    # ``state.active_task_class`` is set only when a concrete
+                    # class/fallback actually fired, so the envelope does not
+                    # pretend an unresolved ambiguous class was active.
+                    _inference = derive_domain_from_ledger(ledger)
+                    _task_class = _inference.single
+                    if _task_class is not None:
+                        _applied = apply_default_ac_template(seed, _task_class)
+                        if _applied.injected_ac:
+                            seed = _applied.seed
+                            state.seed_id = seed.metadata.seed_id
+                            state.seed_artifact = seed.to_dict()
+                        state.active_task_class = _task_class.value
                 except TimeoutError as exc:
                     if self._enforce_deadline(state):
                         record_authoring_backend(state)
@@ -2675,6 +2699,7 @@ class AutoPipeline:
             current_round=state.current_round,
             pending_question=state.pending_question,
             interview_closure_mode=state.interview_closure_mode,
+            active_task_class=state.active_task_class,
             last_progress_message=state.last_progress_message,
             last_progress_at=state.last_progress_at,
             last_grade=state.last_grade,

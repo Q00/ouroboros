@@ -470,6 +470,12 @@ class AutoPipelineState:
     # fallback. None means no profile was activated, so legacy state files load
     # unchanged.
     active_domain_profile_name: str | None = None
+    # L1-d / #1171: active TaskClass (cli / webhook / game_2d / …) derived
+    # from the standardized ledger after seed generation. Distinct from
+    # ``active_domain_profile_name`` (which is a meta-domain concept —
+    # coding / research / design). ``None`` means inference was ambiguous,
+    # unmatched, or skipped (legacy state files load unchanged).
+    active_task_class: str | None = None
     # QA verdict captured during the EVALUATE phase (RFC #809 Phase 2.1).
     # Persisted so a resumed session reuses the verdict without re-invoking
     # the LLM-driven judge when the underlying artifact has not changed.
@@ -886,6 +892,7 @@ class AutoPipelineState:
         payload.setdefault("last_lateral_text", None)
         payload.setdefault("lateral_input_hash", None)
         payload.setdefault("active_domain_profile_name", None)
+        payload.setdefault("active_task_class", None)
         payload.setdefault("last_error_code", None)
         payload.setdefault("interview_closure_mode", None)
         # RFC #809 Phase 2.2b — closed-loop recovery counters. Default the
@@ -1206,6 +1213,7 @@ class AutoPipelineState:
             "last_error",
             "last_error_code",
             "active_domain_profile_name",
+            "active_task_class",
             "interview_closure_mode",
         )
         for field_name in optional_string_fields:
