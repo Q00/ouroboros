@@ -47,6 +47,9 @@ from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, Intervie
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.persistence.event_store import EventStore
+from ouroboros.runtime.controls import load_runtime_controls
+from ouroboros.runtime.watchdog import Watchdog
 
 _STALE_COMPLETED_RALPH_HANDOFF_STATUSES = frozenset(
     {RUN_HANDOFF_STARTED_STATUS, "ralph_retry_after_blocker"}
@@ -498,6 +501,12 @@ async def _run_auto(
     # state forever. Sharing the handler reuses the same ``JobManager``
     # (and underlying ``EventStore``) so the poller sees the persisted job.
     ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
+    watchdog_event_store = EventStore()
+    await watchdog_event_store.initialize()
+    watchdog = Watchdog(
+        controls=load_runtime_controls(None),
+        event_appender=watchdog_event_store,
+    )
     pipeline = AutoPipeline(
         driver,
         HandlerSeedGenerator(generate_seed),
@@ -517,8 +526,12 @@ async def _run_auto(
         ralph_resumer=ralph_resumer,
         complete_product=complete_product,
         progress_callback=progress_callback,
+        watchdog=watchdog,
     )
-    result = await pipeline.run(state)
+    try:
+        result = await pipeline.run(state)
+    finally:
+        await watchdog_event_store.close()
     return result
 
 
@@ -749,6 +762,14 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
             console.print("Assumptions:")
             for item in result.assumptions:
                 console.print(f"  - {item}")
+        if result.assumption_sources:
+            console.print("Assumption sources:")
+            for record in result.assumption_sources:
+                console.print(
+                    f"  - source={_rich_escape(record.source)}; "
+                    f"confidence={record.confidence:.2f}; "
+                    f"text={_rich_escape(record.text)}"
+                )
         if result.non_goals:
             console.print("Non-goals:")
             for item in result.non_goals:

@@ -5,7 +5,8 @@
   "note": "Local extension schema for hook declarations. Mirrors Q00/ouroboros-plugins/schemas/0.1/ plus optional top-level hooks while preserving the archived 0.1 contract.",
   "local_extensions": {
     "plugin.schema.json": [
-      "Changed $id/title/schema_version const from 0.1 to a local 0.2 schema and added optional top-level hooks declarations. Hook execution/dispatch is intentionally out of scope."
+      "Changed $id/title/schema_version const from 0.1 to a local 0.2 schema and added optional top-level hooks declarations. Hook execution/dispatch is intentionally out of scope.",
+      "Allow command-level AgentOS assimilation metadata (permissions, upstream, artifacts, handoff, timeout_seconds, result_states, redaction) and x-* extension objects while keeping undeclared non-namespaced fields rejected; command permissions remain constrained by the Python loader to top-level permissions[].scope."
     ],
     "audit-event.schema.json": [
       "Vendored audit-event.schema.json with local 0.2 $id/title/schema_version alignment; audit event shape remains otherwise unchanged from 0.1."

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from ouroboros.plugin.hooks import (
@@ -118,6 +119,13 @@ class CommandSpec:
     risk: str
     requires_confirmation: bool = False
     arguments: tuple[CommandArgument, ...] = ()
+    permissions: tuple[str, ...] = ()
+    upstream: dict[str, Any] | None = None
+    artifacts: dict[str, Any] | None = None
+    handoff: dict[str, Any] | None = None
+    timeout_seconds: int | None = None
+    result_states: tuple[str, ...] = ()
+    redaction: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -468,7 +476,44 @@ def _build_command(raw: dict[str, Any]) -> CommandSpec:
         risk=raw["risk"],
         requires_confirmation=raw.get("requires_confirmation", False),
         arguments=args,
+        permissions=tuple(raw.get("permissions", ())),
+        upstream=raw.get("upstream"),
+        artifacts=raw.get("artifacts"),
+        handoff=raw.get("handoff"),
+        timeout_seconds=raw.get("timeout_seconds"),
+        result_states=tuple(raw.get("result_states", ())),
+        redaction=raw.get("redaction"),
     )
+
+
+def _validate_command_permissions(
+    commands: tuple[CommandSpec, ...],
+    *,
+    declared_permission_scopes: frozenset[str],
+    manifest_path: str | Path,
+) -> None:
+    """Require command-level permission hints to reference declared scopes only.
+
+    Command metadata is forward-compatible and mostly descriptive, but permission
+    strings cross the trust boundary.  A command may narrow which top-level
+    scopes it uses, but it must not introduce a scope that the install/trust
+    lifecycle never saw.
+    """
+
+    for command_index, command in enumerate(commands):
+        for permission_index, scope in enumerate(command.permissions):
+            if scope in declared_permission_scopes:
+                continue
+            raise PluginManifestError(
+                "command permission must be declared in top-level permissions",
+                path=str(manifest_path),
+                json_pointer=f"/commands/{command_index}/permissions/{permission_index}",
+                expected=(
+                    "permission scope declared in top-level permissions[].scope "
+                    f"({sorted(declared_permission_scopes)!r})"
+                ),
+                got=scope,
+            )
 
 
 def _build_hook(
@@ -780,7 +825,12 @@ def _validation_error_pointer(error: Any) -> str:
     """Return the most useful manifest pointer for a jsonschema error."""
     if error.validator == "additionalProperties" and isinstance(error.instance, dict):
         allowed = set(error.schema.get("properties", ()))
-        unexpected = [key for key in error.instance if key not in allowed]
+        patterns = tuple(error.schema.get("patternProperties", ()))
+        unexpected = [
+            key
+            for key in error.instance
+            if key not in allowed and not any(re.search(pattern, key) for pattern in patterns)
+        ]
         if unexpected:
             path = [*error.absolute_path, unexpected[0]]
             return "/" + "/".join(_escape_json_pointer_token(str(p)) for p in path)
@@ -932,6 +982,11 @@ def load_manifest(path: str | Path) -> PluginManifest:
         audit_was_explicit = True
 
     declared_permission_scopes = frozenset(p.scope for p in permissions)
+    _validate_command_permissions(
+        commands,
+        declared_permission_scopes=declared_permission_scopes,
+        manifest_path=manifest_path,
+    )
     declared_required_permission_scopes = frozenset(p.scope for p in permissions if p.required)
     hooks = tuple(
         _build_hook(

@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import inspect
 import threading
 import time
@@ -14,6 +15,7 @@ from typing import Any, Protocol
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.blocker_attribution import record_authoring_backend
+from ouroboros.auto.domain_inference import derive_domain_from_ledger
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
 from ouroboros.auto.grading import GradeGate, deterministic_floor
@@ -50,9 +52,14 @@ from ouroboros.auto.state import (
     SeedOrigin,
     utc_now_iso,
 )
+from ouroboros.auto.task_class_application import apply_default_ac_template
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 from ouroboros.resilience.lateral import ThinkingPersona
+from ouroboros.runtime.watchdog import (
+    WATCHDOG_STOP_REASON_CODE,
+    Watchdog,
+)
 
 # RFC #809 Phase 2.2b — Stack 1 of 2 scope and invariants.
 #
@@ -181,6 +188,10 @@ class AutoPipelineResult:
     current_round: int = 0
     pending_question: str | None = None
     interview_closure_mode: str | None = None
+    # L1-d / L1-e / #1171: active task class derived from the ledger and
+    # used to inject default AC templates into the Seed. None when the
+    # inference was ambiguous, unmatched, or skipped (legacy paths).
+    active_task_class: str | None = None
     last_progress_message: str | None = None
     last_progress_at: str | None = None
     last_grade: str | None = None
@@ -294,6 +305,14 @@ class AutoPipeline:
     # the raw QA differences. See :class:`HandlerLateralThinker` in
     # adapters.py for the production wiring.
     lateral_thinker: LateralThinker | None = None
+    # L2-2 / #1172: wall-clock watchdog for the session. ``None`` means
+    # no watchdog (legacy behaviour). When wired, the pipeline checks
+    # ``watchdog.check(...)`` at ``run()`` entry; on fire the session
+    # transitions to BLOCKED with
+    # ``stop_reason_code = "watchdog_wall_clock_exceeded"``. The cancel
+    # event has already been appended to the EventStore by the watchdog
+    # itself, so the pipeline does no further side effect on fire.
+    watchdog: Watchdog | None = None
     # L3-2 / #1176: optional async callback that invokes runtime probes
     # for the active task class after the artifact exists. Signature:
     # ``async (state) -> tuple[RuntimeEvidence, ...]``. When ``None``,
@@ -329,6 +348,16 @@ class AutoPipeline:
             if state.ledger
             else SeedDraftLedger.from_goal(state.goal)
         )
+        # L2-2 / #1172: wall-clock watchdog check.
+        # Runs once per ``run()`` entry — both fresh sessions whose
+        # ``created_at`` is too long ago (resume after budget elapsed)
+        # and live sessions whose execution chose to re-enter the loop
+        # are caught here. The watchdog appends its ``runtime.watchdog.cancel``
+        # event itself; the pipeline only translates the decision into
+        # the BLOCKED transition + envelope ``stop_reason_code``.
+        watchdog_result = await self._check_watchdog(state, ledger)
+        if watchdog_result is not None:
+            return watchdog_result
         if self.skip_run and not state.skip_run:
             state.skip_run = True
         # Q00/ouroboros#773 (review-3): ``complete_product`` is durable session
@@ -617,6 +646,24 @@ class AutoPipeline:
                     state.seed_id = seed.metadata.seed_id
                     state.seed_artifact = seed.to_dict()
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
+                    # L1-d / #1171: derive the task class from the already-
+                    # standardized ledger and prepend the catalog's default
+                    # AC template to the Seed. Single match → apply that class;
+                    # unmatched → apply the safe LIBRARY fallback from L1-b;
+                    # ambiguous → leave the user's AC untouched until the
+                    # L1-c interview-driver disambiguation hook resolves it.
+                    # ``state.active_task_class`` is set only when a concrete
+                    # class/fallback actually fired, so the envelope does not
+                    # pretend an unresolved ambiguous class was active.
+                    _inference = derive_domain_from_ledger(ledger)
+                    _task_class = _inference.single
+                    if _task_class is not None:
+                        _applied = apply_default_ac_template(seed, _task_class)
+                        if _applied.injected_ac:
+                            seed = _applied.seed
+                            state.seed_id = seed.metadata.seed_id
+                            state.seed_artifact = seed.to_dict()
+                        state.active_task_class = _task_class.value
                 except TimeoutError as exc:
                     if self._enforce_deadline(state):
                         record_authoring_backend(state)
@@ -1108,6 +1155,53 @@ class AutoPipeline:
             self._save(state)
             retried = True
 
+    async def _check_watchdog(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+    ) -> AutoPipelineResult | None:
+        """L2-2 / #1172: wall-clock watchdog check at ``run()`` entry.
+
+        Returns:
+
+        - ``None`` if no watchdog is wired, or the watchdog did not
+          fire — the pipeline proceeds normally.
+        - A BLOCKED :class:`AutoPipelineResult` if the watchdog fired —
+          ``state.last_error_code`` is set to
+          :data:`WATCHDOG_STOP_REASON_CODE` so the envelope surface
+          (already plumbed by L4 / #1151) reports the typed terminal.
+
+        The watchdog itself owns the EventStore-side ``runtime.watchdog.cancel``
+        append; this helper only converts a returned ``WatchdogDecision``
+        into pipeline state transitions.
+        """
+        if self.watchdog is None:
+            return None
+        try:
+            started_at = datetime.fromisoformat(state.created_at)
+        except (TypeError, ValueError):
+            # A malformed ``created_at`` is a pre-watchdog state-validation
+            # concern; do not let the watchdog crash the run.
+            return None
+        decision = await self.watchdog.check(
+            session_id=state.auto_session_id,
+            session_started_at=started_at,
+        )
+        if decision is None:
+            return None
+        blocker = (
+            f"runtime watchdog cancelled session after "
+            f"{decision.elapsed_seconds}s (budget "
+            f"{decision.configured_budget_seconds}s)"
+        )
+        state.mark_blocked(
+            blocker,
+            tool_name="runtime_watchdog",
+            error_code=WATCHDOG_STOP_REASON_CODE,
+        )
+        self._save(state)
+        return self._result(state, ledger, blocker=state.last_error)
+
     def _deadline_capped_timeout(self, state: AutoPipelineState, phase_timeout: float) -> float:
         """Return ``phase_timeout`` capped by the remaining pipeline deadline.
 
@@ -1374,41 +1468,16 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            # L5-a / #1157: when Ralph terminates with ``oscillation_detected``
-            # and the session has a wired lateral thinker in complete-product
-            # mode, route through UNSTUCK_LATERAL first instead of bailing
-            # straight to BLOCKED. Mirrors the EVALUATE → UNSTUCK_LATERAL
-            # path at ``_evaluate_after_qa``. Other Ralph stop_reasons
-            # (iteration_timeout, wall_clock_exhausted, grade_regressing,
-            # max_generations reached) continue to BLOCKED unchanged because
-            # those terminals are budget exhaustions rather than
-            # spec-reframe candidates.
-            if (
-                stop_reason == "oscillation_detected"
-                and self.lateral_thinker is not None
-                and state.complete_product
-            ):
-                state.transition(
-                    AutoPhase.UNSTUCK_LATERAL,
-                    "Ralph oscillation_detected; invoking lateral persona for reframing",
-                )
-                self._save(state)
-                return await self._run_lateral(
-                    state,
-                    ledger,
-                    seed,
-                    qa_score=0.0,
-                    qa_verdict="oscillation_detected",
-                    qa_differences=(
-                        "Ralph oscillated between grade states without converging on A grade.",
-                    ),
-                    qa_suggestions=(
-                        "Reframe the Seed acceptance criteria so the grade oscillation pattern cannot recur.",
-                    ),
-                    cache_suffix="",
-                    review=review,
-                    run_subagent=run_subagent,
-                )
+            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
+                state,
+                ledger,
+                stop_reason=stop_reason,
+                seed=seed,
+                review=review,
+                run_subagent=run_subagent,
+            )
+            if lateral_result is not None:
+                return lateral_result
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(
@@ -1912,6 +1981,72 @@ class AutoPipeline:
         self._save(state)
         return self._result(
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
+        )
+
+    def _recover_seed_for_lateral(
+        self,
+        state: AutoPipelineState,
+        seed: Seed | None,
+    ) -> Seed | None:
+        if seed is not None:
+            return seed
+        if not state.seed_artifact:
+            return None
+        return self._normalize_execution_seed(state, Seed.from_dict(state.seed_artifact))
+
+    async def _maybe_route_ralph_oscillation_to_lateral(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        stop_reason: str | None,
+        seed: Seed | None,
+        review: SeedReview | None,
+        run_subagent: dict[str, Any] | None,
+    ) -> AutoPipelineResult | None:
+        """Apply the L5-a Ralph oscillation → UNSTUCK_LATERAL contract.
+
+        Ralph terminal status is consumed in three places: fresh handoff,
+        resume polling, and re-attach observation. L5-a is a producer/consumer
+        contract over the terminal ``stop_reason``, so all three consumers
+        must route ``oscillation_detected`` through the same existing lateral
+        recovery substrate when the session is complete-product and a lateral
+        thinker is wired. Other blocked stop reasons remain direct BLOCKED
+        terminals because they represent budget exhaustion, not a spec
+        reframe candidate.
+        """
+        if (
+            stop_reason != "oscillation_detected"
+            or self.lateral_thinker is None
+            or not (state.complete_product or self.complete_product)
+        ):
+            return None
+        if self.complete_product and not state.complete_product:
+            state.complete_product = True
+        recovered_seed = self._recover_seed_for_lateral(state, seed)
+        if recovered_seed is None:
+            return None
+
+        state.transition(
+            AutoPhase.UNSTUCK_LATERAL,
+            "Ralph oscillation_detected; invoking lateral persona for reframing",
+        )
+        self._save(state)
+        return await self._run_lateral(
+            state,
+            ledger,
+            recovered_seed,
+            qa_score=0.0,
+            qa_verdict="oscillation_detected",
+            qa_differences=(
+                "Ralph oscillated between grade states without converging on A grade.",
+            ),
+            qa_suggestions=(
+                "Reframe the Seed acceptance criteria so the grade oscillation pattern cannot recur.",
+            ),
+            cache_suffix="",
+            review=review,
+            run_subagent=run_subagent,
         )
 
     async def _run_lateral(
@@ -2454,14 +2589,16 @@ class AutoPipeline:
                 self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            # L5-a / #1157: the live ``_handoff_to_ralph`` path routes
-            # ``oscillation_detected`` through ``UNSTUCK_LATERAL`` when a
-            # lateral thinker is wired. The resume path intentionally does
-            # not yet plumb lateral recovery — instead it BLOCKED-s with
-            # ``tool_name="ralph_starter"``, which ``_recoverable_phase_for_tool``
-            # maps back to ``RALPH_HANDOFF`` so a re-resume retries Ralph
-            # from scratch rather than stranding the session. Extending
-            # lateral recovery into the resume path is reserved for L5-b.
+            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
+                state,
+                ledger,
+                stop_reason=stop_reason,
+                seed=seed,
+                review=review,
+                run_subagent=None,
+            )
+            if lateral_result is not None:
+                return lateral_result
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
@@ -2584,13 +2721,16 @@ class AutoPipeline:
                 self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
         if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            # L5-a / #1157: re-attach observes an already-dispatched Ralph
-            # job's terminal status and does not currently plumb
-            # ``oscillation_detected`` through ``UNSTUCK_LATERAL``. Falling
-            # through to BLOCKED with ``tool_name="ralph_starter"`` keeps
-            # the session resumable (``_recoverable_phase_for_tool`` maps
-            # ralph_starter back to RALPH_HANDOFF). Lateral recovery on
-            # the re-attach branch is reserved for L5-b.
+            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
+                state,
+                ledger,
+                stop_reason=stop_reason,
+                seed=None,
+                review=None,
+                run_subagent=None,
+            )
+            if lateral_result is not None:
+                return lateral_result
             state.mark_blocked(stop_reason, tool_name="ralph_starter")
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
@@ -2695,6 +2835,7 @@ class AutoPipeline:
             current_round=state.current_round,
             pending_question=state.pending_question,
             interview_closure_mode=state.interview_closure_mode,
+            active_task_class=state.active_task_class,
             last_progress_message=state.last_progress_message,
             last_progress_at=state.last_progress_at,
             last_grade=state.last_grade,

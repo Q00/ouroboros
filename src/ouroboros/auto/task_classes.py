@@ -8,8 +8,9 @@ default acceptance criteria and the runtime evidence layer (L3) can
 bind class-appropriate probes.
 
 This module is **catalog data only** (L1-a sub-PR of #1171). It does
-*not* implement domain inference from the ledger (L1-b), the Seed AC
-injection hook (L1-c), or the result-envelope surface (L1-d).
+*not* implement domain inference from the ledger (L1-b), interview-driver
+disambiguation (L1-c), the Seed AC injection hook (L1-d), or the
+result-envelope surface (L1-e).
 
 Design constraints honored:
 

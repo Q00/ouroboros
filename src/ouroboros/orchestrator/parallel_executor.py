@@ -915,12 +915,11 @@ def _test_command_invocation(command: str) -> str | None:
     as ``| grep passed`` survives the strip and is rejected downstream by
     ``_test_invocation_from_prefix`` rather than being silently dropped.
     """
-    stripped = _strip_command_output_plumbing(command)
-    normalized = stripped.lower()
+    normalized = command.strip().lower()
     if not normalized:
         return None
 
-    direct = _test_invocation_from_prefix(normalized)
+    direct = _test_invocation_from_prefix(_strip_command_output_plumbing(normalized))
     if direct is not None:
         return direct
 
@@ -953,7 +952,7 @@ def _shell_command_body(command: str) -> str | None:
 def _test_invocation_from_shell_body(body: str) -> str | None:
     """Return a test invocation after conservative shell setup preambles."""
     for segment in _segments_after_safe_shell_preamble(body):
-        invocation = _test_invocation_from_prefix(segment)
+        invocation = _test_invocation_from_prefix(_strip_command_output_plumbing(segment))
         if invocation is not None:
             return invocation
         return None
@@ -974,7 +973,7 @@ def _single_command_after_safe_shell_preamble(command: str) -> str | None:
     segments = tuple(_segments_after_safe_shell_preamble(body))
     if len(segments) != 1:
         return None
-    return _normalized_evidence_text(segments[0])
+    return _normalized_evidence_text(_strip_command_output_plumbing(segments[0]))
 
 
 def _segments_after_safe_shell_preamble(body: str) -> tuple[str, ...]:

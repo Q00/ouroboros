@@ -500,6 +500,15 @@ def _capture_result(result: AutoPipelineResult) -> str:
     return _plain(capture.get())
 
 
+def _capture_result_with_ledger(result: AutoPipelineResult) -> str:
+    """Capture :func:`_print_result` with the optional ledger block enabled."""
+    from ouroboros.cli.formatters import console
+
+    with console.capture() as capture:
+        _print_result(result, show_ledger=True)
+    return _plain(capture.get())
+
+
 def _state_in_phase(phase: AutoPhase) -> AutoPipelineState:
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
     state.auto_session_id = "auto_render"
@@ -526,6 +535,34 @@ def test_print_status_resume_capability_resume() -> None:
     assert "Resume (partial)" not in output
     assert "Retry:" not in output
     assert "Start fresh" not in output
+
+
+def test_print_result_show_ledger_renders_assumption_sources() -> None:
+    from ouroboros.auto.ledger import AssumptionRecord
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_assumptions",
+        phase="complete",
+        assumption_sources=(
+            AssumptionRecord(
+                text="Existing patterns",
+                source="conservative_default",
+                confidence=0.85,
+            ),
+            AssumptionRecord(
+                text="Use [project] defaults",
+                source="assumption[ledger]",
+                confidence=0.7,
+            ),
+        ),
+    )
+
+    output = _capture_result_with_ledger(result)
+
+    assert "Assumption sources:" in output
+    assert ("source=conservative_default; confidence=0.85; text=Existing patterns") in output
+    assert ("source=assumption[ledger]; confidence=0.70; text=Use [project] defaults") in output
 
 
 def test_print_status_resume_capability_partial() -> None:

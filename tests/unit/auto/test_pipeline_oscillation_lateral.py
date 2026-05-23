@@ -22,6 +22,7 @@ import pytest
 from ouroboros.auto.adapters import LateralResult
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
+from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState
@@ -96,6 +97,20 @@ def _state_at_run_phase(tmp_path) -> AutoPipelineState:
     state.last_grade = "A"
     state.transition(AutoPhase.REVIEW, "review")
     state.transition(AutoPhase.RUN, "run")
+    return state
+
+
+def _state_in_ralph_handoff(tmp_path) -> AutoPipelineState:
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_existing"
+    state.execution_id = "execution_existing"
+    state.run_session_id = "session_existing"
+    state.ralph_lineage_id = "ralph-seed_test_001-auto_abc"
+    state.ralph_job_id = "job_ralph_existing"
+    state.ralph_dispatch_mode = "job"
+    state.transition(AutoPhase.RALPH_HANDOFF, "persisted ralph checkpoint")
     return state
 
 
@@ -262,3 +277,123 @@ async def test_ralph_iteration_timeout_does_not_invoke_lateral(tmp_path) -> None
     assert result.status == "blocked"
     assert state.last_error == "iteration_timeout"
     assert state.last_tool_name == "ralph_starter"
+
+
+@pytest.mark.asyncio
+async def test_ralph_resume_oscillation_enters_unstuck_lateral_when_wired(tmp_path) -> None:
+    """L5-a applies to persisted resume polling, not only fresh handoff.
+
+    A client can disconnect after Ralph dispatch and resume only after the
+    background Ralph job has already reached ``oscillation_detected``. That
+    terminal snapshot has the same producer contract as the live handoff
+    result, so it must enter ``UNSTUCK_LATERAL`` instead of reverting to the
+    legacy direct-BLOCKED mapping.
+    """
+    state = _state_in_ralph_handoff(tmp_path)
+    captured_calls: list[dict[str, Any]] = []
+
+    async def ralph_resumer(*, job_id: str) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "lineage_id": state.ralph_lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": "failed",
+            "stop_reason": "oscillation_detected",
+        }
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "job_id": "job_ralph_recovery",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:
+        captured_calls.append(dict(kwargs))
+        return LateralResult(
+            persona="architect",
+            approach_summary="Architect: break the oscillation loop",
+            text="The resumed Ralph snapshot still needs spec reframing.",
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        ralph_resumer=ralph_resumer,
+        complete_product=True,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert captured_calls, "resume poll did not invoke lateral_thinker"
+    differences_text = str(captured_calls[0].get("qa_differences"))
+    assert "oscillat" in differences_text.lower()
+    assert state.last_lateral_persona == "architect"
+
+
+@pytest.mark.asyncio
+async def test_ralph_reattach_oscillation_enters_unstuck_lateral_when_wired(tmp_path) -> None:
+    """L5-a also applies to the direct re-attach terminal consumer.
+
+    ``_reattach_ralph_job`` observes a Ralph job that was already dispatched
+    before process death. If that observation returns ``oscillation_detected``,
+    it must share the same lateral recovery route as fresh handoff and resume
+    polling.
+    """
+    state = _state_in_ralph_handoff(tmp_path)
+    captured_calls: list[dict[str, Any]] = []
+    captured_attach: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed | None, **kwargs: Any) -> dict[str, Any]:
+        if "attach_job_id" not in kwargs:
+            return {
+                "job_id": "job_ralph_recovery",
+                "lineage_id": kwargs["lineage_id"],
+                "dispatch_mode": "job",
+                "terminal_status": "completed",
+                "stop_reason": "qa passed",
+            }
+        captured_attach.update(kwargs)
+        return {
+            "job_id": kwargs["attach_job_id"],
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "failed",
+            "stop_reason": "oscillation_detected",
+        }
+
+    async def lateral_thinker(**kwargs: Any) -> LateralResult:
+        captured_calls.append(dict(kwargs))
+        return LateralResult(
+            persona="architect",
+            approach_summary="Architect: reframe re-attached oscillation",
+            text="The re-attached Ralph result still needs lateral recovery.",
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline._reattach_ralph_job(state, ledger=SeedDraftLedger.from_goal(state.goal))
+
+    assert captured_attach["attach_job_id"] == "job_ralph_existing"
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert captured_calls, "re-attach did not invoke lateral_thinker"
+    differences_text = str(captured_calls[0].get("qa_differences"))
+    assert "oscillat" in differences_text.lower()
+    assert state.last_lateral_persona == "architect"

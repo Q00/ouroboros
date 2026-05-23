@@ -529,3 +529,76 @@ def test_unreadable_manifest_reports_structured_error(tmp_path: Path) -> None:
         assert excinfo.value.path == str(target)
     finally:
         target.chmod(0o644)
+
+
+def _issue29_command_metadata_manifest() -> dict:
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["commands"][0].update(
+        {
+            "permissions": ["github:read"],
+            "upstream": {"capability": "repository-inspection", "mode": "pinned_checkout"},
+            "artifacts": {
+                "writes": ["result.json", "report.md", "handoff.json"],
+                "bounded": True,
+            },
+            "handoff": {
+                "produces": True,
+                "consumer": "ooo auto",
+                "description": "Continue from inspection evidence.",
+            },
+            "timeout_seconds": 30,
+            "result_states": ["completed", "blocked", "failed"],
+            "redaction": {"rules": ["no secrets", "bounded metadata only"]},
+            "x-agentos-assimilation": {"notes": "forward-compatible extension bucket"},
+        }
+    )
+    payload["x-agentos"] = {"track": "plugin-assimilation"}
+    return payload
+
+
+def test_command_level_issue29_metadata_loads_without_core_runtime_side_effects(
+    tmp_path: Path,
+) -> None:
+    payload = _issue29_command_metadata_manifest()
+
+    manifest = load_manifest(_write(tmp_path, payload))
+
+    command = manifest.commands[0]
+    assert command.permissions == ("github:read",)
+    assert command.upstream == {"capability": "repository-inspection", "mode": "pinned_checkout"}
+    assert command.artifacts == {
+        "writes": ["result.json", "report.md", "handoff.json"],
+        "bounded": True,
+    }
+    assert command.handoff == {
+        "produces": True,
+        "consumer": "ooo auto",
+        "description": "Continue from inspection evidence.",
+    }
+    assert command.timeout_seconds == 30
+    assert command.result_states == ("completed", "blocked", "failed")
+    assert command.redaction == {"rules": ["no secrets", "bounded metadata only"]}
+
+
+def test_command_level_permission_must_be_declared_top_level(tmp_path: Path) -> None:
+    payload = _issue29_command_metadata_manifest()
+    payload["commands"][0]["permissions"] = ["github:read", "target:publish:write"]
+
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, payload))
+
+    err = excinfo.value
+    assert err.json_pointer == "/commands/0/permissions/1"
+    assert "top-level permissions" in err.args[0]
+    assert "github:read" in err.expected
+    assert err.got == "target:publish:write"
+
+
+def test_non_namespaced_unknown_command_metadata_still_rejected(tmp_path: Path) -> None:
+    payload = _issue29_command_metadata_manifest()
+    payload["commands"][0]["future_field"] = {"unsafe": True}
+
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, payload))
+
+    assert excinfo.value.json_pointer == "/commands/0/future_field"

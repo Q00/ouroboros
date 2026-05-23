@@ -19,7 +19,12 @@ if TYPE_CHECKING:
         AutoInterviewResult,
         InterviewTurn,
     )
-    from ouroboros.auto.ledger import LedgerEntry, LedgerSection, SeedDraftLedger
+    from ouroboros.auto.ledger import (
+        AssumptionRecord,
+        LedgerEntry,
+        LedgerSection,
+        SeedDraftLedger,
+    )
     from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
     from ouroboros.auto.seed_repairer import RepairResult, SeedRepairer
     from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
@@ -37,6 +42,7 @@ __all__ = [
     "AutoPipelineState",
     "AutoPolicy",
     "AutoStore",
+    "AssumptionRecord",
     "GradeGate",
     "InterviewTurn",
     "GradeResult",
@@ -63,6 +69,7 @@ _EXPORTS = {
     "AutoPipelineState": "ouroboros.auto.state",
     "AutoPolicy": "ouroboros.auto.state",
     "AutoStore": "ouroboros.auto.state",
+    "AssumptionRecord": "ouroboros.auto.ledger",
     "GradeGate": "ouroboros.auto.grading",
     "GradeResult": "ouroboros.auto.grading",
     "InterviewTurn": "ouroboros.auto.interview_driver",

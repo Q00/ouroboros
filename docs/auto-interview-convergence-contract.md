@@ -7,7 +7,9 @@ blocker.
 
 This contract is intentionally domain-agnostic.  It describes how the auto
 interview behaves for broad benign work, unsafe work, and stalled loops without
-encoding prompt-specific defaults.
+encoding prompt-specific defaults. It is a Track B `ooo auto` convergence
+contract, not an AgentOS substrate, projection, runtime tier-gate, or plugin
+lifecycle contract.
 
 ## Required-section outcomes
 
@@ -56,15 +58,22 @@ actionable blocked state.
 ## Stalled gap-reduction loops
 
 The interview backend may keep asking generic follow-up questions (`What else?`,
-`Any additional context?`) even after auto answers become repetitive.  The driver
+`Any additional context?`) even after auto answers become repetitive. The driver
 must treat unchanged required gaps as a convergence signal:
 
 - steer generic follow-ups toward the highest-priority open gap;
 - recognize repeated generic fallback answers as a stall signal that should trigger gap-directed steering;
-- when the round cap is reached, report the unresolved sections explicitly.
+- at the round cap, close only the gaps covered by auditable safe defaults and
+  push the synthesis back into the persisted interview transcript before
+  returning `seed_ready`;
+- block if any remaining gap is unsafe, conflicting, not covered by the
+  safe-default policy, or if the persisted interview does not accept the
+  synthesis as closed.
 
-The blocked reason should name the gaps or unsafe decision, not only say that the
-maximum round count was reached.
+The blocked reason should name the unsafe or unresolved decision, not only say
+that the maximum round count was reached. Ledger defaults must be rolled back
+when the transcript cannot be synchronized so the Seed Draft Ledger and the
+persisted interview remain a single source of truth.
 
 ## Regression coverage
 
@@ -75,6 +84,8 @@ maximum round count was reached.
   entry) when no bounded repo facts are supplied;
 - unsafe credential/production-authority questions blocking immediately on the
   first turn with a ``credential or secret value required`` reason;
-- stalled generic ``What else?`` follow-up loops producing a round-cap blocker
-  that names the unresolved required sections rather than just reporting that
-  ``max_rounds`` was reached.
+- stalled generic ``What else?`` follow-up loops reaching `seed_ready` for benign
+  local goals only after safe-default synthesis closes the persisted interview;
+- transcript-sync failures, accepted-but-not-closed synthesis turns, partial
+  unsafe gaps, and unsafe credential/production goals blocking with defaults
+  rolled back.

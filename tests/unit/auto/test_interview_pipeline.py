@@ -1114,8 +1114,15 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
 
     assert result.status == "complete"
     assert result.grade == "A"
-    repaired_acceptance = state.seed_artifact["acceptance_criteria"][0]
-    assert "The CLI" in repaired_acceptance
+    # The user's vague "The CLI should be easy..." AC is repaired in
+    # place. After L1-d (#1171) the catalog's default_ac_template is
+    # prepended to the Seed before the repairer runs, so the *user*
+    # entry is no longer at index [0]; locate it by content instead.
+    repaired_entries = [
+        item for item in state.seed_artifact["acceptance_criteria"] if "The CLI" in item
+    ]
+    assert repaired_entries, "expected to find the repaired user-supplied CLI AC"
+    repaired_acceptance = repaired_entries[0]
     assert "stable observable output" in repaired_acceptance
     assert (
         repaired_acceptance
