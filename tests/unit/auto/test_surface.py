@@ -477,6 +477,7 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "blocker": "waiting for interview answer",
         "seed_path": "/tmp/seed.yaml",
         "seed_origin": "none",
+        "active_task_class": None,
         "grade": "B",
         "last_grade": "B",
         "interview_session_id": "interview_1",
@@ -1376,6 +1377,37 @@ def test_auto_handler_meta_preserves_empty_defaulted_sections() -> None:
     )
 
     assert meta["defaulted_sections"] == []
+
+
+def test_auto_handler_meta_exposes_active_task_class() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _result_meta
+
+    meta = _result_meta(
+        AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+            active_task_class="cli",
+        )
+    )
+
+    assert meta["active_task_class"] == "cli"
+
+
+def test_auto_handler_meta_preserves_empty_active_task_class() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _result_meta
+
+    meta = _result_meta(
+        AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+        )
+    )
+
+    assert meta["active_task_class"] is None
 
 
 @pytest.mark.asyncio

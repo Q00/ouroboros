@@ -1205,6 +1205,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "blocker": result.blocker,
         "seed_path": result.seed_path,
         "seed_origin": result.seed_origin,
+        "active_task_class": result.active_task_class,
         "grade": result.grade,
         "last_grade": result.last_grade,
         "interview_session_id": result.interview_session_id,
