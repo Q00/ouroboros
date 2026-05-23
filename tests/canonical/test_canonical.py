@@ -196,6 +196,7 @@ async def _invoke_ouroboros_auto(scenario: CanonicalScenario, workdir: Path) -> 
         "goal": scenario.goal,
         "cwd": str(workdir),
         "skip_run": False,
+        "complete_product": scenario.completion_mode == "product_complete",
         # Bounded budget so a stuck scenario does not hang the
         # operator. The watchdog (L2) catches anything past this on
         # its own.
@@ -245,6 +246,25 @@ async def test_scenario_live_run_or_skip(
     result = await _invoke_ouroboros_auto(scenario, workdir)
 
     assert result.is_ok(), (
-        f"{scenario.slug}: ouroboros_auto returned error: "
+        f"{scenario.slug}: ouroboros_auto returned MCP error: "
         f"{result.unwrap_err() if not result.is_ok() else 'unknown'}"
+    )
+
+    tool_result = result.unwrap()
+    assert not tool_result.is_error, (
+        f"{scenario.slug}: ouroboros_auto reached a failed/blocked terminal: "
+        f"{tool_result.content[0].text if tool_result.content else tool_result.meta}"
+    )
+    assert tool_result.meta["status"] == "complete", (
+        f"{scenario.slug}: expected complete terminal status; "
+        f"got {tool_result.meta.get('status')!r} with meta {tool_result.meta}"
+    )
+    if scenario.completion_mode == "product_complete":
+        assert tool_result.meta.get("product_status") != "not_verified_complete", (
+            f"{scenario.slug}: product_complete scenario must not stop at an "
+            f"unverified run handoff: {tool_result.meta}"
+        )
+    print(
+        f"CANONICAL {scenario.slug}: status={tool_result.meta['status']} "
+        f"phase={tool_result.meta.get('phase')} completion_mode={scenario.completion_mode}"
     )
