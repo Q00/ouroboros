@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ouroboros.bigbang.interview import InterviewState, InterviewStatus
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
@@ -46,6 +46,7 @@ class _FakeInterviewEngine:
 
     state_dir: Path
     saved_states: list[InterviewState] = field(default_factory=list)
+    states: dict[str, InterviewState] = field(default_factory=dict)
     question_error: Any | None = None
 
     async def start_interview(
@@ -73,12 +74,28 @@ class _FakeInterviewEngine:
             encoding="utf-8",
         )
         self.saved_states.append(state)
+        self.states[state.interview_id] = state
         return Result.ok(path)
 
-    async def load_state(
-        self, session_id: str
-    ) -> Result[InterviewState, MCPServerError]:  # pragma: no cover - unused
-        raise NotImplementedError
+    async def load_state(self, session_id: str) -> Result[InterviewState, MCPServerError]:
+        return Result.ok(self.states[session_id])
+
+    async def record_response(
+        self,
+        state: InterviewState,
+        user_response: str,
+        question: str,
+    ) -> Result[InterviewState, MCPServerError]:
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=question,
+                user_response=user_response,
+            )
+        )
+        state.mark_updated()
+        self.states[state.interview_id] = state
+        return Result.ok(state)
 
 
 @pytest.mark.asyncio
@@ -106,6 +123,120 @@ async def test_subprocess_handler_persists_session_id_on_question_failure(tmp_pa
         "interview state file must exist on disk after first-question failure"
     )
     assert engine.saved_states, "engine.save_state must have been invoked"
+
+
+@pytest.mark.asyncio
+async def test_tool_envelope_question_failure_hands_off_to_parent_session(
+    tmp_path: Path,
+) -> None:
+    provider_error = ProviderError(
+        "Question generator produced a ToolUseBlockViolation",
+        provider="claude_code",
+        details={"error_type": "ToolUseBlockViolation", "session_id": "claude-session-1"},
+    )
+    engine = _FakeInterviewEngine(state_dir=tmp_path, question_error=provider_error)
+    mock_store = AsyncMock()
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=mock_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle({"initial_context": "Build a CLI", "cwd": str(tmp_path)})
+    await handler.close()
+
+    assert outcome.is_ok
+    mcp_result = outcome.value
+    assert mcp_result.is_error is False
+    meta = mcp_result.meta or {}
+    session_id = meta.get("session_id")
+    assert isinstance(session_id, str) and session_id
+    assert meta["status"] == "parent_question_required"
+    assert meta["recoverable"] is True
+    assert meta["retry_mcp"] is False
+    assert meta["ask_user_directly"] is True
+    assert meta["last_question_required"] is True
+    assert meta["reason_code"] == "question_generation_envelope_violation"
+    assert meta["question_source"] == "parent_session"
+    assert meta["provider_error_type"] == "ToolUseBlockViolation"
+
+    response_text = mcp_result.content[0].text
+    assert "Ask the user exactly one natural Socratic clarification question" in response_text
+    assert "Do not mention MCP" in response_text
+    assert "last_question=<the exact question you asked>" in response_text
+    assert (tmp_path / f"interview_{session_id}.json").exists()
+
+    event_types = [call.args[0].type for call in mock_store.append.await_args_list]
+    assert "interview.question_generation.parent_handoff" in event_types
+    assert "interview.failed" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_tool_envelope_failure_after_answer_hands_off_without_mcp_error(
+    tmp_path: Path,
+) -> None:
+    provider_error = ProviderError(
+        "Question generator produced a ToolUseBlockViolation",
+        provider="claude_code",
+        details={"error_type": "ToolUseBlockViolation"},
+    )
+    session_id = "interview_0123456789abcdef"
+    state = InterviewState(
+        interview_id=session_id,
+        initial_context="Build a CLI",
+        status=InterviewStatus.IN_PROGRESS,
+    )
+    state.rounds.append(
+        InterviewRound(
+            round_number=1,
+            question="What should this CLI do first?",
+            user_response="It should scaffold plugins.",
+        )
+    )
+    engine = _FakeInterviewEngine(
+        state_dir=tmp_path,
+        question_error=provider_error,
+        states={session_id: state},
+    )
+    await engine.save_state(state)
+    mock_store = AsyncMock()
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=mock_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {
+            "session_id": session_id,
+            "answer": "Use the existing plugin manifest format.",
+            "last_question": "Which manifest format should the CLI use?",
+        }
+    )
+    await handler.close()
+
+    assert outcome.is_ok
+    mcp_result = outcome.value
+    assert mcp_result.is_error is False
+    meta = mcp_result.meta or {}
+    assert meta["status"] == "parent_question_required"
+    assert meta["ask_user_directly"] is True
+    assert meta["last_question_required"] is True
+    assert meta["retry_mcp"] is False
+    assert meta["question_source"] == "parent_session"
+    assert meta["interview_reasoning"]["phase"] == "next_question_parent_handoff"
+
+    persisted_state = engine.states[session_id]
+    assert persisted_state.rounds[-1].question == "Which manifest format should the CLI use?"
+    assert persisted_state.rounds[-1].user_response == "Use the existing plugin manifest format."
+
+    event_types = [call.args[0].type for call in mock_store.append.await_args_list]
+    assert "interview.question_generation.parent_handoff" in event_types
+    assert "interview.failed" not in event_types
 
 
 @pytest.mark.asyncio

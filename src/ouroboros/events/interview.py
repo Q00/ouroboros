@@ -73,6 +73,28 @@ def interview_failed(
     )
 
 
+def interview_question_parent_handoff(
+    interview_id: str,
+    *,
+    phase: str,
+    reason_code: str,
+    provider_error_type: str | None = None,
+) -> BaseEvent:
+    """Create event when question generation is handed to the parent session."""
+    data = {
+        "phase": phase,
+        "reason_code": reason_code,
+    }
+    if provider_error_type:
+        data["provider_error_type"] = provider_error_type
+    return BaseEvent(
+        type="interview.question_generation.parent_handoff",
+        aggregate_type="interview",
+        aggregate_id=interview_id,
+        data=data,
+    )
+
+
 def interview_response_emitted(
     interview_id: str,
     *,

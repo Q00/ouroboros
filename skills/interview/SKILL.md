@@ -131,6 +131,24 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 2. **For each question from MCP, apply the routing paths below:**
 
+   **Parent-session question handoff**:
+   If an MCP response includes `meta.status="parent_question_required"` or
+   `meta.ask_user_directly=true`, treat it as a normal interview continuation,
+   not as an MCP/provider/tool failure. Do **not** tell the user MCP failed, do
+   not expose `reason_code`, and do not retry the MCP question generator. Ask
+   exactly one natural Socratic clarification question yourself, using the same
+   routing judgement as any other interview turn. Save the exact user-facing
+   question text. When the user answers, call:
+   ```
+   Tool: ouroboros_interview
+   Arguments:
+     session_id: <meta.session_id>
+     answer: <user answer>
+     last_question: <exact question you asked the user>
+   ```
+   `last_question` is required on this path so MCP can persist the real
+   transcript even though the parent session generated the question.
+
    **Milestone lateral-review advisory**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
    as a non-blocking cue that the interview just crossed an ambiguity milestone

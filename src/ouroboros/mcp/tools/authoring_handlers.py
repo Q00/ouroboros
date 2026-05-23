@@ -77,6 +77,8 @@ _DATA_DIR = Path.home() / ".ouroboros" / "data"
 _SUGGESTED_INTERVIEW_ID_RE = re.compile(r"^interview_[a-f0-9]{16}$")
 
 _LIVE_AMBIGUITY_MAX_RETRIES = 3
+_QUESTION_GENERATION_ENVELOPE_VIOLATION = "ToolUseBlockViolation"
+_QUESTION_GENERATION_ENVELOPE_REASON_CODE = "question_generation_envelope_violation"
 
 REQUIRED_CLIENT_GATES: tuple[str, ...] = (
     # TODO(#1008): derive required gate names from the interview skill /
@@ -430,6 +432,23 @@ def _length_guard_meta_fields() -> dict[str, Any]:
         "expected_action": "resend_with_summary",
         "max_chars": MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     }
+
+
+def _provider_error_type(error: Any) -> str | None:
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        error_type = details.get("error_type")
+        if isinstance(error_type, str) and error_type:
+            return error_type
+    return None
+
+
+def _is_question_generation_envelope_violation(error: Any) -> bool:
+    """Return true for strict provider tool-envelope violations."""
+    provider_error_type = _provider_error_type(error)
+    if provider_error_type == _QUESTION_GENERATION_ENVELOPE_VIOLATION:
+        return True
+    return _QUESTION_GENERATION_ENVELOPE_VIOLATION in str(error)
 
 
 def _interview_reasoning_meta(
@@ -1314,6 +1333,61 @@ class InterviewHandler:
         return score
 
     @staticmethod
+    def _parent_question_handoff_response(
+        state: InterviewState,
+        session_id: str,
+        *,
+        phase: str,
+        score: AmbiguityScore | None,
+        error: Any,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Build a non-error response asking the parent session to ask the user."""
+        provider_error_type = _provider_error_type(error)
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"Session {session_id}\n\n"
+                            "Ask the user exactly one natural Socratic clarification "
+                            "question yourself. Do not mention MCP, provider failures, "
+                            "tool envelopes, retries, or internal recovery. When the "
+                            "user answers, call ouroboros_interview with "
+                            f'session_id="{session_id}", answer=<user answer>, and '
+                            "last_question=<the exact question you asked>."
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": session_id,
+                    "status": "parent_question_required",
+                    "recoverable": True,
+                    "retry_mcp": False,
+                    "ask_user_directly": True,
+                    "last_question_required": True,
+                    "reason_code": _QUESTION_GENERATION_ENVELOPE_REASON_CODE,
+                    "question_source": "parent_session",
+                    "provider_error_type": provider_error_type,
+                    "ambiguity_score": score.overall_score if score is not None else None,
+                    "milestone": _milestone_for_score(score),
+                    "seed_ready": score.is_ready_for_seed if score is not None else None,
+                    **_interview_reasoning_meta(
+                        state=state,
+                        session_id=session_id,
+                        phase=phase,
+                        next_action=(
+                            "ask one direct user question, then resume with last_question"
+                        ),
+                        score=score,
+                        recoverable=True,
+                    ),
+                },
+            )
+        )
+
+    @staticmethod
     def _ambiguity_gate_response(
         session_id: str,
         score: AmbiguityScore | None,
@@ -1839,6 +1913,31 @@ class InterviewHandler:
                 live_score = None
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
+                    if _is_question_generation_envelope_violation(question_result.error):
+                        from ouroboros.events.interview import interview_question_parent_handoff
+
+                        self._emit_event_bg(
+                            interview_question_parent_handoff(
+                                state.interview_id,
+                                phase="start_question_generation",
+                                reason_code=_QUESTION_GENERATION_ENVELOPE_REASON_CODE,
+                                provider_error_type=_provider_error_type(question_result.error),
+                            )
+                        )
+                        log.warning(
+                            "mcp.tool.interview.question_generation_parent_handoff",
+                            session_id=state.interview_id,
+                            phase="start_question_generation",
+                            reason_code=_QUESTION_GENERATION_ENVELOPE_REASON_CODE,
+                        )
+                        return self._parent_question_handoff_response(
+                            state,
+                            state.interview_id,
+                            phase="start_question_parent_handoff",
+                            score=live_score,
+                            error=question_result.error,
+                        )
+
                     error_msg = str(question_result.error)
                     event_error_msg = _format_interview_failure_event_error(question_result.error)
                     from ouroboros.events.interview import interview_failed
@@ -2418,6 +2517,31 @@ class InterviewHandler:
                     live_score = _load_state_ambiguity_score(state)
                     question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
+                    if _is_question_generation_envelope_violation(question_result.error):
+                        from ouroboros.events.interview import interview_question_parent_handoff
+
+                        self._emit_event_bg(
+                            interview_question_parent_handoff(
+                                session_id,
+                                phase="next_question_generation",
+                                reason_code=_QUESTION_GENERATION_ENVELOPE_REASON_CODE,
+                                provider_error_type=_provider_error_type(question_result.error),
+                            )
+                        )
+                        log.warning(
+                            "mcp.tool.interview.question_generation_parent_handoff",
+                            session_id=session_id,
+                            phase="next_question_generation",
+                            reason_code=_QUESTION_GENERATION_ENVELOPE_REASON_CODE,
+                        )
+                        return self._parent_question_handoff_response(
+                            state,
+                            session_id,
+                            phase="next_question_parent_handoff",
+                            score=live_score,
+                            error=question_result.error,
+                        )
+
                     error_msg = str(question_result.error)
                     event_error_msg = _format_interview_failure_event_error(question_result.error)
                     from ouroboros.events.interview import interview_failed
