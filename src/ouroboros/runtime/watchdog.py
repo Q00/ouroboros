@@ -36,7 +36,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.runtime.controls import RuntimeControls
@@ -64,6 +64,7 @@ WATCHDOG_STOP_REASON_CODE: str = "watchdog_wall_clock_exceeded"
 cancel event is observed."""
 
 
+@runtime_checkable
 class _EventAppender(Protocol):
     """Minimal protocol the watchdog needs from the EventStore.
 
@@ -73,6 +74,19 @@ class _EventAppender(Protocol):
     """
 
     async def append(self, event: BaseEvent) -> None: ...
+
+
+@runtime_checkable
+class _WatchdogEventReader(Protocol):
+    """Optional EventStore replay hook used for restart idempotency."""
+
+    async def query_events(
+        self,
+        aggregate_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[BaseEvent]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +194,15 @@ class Watchdog:
         budget = self._controls.session_wall_clock_seconds
         if elapsed_seconds <= budget:
             return None
+        if isinstance(self._appender, _WatchdogEventReader):
+            existing = await self._appender.query_events(
+                aggregate_id=session_id,
+                event_type=WATCHDOG_CANCEL_EVENT_TYPE,
+                limit=1,
+            )
+            if existing:
+                self._fired_sessions.add(session_id)
+                return None
         decision = WatchdogDecision(
             session_id=session_id,
             fired_at=now,

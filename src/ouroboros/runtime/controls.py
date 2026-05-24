@@ -14,6 +14,7 @@ deferral rationale.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -75,14 +76,23 @@ def load_runtime_controls(path: Path | str | None = None) -> RuntimeControls:
 
     Behaviour:
 
-    - ``path is None`` → return ``RuntimeControls()`` with defaults.
+    - ``path is None`` → return defaults, optionally overridden by
+      ``OUROBOROS_SESSION_WALL_CLOCK_SECONDS``.
     - ``path`` exists but no ``runtime_controls`` key → defaults.
     - YAML parse error → ``ValueError`` so callers fail loudly.
     - Unrecognized keys under ``runtime_controls`` → ``ValueError``;
       the v2 expansion path adds new keys only through code review.
     """
     if path is None:
-        return RuntimeControls()
+        env_budget = os.environ.get("OUROBOROS_SESSION_WALL_CLOCK_SECONDS")
+        if env_budget is None:
+            return RuntimeControls()
+        try:
+            budget = int(env_budget)
+        except ValueError as exc:
+            msg = "OUROBOROS_SESSION_WALL_CLOCK_SECONDS must be an integer"
+            raise ValueError(msg) from exc
+        return RuntimeControls(session_wall_clock_seconds=budget)
     resolved = Path(path)
     if not resolved.is_file():
         msg = f"runtime_controls config not found at {resolved}"
@@ -104,7 +114,17 @@ def load_runtime_controls(path: Path | str | None = None) -> RuntimeControls:
     if not isinstance(block, dict):
         msg = f"runtime_controls block at {resolved} must be a mapping; got {type(block).__name__}"
         raise ValueError(msg)
-    allowed = {"session_wall_clock_seconds"}
+    # Keep compatibility with the existing runtime_controls config block.
+    # This loader consumes only the Auto session wall-clock knob and ignores
+    # the older generation/MCP controls owned by ouroboros.config.loader.
+    allowed = {
+        "session_wall_clock_seconds",
+        "mcp_tool_timeout_seconds",
+        "generation_idle_timeout_seconds",
+        "generation_no_progress_timeout_seconds",
+        "generation_safety_timeout_seconds",
+        "watchdog_poll_seconds",
+    }
     unknown = set(block.keys()) - allowed
     if unknown:
         msg = (

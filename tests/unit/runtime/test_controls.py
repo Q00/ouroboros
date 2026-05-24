@@ -43,6 +43,21 @@ def test_load_returns_defaults_when_path_is_none() -> None:
     assert load_runtime_controls(None) == RuntimeControls()
 
 
+def test_load_path_none_uses_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OUROBOROS_SESSION_WALL_CLOCK_SECONDS", "0")
+
+    controls = load_runtime_controls(None)
+
+    assert controls == RuntimeControls(session_wall_clock_seconds=0)
+
+
+def test_load_path_none_rejects_bad_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OUROBOROS_SESSION_WALL_CLOCK_SECONDS", "soon")
+
+    with pytest.raises(ValueError, match="OUROBOROS_SESSION_WALL_CLOCK_SECONDS"):
+        load_runtime_controls(None)
+
+
 def test_load_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_runtime_controls(tmp_path / "nope.yaml")
@@ -89,16 +104,24 @@ def test_load_non_mapping_block_raises(tmp_path: Path) -> None:
         load_runtime_controls(fixture)
 
 
-def test_load_unknown_key_rejected(tmp_path: Path) -> None:
-    """Unknown keys under ``runtime_controls`` are rejected — v2 expansion
-    keys (idle/no_progress/safety, directive vocabulary, …) require code
-    review to land, not silent acceptance."""
-    fixture = tmp_path / "extra_key.yaml"
+def test_load_existing_runtime_controls_keys_ignored(tmp_path: Path) -> None:
+    """Existing config-owned runtime_controls keys remain compatible."""
+    fixture = tmp_path / "existing_keys.yaml"
     fixture.write_text(
         "runtime_controls:\n"
         "  session_wall_clock_seconds: 600\n"
-        "  idle_timeout_seconds: 60\n"  # v2 expansion path; not yet here.
+        "  mcp_tool_timeout_seconds: 0\n"
+        "  generation_idle_timeout_seconds: 7200\n"
+        "  generation_no_progress_timeout_seconds: 14400\n"
+        "  generation_safety_timeout_seconds: 0\n"
+        "  watchdog_poll_seconds: 15\n"
     )
+    assert load_runtime_controls(fixture) == RuntimeControls(session_wall_clock_seconds=600)
+
+
+def test_load_unknown_key_rejected(tmp_path: Path) -> None:
+    fixture = tmp_path / "extra_key.yaml"
+    fixture.write_text("runtime_controls:\n  idle_timeout_seconds: 60\n")
     with pytest.raises(ValueError, match="idle_timeout_seconds"):
         load_runtime_controls(fixture)
 
