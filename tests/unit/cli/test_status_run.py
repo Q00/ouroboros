@@ -139,6 +139,20 @@ def test_status_run_missing_selector_exits_with_code_64() -> None:
     assert "required" in result.output.lower()
 
 
+def test_status_run_invalid_limit_exits_with_code_64() -> None:
+    """Malformed numeric CLI input maps to exit code ``64`` before MCP dispatch."""
+
+    mcp_payload = MCPToolResult(content=(), meta=_golden_meta())
+    handler = _RecordingHandler(Result.ok(mcp_payload))
+
+    with _patched_runner(handler):
+        result = runner.invoke(app, ["status", "run", "exec_golden", "--limit", "0", "--json"])
+
+    assert result.exit_code == 64
+    assert "limit must be a positive integer" in result.output
+    assert handler.last_arguments is None
+
+
 def test_status_run_conflicting_selectors_exit_with_code_64() -> None:
     """RUN_ID combined with --session-id is malformed input."""
 

@@ -146,7 +146,7 @@ def test_headless_run_empty_command_rejected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_deferred_probe_returns_passing_evidence(tmp_path: Path) -> None:
+def test_deferred_probe_returns_non_passing_evidence(tmp_path: Path) -> None:
     """A :class:`DeferredProbe` represents a catalog-declared probe kind
     that L3 v1 has not yet implemented (e.g. ``sim_trace``). Calling
     :meth:`run` must succeed with a clearly-marked ``outcome ==
@@ -154,7 +154,7 @@ def test_deferred_probe_returns_passing_evidence(tmp_path: Path) -> None:
     probe = DeferredProbe(kind="sim_trace")
     evidence = probe.run(cwd=tmp_path, command=())
     assert evidence.probe_kind == "sim_trace"
-    assert evidence.passed is True
+    assert evidence.passed is False
     assert evidence.payload["outcome"] == "deferred"
     assert "deferred" in evidence.summary
 

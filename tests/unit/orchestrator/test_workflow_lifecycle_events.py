@@ -424,6 +424,35 @@ def test_projection_is_deterministic_across_input_orderings() -> None:
     assert project_workflow_lifecycle(spec.spec_id, mixed) == canonical
 
 
+def test_projection_same_timestamp_restart_boundary_prefers_fresh_run() -> None:
+    spec = _spec()
+    timestamp = _t(1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=_t(0),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=timestamp,
+            reason_code="old_run_completed",
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=timestamp,
+        ),
+    )
+
+    projection = project_workflow_lifecycle(spec.spec_id, tuple(reversed(events)))
+
+    assert projection.run_state is WorkflowRunLifecycleState.CREATED
+    assert projection.terminal_reason_code is None
+    assert not projection.is_terminal()
+
+
 def test_projection_tie_breaks_same_timestamp_node_attempts() -> None:
     spec = _spec()
     timestamp = _t(1)

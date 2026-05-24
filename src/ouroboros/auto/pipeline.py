@@ -648,15 +648,11 @@ class AutoPipeline:
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
                     # L1-d / #1171: derive the task class from the already-
                     # standardized ledger and prepend the catalog's default
-                    # AC template to the Seed. Single match → apply that class;
-                    # unmatched → apply the safe LIBRARY fallback from L1-b;
-                    # ambiguous → leave the user's AC untouched until the
-                    # L1-c interview-driver disambiguation hook resolves it.
-                    # ``state.active_task_class`` is set only when a concrete
-                    # class/fallback actually fired, so the envelope does not
-                    # pretend an unresolved ambiguous class was active.
+                    # AC template only for a concrete single match. Ambiguous
+                    # or unmatched ledgers leave the user's AC untouched until
+                    # a disambiguation hook resolves the class.
                     _inference = derive_domain_from_ledger(ledger)
-                    _task_class = _inference.single
+                    _task_class = next(iter(_inference.classes)) if _inference.is_single else None
                     if _task_class is not None:
                         _applied = apply_default_ac_template(seed, _task_class)
                         if _applied.injected_ac:

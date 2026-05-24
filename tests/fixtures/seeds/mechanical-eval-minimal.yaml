@@ -61,6 +61,8 @@ verdicts:
     rationale: "mechanical checks passed"
     evidence_artifact_ids:
       - "artifact_pytest_collect"
+    evidence_event_ids:
+      - "evt_artifact_0"
 
 # Expectations the integration test enforces against the projected
 # bundle. They are recorded here so the fixture documents the contract
@@ -84,3 +86,6 @@ expected:
   verdict:
     scope: "run"
     outcome: "pass"
+    evidence_event_ids:
+      - "evt_verdict_0"
+      - "evt_artifact_0"

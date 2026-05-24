@@ -598,6 +598,8 @@ class AutoPipelineState:
         self.updated_at = now
         self.last_progress_message = message
         self.last_error = error
+        if error is None:
+            self.last_error_code = None
         # Authoring-backend attribution is scoped to the most recent
         # authoring failure; reset on every transition so a later
         # non-authoring blocker (grade_gate, seed_saver, run_starter)

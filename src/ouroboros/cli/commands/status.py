@@ -205,6 +205,9 @@ def run_projection(
     if seed_id is not None:
         arguments["seed_id"] = seed_id
     if limit is not None:
+        if limit <= 0:
+            print_error("Run projection failed: limit must be a positive integer")
+            raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
         arguments["limit"] = limit
 
     result = asyncio.run(ProjectionQueryHandler().handle(arguments))

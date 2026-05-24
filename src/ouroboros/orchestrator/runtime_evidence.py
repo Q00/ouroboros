@@ -180,6 +180,16 @@ class HeadlessRunProbe:
             )
         except subprocess.TimeoutExpired as exc:
             duration = time.monotonic() - start
+            stdout = (
+                exc.stdout.decode("utf-8", errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout or "")
+            )
+            stderr = (
+                exc.stderr.decode("utf-8", errors="replace")
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr or "")
+            )
             return RuntimeEvidence(
                 probe_kind=self.kind,
                 passed=False,
@@ -190,8 +200,8 @@ class HeadlessRunProbe:
                 payload={
                     "argv": argv,
                     "timeout_seconds": timeout_seconds,
-                    "stdout_preview": _truncate(exc.stdout or ""),
-                    "stderr_preview": _truncate(exc.stderr or ""),
+                    "stdout_preview": _truncate(stdout),
+                    "stderr_preview": _truncate(stderr),
                     "outcome": "timeout",
                 },
             )
@@ -218,9 +228,9 @@ class DeferredProbe:
     """Placeholder for probe kinds declared in the L1 catalog but not
     yet implemented in this v1 (per #1176 minimal-substrate audit).
 
-    Calling :meth:`run` on a deferred probe returns a probe-PASS
+    Calling :meth:`run` on a deferred probe returns a non-passing
     :class:`RuntimeEvidence` with ``outcome = "deferred"`` so the
-    verifier can flag the gap without failing the grade. The L3
+    verifier can flag the gap without treating it as real acceptance. The L3
     follow-up that implements ``sim_trace`` / ``render_hash`` /
     ``api_smoke`` swaps the registry entry from :class:`DeferredProbe`
     to the real implementation; no consumer needs to change.
@@ -237,7 +247,7 @@ class DeferredProbe:
     ) -> RuntimeEvidence:
         return RuntimeEvidence(
             probe_kind=self.kind,
-            passed=True,
+            passed=False,
             summary=f"probe kind {self.kind!r} is deferred to a future L3 follow-up",
             duration_seconds=0.0,
             payload={"outcome": "deferred"},

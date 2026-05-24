@@ -1217,6 +1217,10 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["product_status"] = "not_verified_complete"
     if result.stop_reason_code is not None:
         meta["stop_reason_code"] = result.stop_reason_code
+    if result.interview_closure_mode is not None:
+        meta["interview_closure_mode"] = result.interview_closure_mode
+    if result.active_task_class is not None:
+        meta["active_task_class"] = result.active_task_class
     if result.execution_job_status:
         meta["execution_job_status"] = result.execution_job_status
     if result.execution_job_error:
@@ -1257,6 +1261,12 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["ralph_lineage_id"] = result.ralph_lineage_id
     if result.ralph_dispatch_mode:
         meta["ralph_dispatch_mode"] = result.ralph_dispatch_mode
+    if (
+        result.status == "complete"
+        and result.ralph_dispatch_mode == "plugin"
+        and result.execution_job_status != "completed"
+    ):
+        meta["product_status"] = "not_verified_complete"
     # RFC #809 Phase 2.1 — surface the EVALUATE verdict when present. None
     # signals "EVALUATE did not run" so clients can distinguish "not graded"
     # from "graded and failed".
@@ -1290,6 +1300,16 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     meta["assumption_sources"] = [
         {"text": record.text, "source": record.source, "confidence": record.confidence}
         for record in result.assumption_sources
+    ]
+    meta["runtime_probe_evidence"] = [
+        {
+            "probe_kind": evidence.probe_kind,
+            "passed": evidence.passed,
+            "summary": evidence.summary,
+            "duration_seconds": evidence.duration_seconds,
+            "payload": dict(evidence.payload),
+        }
+        for evidence in result.runtime_probe_evidence
     ]
     return meta
 
