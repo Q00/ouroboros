@@ -12,6 +12,7 @@ from rich.markup import escape as _rich_escape
 import typer
 
 from ouroboros.auto.adapters import (
+    EnvRuntimeProbeRunner,
     HandlerInterviewBackend,
     HandlerRalphPoller,
     HandlerRalphStarter,
@@ -527,6 +528,7 @@ async def _run_auto(
         complete_product=complete_product,
         progress_callback=progress_callback,
         watchdog=watchdog,
+        probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
     )
     try:
         result = await pipeline.run(state)

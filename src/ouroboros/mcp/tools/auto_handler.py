@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.auto.adapters import (
+    EnvRuntimeProbeRunner,
     HandlerEvaluator,
     HandlerInterviewBackend,
     HandlerLateralThinker,
@@ -503,6 +504,7 @@ class AutoHandler:
             evaluator=evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
+            probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
         )
         try:
             return await pipeline.run(state)

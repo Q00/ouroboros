@@ -549,6 +549,9 @@ class AutoPipelineState:
     # Typed artifact for the next automated recovery step. Current PRs persist
     # this plan after QA/lateral failure; a follow-up redispatch PR consumes it.
     last_recovery_plan: dict[str, Any] | None = None
+    # L3-2 runtime probe evidence. Persisted so completed-session resume and
+    # result replay keep the acceptance evidence that gated PRODUCT_COMPLETE.
+    runtime_probe_evidence: list[dict[str, Any]] = field(default_factory=list)
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -905,6 +908,7 @@ class AutoPipelineState:
         payload.setdefault("personas_invoked", [])
         payload.setdefault("recovery_guard_tripped", None)
         payload.setdefault("last_recovery_plan", None)
+        payload.setdefault("runtime_probe_evidence", [])
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -1159,6 +1163,22 @@ class AutoPipelineState:
             except Exception as exc:
                 msg = "last_recovery_plan must be a valid AutoRecoveryPlan object or null"
                 raise ValueError(msg) from exc
+        if not isinstance(self.runtime_probe_evidence, list):
+            msg = "runtime_probe_evidence must be a list"
+            raise ValueError(msg)
+        try:
+            from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
+
+            for item in self.runtime_probe_evidence:
+                if not isinstance(item, dict):
+                    msg = "runtime_probe_evidence entries must be objects"
+                    raise ValueError(msg)
+                RuntimeEvidence.from_dict(item)
+        except Exception as exc:
+            if isinstance(exc, ValueError):
+                raise
+            msg = "runtime_probe_evidence entries must be valid RuntimeEvidence objects"
+            raise ValueError(msg) from exc
         if self.recovery_guard_tripped is not None and (
             not isinstance(self.recovery_guard_tripped, str)
             or self.recovery_guard_tripped not in _VALID_RECOVERY_GUARD_TAGS

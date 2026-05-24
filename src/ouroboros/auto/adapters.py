@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.mcp.types import MCPToolResult
+from ouroboros.orchestrator.runtime_evidence import HeadlessRunProbe, RuntimeEvidence
 from ouroboros.resilience.lateral import ThinkingPersona
 
 _SAFE_SEED_ID_FILENAME_CHARS = frozenset(
@@ -47,6 +49,34 @@ _SEED_FILENAME_STEM_MAX_BYTES = _SEED_FILENAME_COMPONENT_MAX_BYTES - len(
 
 class HandlerError(RuntimeError):
     """Raised when an MCP handler returns an error result."""
+
+
+class EnvRuntimeProbeRunner:
+    """Runtime probe runner configured through public CLI/MCP environment.
+
+    ``OUROBOROS_RUNTIME_PROBE_COMMAND`` opt-in keeps default behavior unchanged,
+    while giving production entrypoints a real probe path whose failures can
+    block PRODUCT_COMPLETE.
+    """
+
+    def __init__(self, *, env: dict[str, str] | None = None) -> None:
+        self._env = env if env is not None else os.environ
+
+    async def __call__(self, state: Any) -> tuple[RuntimeEvidence, ...]:
+        command = self._env.get("OUROBOROS_RUNTIME_PROBE_COMMAND")
+        if not command:
+            return ()
+        raw_timeout = self._env.get("OUROBOROS_RUNTIME_PROBE_TIMEOUT_SECONDS")
+        timeout: float | None = 60.0
+        if raw_timeout:
+            timeout = float(raw_timeout)
+        evidence = await asyncio.to_thread(
+            HeadlessRunProbe().run,
+            cwd=Path(state.cwd),
+            command=command,
+            timeout_seconds=timeout,
+        )
+        return (evidence,)
 
 
 class PartialInterviewStartError(HandlerError):
