@@ -541,6 +541,7 @@ class MCPClientAdapter:
         return MCPToolResult(
             content=tuple(content_items),
             is_error=getattr(result, "isError", False),
+            meta=getattr(result, "meta", {}) or {},
         )
 
     async def list_resources(self) -> Result[Sequence[MCPResourceDefinition], MCPClientError]:

@@ -121,6 +121,24 @@ class TestMCPClientAdapterParsing:
         assert result.content[0].text == "Hello, world!"
         assert result.is_error is False
 
+    def test_parse_tool_result_preserves_meta(self) -> None:
+        """SDK result metadata is restored into MCPToolResult.meta."""
+        adapter = MCPClientAdapter()
+        mock_result = MagicMock()
+        mock_content = MagicMock()
+        mock_content.text = "Question?"
+        mock_result.content = [mock_content]
+        mock_result.isError = False
+        mock_result.meta = {
+            "internal_reasoning": ["phase: start"],
+            "interview_reasoning": {"phase": "start"},
+        }
+
+        result = adapter._parse_tool_result(mock_result, "ouroboros_interview")
+
+        assert result.meta["internal_reasoning"] == ["phase: start"]
+        assert result.meta["interview_reasoning"]["phase"] == "start"
+
 
 class TestMCPClientAdapterRetry:
     """Test MCPClientAdapter retry behavior."""

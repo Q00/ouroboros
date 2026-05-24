@@ -23,6 +23,7 @@ from ouroboros.mcp.server.adapter import (
     _project_dir_from_artifact,
     _project_dir_from_seed,
     _safe_cwd,
+    _to_fastmcp_tool_result,
     validate_transport,
 )
 from ouroboros.mcp.types import (
@@ -720,6 +721,18 @@ class TestMCPServerAdapterTools:
         assert result.is_ok
         assert result.value.text_content == "Success"
         handler.handle_mock.assert_called_once_with({"input": "test"})
+
+    def test_fastmcp_tool_result_preserves_meta(self) -> None:
+        """FastMCP boundary conversion must not drop MCPToolResult.meta."""
+        result = MCPToolResult(
+            content=(MCPContentItem(type=ContentType.TEXT, text="Success"),),
+            meta={"internal_reasoning": ["phase: start"]},
+        )
+
+        converted = _to_fastmcp_tool_result(result)
+
+        assert converted.content[0].text == "Success"
+        assert converted.meta == {"internal_reasoning": ["phase: start"]}
 
     async def test_call_tool_scopes_io_journal_recorder_from_runtime_context(self) -> None:
         """MCP tool calls provide per-call journal identity to shared adapters."""

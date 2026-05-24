@@ -66,6 +66,21 @@ def _safe_cwd() -> Path:
     return cwd
 
 
+def _to_fastmcp_tool_result(tool_result: MCPToolResult) -> Any:
+    """Convert internal tool results to MCP SDK results without dropping meta."""
+    try:
+        from mcp.types import CallToolResult, TextContent
+    except ImportError as exc:  # pragma: no cover - start() already checks this path.
+        msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
+        raise RuntimeError(msg) from exc
+
+    return CallToolResult(
+        content=[TextContent(type="text", text=tool_result.text_content)],
+        isError=tool_result.is_error,
+        _meta=tool_result.meta or None,
+    )
+
+
 def _default_interview_state_dir() -> Path:
     """Return the global interview state directory for MCP handlers."""
     from ouroboros.config.models import get_config_dir
@@ -920,7 +935,7 @@ class MCPServerAdapter:
                     if result.is_ok:
                         # Convert MCPToolResult to FastMCP format
                         tool_result = result.value
-                        return tool_result.text_content
+                        return _to_fastmcp_tool_result(tool_result)
                     else:
                         # Raise so FastMCP returns a proper MCP error response
                         # with isError: true, instead of a success with error text.
