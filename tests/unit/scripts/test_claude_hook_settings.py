@@ -16,12 +16,13 @@ def _hook_commands() -> list[str]:
     return commands
 
 
-def test_plugin_hooks_use_plugin_root_for_bundled_scripts() -> None:
-    """Hooks must not resolve bundled scripts relative to the user's project cwd."""
+def test_plugin_hooks_prefer_plugin_root_and_fallback_to_repo_root() -> None:
+    """Hooks must work both inside plugin runtime and normal repo checkouts."""
     commands = _hook_commands()
 
-    assert any("${CLAUDE_PLUGIN_ROOT}/scripts/keyword-detector.py" in cmd for cmd in commands)
-    assert any("${CLAUDE_PLUGIN_ROOT}/scripts/drift-monitor.py" in cmd for cmd in commands)
+    assert any('ROOT="${CLAUDE_PLUGIN_ROOT:-$PWD}"' in cmd for cmd in commands)
+    assert any('"$ROOT/scripts/keyword-detector.py"' in cmd for cmd in commands)
+    assert any('"$ROOT/scripts/drift-monitor.py"' in cmd for cmd in commands)
     assert all("CLAUDE_PROJECT_DIR" not in cmd for cmd in commands)
     assert all("cd " not in cmd for cmd in commands)
 
@@ -30,5 +31,5 @@ def test_plugin_hooks_fall_back_to_unversioned_python() -> None:
     """Prefer python3 where available, but fall back for Windows installs."""
     commands = _hook_commands()
 
-    assert all(cmd.startswith("python3 ") for cmd in commands)
+    assert all("python3 " in cmd for cmd in commands)
     assert all(" || python " in cmd for cmd in commands)
