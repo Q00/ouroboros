@@ -15,7 +15,7 @@ from ouroboros.orchestrator.workflow_ir_adapter import (
     workflow_spec_from_plugin_descriptor,
 )
 from ouroboros.plugin.manifest import load_manifest
-from tests.unit.plugin.test_manifest import REFERENCE_MANIFEST
+from tests.unit.plugin.test_manifest import REFERENCE_MANIFEST, _issue29_command_metadata_manifest
 
 
 def _write(tmp_path: Path, payload: dict) -> Path:
@@ -52,6 +52,40 @@ def test_plugin_descriptor_projects_contract_only_plugin_nodes(tmp_path: Path) -
     assert spec.edges[0].source == plugin_node.node_id
     assert spec.edges[0].target == terminal_node.node_id
     assert spec.edges[0].metadata["dispatch_enabled"] is False
+
+
+def test_plugin_descriptor_projects_command_level_metadata_to_workflow_ir(
+    tmp_path: Path,
+) -> None:
+    payload = _issue29_command_metadata_manifest()
+    payload["permissions"].append(
+        {
+            "scope": "github:write",
+            "risk": "write",
+            "required": False,
+            "reason": "Optional mutation scope.",
+        }
+    )
+    payload["commands"][0]["permissions"] = ["github:read", "github:write"]
+    manifest = load_manifest(_write(tmp_path, payload))
+
+    spec = workflow_spec_from_plugin_descriptor(manifest.to_descriptor())
+
+    node = spec.nodes[0]
+    assert node.metadata["command_permission_scopes"] == ("github:read", "github:write")
+    assert node.metadata["required_permission_scopes"] == ("github:read",)
+    assert node.metadata["optional_permission_scopes"] == ("github:write",)
+    assert node.metadata["upstream"] == {
+        "capability": "repository-inspection",
+        "mode": "pinned_checkout",
+    }
+    artifacts = dict(node.metadata["artifacts"])
+    assert artifacts["writes"] == ("result.json", "report.md", "handoff.json")
+    assert artifacts["bounded"] is True
+    assert node.metadata["handoff"]["consumer"] == "ooo auto"
+    assert node.metadata["timeout_seconds"] == 30
+    assert node.metadata["result_states"] == ("completed", "blocked", "failed")
+    assert dict(node.metadata["redaction"])["rules"] == ("no secrets", "bounded metadata only")
 
 
 def test_plugin_descriptor_projection_is_metadata_only_not_entrypoint_dispatch(

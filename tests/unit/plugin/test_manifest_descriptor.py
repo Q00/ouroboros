@@ -19,7 +19,7 @@ from ouroboros.plugin.manifest import (
     load_manifest,
     plugin_descriptor_from_manifest,
 )
-from tests.unit.plugin.test_manifest import REFERENCE_MANIFEST
+from tests.unit.plugin.test_manifest import REFERENCE_MANIFEST, _issue29_command_metadata_manifest
 
 
 def _write(tmp_path: Path, payload: dict) -> Path:
@@ -103,6 +103,7 @@ def test_descriptor_projects_command_as_harness_action(tmp_path: Path) -> None:
     assert action.usage == "ooo github-pr review <pull-request-url>"
     assert action.risk == "read_only"
     assert action.entrypoint.command == "python -m github_pr_ops"
+    assert action.permissions == ()
     assert action.required_permissions == (
         "github:read",
         HOOK_LIFECYCLE_READ_SCOPE,
@@ -110,6 +111,39 @@ def test_descriptor_projects_command_as_harness_action(tmp_path: Path) -> None:
     )
     assert action.optional_permissions == ("github:write",)
     assert [argument.name for argument in action.arguments] == ["pull_request_url"]
+
+
+def test_descriptor_preserves_command_level_agentos_metadata(tmp_path: Path) -> None:
+    payload = _issue29_command_metadata_manifest()
+    payload["permissions"].append(
+        {
+            "scope": "github:write",
+            "risk": "write",
+            "required": False,
+            "reason": "Optional mutation scope.",
+        }
+    )
+    payload["commands"][0]["permissions"] = ["github:read", "github:write"]
+    manifest = load_manifest(_write(tmp_path, payload))
+
+    action = manifest.to_descriptor().actions[0]
+
+    assert action.permissions == ("github:read", "github:write")
+    assert action.required_permissions == ("github:read",)
+    assert action.optional_permissions == ("github:write",)
+    assert action.upstream == {"capability": "repository-inspection", "mode": "pinned_checkout"}
+    assert action.artifacts == {
+        "writes": ["result.json", "report.md", "handoff.json"],
+        "bounded": True,
+    }
+    assert action.handoff == {
+        "produces": True,
+        "consumer": "ooo auto",
+        "description": "Continue from inspection evidence.",
+    }
+    assert action.timeout_seconds == 30
+    assert action.result_states == ("completed", "blocked", "failed")
+    assert action.redaction == {"rules": ["no secrets", "bounded metadata only"]}
 
 
 def test_descriptor_reflects_schema_default_audit_events(tmp_path: Path) -> None:
