@@ -1688,15 +1688,18 @@ def _maybe_prompt_grant_required_permissions(
 
     scopes = [p.scope for p in missing]
     try:
-        record = trust.grant_many_and_clear_disable(
-            plugin=manifest.name,
-            version=manifest.version,
-            scopes=scopes,
-            granted_by="user:cli",
-            source_type=entry.source_type,
-            source_identity=entry.source_identity,
-            artifact_digest=entry.artifact_digest,
-        )
+        was_disabled = trust.is_disabled(manifest.name)
+        record = None
+        for scope in scopes:
+            record = trust.grant(
+                plugin=manifest.name,
+                version=manifest.version,
+                scope=scope,
+                granted_by="user:cli",
+                source_type=entry.source_type,
+                source_identity=entry.source_identity,
+                artifact_digest=entry.artifact_digest,
+            )
     except (ValueError, OSError) as exc:
         print_error(
             f"could not write trust grant for {manifest.name!r}: {exc}. "
@@ -1705,10 +1708,18 @@ def _maybe_prompt_grant_required_permissions(
         )
         raise typer.Exit(code=1) from exc
 
+    assert record is not None
     console.print(
         f"  granted required scopes: {', '.join(scopes)} "
         f"({len(record.granted_scopes)} total scope(s))"
     )
+    if was_disabled:
+        console.print(
+            "  plugin remains disabled; re-enable explicitly with "
+            f"`ooo plugin trust {manifest.name}`",
+            markup=False,
+            highlight=False,
+        )
 
 
 @app.command("add")
@@ -2220,7 +2231,7 @@ def _install_from_local_directory(
     try:
         artifact_digest = canonical_tree_hash(src)
         with _atomic_install_with_rollback(src, plugin_home):
-            _install_one(
+            installed_entry = _install_one(
                 manifest=manifest,
                 plugin_home=plugin_home,
                 lock=lock,
@@ -2251,6 +2262,11 @@ def _install_from_local_directory(
         new_source_type=manifest_source_type,
         new_source_identity=source_identity,
         new_artifact_digest=artifact_digest,
+        trust=trust,
+    )
+    _maybe_prompt_grant_required_permissions(
+        manifest=manifest,
+        entry=installed_entry,
         trust=trust,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
@@ -2314,7 +2330,7 @@ def _install_named_from_local_path(
         # Digest, plugin_home swap, lockfile commit — all wrapped.
         artifact_digest = canonical_tree_hash(candidate_root)
         with _atomic_install_with_rollback(candidate_root, plugin_home):
-            _install_one(
+            installed_entry = _install_one(
                 manifest=manifest,
                 plugin_home=plugin_home,
                 lock=lock,
@@ -2345,6 +2361,11 @@ def _install_named_from_local_path(
         new_source_type=manifest_source_type,
         new_source_identity=source_identity,
         new_artifact_digest=artifact_digest,
+        trust=trust,
+    )
+    _maybe_prompt_grant_required_permissions(
+        manifest=manifest,
+        entry=installed_entry,
         trust=trust,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
@@ -2422,7 +2443,7 @@ def _install_named_from_url(
         # Digest, plugin_home swap, lockfile commit — all wrapped.
         artifact_digest = canonical_tree_hash(source_dir)
         with _atomic_install_with_rollback(source_dir, plugin_home):
-            _install_one(
+            installed_entry = _install_one(
                 manifest=manifest,
                 plugin_home=plugin_home,
                 lock=lock,
@@ -2453,6 +2474,11 @@ def _install_named_from_url(
         new_source_type=manifest_source_type,
         new_source_identity=source_identity,
         new_artifact_digest=artifact_digest,
+        trust=trust,
+    )
+    _maybe_prompt_grant_required_permissions(
+        manifest=manifest,
+        entry=installed_entry,
         trust=trust,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
