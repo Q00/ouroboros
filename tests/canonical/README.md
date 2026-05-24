@@ -36,7 +36,7 @@ fixture files in the right shape. It does **not** invoke
 copyable status line per scenario, for example:
 
 ```text
-CANONICAL cli-todo: shape_valid domain=cli completion=product_complete probes=headless_run,stdout_golden budget=1800s live=opt_in
+CANONICAL cli-todo: shape_valid domain=cli completion=product_complete probes=headless_run,stdout_golden budget=1800s live=available_opt_in
 ```
 
 ### Full live run (manual, costs LLM tokens)
@@ -83,7 +83,7 @@ domain_class: cli                    # one of the L1 TaskClass values
 completion_mode: product_complete    # CODE_COMPLETE | PRODUCT_COMPLETE
 
 # optional
-runtime_probe_kinds:                 # placeholder until L3 lands
+runtime_probe_kinds:
   - headless_run
   - stdout_golden
 wall_clock_budget_seconds: 600       # default: 7200
@@ -98,8 +98,7 @@ auto-discovers.
 
 ## Live-run path
 
-The hermetic shape-check remains the default. The live-run path
-(`OUROBOROS_RUN_CANONICAL=1`) is wired for manual maintainer use and
-invokes `ouroboros_auto` from a per-scenario temporary workdir. Keep it
-out of scheduled CI unless a future issue explicitly accepts the LLM
-cost and operational risk.
+The hermetic shape-check is the default. The live-run path
+(`OUROBOROS_RUN_CANONICAL=1`) invokes `ouroboros_auto` against each
+scenario and treats MCP errors, failed terminals, and unverified
+PRODUCT_COMPLETE handoffs as test failures.

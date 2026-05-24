@@ -41,8 +41,8 @@ def test_scenario_domain_class_is_lowercase_snake(scenario: CanonicalScenario) -
     ``expected.yaml`` fails here rather than at runtime when the
     inference hook is wired.
 
-    Cross-validation against the actual L1 ``TaskClass`` enum lands in
-    a follow-up PR after #1173 merges to main.
+    Cross-validation against the actual L1 ``TaskClass`` enum is pinned
+    below.
     """
     value = scenario.domain_class
     assert value == value.lower(), f"{scenario.slug}: domain_class {value!r} must be lowercase"
@@ -66,9 +66,8 @@ def test_scenario_runtime_probe_kinds_are_strings(
     scenario: CanonicalScenario,
 ) -> None:
     """``runtime_probe_kinds`` is a tuple of plain strings. Cross-
-    validation against the L1 catalog's per-class probe whitelist
-    lands in a follow-up PR after #1173 merges; this test pins the
-    surface shape only."""
+    validation against the L1 catalog's per-class probe whitelist is
+    pinned below; this test pins the surface shape."""
     kinds = scenario.runtime_probe_kinds
     assert isinstance(kinds, tuple)
     for kind in kinds:
@@ -268,3 +267,50 @@ async def test_scenario_live_run_or_skip(
         f"CANONICAL {scenario.slug}: status={tool_result.meta['status']} "
         f"phase={tool_result.meta.get('phase')} completion_mode={scenario.completion_mode}"
     )
+
+
+@pytest.mark.asyncio
+async def test_live_run_opt_in_invokes_auto_handler(
+    scenario: CanonicalScenario,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hermetically pin that the opt-in path calls the live runner."""
+
+    calls: list[tuple[str, Path]] = []
+
+    class _Ok:
+        def is_ok(self) -> bool:
+            return True
+
+        def unwrap(self) -> object:
+            return _ToolResult()
+
+        def unwrap_err(self) -> str:
+            return "unexpected"
+
+    class _ToolResult:
+        is_error = False
+        content: list[object] = []
+        meta = {
+            "status": "complete",
+            "phase": "done",
+            "product_status": "verified_complete",
+        }
+
+    async def fake_invoke(selected: CanonicalScenario, workdir: Path) -> _Ok:
+        calls.append((selected.slug, workdir))
+        return _Ok()
+
+    monkeypatch.setattr(
+        "tests.canonical.test_canonical._invoke_ouroboros_auto",
+        fake_invoke,
+    )
+
+    await test_scenario_live_run_or_skip(
+        scenario=scenario,
+        live_run_enabled=True,
+        tmp_path=tmp_path,
+    )
+
+    assert calls == [(scenario.slug, tmp_path / scenario.slug)]

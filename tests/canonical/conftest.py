@@ -82,11 +82,8 @@ class CanonicalScenario:
 def format_canonical_summary_line(scenario: CanonicalScenario) -> str:
     """Return the copyable one-line status for a canonical scenario.
 
-    The default canonical run remains a hermetic shape/catalog check, so
-    the summary deliberately reports ``shape_valid`` instead of pretending
-    PRODUCT_COMPLETE was exercised. ``live=opt_in`` records that the live
-    ``ouroboros_auto`` path is wired but only runs when the maintainer sets
-    ``OUROBOROS_RUN_CANONICAL=1``.
+    The default run is still the no-cost shape check, but the live
+    ``ouroboros_auto`` path is available behind ``OUROBOROS_RUN_CANONICAL=1``.
     """
     probe_text = ",".join(scenario.runtime_probe_kinds) or "none"
     return (
@@ -95,7 +92,7 @@ def format_canonical_summary_line(scenario: CanonicalScenario) -> str:
         f"completion={scenario.completion_mode} "
         f"probes={probe_text} "
         f"budget={scenario.wall_clock_budget_seconds}s "
-        f"live=opt_in"
+        f"live=available_opt_in"
     )
 
 
