@@ -8,6 +8,7 @@ runtime dispatch, persistence, or projection records.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ouroboros.core.seed import Seed
@@ -21,6 +22,11 @@ from ouroboros.orchestrator.workflow_ir import (
     WorkflowSpec,
     validate_workflow,
 )
+from ouroboros.orchestrator.workflow_lifecycle import (
+    WorkflowLifecycleEvent,
+    WorkflowLifecycleEventType,
+)
+from ouroboros.plugin.firewall import InvocationResult
 from ouroboros.plugin.manifest import PluginDescriptor
 
 DEFAULT_SEED_AC_INPUT_SCHEMA_REF = "ouroboros://schemas/seed-acceptance-criterion-input/v1"
@@ -292,6 +298,76 @@ def workflow_spec_from_plugin_descriptor(
     return spec
 
 
+def workflow_lifecycle_from_plugin_invocation_result(
+    spec: WorkflowSpec,
+    *,
+    node_id: str,
+    result: InvocationResult,
+    timestamp: datetime | None = None,
+) -> tuple[WorkflowLifecycleEvent, ...]:
+    """Project a plugin firewall result into Workflow IR lifecycle events.
+
+    This is the production adapter boundary between ``plugin.firewall`` and
+    Workflow IR consumers. Only a successful firewall result may complete a
+    plugin-owned node. Blocked permission-gate outcomes become
+    ``NODE_FAILED``/``RUN_FAILED`` with ``reason_code='plugin_blocked'`` so a
+    permission denial cannot be replayed as a successful workflow completion.
+    """
+    nodes_by_id = {node.node_id: node for node in spec.nodes}
+    node = nodes_by_id.get(node_id)
+    if node is None:
+        msg = f"WorkflowSpec {spec.spec_id!r} has no node {node_id!r}"
+        raise ValueError(msg)
+    if node.owner is not NodeOwner.PLUGIN:
+        msg = f"Workflow node {node_id!r} is not plugin-owned"
+        raise ValueError(msg)
+
+    started_at = timestamp or datetime.now(tz=UTC)
+    if result.status == "success":
+        return (
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.RUN_CREATED,
+                workflow_id=spec.spec_id,
+                timestamp=started_at,
+            ),
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+                workflow_id=spec.spec_id,
+                node_id=node_id,
+                attempt=1,
+                timestamp=started_at + timedelta(seconds=1),
+            ),
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+                workflow_id=spec.spec_id,
+                timestamp=started_at + timedelta(seconds=2),
+            ),
+        )
+
+    reason_code = "plugin_blocked" if result.status == "blocked" else "plugin_failed"
+    return (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=started_at,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_FAILED,
+            workflow_id=spec.spec_id,
+            node_id=node_id,
+            attempt=1,
+            reason_code=reason_code,
+            timestamp=started_at + timedelta(seconds=1),
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_FAILED,
+            workflow_id=spec.spec_id,
+            reason_code=reason_code,
+            timestamp=started_at + timedelta(seconds=2),
+        ),
+    )
+
+
 def _validate_registered_plugin_action_contract(descriptor: PluginDescriptor) -> None:
     """Mirror the registry's registered-plugin action-shape invariants."""
     namespaces = {action.namespace for action in descriptor.actions}
@@ -345,5 +421,6 @@ __all__ = [
     "DEFAULT_SEED_AC_EVIDENCE_SCHEMA_REF",
     "DEFAULT_SEED_AC_INPUT_SCHEMA_REF",
     "workflow_spec_from_plugin_descriptor",
+    "workflow_lifecycle_from_plugin_invocation_result",
     "workflow_spec_from_seed",
 ]
