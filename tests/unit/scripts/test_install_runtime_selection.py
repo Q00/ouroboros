@@ -18,6 +18,7 @@ def _write_executable(path: Path, content: str) -> None:
 def _run_installer(
     tmp_path: Path,
     *,
+    local_repo: bool = True,
     env: dict[str, str] | None = None,
     fake_commands: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -47,6 +48,14 @@ exit 0
         for name, content in fake_commands.items():
             _write_executable(bin_dir / name, content)
 
+    install_sh = INSTALL_SH
+    cwd = REPO_ROOT
+    if not local_repo:
+        install_sh = tmp_path / "install.sh"
+        install_sh.write_text(INSTALL_SH.read_text(encoding="utf-8"), encoding="utf-8")
+        install_sh.chmod(0o755)
+        cwd = tmp_path
+
     run_env = os.environ.copy()
     run_env.update(
         {
@@ -58,8 +67,8 @@ exit 0
         run_env.update(env)
 
     return subprocess.run(
-        ["bash", str(INSTALL_SH)],
-        cwd=REPO_ROOT,
+        ["bash", str(install_sh)],
+        cwd=cwd,
         env=run_env,
         text=True,
         capture_output=True,
@@ -89,7 +98,7 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     assert "Runtime: opencode (preserved from" in result.stdout
     assert "Installing . ..." in result.stdout
     assert (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        "uv tool install --upgrade --python >=3.12 . --prerelease=allow",
+        "uv tool install --upgrade --python >=3.12 .",
         "ouroboros setup --runtime opencode --non-interactive",
     ]
 
@@ -105,10 +114,24 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --prerelease=allow --with mcp>=1.26.0,<2.0.0 --with claude-agent-sdk>=0.1.0,<1.0.0 --with anthropic>=0.52.0,<1.0.0"
+        "uv tool install --upgrade --python >=3.12 . --with mcp>=1.26.0,<2.0.0 --with claude-agent-sdk>=0.1.0,<1.0.0 --with anthropic>=0.52.0,<1.0.0"
         in calls
     )
     assert "ouroboros setup --runtime claude --non-interactive" in calls
+
+
+def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "codex"},
+        fake_commands={"curl": "#!/bin/sh\nexit 22\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "uv tool install --upgrade --python >=3.12 ouroboros-ai" in calls
+    assert "--prerelease=allow" not in calls
 
 
 # ---------------------------------------------------------------------------
