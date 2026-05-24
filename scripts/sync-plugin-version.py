@@ -35,7 +35,10 @@ def get_version() -> str:
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
 
-    # Fallback: parse git describe like hatch-vcs does
+    # Fallback: parse git describe like hatch-vcs does.
+    # dev-publish.yml intentionally runs this script before installing hatch,
+    # so this branch must preserve the same next-dev source version that the
+    # subsequent hatch-vcs package build will produce.
     try:
         result = subprocess.run(
             ["git", "describe", "--tags", "--match", "v*"],
@@ -44,19 +47,38 @@ def get_version() -> str:
             cwd=ROOT,
             check=True,
         )
-        desc = result.stdout.strip()  # e.g. v0.26.0b4-3-gabcdef
-        # Strip leading 'v'
-        desc = desc.lstrip("v")
-        # For exact tag match, return as-is
-        if "-" not in desc:
-            return desc
-        # For dev versions, extract base version
-        base = desc.split("-")[0]
-        return base
+        return version_from_git_describe(result.stdout.strip())
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
 
     sys.exit("Error: cannot determine version (no hatch, no git tags)")
+
+
+def version_from_git_describe(desc: str) -> str:
+    """Return a hatch-vcs compatible version from ``git describe`` output."""
+    normalized = desc.removeprefix("v")
+    match = re.fullmatch(r"(?P<base>.+)-(?P<distance>\d+)-g[0-9a-f]+(?:-dirty)?", normalized)
+    if match is None:
+        return normalized
+    next_version = _guess_next_dev_base(match.group("base"))
+    return f"{next_version}.dev{match.group('distance')}"
+
+
+def _guess_next_dev_base(version: str) -> str:
+    """Approximate hatch-vcs/setuptools-scm ``guess-next-dev`` for tags."""
+    match = re.fullmatch(r"(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)", version)
+    if match is not None:
+        patch = int(match.group("patch")) + 1
+        return f"{match.group('major')}.{match.group('minor')}.{patch}"
+
+    prerelease = re.fullmatch(
+        r"(?P<prefix>\d+\.\d+\.\d+(?P<label>a|alpha|b|beta|rc))(?P<num>\d+)",
+        version,
+    )
+    if prerelease is not None:
+        return f"{prerelease.group('prefix')}{int(prerelease.group('num')) + 1}"
+
+    return version
 
 
 def normalize_version(v: str) -> str:
