@@ -1166,20 +1166,40 @@ def test_command_claim_rejects_inner_command_after_safe_preamble_with_grep_filte
     assert not _runtime_messages_support_command_claim("pytest tests/test_foo.py", (message,))
 
 
-def test_test_invocation_supports_shell_preamble_with_output_plumbing() -> None:
-    """``tests_passed`` matching keeps shell-wrapper parity with commands_run."""
+def test_test_invocation_supports_shell_preamble_with_pipefail_output_plumbing() -> None:
+    """Test proof can strip pager plumbing only when pipefail preserves status."""
     message = AgentMessage(
         type="tool",
         content="Bash command started",
         tool_name="Bash",
         data={
             "tool_input": {
-                "command": "/bin/bash -lc 'cd /workspace && pytest tests/test_foo.py 2>&1 | tail -20'"
+                "command": (
+                    "/bin/bash -lc 'set -o pipefail && cd /workspace && "
+                    "pytest tests/test_foo.py 2>&1 | tail -20'"
+                )
             }
         },
     )
 
     assert _runtime_messages_support_command_claim("pytest tests/test_foo.py", (message,))
+
+
+def test_test_invocation_rejects_status_masking_output_pipe() -> None:
+    """A clean pytest claim is not proven by a pipeline whose final filter can mask failure."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "/bin/bash -lc 'cd /workspace && pytest tests/test_foo.py | cat'"
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_command_claim("pytest tests/test_foo.py", (message,))
 
 
 def test_command_claim_keeps_meaningful_pipeline_segments() -> None:
