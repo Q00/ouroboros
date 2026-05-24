@@ -714,6 +714,7 @@ class PMInterviewHandler:
         cwd: str,
         *,
         selected_repos: list[str] | None = None,
+        interview_id: str | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Start a new PM interview session.
 
@@ -761,6 +762,7 @@ class PMInterviewHandler:
 
         result = await engine.ask_opening_and_start(
             user_response=initial_context,
+            interview_id=interview_id,
             brownfield_repos=brownfield_repos,
         )
         if result.is_err:
@@ -1016,6 +1018,7 @@ class PMInterviewHandler:
             saved_context,
             cwd,
             selected_repos=selected_repos,
+            interview_id=session_id,
         )
 
     # ──────────────────────────────────────────────────────────────

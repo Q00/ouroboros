@@ -772,3 +772,40 @@ class TestDetectAction:
             }
         )
         assert result == "start"
+
+
+class TestSelectReposSessionContinuity:
+    """Regression coverage for the in-process 2-step PM start flow."""
+
+    async def test_select_repos_continues_existing_session_id(self, tmp_path: Path) -> None:
+        """Step 2 must start the interview under the session created in step 1."""
+        session_id = "interview_existing_session"
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd="/tmp/project",
+            data_dir=tmp_path,
+            extra={"initial_context": "Build a planning app"},
+        )
+
+        engine = _make_engine_stub()
+        engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(_make_state(session_id)))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("What should it do first?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(None))
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        result = await handler._handle_select_repos(
+            engine,
+            selected_repos=[],
+            session_id=session_id,
+            initial_context=None,
+            cwd="/tmp/project",
+        )
+
+        assert result.is_ok
+        engine.ask_opening_and_start.assert_awaited_once_with(
+            user_response="Build a planning app",
+            interview_id=session_id,
+            brownfield_repos=None,
+        )
+        assert result.value.meta["session_id"] == session_id
