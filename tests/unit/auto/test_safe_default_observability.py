@@ -168,6 +168,45 @@ async def test_safe_default_logs_closed_path(tmp_path) -> None:
     assert result.status == "seed_ready"
 
 
+@pytest.mark.asyncio
+async def test_safe_default_logs_synthesis_nonclosure(tmp_path) -> None:
+    """Backend response that accepts synthesis but keeps interviewing is structured-log visible."""
+    ledger = SeedDraftLedger.from_goal("Build a tiny local CLI")
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_nonclosure")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        if "[safe-default-synthesis]" in text:
+            return InterviewTurn("Still need more", session_id, seed_ready=False, completed=False)
+        return InterviewTurn("What else should we know?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    with capture_logs() as captured:
+        result = await driver.run(state, ledger)
+
+    events = [e["event"] for e in captured]
+    assert "auto.interview.safe_default_synthesis_nonclosure" in events
+    nonclosure = [
+        e for e in captured if e["event"] == "auto.interview.safe_default_synthesis_nonclosure"
+    ][0]
+    assert nonclosure["synthesis_pushed"] is True
+    assert nonclosure["backend_seed_ready"] is False
+    assert nonclosure["backend_completed"] is False
+    assert nonclosure["defaulted_sections"]
+    assert result.status == "blocked"
+    assert "did not close" in (result.blocker or "")
+
+
 # ---------------------------------------------------------------------------
 # Test 3: unsafe_context_match logs pattern_name and safe metrics
 # ---------------------------------------------------------------------------

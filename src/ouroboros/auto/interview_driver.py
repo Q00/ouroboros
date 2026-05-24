@@ -445,6 +445,15 @@ class AutoInterviewDriver:
                         "safe-default synthesis did not close the persisted interview: "
                         "backend_done=False, ledger defaults rolled back"
                     )
+                    log.warning(
+                        "auto.interview.safe_default_synthesis_nonclosure",
+                        auto_session_id=state.auto_session_id,
+                        interview_session_id=state.interview_session_id,
+                        defaulted_sections=finalization.defaulted_sections,
+                        backend_seed_ready=bool(synthesis_turn.seed_ready),
+                        backend_completed=bool(synthesis_turn.completed),
+                        synthesis_pushed=synthesis_pushed,
+                    )
                     state.ledger = ledger.to_dict()
                     state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
                     record_authoring_backend(state)
