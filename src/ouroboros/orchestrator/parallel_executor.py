@@ -922,7 +922,7 @@ def _test_command_invocation(command: str) -> str | None:
     direct_candidate = _strip_command_output_plumbing(normalized)
     if (
         _has_trailing_output_filter_pipeline(normalized)
-        and not _uses_pipefail(normalized)
+        and not _output_filter_pipeline_is_pipefail_protected(normalized)
         and _test_invocation_from_prefix(direct_candidate) is not None
     ):
         direct_candidate = normalized
@@ -958,11 +958,11 @@ def _shell_command_body(command: str) -> str | None:
 
 def _test_invocation_from_shell_body(body: str) -> str | None:
     """Return a test invocation after conservative shell setup preambles."""
-    for segment in _segments_after_safe_shell_preamble(body):
+    for segment, pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body):
         candidate = _strip_command_output_plumbing(segment)
         if (
             _has_trailing_output_filter_pipeline(segment)
-            and not _uses_pipefail(body)
+            and not pipefail_enabled
             and _test_invocation_from_prefix(candidate) is not None
         ):
             candidate = segment
@@ -991,7 +991,7 @@ def _single_command_after_safe_shell_preamble(command: str) -> str | None:
     stripped = _strip_command_output_plumbing(segment)
     if (
         _has_trailing_output_filter_pipeline(segment)
-        and not _uses_pipefail(body)
+        and not _output_filter_pipeline_is_pipefail_protected(body)
         and _looks_like_test_command(stripped)
     ):
         return None
@@ -1000,14 +1000,24 @@ def _single_command_after_safe_shell_preamble(command: str) -> str | None:
 
 def _segments_after_safe_shell_preamble(body: str) -> tuple[str, ...]:
     """Return non-preamble shell segments after setup-only commands."""
-    remaining: list[str] = []
+    return tuple(
+        segment for segment, _pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body)
+    )
+
+
+def _segments_after_safe_shell_preamble_with_pipefail(body: str) -> tuple[tuple[str, bool], ...]:
+    """Return non-preamble segments with pipefail state active before each one."""
+    remaining: list[tuple[str, bool]] = []
+    pipefail_enabled = False
     for segment in re.split(r"\s*&&\s*", body.strip()):
         normalized_segment = segment.strip()
         if not normalized_segment:
             continue
         if not remaining and _is_safe_test_command_preamble(normalized_segment):
+            if _is_pipefail_preamble(normalized_segment):
+                pipefail_enabled = True
             continue
-        remaining.append(normalized_segment)
+        remaining.append((normalized_segment, pipefail_enabled))
     return tuple(remaining)
 
 
@@ -1021,7 +1031,7 @@ def _is_safe_test_command_preamble(segment: str) -> bool:
         return True
     if parts[0] == "cd" and len(parts) == 2:
         return True
-    if parts == ["set", "-o", "pipefail"]:
+    if _is_pipefail_parts(parts):
         return True
     if parts[0] == "export" and len(parts) > 1:
         return all(_is_env_assignment(part) for part in parts[1:])
@@ -1169,6 +1179,21 @@ def _has_trailing_output_filter_pipeline(command: str) -> bool:
     return False
 
 
+def _output_filter_pipeline_is_pipefail_protected(command: str) -> bool:
+    """Return True when pipefail is enabled before the first stripped pipeline."""
+    pipefail_enabled = False
+    for segment in re.split(r"\s*(?:&&|;)\s*", command.strip()):
+        normalized_segment = segment.strip()
+        if not normalized_segment:
+            continue
+        if _is_pipefail_preamble(normalized_segment):
+            pipefail_enabled = True
+            continue
+        if _has_trailing_output_filter_pipeline(normalized_segment):
+            return pipefail_enabled
+    return False
+
+
 def _uses_pipefail(command: str) -> bool:
     """Return True when shell text explicitly preserves upstream pipe status."""
     for segment in re.split(r"\s*(?:&&|;)\s*", command.strip()):
@@ -1176,9 +1201,21 @@ def _uses_pipefail(command: str) -> bool:
             parts = shlex.split(segment)
         except ValueError:
             continue
-        if parts == ["set", "-o", "pipefail"]:
+        if _is_pipefail_parts(parts):
             return True
     return False
+
+
+def _is_pipefail_preamble(segment: str) -> bool:
+    try:
+        parts = shlex.split(segment)
+    except ValueError:
+        return False
+    return _is_pipefail_parts(parts)
+
+
+def _is_pipefail_parts(parts: list[str]) -> bool:
+    return parts == ["set", "-o", "pipefail"]
 
 
 def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
@@ -1211,7 +1248,7 @@ def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
             and stripped != base
             and _has_trailing_output_filter_pipeline(base)
             and _looks_like_test_command(stripped)
-            and not _uses_pipefail(base)
+            and not _output_filter_pipeline_is_pipefail_protected(base)
         ):
             continue
         if stripped and stripped not in aliases:

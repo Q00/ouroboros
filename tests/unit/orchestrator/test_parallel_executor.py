@@ -1222,6 +1222,26 @@ def test_test_invocation_rejects_pipefail_text_without_shell_option() -> None:
     assert not _runtime_messages_support_command_claim("pytest tests/test_pipefail.py", (message,))
 
 
+def test_test_invocation_rejects_pipefail_set_after_output_pipe() -> None:
+    """Pipefail must be enabled before the pipeline it is meant to protect."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    "/bin/bash -lc 'cd /workspace && "
+                    "pytest tests/test_foo.py 2>&1 | cat && set -o pipefail'"
+                )
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_command_claim("pytest tests/test_foo.py", (message,))
+
+
 def test_command_claim_keeps_meaningful_pipeline_segments() -> None:
     """Only output-filter pipes are stripped; real pipelines are not over-matched."""
     message = AgentMessage(
