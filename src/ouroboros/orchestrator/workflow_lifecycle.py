@@ -157,7 +157,12 @@ _NODE_STATE_BY_EVENT: Final[dict[WorkflowLifecycleEventType, WorkflowNodeLifecyc
 }
 
 _EVENT_SORT_ORDER: Final[dict[WorkflowLifecycleEventType, int]] = {
-    WorkflowLifecycleEventType.RUN_CREATED: 0,
+    # Terminal events sort before RUN_CREATED at the same timestamp so replay
+    # of "old run ended and new run began" converges on the fresh run.
+    WorkflowLifecycleEventType.RUN_COMPLETED: 0,
+    WorkflowLifecycleEventType.RUN_FAILED: 0,
+    WorkflowLifecycleEventType.RUN_CANCELLED: 0,
+    WorkflowLifecycleEventType.RUN_CREATED: 1,
     WorkflowLifecycleEventType.NODE_SCHEDULED: 10,
     WorkflowLifecycleEventType.NODE_STARTED: 20,
     WorkflowLifecycleEventType.NODE_FAILED: 30,
@@ -165,9 +170,6 @@ _EVENT_SORT_ORDER: Final[dict[WorkflowLifecycleEventType, int]] = {
     WorkflowLifecycleEventType.NODE_COMPLETED: 50,
     WorkflowLifecycleEventType.EDGE_TRAVERSED: 60,
     WorkflowLifecycleEventType.CHECKPOINT_SAVED: 70,
-    WorkflowLifecycleEventType.RUN_COMPLETED: 80,
-    WorkflowLifecycleEventType.RUN_FAILED: 80,
-    WorkflowLifecycleEventType.RUN_CANCELLED: 80,
 }
 
 
@@ -194,12 +196,12 @@ def _run_boundary_group_order(
     has_terminal_restart_tie: bool,
     prefer_restart_tie: bool,
 ) -> tuple[int, str]:
-    if not has_terminal_restart_tie or not prefer_restart_tie:
+    if not has_terminal_restart_tie:
         return (_EVENT_SORT_ORDER[event.event_type], event.event_type.value)
-    if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
-        return (100, event.event_type.value)
     if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
-        return (101, event.event_type.value)
+        return (101 if prefer_restart_tie else 0, event.event_type.value)
+    if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
+        return (100 if prefer_restart_tie else 1, event.event_type.value)
     return (_EVENT_SORT_ORDER[event.event_type], event.event_type.value)
 
 

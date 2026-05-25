@@ -151,6 +151,7 @@ def _materialize_events(fixture: dict[str, Any]) -> list[BaseEvent]:
                     "outcome": str(verdict.get("outcome", "pass")),
                     "rationale": verdict.get("rationale", ""),
                     "evidence_artifact_ids": list(verdict.get("evidence_artifact_ids", [])),
+                    "evidence_event_ids": list(verdict.get("evidence_event_ids", [])),
                 },
             )
         )
@@ -276,8 +277,7 @@ class TestMechanicalEvaluationFixture:
         assert verdict.scope == expected["scope"]
         assert verdict.outcome is VerdictOutcome(expected["outcome"])
         # Verdict must link source events and existing artifact IDs.
-        assert verdict.evidence_event_ids
-        assert all(isinstance(eid, str) and eid.strip() for eid in verdict.evidence_event_ids)
+        assert tuple(verdict.evidence_event_ids) == tuple(expected["evidence_event_ids"])
         if result.artifacts:
             artifact_ids = {artifact.artifact_id for artifact in result.artifacts}
             assert set(verdict.evidence_artifact_ids).issubset(artifact_ids)

@@ -52,6 +52,7 @@ from ouroboros.plugin.hooks import (
     HOOK_COMPLETED_EVENT,
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
+    TERMINAL_OBSERVABILITY_HOOK_KINDS,
     HookFailurePolicy,
     HookKind,
 )
@@ -571,17 +572,59 @@ def invoke_plugin(
         # stable workspace/output contract for runtime artifacts.
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         workdir = Path.cwd()
-        env.setdefault("OUROBOROS_PLUGIN_WORKDIR", str(workdir))
-        env.setdefault(
-            "OUROBOROS_PLUGIN_OUTPUT_DIR",
-            str(workdir / ".ouroboros" / "plugin-artifacts" / manifest.name),
+        env["OUROBOROS_PLUGIN_WORKDIR"] = str(workdir)
+        env["OUROBOROS_PLUGIN_OUTPUT_DIR"] = str(
+            workdir / ".ouroboros" / "plugin-artifacts" / manifest.name
         )
         if plugin_home is not None:
-            env.setdefault("OUROBOROS_PLUGIN_HOME", str(plugin_home))
+            env["OUROBOROS_PLUGIN_HOME"] = str(plugin_home)
         return env
 
     def _run_lifecycle_hooks(hook_kind: HookKind) -> tuple[bool, str]:
         for hook in _matching_hooks(manifest, hook_kind):
+            # Defense-in-depth: terminal observability hooks (``on_error`` /
+            # ``on_cancel``) MUST be fail-open at the contract level. The
+            # manifest JSON schema and loader already reject ``fail_closed``
+            # for these kinds, but a HookSpec constructed programmatically
+            # (bypassing the loader) could still smuggle ``fail_closed``
+            # into runtime. If we ever see that here, refuse to dispatch
+            # the subprocess, emit a bounded audit record, and continue —
+            # terminal observability stays fail-open at the contract level
+            # so the original ``plugin.failed`` cause reaches the caller
+            # unchanged.
+            if (
+                hook_kind in TERMINAL_OBSERVABILITY_HOOK_KINDS
+                and hook.failure_policy == HookFailurePolicy.FAIL_CLOSED.value
+            ):
+                _emit(
+                    _event_envelope(
+                        event_type=HOOK_BLOCKED_EVENT,
+                        manifest=manifest,
+                        namespace=namespace,
+                        command_name=command_name,
+                        argv=argv,
+                        trust_state=trust_state,
+                        permissions_used=hook.permissions,
+                        result={
+                            "status": "blocked",
+                            "message": (
+                                "terminal observability hook "
+                                f"{hook.name!r} declared fail_closed; "
+                                "terminal hooks must be fail_open."
+                            ),
+                        },
+                        provenance={
+                            "correlation_id": correlation_id,
+                            "hook_name": hook.name,
+                            "hook_kind": hook_kind.value,
+                            "failure_policy": hook.failure_policy,
+                            "reason": "terminal_observability_must_be_fail_open",
+                        },
+                        schema_version=HOOK_AUDIT_SCHEMA_VERSION,
+                    )
+                )
+                continue
+
             hook_provenance = {
                 "correlation_id": correlation_id,
                 "hook_name": hook.name,

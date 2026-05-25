@@ -11,11 +11,18 @@ DEFAULT_CODEX_CLI_NAME = "codex"
 DEFAULT_MAX_OUROBOROS_DEPTH = 5
 DEFAULT_CODEX_CHILD_ENV_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
 DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS = ("CODEX_THREAD_ID",)
-_WRAPPER_MAGIC_HEADERS = (
+_COMPILED_BINARY_MAGIC_HEADERS = (
     b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit
     b"\xce\xfa\xed\xfe",  # Mach-O 32-bit
     b"\x7fELF",  # ELF
 )
+_WRAPPER_SIGNATURES = (
+    b"zeude",
+    b"Zeude",
+    b"wrapper:codex",
+    b"codex-wrapper",
+)
+_WRAPPER_SIGNATURE_SCAN_BYTES = 128 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +45,8 @@ def resolve_codex_cli_path(
 ) -> CodexCliResolution:
     """Resolve the safest Codex CLI path for nested automation.
 
-    When the configured candidate is a compiled wrapper (for example a Zeude
-    shim), prefer the next real ``codex`` binary on ``PATH`` instead.
+    When the configured candidate is a known compiled wrapper (for example a
+    Zeude shim), prefer the next real ``codex`` binary on ``PATH`` instead.
     """
     if explicit_cli_path is not None:
         candidate = str(Path(explicit_cli_path).expanduser())
@@ -57,7 +64,7 @@ def resolve_codex_cli_path(
     logger.warning(
         f"{log_namespace}.cli_wrapper_detected",
         wrapper_path=resolved,
-        hint="Searching PATH for the real Node.js codex CLI.",
+        hint="Searching PATH for the real Codex CLI.",
     )
     fallback = find_real_cli(default_cli_name=default_cli_name, skip=resolved)
     if fallback is not None:
@@ -84,13 +91,23 @@ def resolve_codex_cli_path(
 
 
 def is_wrapper_binary(path: str) -> bool:
-    """Return True when *path* looks like a compiled wrapper."""
+    """Return True when *path* looks like a known compiled Codex wrapper.
+
+    Older Zeude-era shims were compiled binaries, but the official OpenAI
+    Codex CLI is now also shipped as a native Mach-O/ELF Rust binary. A binary
+    magic header alone is therefore not enough evidence that a candidate is a
+    wrapper. Require both a compiled-binary header and a wrapper-specific
+    marker string so official Rust binaries are treated as real CLI targets.
+    """
     try:
         with open(path, "rb") as fh:
-            magic = fh.read(4)
+            payload = fh.read(_WRAPPER_SIGNATURE_SCAN_BYTES)
     except OSError:
         return False
-    return magic in _WRAPPER_MAGIC_HEADERS
+
+    if len(payload) < 4 or payload[:4] not in _COMPILED_BINARY_MAGIC_HEADERS:
+        return False
+    return any(signature in payload for signature in _WRAPPER_SIGNATURES)
 
 
 def find_real_cli(*, default_cli_name: str = DEFAULT_CODEX_CLI_NAME, skip: str) -> str | None:

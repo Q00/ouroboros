@@ -176,3 +176,33 @@ async def test_blockers_without_canonical_code_leave_stop_reason_code_none(tmp_p
     assert result.stop_reason_code is None
     assert result.blocker is not None
     assert "pipeline budget exhausted" in result.blocker
+
+
+def test_recovery_transition_clears_stale_stop_reason_code(tmp_path) -> None:
+    """A recovered session must not keep reporting an old blocker code."""
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked(
+        "interview phase exceeded 600s timeout",
+        tool_name="interview.run",
+        error_code="interview_phase_deadline",
+    )
+
+    state.recover(AutoPhase.INTERVIEW, "retrying interview")
+
+    assert state.last_error is None
+    assert state.last_error_code is None
+
+
+def test_failed_transition_clears_stale_stop_reason_code(tmp_path) -> None:
+    """A later hard failure must not inherit an earlier blocker code."""
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.last_error_code = "interview_phase_deadline"
+
+    state.mark_failed("seed generation crashed", tool_name="seed_generator")
+
+    assert state.last_error == "seed generation crashed"
+    assert state.last_error_code is None

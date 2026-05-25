@@ -12,6 +12,7 @@ from rich.markup import escape as _rich_escape
 import typer
 
 from ouroboros.auto.adapters import (
+    EnvRuntimeProbeRunner,
     HandlerInterviewBackend,
     HandlerRalphPoller,
     HandlerRalphStarter,
@@ -527,6 +528,7 @@ async def _run_auto(
         complete_product=complete_product,
         progress_callback=progress_callback,
         watchdog=watchdog,
+        probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
     )
     try:
         result = await pipeline.run(state)
@@ -770,6 +772,10 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
                     f"confidence={record.confidence:.2f}; "
                     f"text={_rich_escape(record.text)}"
                 )
+        if result.defaulted_sections:
+            console.print("Defaulted sections:")
+            for item in result.defaulted_sections:
+                console.print(f"  - {_rich_escape(item)}")
         if result.non_goals:
             console.print("Non-goals:")
             for item in result.non_goals:

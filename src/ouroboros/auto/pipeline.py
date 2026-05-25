@@ -167,6 +167,16 @@ _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
 _RALPH_RESUME_PEEK_SECONDS = 1.0
 
 
+def _runtime_probe_evidence_from_state(
+    state: AutoPipelineState,
+) -> tuple[RuntimeEvidence, ...]:
+    """Return validated persisted runtime probe evidence."""
+    evidence: list[RuntimeEvidence] = []
+    for item in state.runtime_probe_evidence:
+        evidence.append(RuntimeEvidence.from_dict(item))
+    return tuple(evidence)
+
+
 @dataclass(frozen=True, slots=True)
 class AutoPipelineResult:
     """Structured AutoPipeline result for CLI/MCP surfaces."""
@@ -337,7 +347,7 @@ class AutoPipeline:
         # L3-2 / #1176: clear any cached probe evidence from a prior
         # run so a re-used ``AutoPipeline`` instance does not leak
         # the previous session's evidence onto a new ``_result()``.
-        self._last_probe_evidence = ()
+        self._last_probe_evidence = _runtime_probe_evidence_from_state(state)
         # Push the same progress callback down into the interview driver so
         # the longest-running phase (auto interview rounds) emits live
         # snapshots through the same observer contract instead of forcing
@@ -1567,6 +1577,8 @@ class AutoPipeline:
             self._save(state)
             return msg
         self._last_probe_evidence = tuple(evidence) if evidence else ()
+        state.runtime_probe_evidence = [item.to_dict() for item in self._last_probe_evidence]
+        self._save(state)
         failures = tuple(item for item in self._last_probe_evidence if not item.passed)
         if not failures:
             return None
@@ -2872,7 +2884,8 @@ class AutoPipeline:
             ledger_provenance=ledger_provenance,
             evidence_backed_sections=tuple(summary.get("evidence_backed_sections", ())),
             assumption_only_sections=tuple(summary.get("assumption_only_sections", ())),
-            runtime_probe_evidence=self._last_probe_evidence,
+            runtime_probe_evidence=self._last_probe_evidence
+            or _runtime_probe_evidence_from_state(state),
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:

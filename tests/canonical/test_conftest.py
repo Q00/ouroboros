@@ -89,7 +89,7 @@ def test_format_canonical_summary_line_is_copyable() -> None:
         "completion=product_complete "
         "probes=headless_run,stdout_golden "
         "budget=1800s "
-        "live=deferred_l0b"
+        "live=opt_in"
     )
 
 
@@ -124,6 +124,6 @@ def test_pytest_terminal_summary_emits_copyable_lines(
             "completion=product_complete "
             "probes=headless_run "
             "budget=42s "
-            "live=deferred_l0b",
+            "live=opt_in",
         ),
     ]

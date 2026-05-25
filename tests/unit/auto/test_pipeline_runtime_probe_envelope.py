@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.adapters import EvaluateResult
+from ouroboros.auto.adapters import EnvRuntimeProbeRunner, EvaluateResult
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
@@ -382,3 +382,87 @@ async def test_evaluate_complete_path_invokes_probe_runner(tmp_path) -> None:
     assert result.status == "complete"
     assert len(result.runtime_probe_evidence) == 1
     assert invocations == ["evaluate"]
+
+
+@pytest.mark.asyncio
+async def test_completed_resume_preserves_persisted_probe_evidence(tmp_path) -> None:
+    """A completed session replay keeps runtime_probe_evidence from state."""
+
+    async def probe_runner(state: AutoPipelineState) -> tuple[RuntimeEvidence, ...]:  # noqa: ARG001
+        return (
+            RuntimeEvidence(
+                probe_kind="headless_run",
+                passed=True,
+                summary="headless run exit_code=0 (duration 0.01s)",
+                payload={"exit_code": 0, "outcome": "completed"},
+            ),
+        )
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_pe6", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(_session_id: str) -> Seed:
+        return _seed()
+
+    store = AutoStore(tmp_path)
+    state = _state_at_clean_start(tmp_path)
+    pipeline = AutoPipeline(
+        AutoInterviewDriver(
+            FunctionInterviewBackend(start, answer),
+            store=store,
+            max_rounds=1,
+        ),
+        generate_seed,
+        reviewer=_PassReviewer(),
+        run_starter=_run_starter_ok,
+        ralph_starter=_ralph_starter_completed,
+        complete_product=True,
+        store=store,
+        probe_runner=probe_runner,
+    )
+
+    first = await pipeline.run(state)
+    persisted = store.load(first.auto_session_id)
+    assert persisted is not None
+
+    replay = AutoPipeline(
+        AutoInterviewDriver(
+            FunctionInterviewBackend(start, answer),
+            store=store,
+            max_rounds=1,
+        ),
+        generate_seed,
+        reviewer=_PassReviewer(),
+        run_starter=_run_starter_ok,
+        ralph_starter=_ralph_starter_completed,
+        complete_product=True,
+        store=store,
+    )
+
+    second = await replay.run(persisted)
+
+    assert second.status == "complete"
+    assert len(second.runtime_probe_evidence) == 1
+    assert second.runtime_probe_evidence[0].summary == "headless run exit_code=0 (duration 0.01s)"
+
+
+@pytest.mark.asyncio
+async def test_env_runtime_probe_runner_blocks_public_entrypoint_failures(tmp_path) -> None:
+    """Public composition runner executes configured command and returns failing evidence."""
+    runner = EnvRuntimeProbeRunner(
+        env={
+            "OUROBOROS_RUNTIME_PROBE_COMMAND": "python -c 'import sys; sys.exit(7)'",
+            "OUROBOROS_RUNTIME_PROBE_TIMEOUT_SECONDS": "5",
+        }
+    )
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+
+    evidence = await runner(state)
+
+    assert len(evidence) == 1
+    assert evidence[0].probe_kind == "headless_run"
+    assert evidence[0].passed is False
+    assert evidence[0].payload["exit_code"] == 7

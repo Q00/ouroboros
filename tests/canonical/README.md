@@ -36,7 +36,7 @@ fixture files in the right shape. It does **not** invoke
 copyable status line per scenario, for example:
 
 ```text
-CANONICAL cli-todo: shape_valid domain=cli completion=product_complete probes=headless_run,stdout_golden budget=1800s live=deferred_l0b
+CANONICAL cli-todo: shape_valid domain=cli completion=product_complete probes=headless_run,stdout_golden budget=1800s live=opt_in
 ```
 
 ### Full live run (manual, costs LLM tokens)
@@ -45,13 +45,12 @@ CANONICAL cli-todo: shape_valid domain=cli completion=product_complete probes=he
 OUROBOROS_RUN_CANONICAL=1 uv run pytest tests/canonical/ -v
 ```
 
-Once the live wiring lands in L0-b, this command will invoke the
-`ouroboros_auto` MCP tool against each scenario and assert the
-documented terminal state — **use sparingly**, each scenario will
-consume real LLM tokens (cli-todo ≈ \$1, kart-racer ≈ \$5 with
-Sonnet-class models). **At L0-a (this PR) the opt-in still
-`pytest.skip`s with a typed reason** so the harness contract is
-observable without burning tokens; the shape-check tests still run.
+This command invokes the `ouroboros_auto` MCP tool against each
+scenario and asserts the documented terminal state — **use sparingly**,
+each scenario will consume real LLM tokens (cli-todo ≈ \$1,
+kart-racer ≈ \$5 with Sonnet-class models). Without the environment
+variable, the live test skips and only the hermetic shape/catalog checks
+run.
 
 ### Run a single scenario
 
@@ -63,8 +62,8 @@ with `-k`:
 uv run pytest tests/canonical/ -v -k cli-todo
 ```
 
-Add `OUROBOROS_RUN_CANONICAL=1` once L0-b lands to opt into the live
-invocation for that scenario.
+Add `OUROBOROS_RUN_CANONICAL=1` to opt into the live invocation for
+that scenario.
 
 ## Scenario directory shape
 
@@ -97,10 +96,10 @@ canonicalizing, add a new `<slug>/` directory + populate
 `expected.yaml`. No infrastructure change required. The runner
 auto-discovers.
 
-## Adding the live-run path
+## Live-run path
 
-The hermetic shape-check is in place from L0-a. The live-run path
-(`OUROBOROS_RUN_CANONICAL=1`) is wired but the actual
-`ouroboros_auto` invocation lands in L0-b once the maintainer has
-confirmed they want it; until then the live-run path skips with a
-typed reason so the harness contract stays observable.
+The hermetic shape-check remains the default. The live-run path
+(`OUROBOROS_RUN_CANONICAL=1`) is wired for manual maintainer use and
+invokes `ouroboros_auto` from a per-scenario temporary workdir. Keep it
+out of scheduled CI unless a future issue explicitly accepts the LLM
+cost and operational risk.

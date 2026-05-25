@@ -11,12 +11,14 @@ import typer
 
 from ouroboros.cli.commands.run import (
     _load_skip_completed_markers,
+    _resolve_cli_project_dir,
     _resolve_fat_harness_mode,
     _resolve_max_decomposition_depth,
     _resolve_max_parallel_workers,
     _resolve_resume_fat_harness_mode,
     _run_orchestrator,
 )
+from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.evaluation.verification_artifacts import VerificationArtifacts
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -76,6 +78,142 @@ FAKE_VERIFICATION_ARTIFACTS = VerificationArtifacts(
     artifact_dir="/tmp/ouroboros-artifacts/exec-test",
     manifest_path="/tmp/ouroboros-artifacts/exec-test/manifest.json",
 )
+
+
+def test_resolve_cli_project_dir_prefers_explicit_project_dir(tmp_path: Path) -> None:
+    """--project-dir should be the highest-priority run boundary."""
+    seed_file = tmp_path / "seeds" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    explicit_project = tmp_path / "project"
+    explicit_project.mkdir()
+    seed = Seed.from_dict(VALID_SEED_DATA)
+
+    assert (
+        _resolve_cli_project_dir(
+            seed,
+            seed_file,
+            seed_data=VALID_SEED_DATA,
+            project_dir=explicit_project,
+        )
+        == explicit_project.resolve()
+    )
+
+
+def test_resolve_cli_project_dir_uses_brownfield_target_dir_when_present(
+    tmp_path: Path,
+) -> None:
+    """Seeds in a central library may target an external brownfield repo."""
+    seed_file = tmp_path / "seed-library" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    target_dir = tmp_path / "work" / "myproject"
+    target_dir.mkdir(parents=True)
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "target_dir": str(target_dir),
+            "context_references": [
+                {"path": "main.py", "role": "primary", "summary": "target file"},
+            ],
+        },
+    }
+    (target_dir / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    seed = Seed.from_dict(seed_data)
+
+    assert _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data) == target_dir.resolve()
+
+
+def test_resolve_cli_project_dir_falls_back_to_seed_parent_without_project_hints(
+    tmp_path: Path,
+) -> None:
+    """Back-compat path remains the seed file directory."""
+    seed_file = tmp_path / "seeds" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    seed = Seed.from_dict(VALID_SEED_DATA)
+
+    assert (
+        _resolve_cli_project_dir(seed, seed_file, seed_data=VALID_SEED_DATA)
+        == seed_file.parent.resolve()
+    )
+
+
+def test_resolve_cli_project_dir_keeps_seed_relative_metadata_project_dir(
+    tmp_path: Path,
+) -> None:
+    """metadata.project_dir keeps working with the existing seed-relative behavior."""
+    seed_file = tmp_path / "seeds" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    seed_data = {
+        **VALID_SEED_DATA,
+        "metadata": {**VALID_SEED_DATA["metadata"], "project_dir": "repo-root"},
+    }
+    seed = Seed.from_dict(seed_data)
+
+    assert (
+        _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+        == (seed_file.parent / "repo-root").resolve()
+    )
+
+
+@pytest.mark.parametrize("metadata_field", ["project_dir", "working_directory"])
+def test_resolve_cli_project_dir_rejects_raw_metadata_project_escape(
+    tmp_path: Path, metadata_field: str
+) -> None:
+    """Raw metadata project fields must not silently fall back after rejection."""
+    seed_file = tmp_path / "seeds" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    outside_project = tmp_path / "outside-project"
+    seed_data = {
+        **VALID_SEED_DATA,
+        "metadata": {
+            **VALID_SEED_DATA["metadata"],
+            metadata_field: str(outside_project),
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    with patch("ouroboros.cli.commands.run.print_error") as mock_print:
+        with pytest.raises(typer.Exit) as exc_info:
+            _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+
+    assert exc_info.value.exit_code == 1
+    assert mock_print.call_count == 1
+    assert "escapes" in mock_print.call_args[0][0]
+
+
+def test_resolve_cli_project_dir_uses_parent_when_context_reference_is_file(
+    tmp_path: Path,
+) -> None:
+    """A primary file reference should not become the runtime cwd itself."""
+    seed_file = tmp_path / "seed-library" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    target_dir = tmp_path / "work" / "myproject"
+    target_dir.mkdir(parents=True)
+    source_file = target_dir / "src" / "main.py"
+    source_file.parent.mkdir()
+    source_file.write_text("print('hi')\n", encoding="utf-8")
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "target_dir": str(target_dir),
+            "context_references": [
+                {"path": "src/main.py", "role": "primary", "summary": "target file"},
+            ],
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    assert (
+        _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+        == source_file.parent.resolve()
+    )
 
 
 def test_resolve_fat_harness_mode_defaults_to_enabled() -> None:

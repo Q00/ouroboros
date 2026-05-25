@@ -176,7 +176,7 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
             "http server",
         ),
     )
-    return api_signal and not _matches_webhook(ledger)
+    return api_signal
 
 
 def _matches_data_pipeline(ledger: SeedDraftLedger) -> bool:

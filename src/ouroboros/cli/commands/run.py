@@ -23,7 +23,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.config.loader import get_max_parallel_workers
 from ouroboros.core.errors import ConfigError
-from ouroboros.core.project_paths import resolve_seed_project_path
+from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.worktree import (
     TaskWorkspace,
@@ -113,18 +113,83 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
         raise typer.Exit(1) from e
 
 
-def _resolve_cli_project_dir(seed: "Seed", seed_file: Path) -> Path:
+def _resolve_raw_metadata_project_dir(
+    seed_data: dict[str, Any],
+    *,
+    stable_base: Path,
+) -> Path | None:
+    """Resolve legacy raw metadata project_dir/working_directory fields."""
+    metadata = seed_data.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+
+    raw_project_dir = metadata.get("project_dir") or metadata.get("working_directory")
+    if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
+        return None
+
+    resolved = resolve_path_against_base(
+        raw_project_dir,
+        stable_base=stable_base,
+        enforce_containment=True,
+    )
+    if resolved is None:
+        print_error(
+            "Seed metadata encodes a project_dir/working_directory path that escapes "
+            f"the seed stable project directory ({stable_base}). Refusing to fall back "
+            "silently — edit the seed metadata to use a path inside the seed directory "
+            "or rerun with --project-dir pointing at the target project."
+        )
+        raise typer.Exit(1)
+    return resolved
+
+
+def _resolve_brownfield_target_dir(seed_data: dict[str, Any]) -> Path | None:
+    """Return an existing brownfield target_dir from raw seed data, if present."""
+    brownfield_context = seed_data.get("brownfield_context")
+    if not isinstance(brownfield_context, dict):
+        return None
+
+    raw_target_dir = brownfield_context.get("target_dir")
+    if not isinstance(raw_target_dir, str) or not raw_target_dir.strip():
+        return None
+
+    target_dir = Path(raw_target_dir).expanduser().resolve()
+    return target_dir if target_dir.is_dir() else None
+
+
+def _directory_for_runtime(path: Path) -> Path:
+    """Normalize a resolved project candidate into a runtime cwd."""
+    return path.parent if path.is_file() else path
+
+
+def _resolve_cli_project_dir(
+    seed: "Seed",
+    seed_file: Path,
+    *,
+    seed_data: dict[str, Any] | None = None,
+    project_dir: Path | None = None,
+) -> Path:
     """Resolve the project directory for CLI execution and verification."""
-    stable_base = seed_file.parent.resolve()
+    if project_dir is not None:
+        return project_dir.expanduser().resolve()
+
+    seed_data = seed_data or {}
+    seed_base = seed_file.parent.resolve()
+    metadata_project_dir = _resolve_raw_metadata_project_dir(seed_data, stable_base=seed_base)
+    if metadata_project_dir is not None:
+        return _directory_for_runtime(metadata_project_dir)
+
+    target_dir = _resolve_brownfield_target_dir(seed_data)
+    stable_base = target_dir or seed_base
     resolution = resolve_seed_project_path(seed, stable_base=stable_base)
     if resolution.path is not None:
-        return resolution.path
+        return _directory_for_runtime(resolution.path)
     if resolution.rejected:
         print_error(
             "Seed encodes a project_dir/brownfield path that escapes the seed "
-            f"file's directory ({stable_base}). Refusing to fall back silently — "
-            "edit the seed to use a path inside the seed directory or rerun "
-            "with the seed copied next to the target project."
+            f"stable project directory ({stable_base}). Refusing to fall back silently — "
+            "edit the seed to use a path inside the project directory or rerun "
+            "with --project-dir pointing at the target project."
         )
         raise typer.Exit(1)
     return stable_base
@@ -380,6 +445,7 @@ async def _run_orchestrator(
     runtime_backend: str | None = None,
     max_decomposition_depth: int | None = None,
     skip_completed: str | None = None,
+    project_dir: Path | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -394,6 +460,7 @@ async def _run_orchestrator(
         runtime_backend: Optional orchestrator runtime backend override.
         max_decomposition_depth: Optional recursive decomposition depth cap override.
         skip_completed: Optional path to a marker file for already-satisfied ACs.
+        project_dir: Optional explicit project directory for seed path resolution.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
@@ -448,7 +515,12 @@ async def _run_orchestrator(
     event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
     await event_store.initialize()
 
-    project_dir = _resolve_cli_project_dir(seed, seed_file)
+    project_dir = _resolve_cli_project_dir(
+        seed,
+        seed_file,
+        seed_data=seed_data,
+        project_dir=project_dir,
+    )
     session_repo = SessionRepository(event_store)
     workspace: TaskWorkspace | None = None
     execution_id: str | None = None
@@ -630,6 +702,16 @@ def workflow(
             help="Prefix to add to all MCP tool names (e.g., 'mcp_').",
         ),
     ] = "",
+    project_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-dir",
+            help="Explicit project directory for resolving seed-relative paths.",
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", "-n", help="Validate seed without executing."),
@@ -752,6 +834,7 @@ def workflow(
                     runtime_backend=runtime.value if runtime else None,
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
+                    project_dir=project_dir,
                 )
             )
         except (ValueError, NotImplementedError) as e:

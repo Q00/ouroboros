@@ -213,8 +213,15 @@ class PluginActionDescriptor:
     requires_confirmation: bool
     arguments: tuple[CommandArgument, ...]
     entrypoint: Entrypoint
+    permissions: tuple[str, ...]
     required_permissions: tuple[str, ...]
     optional_permissions: tuple[str, ...]
+    upstream: dict[str, Any] | None = None
+    artifacts: dict[str, Any] | None = None
+    handoff: dict[str, Any] | None = None
+    timeout_seconds: int | None = None
+    result_states: tuple[str, ...] = ()
+    redaction: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -280,8 +287,9 @@ def plugin_descriptor_from_manifest(manifest: PluginManifest) -> PluginDescripto
     commands.
     """
 
-    required_permissions = tuple(p.scope for p in manifest.permissions if p.required)
-    optional_permissions = tuple(p.scope for p in manifest.permissions if not p.required)
+    permission_by_scope = {p.scope: p for p in manifest.permissions}
+    manifest_required_permissions = tuple(p.scope for p in manifest.permissions if p.required)
+    manifest_optional_permissions = tuple(p.scope for p in manifest.permissions if not p.required)
     actions = tuple(
         PluginActionDescriptor(
             action_id=f"{manifest.name}:{command.namespace}:{command.name}",
@@ -293,8 +301,33 @@ def plugin_descriptor_from_manifest(manifest: PluginManifest) -> PluginDescripto
             requires_confirmation=command.requires_confirmation,
             arguments=command.arguments,
             entrypoint=manifest.entrypoint,
-            required_permissions=required_permissions,
-            optional_permissions=optional_permissions,
+            permissions=command.permissions,
+            required_permissions=(
+                tuple(
+                    scope
+                    for scope in command.permissions
+                    if permission_by_scope.get(scope) is not None
+                    and permission_by_scope[scope].required
+                )
+                if command.permissions
+                else manifest_required_permissions
+            ),
+            optional_permissions=(
+                tuple(
+                    scope
+                    for scope in command.permissions
+                    if permission_by_scope.get(scope) is not None
+                    and not permission_by_scope[scope].required
+                )
+                if command.permissions
+                else manifest_optional_permissions
+            ),
+            upstream=command.upstream,
+            artifacts=command.artifacts,
+            handoff=command.handoff,
+            timeout_seconds=command.timeout_seconds,
+            result_states=command.result_states,
+            redaction=command.redaction,
         )
         for command in manifest.commands
     )

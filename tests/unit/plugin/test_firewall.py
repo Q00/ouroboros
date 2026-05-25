@@ -845,6 +845,52 @@ def test_plugin_subprocess_receives_immutable_home_runtime_environment(
     )
 
 
+def test_plugin_runtime_environment_overrides_inherited_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller env cannot redirect plugin runtime artifacts into trusted homes."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    plugin_home = tmp_path / "installed-plugin"
+    plugin_home.mkdir()
+    user_cwd = tmp_path / "workspace"
+    user_cwd.mkdir()
+    monkeypatch.chdir(user_cwd)
+    monkeypatch.setenv("OUROBOROS_PLUGIN_HOME", str(tmp_path / "stale-home"))
+    monkeypatch.setenv("OUROBOROS_PLUGIN_WORKDIR", str(tmp_path / "stale-workdir"))
+    monkeypatch.setenv("OUROBOROS_PLUGIN_OUTPUT_DIR", str(plugin_home / "artifacts"))
+    captured: dict = {}
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="{}", stderr="")
+
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=lambda _event: None,
+        correlation_id="corr-runtime-env-overrides",
+        subprocess_runner=runner,
+        plugin_home=plugin_home,
+    )
+
+    assert result.status == "success"
+    env = captured["env"]
+    assert env["OUROBOROS_PLUGIN_HOME"] == str(plugin_home)
+    assert env["OUROBOROS_PLUGIN_WORKDIR"] == str(user_cwd)
+    assert env["OUROBOROS_PLUGIN_OUTPUT_DIR"] == str(
+        user_cwd / ".ouroboros" / "plugin-artifacts" / "github-pr-ops"
+    )
+
+
 def test_trust_violation_only_emits_failed_no_invoked(tmp_path: Path) -> None:
     """Test 2: missing required scope → ONLY plugin.failed (status=blocked).
 

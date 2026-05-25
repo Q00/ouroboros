@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -97,6 +98,56 @@ class RuntimeEvidence:
         if not self.probe_kind:
             msg = "probe_kind must be a non-empty string"
             raise ValueError(msg)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-safe persistence payload."""
+        return {
+            "probe_kind": self.probe_kind,
+            "passed": self.passed,
+            "summary": self.summary,
+            "duration_seconds": self.duration_seconds,
+            "payload": _json_safe_payload(self.payload),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> RuntimeEvidence:
+        """Rehydrate persisted runtime evidence."""
+        payload = data.get("payload", {})
+        if not isinstance(payload, Mapping):
+            msg = "RuntimeEvidence.payload must be an object"
+            raise ValueError(msg)
+        probe_kind = data.get("probe_kind")
+        passed = data.get("passed")
+        summary = data.get("summary")
+        duration_seconds = data.get("duration_seconds", 0.0)
+        if not isinstance(probe_kind, str):
+            msg = "RuntimeEvidence.probe_kind must be a string"
+            raise ValueError(msg)
+        if type(passed) is not bool:
+            msg = "RuntimeEvidence.passed must be a boolean"
+            raise ValueError(msg)
+        if not isinstance(summary, str):
+            msg = "RuntimeEvidence.summary must be a string"
+            raise ValueError(msg)
+        if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, int | float):
+            msg = "RuntimeEvidence.duration_seconds must be numeric"
+            raise ValueError(msg)
+        return cls(
+            probe_kind=probe_kind,
+            passed=passed,
+            summary=summary,
+            duration_seconds=float(duration_seconds),
+            payload=dict(payload),
+        )
+
+
+def _json_safe_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Coerce probe payloads into JSON-compatible values."""
+    try:
+        json.dumps(payload)
+        return dict(payload)
+    except TypeError:
+        return json.loads(json.dumps(payload, default=str))
 
 
 class RuntimeProbe(Protocol):
@@ -180,6 +231,16 @@ class HeadlessRunProbe:
             )
         except subprocess.TimeoutExpired as exc:
             duration = time.monotonic() - start
+            stdout = (
+                exc.stdout.decode("utf-8", errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout or "")
+            )
+            stderr = (
+                exc.stderr.decode("utf-8", errors="replace")
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr or "")
+            )
             return RuntimeEvidence(
                 probe_kind=self.kind,
                 passed=False,
@@ -190,8 +251,8 @@ class HeadlessRunProbe:
                 payload={
                     "argv": argv,
                     "timeout_seconds": timeout_seconds,
-                    "stdout_preview": _truncate(exc.stdout or ""),
-                    "stderr_preview": _truncate(exc.stderr or ""),
+                    "stdout_preview": _truncate(stdout),
+                    "stderr_preview": _truncate(stderr),
                     "outcome": "timeout",
                 },
             )

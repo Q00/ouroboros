@@ -174,7 +174,7 @@ class TestCodexCliRuntime:
 
     @staticmethod
     def _write_wrapper(path: Path) -> Path:
-        path.write_bytes(b"\xcf\xfa\xed\xfe")
+        path.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 32 + b"zeude codex-wrapper")
         path.chmod(0o755)
         return path
 
@@ -539,7 +539,7 @@ class TestCodexCliRuntime:
         mock_warning.assert_called_once_with(
             "codex_cli_runtime.cli_wrapper_detected",
             wrapper_path=str(wrapper),
-            hint="Searching PATH for the real Node.js codex CLI.",
+            hint="Searching PATH for the real Codex CLI.",
         )
         mock_info.assert_any_call(
             "codex_cli_runtime.cli_resolved_via_fallback",

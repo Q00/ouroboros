@@ -5967,16 +5967,30 @@ class TestParallelACExecutor:
             atomic_verifier=_rejecting_verifier,
         )
 
-        result = await executor._execute_atomic_ac(
+        with patch("ouroboros.orchestrator.parallel_executor.log") as log_mock:
+            result = await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Implement AC 1",
+                session_id="orch_123",
+                tools=["Read"],
+                tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+                system_prompt="system",
+                seed_goal="Ship the feature",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        log_mock.warning.assert_any_call(
+            "parallel_executor.ac.verifier_rejected",
             ac_index=0,
-            ac_content="Implement AC 1",
-            session_id="orch_123",
-            tools=["Read"],
-            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
-            system_prompt="system",
-            seed_goal="Ship the feature",
             depth=0,
-            start_time=datetime.now(UTC),
+            reason="Fat-harness verifier failed (claimed test command did not support the AC).",
+            typed_evidence_present=True,
+            typed_evidence_valid=True,
+            verifier_ran=True,
+            verifier_passed=False,
+            verifier_reasons=["claimed test command did not support the AC"],
+            verifier_failure_class="FABRICATION_SUSPECTED",
         )
 
         assert result.success is False
@@ -6766,6 +6780,48 @@ class TestParallelACExecutor:
         assert "Implemented manually" in result.results[0].final_message
         assert "abc1234" in result.results[0].final_message
         executor._execute_ac_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_parallel_logs_dependency_edges(self) -> None:
+        """The inferred dependency graph should be visible before cascaded skips."""
+        seed = _make_seed("AC 0 foundation", "AC 1 dependent flow")
+        dependency_graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=(0,)),
+            ),
+            execution_levels=((0,), (1,)),
+        )
+        executor = _make_executor()
+        executor._execute_ac_batch = AsyncMock(
+            return_value=[
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=False,
+                    error="Foundation failed",
+                    outcome=ACExecutionOutcome.FAILED,
+                )
+            ]
+        )
+
+        with patch("ouroboros.orchestrator.parallel_executor.log") as log_mock:
+            await executor.execute_parallel(
+                seed=seed,
+                execution_plan=dependency_graph.to_execution_plan(),
+                session_id="orch_dependency_log",
+                execution_id="exec_dependency_log",
+                tools=["Read"],
+                tool_catalog=None,
+                system_prompt="system",
+            )
+
+        log_mock.info.assert_any_call(
+            "parallel_executor.dependency_graph",
+            session_id="orch_dependency_log",
+            total_acs=2,
+            dependency_edges=[{"ac_index": 1, "depends_on": (0,)}],
+        )
 
     @pytest.mark.asyncio
     async def test_externally_satisfied_ac_blocked_when_dependency_failed(self) -> None:
