@@ -20,11 +20,13 @@ from ouroboros.mcp.tools.auto_handler import (
     _authoring_interview_handler,
     _authoring_seed_handler,
     _execution_start_handler,
+    _result_meta,
     _resolve_cwd,
     _safe_default_cwd,
 )
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 
 
 def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
@@ -492,6 +494,37 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "assumption_sources": [],
         "runtime_probe_evidence": [],
     }
+
+
+def test_result_meta_serializes_runtime_probe_evidence_shape() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+
+    meta = _result_meta(
+        AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_probe",
+            phase="complete",
+            runtime_probe_evidence=(
+                RuntimeEvidence(
+                    probe_kind="headless_run",
+                    passed=True,
+                    summary="headless run exit_code=0 (duration 0.01s)",
+                    duration_seconds=0.01,
+                    payload={"exit_code": 0, "stdout_preview": "ok"},
+                ),
+            ),
+        )
+    )
+
+    assert meta["runtime_probe_evidence"] == [
+        {
+            "probe_kind": "headless_run",
+            "passed": True,
+            "summary": "headless run exit_code=0 (duration 0.01s)",
+            "duration_seconds": 0.01,
+            "payload": {"exit_code": 0, "stdout_preview": "ok"},
+        }
+    ]
 
 
 @pytest.mark.asyncio
