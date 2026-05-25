@@ -194,10 +194,10 @@ def build_subagent_result(
 ) -> Result:
     """Wrap a SubagentPayload into an MCPToolResult for MCP transport.
 
-    The payload is serialized as JSON text in the content field because the
-    FastMCP adapter only passes ``text_content`` through to the wire — the
-    ``meta`` dict is lost. The bridge plugin parses JSON from the text to
-    detect the ``_subagent`` key.
+    The payload is serialized as JSON text in the content field so bridge
+    clients can parse the ``_subagent`` key directly. ``meta`` is preserved
+    by the FastMCP adapter for structured clients, but content JSON remains
+    the compatibility surface for plugin bridge dispatch.
 
     Public-contract preservation (#442): when ``response_shape`` is provided,
     the natural tool response fields (e.g. ``session_id``, ``job_id``,

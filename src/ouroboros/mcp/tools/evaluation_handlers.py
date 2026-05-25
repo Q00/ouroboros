@@ -1466,10 +1466,9 @@ class LateralThinkHandler(BridgeAwareMixin):
             # too, so non-plugin runtimes (Claude Code, Codex CLI, OpenCode
             # subprocess) can drive their own sub-agent fan-out from the
             # same structured prompts that plugin mode dispatches via
-            # `_subagents`. The FastMCP adapter only forwards `text_content`
-            # to the wire (`adapter.py:923`); `meta` is dropped. So the
-            # dispatch payload has to ride inside `content` to survive
-            # transport.
+            # `_subagents`. The FastMCP adapter now preserves `meta`, but
+            # older bridge consumers still read only `text_content`, so the
+            # dispatch payload continues to ride inside `content`.
             #
             # Format: a hidden HTML-comment block with a versioned sentinel,
             # carrying the dispatch JSON base64-encoded inside the comment.
