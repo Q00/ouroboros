@@ -185,37 +185,23 @@ class Watchdog:
         ``runtime.watchdog.cancel`` event is appended to the
         configured event appender.
         """
-        if not self._controls.watchdog_enabled:
-            return None
         if session_id in self._fired_sessions:
             return None
         now = self._now()
         elapsed_seconds = int((now - session_started_at).total_seconds())
         budget = self._controls.session_wall_clock_seconds
+        replayed = await self._replay_existing_decision(
+            session_id=session_id,
+            fired_at_default=now,
+            elapsed_seconds_default=elapsed_seconds,
+            budget_default=budget,
+        )
+        if replayed is not None:
+            return replayed
+        if not self._controls.watchdog_enabled:
+            return None
         if elapsed_seconds <= budget:
             return None
-        if isinstance(self._appender, _WatchdogEventReader):
-            existing = await self._appender.query_events(
-                aggregate_id=session_id,
-                event_type=WATCHDOG_CANCEL_EVENT_TYPE,
-                limit=1,
-            )
-            if existing:
-                self._fired_sessions.add(session_id)
-                event = existing[0]
-                fired_at = _coerce_datetime(event.data.get("fired_at")) or now
-                return WatchdogDecision(
-                    session_id=session_id,
-                    fired_at=fired_at,
-                    elapsed_seconds=_coerce_int(
-                        event.data.get("elapsed_seconds"),
-                        default=elapsed_seconds,
-                    ),
-                    configured_budget_seconds=_coerce_int(
-                        event.data.get("configured_budget_seconds"),
-                        default=budget,
-                    ),
-                )
         decision = WatchdogDecision(
             session_id=session_id,
             fired_at=now,
@@ -237,6 +223,39 @@ class Watchdog:
         await self._appender.append(event)
         self._fired_sessions.add(session_id)
         return decision
+
+    async def _replay_existing_decision(
+        self,
+        *,
+        session_id: str,
+        fired_at_default: datetime,
+        elapsed_seconds_default: int,
+        budget_default: int,
+    ) -> WatchdogDecision | None:
+        """Replay a persisted cancel event before evaluating current controls."""
+        if isinstance(self._appender, _WatchdogEventReader):
+            existing = await self._appender.query_events(
+                aggregate_id=session_id,
+                event_type=WATCHDOG_CANCEL_EVENT_TYPE,
+                limit=1,
+            )
+            if existing:
+                self._fired_sessions.add(session_id)
+                event = existing[0]
+                fired_at = _coerce_datetime(event.data.get("fired_at")) or fired_at_default
+                return WatchdogDecision(
+                    session_id=session_id,
+                    fired_at=fired_at,
+                    elapsed_seconds=_coerce_int(
+                        event.data.get("elapsed_seconds"),
+                        default=elapsed_seconds_default,
+                    ),
+                    configured_budget_seconds=_coerce_int(
+                        event.data.get("configured_budget_seconds"),
+                        default=budget_default,
+                    ),
+                )
+        return None
 
     def has_fired_for(self, session_id: str) -> bool:
         """Test/inspection helper — True iff this instance has already

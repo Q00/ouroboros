@@ -266,7 +266,11 @@ async def test_pipeline_with_watchdog_over_budget_blocks(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_blocks_when_prior_watchdog_cancel_event_exists(tmp_path) -> None:
+@pytest.mark.parametrize("resumed_budget", [0, 10_000])
+async def test_pipeline_blocks_when_prior_watchdog_cancel_event_exists(
+    tmp_path,
+    resumed_budget: int,
+) -> None:
     """Replay must preserve a watchdog cancellation even if state was not saved."""
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -298,7 +302,7 @@ async def test_pipeline_blocks_when_prior_watchdog_cancel_event_exists(tmp_path)
         )
     )
     watchdog = Watchdog(
-        controls=RuntimeControls(session_wall_clock_seconds=60),
+        controls=RuntimeControls(session_wall_clock_seconds=resumed_budget),
         event_appender=appender,
         now=lambda: started + timedelta(seconds=180),
     )
