@@ -28,10 +28,8 @@ Refs #1131, #956, #939 (read-only boundary).
 
 from __future__ import annotations
 
-from datetime import timedelta
 import json
 from pathlib import Path
-from typing import Protocol
 
 import pytest
 
@@ -43,8 +41,10 @@ from ouroboros.orchestrator.workflow_ir import (
     WorkflowSpec,
     validate_workflow,
 )
+from ouroboros.orchestrator.workflow_ir_adapter import (
+    workflow_lifecycle_from_plugin_invocation_result,
+)
 from ouroboros.orchestrator.workflow_lifecycle import (
-    WorkflowLifecycleEvent,
     WorkflowLifecycleEventType,
     validate_workflow_lifecycle_conformance,
 )
@@ -90,10 +90,6 @@ _BLOCKED_PLUGIN_MANIFEST: dict = {
         "command": "python -m conformance_blocked_plugin",
     },
 }
-
-
-class _PluginInvocationResult(Protocol):
-    status: str
 
 
 @pytest.fixture()
@@ -161,66 +157,6 @@ def test_blocked_invocation_emits_only_plugin_failed(blocked_plugin_program) -> 
     assert "plugin.completed" not in event_types
 
 
-def _workflow_history_from_plugin_result(
-    *,
-    spec: WorkflowSpec,
-    node_id: str,
-    result: _PluginInvocationResult,
-) -> tuple[WorkflowLifecycleEvent, ...]:
-    """Project a plugin firewall result into the harness lifecycle contract.
-
-    This helper is intentionally local to the conformance fixture: v1 does
-    not add live plugin dispatch or production projection behavior. It pins
-    the rule a future harness adapter must preserve — only an explicit
-    ``status='success'`` may become ``NODE_COMPLETED``. Permission-denied
-    blocked results stay on the failure path and carry a discriminating
-    ``plugin_blocked`` reason code.
-    """
-    status = result.status
-    if status == "success":
-        return (
-            WorkflowLifecycleEvent(
-                event_type=WorkflowLifecycleEventType.RUN_CREATED,
-                workflow_id=spec.spec_id,
-                timestamp=FIXTURE_EPOCH,
-            ),
-            WorkflowLifecycleEvent(
-                event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
-                workflow_id=spec.spec_id,
-                node_id=node_id,
-                attempt=1,
-                timestamp=FIXTURE_EPOCH + timedelta(seconds=1),
-            ),
-            WorkflowLifecycleEvent(
-                event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
-                workflow_id=spec.spec_id,
-                timestamp=FIXTURE_EPOCH + timedelta(seconds=2),
-            ),
-        )
-    reason_code = "plugin_blocked" if status == "blocked" else f"plugin_{status}"
-    return (
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.RUN_CREATED,
-            workflow_id=spec.spec_id,
-            timestamp=FIXTURE_EPOCH,
-        ),
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.NODE_FAILED,
-            workflow_id=spec.spec_id,
-            node_id=node_id,
-            attempt=1,
-            reason_code=reason_code,
-            timestamp=FIXTURE_EPOCH + timedelta(seconds=1),
-        ),
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.RUN_FAILED,
-            workflow_id=spec.spec_id,
-            reason_code=reason_code,
-            timestamp=FIXTURE_EPOCH + timedelta(seconds=2),
-        ),
-    )
-
-
 def test_blocked_invocation_cannot_present_as_node_completion(
     blocked_plugin_program,
 ) -> None:
@@ -251,11 +187,12 @@ def test_blocked_invocation_cannot_present_as_node_completion(
     spec_result = validate_workflow(spec)
     assert spec_result.ok, f"plugin-node spec must validate cleanly; got {spec_result.errors!r}"
 
-    # 2. Harness projection contract: blocked -> NODE_FAILED + RUN_FAILED.
-    blocked_history = _workflow_history_from_plugin_result(
+    # 2. Production adapter contract: blocked -> NODE_FAILED + RUN_FAILED.
+    blocked_history = workflow_lifecycle_from_plugin_invocation_result(
         spec=spec,
         node_id="plugin_task",
         result=result,
+        timestamp=FIXTURE_EPOCH,
     )
     projected_types = tuple(event.event_type for event in blocked_history)
     assert WorkflowLifecycleEventType.NODE_FAILED in projected_types
