@@ -1202,6 +1202,26 @@ def test_test_invocation_rejects_status_masking_output_pipe() -> None:
     assert not _runtime_messages_support_command_claim("pytest tests/test_foo.py", (message,))
 
 
+def test_test_invocation_rejects_pipefail_text_without_shell_option() -> None:
+    """The pipefail guard must prove a shell option, not arbitrary command text."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    "/bin/bash -lc 'cd /workspace && "
+                    "pytest tests/test_pipefail.py 2>&1 | cat # pipefail mentioned'"
+                )
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_command_claim("pytest tests/test_pipefail.py", (message,))
+
+
 def test_command_claim_keeps_meaningful_pipeline_segments() -> None:
     """Only output-filter pipes are stripped; real pipelines are not over-matched."""
     message = AgentMessage(

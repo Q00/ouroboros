@@ -1171,8 +1171,14 @@ def _has_trailing_output_filter_pipeline(command: str) -> bool:
 
 def _uses_pipefail(command: str) -> bool:
     """Return True when shell text explicitly preserves upstream pipe status."""
-    normalized = _normalized_evidence_text(command)
-    return "pipefail" in normalized
+    for segment in re.split(r"\s*(?:&&|;)\s*", command.strip()):
+        try:
+            parts = shlex.split(segment)
+        except ValueError:
+            continue
+        if parts == ["set", "-o", "pipefail"]:
+            return True
+    return False
 
 
 def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
