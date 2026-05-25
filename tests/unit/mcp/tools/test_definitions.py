@@ -335,6 +335,44 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "cannot resume sessions created with fat_harness_mode=True" in str(result.error)
 
+    async def test_handle_plugin_rejects_fat_harness_resume_without_contract(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plugin-dispatched execute_seed must not infer fat-harness from seed on resume."""
+        tracker = SessionTracker.create("exec_missing", "seed-123")
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                assert session_id == "sess_missing"
+                return Result.ok(tracker)
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: fat_harness\nmetadata:", 1
+                ),
+                "session_id": "sess_missing",
+            }
+        )
+
+        assert result.is_err
+        assert "without a persisted fat_harness_mode contract" in str(result.error)
+
     async def test_handle_rejects_unknown_execution_mode(self) -> None:
         """MCP execute_seed keeps execution_mode non-configurable like the CLI."""
         handler = ExecuteSeedHandler()
@@ -1774,6 +1812,44 @@ class TestAsyncJobHandlers:
 
         assert result.is_err
         assert "cannot resume sessions created with fat_harness_mode=True" in str(result.error)
+
+    async def test_start_execute_seed_plugin_rejects_fat_harness_resume_without_contract(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plugin-dispatched start_execute_seed must not infer fat-harness on resume."""
+        tracker = SessionTracker.create("exec_missing", "seed-123")
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                assert session_id == "sess_missing"
+                return Result.ok(tracker)
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        handler = StartExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: fat_harness\nmetadata:", 1
+                ),
+                "session_id": "sess_missing",
+            }
+        )
+
+        assert result.is_err
+        assert "without a persisted fat_harness_mode contract" in str(result.error)
 
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()

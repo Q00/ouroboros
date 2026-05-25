@@ -140,6 +140,7 @@ def _validate_plugin_execution_mode(
 async def _validate_plugin_resume_acceptance_contract(
     *,
     event_store: EventStore | None,
+    execution_mode: Any,
     session_id: str | None,
     tool_name: str,
 ) -> Result[None, MCPToolError]:
@@ -166,6 +167,16 @@ async def _validate_plugin_resume_acceptance_contract(
                     "OpenCode plugin dispatch cannot resume sessions created with "
                     "fat_harness_mode=True because the child task cannot enforce typed "
                     "evidence plus verifier PASS acceptance. Resume without plugin dispatch.",
+                    tool_name=tool_name,
+                )
+            )
+        if execution_mode == "fat_harness" and not isinstance(persisted_fat_harness_mode, bool):
+            return Result.err(
+                MCPToolError(
+                    "OpenCode plugin dispatch cannot resume sessions whose seed requests "
+                    "execution_mode='fat_harness' without a persisted fat_harness_mode "
+                    "contract because the child task cannot enforce typed evidence plus "
+                    "verifier PASS acceptance. Resume without plugin dispatch.",
                     tool_name=tool_name,
                 )
             )
@@ -412,6 +423,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             if is_resume:
                 plugin_mode_result = await _validate_plugin_resume_acceptance_contract(
                     event_store=self.event_store,
+                    execution_mode=execution_mode,
                     session_id=session_id,
                     tool_name="ouroboros_execute_seed",
                 )
@@ -1212,6 +1224,7 @@ class StartExecuteSeedHandler:
             if is_resume:
                 plugin_mode_result = await _validate_plugin_resume_acceptance_contract(
                     event_store=self.event_store,
+                    execution_mode=execution_mode,
                     session_id=arguments.get("session_id"),
                     tool_name="ouroboros_start_execute_seed",
                 )
