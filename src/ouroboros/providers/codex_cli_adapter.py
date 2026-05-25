@@ -157,6 +157,7 @@ class CodexCliLLMAdapter:
         return build_codex_exec_permission_args(
             self._permission_mode,
             default_mode="default",
+            source=f"{self._log_namespace}.llm_adapter",
         )
 
     def _get_configured_cli_path(self) -> str | None:

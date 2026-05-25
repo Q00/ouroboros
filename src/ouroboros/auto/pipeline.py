@@ -686,10 +686,11 @@ class AutoPipeline:
                     self._save(state)
                     return self._result(state, ledger, blocker=str(exc) or state.last_error)
                 except Exception as exc:
-                    state.mark_failed(
-                        f"seed generation failed: {exc}",
-                        tool_name="seed_generator",
-                    )
+                    message = f"seed generation failed: {exc}"
+                    if _is_seed_generation_blocker(exc):
+                        state.mark_blocked(message, tool_name="seed_generator")
+                    else:
+                        state.mark_failed(message, tool_name="seed_generator")
                     record_authoring_backend(state)
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
@@ -3099,6 +3100,12 @@ def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:
         if param.kind is inspect.Parameter.VAR_KEYWORD:
             return True
     return False
+
+
+def _is_seed_generation_blocker(exc: Exception) -> bool:
+    """Classify recoverable authoring validation as blocked, not failed."""
+    message = str(exc)
+    return "Ambiguity score" in message and "exceeds threshold" in message
 
 
 def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:

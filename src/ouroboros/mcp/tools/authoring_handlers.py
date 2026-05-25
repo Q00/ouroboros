@@ -1434,6 +1434,8 @@ class InterviewHandler:
         state: InterviewState,
         session_id: str,
         score: AmbiguityScore | None = None,
+        *,
+        seed_ready_override: bool | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Complete the interview and return a Seed-ready MCP response."""
         complete_result = await engine.complete_interview(state)
@@ -1484,7 +1486,13 @@ class InterviewHandler:
                     "completed": True,
                     "ambiguity_score": score.overall_score if score is not None else None,
                     "milestone": _milestone_for_score(score),
-                    "seed_ready": score.is_ready_for_seed if score is not None else None,
+                    "seed_ready": (
+                        seed_ready_override
+                        if seed_ready_override is not None
+                        else score.is_ready_for_seed
+                        if score is not None
+                        else None
+                    ),
                     "required_client_gates": REQUIRED_CLIENT_GATES,
                     **_interview_reasoning_meta(
                         state=state,
@@ -2247,6 +2255,34 @@ class InterviewHandler:
                                 state,
                                 advance_streak=False,
                                 reset_on_failure=True,
+                            )
+                        # Safe-default synthesis is emitted only after the
+                        # auto driver has filled every remaining required
+                        # ledger gap with audited conservative defaults. Do
+                        # not require the semantic ambiguity scorer to also
+                        # cross the normal human "done" threshold; that score
+                        # can lag behind the ledger and would leave a trailing
+                        # unanswered question in the persisted transcript.
+                        if is_safe_default_synthesis:
+                            if has_pending_round:
+                                state.rounds.pop()
+                            from ouroboros.bigbang.interview import InterviewRound
+
+                            state.rounds.append(
+                                InterviewRound(
+                                    round_number=len(state.rounds) + 1,
+                                    question=last_question or "[driver safe-default finalization]",
+                                    user_response=answer,
+                                )
+                            )
+                            state.clear_stored_ambiguity()
+                            state.mark_updated()
+                            return await self._complete_interview_response(
+                                engine,
+                                state,
+                                session_id,
+                                None,
+                                seed_ready_override=True,
                             )
                         if exit_score is not None and qualifies_for_seed_completion(
                             exit_score,

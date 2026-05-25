@@ -2376,7 +2376,10 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["completed"] is True
         assert result.value.meta["seed_ready"] is True
         assert state.status is InterviewStatus.COMPLETED
-        assert state.rounds == []
+        assert len(state.rounds) == 1
+        assert state.rounds[0].question == "[driver safe-default finalization]"
+        assert state.rounds[0].user_response is not None
+        assert "[safe-default-synthesis]" in state.rounds[0].user_response
         mock_engine.complete_interview.assert_awaited_once()
 
 

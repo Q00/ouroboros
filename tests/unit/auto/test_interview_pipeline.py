@@ -1384,6 +1384,38 @@ async def test_pipeline_result_surfaces_assumption_sources_with_provenance(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_pipeline_blocks_on_seed_ambiguity_validation(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_1", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not need another answer")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise RuntimeError(
+            "ouroboros_generate_seed failed: Validation error: Ambiguity score 0.26 "
+            "exceeds threshold 0.2. Cannot generate Seed."
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    assert state.interview_completed is True
+    assert "Ambiguity score 0.26 exceeds threshold 0.2" in (result.blocker or "")
+    assert state.last_tool_name == "seed_generator"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_uses_explicit_goal_facts_before_completed_interview(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("done", "interview_hello", seed_ready=True, completed=True)

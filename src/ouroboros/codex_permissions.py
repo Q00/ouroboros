@@ -57,7 +57,14 @@ def resolve_codex_permission_mode(
     return candidate  # type: ignore[return-value]
 
 
-def build_codex_exec_args_for_sandbox(sandbox: SandboxClass) -> list[str]:
+def build_codex_exec_args_for_sandbox(
+    sandbox: SandboxClass,
+    *,
+    source: str | None = None,
+    permission_mode: str | None = None,
+    default_mode: CodexPermissionMode | None = None,
+    resolved_mode: CodexPermissionMode | None = None,
+) -> list[str]:
     """Translate a sandbox class into Codex CLI exec flags.
 
     This is the canonical entry point for new call sites.  Engine code
@@ -73,7 +80,14 @@ def build_codex_exec_args_for_sandbox(sandbox: SandboxClass) -> list[str]:
         msg = f"No Codex CLI mapping registered for sandbox class {sandbox!r}"
         raise KeyError(msg)
     if sandbox is SandboxClass.UNRESTRICTED:
-        log.warning("permissions.bypass_activated", sandbox=sandbox.value)
+        log.warning(
+            "permissions.bypass_activated",
+            sandbox=sandbox.value,
+            source=source,
+            permission_mode=permission_mode,
+            default_mode=default_mode,
+            resolved_mode=resolved_mode,
+        )
     return list(args)
 
 
@@ -81,6 +95,7 @@ def build_codex_exec_permission_args(
     permission_mode: str | None,
     *,
     default_mode: CodexPermissionMode = "default",
+    source: str | None = None,
 ) -> list[str]:
     """Translate a legacy permission-mode string into Codex CLI exec flags.
 
@@ -95,7 +110,13 @@ def build_codex_exec_permission_args(
       no sandbox
     """
     resolved = resolve_codex_permission_mode(permission_mode, default_mode=default_mode)
-    return build_codex_exec_args_for_sandbox(_PERMISSION_MODE_TO_SANDBOX[resolved])
+    return build_codex_exec_args_for_sandbox(
+        _PERMISSION_MODE_TO_SANDBOX[resolved],
+        source=source,
+        permission_mode=permission_mode,
+        default_mode=default_mode,
+        resolved_mode=resolved,
+    )
 
 
 __all__ = [

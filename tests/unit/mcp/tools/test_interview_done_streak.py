@@ -182,6 +182,67 @@ class TestInterviewDoneStreakAndShortfall:
         mock_engine.complete_interview.assert_called_once()
         mock_engine.ask_next_question.assert_not_called()
 
+    async def test_safe_default_synthesis_completes_without_score_threshold(self) -> None:
+        """Auto safe-default synthesis closes the transcript without the done streak."""
+        handler = InterviewHandler()
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-123",
+            completion_candidate_streak=0,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What boundary should invalidate the run?",
+                    user_response=None,
+                )
+            ],
+        )
+        nonqualifying_score = create_mock_live_ambiguity_score(0.35, seed_ready=False)
+        answer = (
+            "[from-auto][safe-default-synthesis] Mark the interview complete and "
+            "hand off for seed generation. Auto ledger-complete synthesis."
+        )
+
+        async def complete_state(
+            current_state: InterviewState,
+        ) -> Result[InterviewState, Exception]:
+            current_state.status = InterviewStatus.COMPLETED
+            return Result.ok(current_state)
+
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.complete_interview = AsyncMock(side_effect=complete_state)
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_engine.ask_next_question = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+                return_value=mock_engine,
+            ),
+            patch.object(
+                handler,
+                "_score_interview_state",
+                AsyncMock(return_value=nonqualifying_score),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "session_id": "sess-123",
+                    "answer": answer,
+                    "last_question": "[driver safe-default finalization: max_rounds=2]",
+                }
+            )
+
+        assert result.is_ok
+        assert state.status == InterviewStatus.COMPLETED
+        assert state.completion_candidate_streak == 0
+        assert state.rounds[-1].question == "[driver safe-default finalization: max_rounds=2]"
+        assert state.rounds[-1].user_response == answer
+        assert result.value.meta["completed"] is True
+        mock_engine.complete_interview.assert_called_once()
+        mock_engine.ask_next_question.assert_not_called()
+
     async def test_explicit_done_no_infinite_loop(self) -> None:
         """Two sequential 'done' commands must complete the interview (no infinite loop).
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from ouroboros.claude_permissions import (
@@ -117,6 +119,23 @@ class TestCodexLegacyWrapperPreservesBehavior:
         legacy_args = build_codex_exec_permission_args(mode)
         enum_args = build_codex_exec_args_for_sandbox(expected_sandbox)
         assert legacy_args == enum_args
+
+    def test_bypass_warning_includes_permission_provenance(self) -> None:
+        with patch("ouroboros.codex_permissions.log.warning") as mock_warning:
+            args = build_codex_exec_permission_args(
+                "bypassPermissions",
+                source="codex_cli_runtime.agent_runtime",
+            )
+
+        assert args == ["--dangerously-bypass-approvals-and-sandbox"]
+        mock_warning.assert_called_once_with(
+            "permissions.bypass_activated",
+            sandbox="unrestricted",
+            source="codex_cli_runtime.agent_runtime",
+            permission_mode="bypassPermissions",
+            default_mode="default",
+            resolved_mode="bypassPermissions",
+        )
 
 
 class TestClaudeLegacyVocabularyMatchesSandbox:

@@ -1792,6 +1792,7 @@ class TestCodexCliRuntime:
             "command_prefix": "ooo auto",
             "dispatch_error_type": "LookupError",
             "dispatch_error": "No local handler registered",
+            "dispatch_error_category": "local_handler_missing",
         }
 
     @pytest.mark.asyncio
@@ -1908,6 +1909,65 @@ class TestCodexCliRuntime:
         assert messages[0].data["error_type"] == "SkillDispatchUnavailable"
         assert messages[0].data["dispatch_error_type"] == "MCPResourceNotFoundError"
         assert messages[0].data["dispatch_error"] == "Tool ouroboros_auto not found"
+        assert messages[0].data["dispatch_error_category"] == "mcp_registration_missing"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_auto_transport_closed_reports_transport_not_setup(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Codex App MCP transport closures should not be misreported as setup drift."""
+        self._write_skill(
+            tmp_path,
+            "auto",
+            [
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock(
+            return_value=(
+                AgentMessage(type="assistant", content="Calling tool: ouroboros_auto"),
+                AgentMessage(
+                    type="result",
+                    content="MCPClientError: Transport closed",
+                    data={
+                        "subtype": "error",
+                        "error_type": "MCPClientError",
+                    },
+                ),
+            )
+        )
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        with (
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            ) as mock_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+
+        dispatcher.assert_awaited_once()
+        assert mock_warning.call_args.kwargs["fallback"] == "terminal_error"
+        mock_exec.assert_not_called()
+        assert len(messages) == 1
+        assert messages[0].data["error_type"] == "SkillDispatchUnavailable"
+        assert messages[0].data["dispatch_error_type"] == "MCPClientError"
+        assert messages[0].data["dispatch_error"] == "MCPClientError: Transport closed"
+        assert messages[0].data["dispatch_error_category"] == "mcp_transport_closed"
+        assert "MCP transport closed" in messages[0].content
+        assert "not proof that the tool is unregistered" in messages[0].content
+        assert "setup to register" not in messages[0].content
 
     @pytest.mark.asyncio
     async def test_execute_task_auto_recoverable_pipeline_error_preserves_real_cause(

@@ -167,6 +167,7 @@ class CodexCliRuntime:
         return build_codex_exec_permission_args(
             self._permission_mode,
             default_mode="acceptEdits",
+            source=f"{self._log_namespace}.agent_runtime",
         )
 
     def _get_configured_cli_path(self) -> str | None:
@@ -540,41 +541,85 @@ class CodexCliRuntime:
         )
 
     @staticmethod
+    def _auto_dispatch_error_category(
+        error_type: str | None,
+        error_text: str,
+    ) -> str | None:
+        """Classify terminal auto-dispatch failures for operator diagnostics."""
+        normalized_error = error_text.lower()
+        transport_markers = (
+            "transport closed",
+            "connection closed",
+            "stdio closed",
+            "broken pipe",
+        )
+        unavailable_markers = (
+            "unavailable",
+            "not found",
+            "not registered",
+            "unknown tool",
+            "no such tool",
+        )
+
+        if any(marker in normalized_error for marker in transport_markers):
+            return "mcp_transport_closed"
+        if error_type == "MCPResourceNotFoundError":
+            return "mcp_registration_missing"
+        if error_type == "LookupError" and "no local handler registered" in normalized_error:
+            return "local_handler_missing"
+        if error_type in {"MCPClientError", "MCPToolError"} and any(
+            marker in normalized_error for marker in unavailable_markers
+        ):
+            return "mcp_registration_missing"
+        return None
+
+    @staticmethod
     def _is_auto_recoverable_dispatch_unavailable(recoverable_error: AgentMessage) -> bool:
         """Return whether a recoverable auto dispatch error means the tool is unavailable."""
-        error_type = recoverable_error.data.get("error_type")
-        error_text = recoverable_error.content.lower()
-        if error_type == "MCPResourceNotFoundError":
-            return True
-        if error_type == "LookupError":
-            return "no local handler registered" in error_text
-
-        if error_type == "MCPClientError":
-            return any(
-                marker in error_text
-                for marker in (
-                    "unavailable",
-                    "not found",
-                    "not registered",
-                    "unknown tool",
-                    "no such tool",
-                )
-            )
-        if error_type != "MCPToolError":
+        error_type = str(recoverable_error.data.get("error_type") or "")
+        error_text = recoverable_error.content
+        if error_text.lower().startswith("auto pipeline failed:"):
             return False
+        return CodexCliRuntime._auto_dispatch_error_category(error_type, error_text) is not None
 
-        if error_text.startswith("auto pipeline failed:"):
-            return False
-        return any(
-            marker in error_text
-            for marker in (
-                "unavailable",
-                "not found",
-                "not registered",
-                "unknown tool",
-                "no such tool",
+    def _build_auto_dispatch_unavailable_content(
+        self,
+        tool_name: str,
+        category: str | None,
+    ) -> str:
+        """Return the operator-facing auto dispatch failure message."""
+        if category == "mcp_transport_closed":
+            return (
+                "Cannot run ooo auto: MCP transport closed before "
+                f"`{tool_name}` completed. Run `ouroboros mcp doctor` to verify "
+                "the server, then reconnect or restart the Codex App MCP session; "
+                "this is a transport/session failure, not proof that the tool is "
+                "unregistered."
             )
+        return (
+            "Cannot run ooo auto: required MCP tool "
+            f"`{tool_name}` is unavailable. "
+            "Run `ouroboros mcp doctor` / setup to register the MCP server."
         )
+
+    @staticmethod
+    def _is_mcp_transport_closed_error(message: AgentMessage) -> bool:
+        """Return True for recoverable-looking MCP client transport closures."""
+        error_type = message.data.get("error_type")
+        if error_type != "MCPClientError":
+            return False
+        return (
+            CodexCliRuntime._auto_dispatch_error_category(error_type, message.content)
+            == "mcp_transport_closed"
+        )
+
+    @staticmethod
+    def _is_recoverable_mcp_error_type(message: AgentMessage) -> bool:
+        """Return True for MCP transport errors that should not be passed through."""
+        error_type = message.data.get("error_type")
+        if error_type in {"MCPConnectionError", "MCPTimeoutError"}:
+            return True
+        return CodexCliRuntime._is_mcp_transport_closed_error(message)
 
     def _build_auto_dispatch_unavailable_message(
         self,
@@ -596,14 +641,13 @@ class CodexCliRuntime:
             data["dispatch_error_type"] = dispatch_error_type
         if dispatch_error:
             data["dispatch_error"] = dispatch_error
+        category = self._auto_dispatch_error_category(dispatch_error_type, dispatch_error or "")
+        if category:
+            data["dispatch_error_category"] = category
 
         return AgentMessage(
             type="result",
-            content=(
-                "Cannot run ooo auto: required MCP tool "
-                f"`{intercept.mcp_tool}` is unavailable. "
-                "Run `ouroboros mcp doctor` / setup to register the MCP server."
-            ),
+            content=self._build_auto_dispatch_unavailable_content(intercept.mcp_tool, category),
             data=data,
             resume_handle=current_handle,
         )
@@ -719,7 +763,7 @@ class CodexCliRuntime:
             if metadata.get("is_retriable") is True or metadata.get("retriable") is True:
                 return final_message
 
-        if final_message.data.get("error_type") in {"MCPConnectionError", "MCPTimeoutError"}:
+        if self._is_recoverable_mcp_error_type(final_message):
             return final_message
 
         return None
