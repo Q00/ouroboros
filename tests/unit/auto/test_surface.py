@@ -20,8 +20,8 @@ from ouroboros.mcp.tools.auto_handler import (
     _authoring_interview_handler,
     _authoring_seed_handler,
     _execution_start_handler,
-    _result_meta,
     _resolve_cwd,
+    _result_meta,
     _safe_default_cwd,
 )
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
