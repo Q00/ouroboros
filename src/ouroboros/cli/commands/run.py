@@ -435,7 +435,7 @@ async def _run_orchestrator(
         print_info(f"Max decomposition depth: {resolved_max_decomposition_depth}")
         print_info(f"Max parallel workers: {resolved_max_parallel_workers}")
         if resolved_fat_harness_mode:
-            print_info("Execution mode: fat_harness (default)")
+            print_info("Execution mode: fat_harness")
         if externally_satisfied_acs:
             print_info(f"Externally satisfied ACs: {len(externally_satisfied_acs)}")
 
