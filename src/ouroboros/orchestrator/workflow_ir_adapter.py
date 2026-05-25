@@ -324,7 +324,7 @@ def workflow_lifecycle_from_plugin_invocation_result(
 
     started_at = timestamp or datetime.now(tz=UTC)
     if result.status == "success":
-        return (
+        events = [
             WorkflowLifecycleEvent(
                 event_type=WorkflowLifecycleEventType.RUN_CREATED,
                 workflow_id=spec.spec_id,
@@ -337,12 +337,21 @@ def workflow_lifecycle_from_plugin_invocation_result(
                 attempt=1,
                 timestamp=started_at + timedelta(seconds=1),
             ),
-            WorkflowLifecycleEvent(
-                event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
-                workflow_id=spec.spec_id,
-                timestamp=started_at + timedelta(seconds=2),
-            ),
-        )
+        ]
+        plugin_task_nodes = [
+            candidate
+            for candidate in spec.nodes
+            if candidate.owner is NodeOwner.PLUGIN and candidate.kind is NodeKind.TASK
+        ]
+        if len(plugin_task_nodes) == 1:
+            events.append(
+                WorkflowLifecycleEvent(
+                    event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+                    workflow_id=spec.spec_id,
+                    timestamp=started_at + timedelta(seconds=2),
+                )
+            )
+        return tuple(events)
 
     reason_code = "plugin_blocked" if result.status == "blocked" else "plugin_failed"
     return (
