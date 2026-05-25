@@ -1001,7 +1001,8 @@ def _single_command_after_safe_shell_preamble(command: str) -> str | None:
 def _segments_after_safe_shell_preamble(body: str) -> tuple[str, ...]:
     """Return non-preamble shell segments after setup-only commands."""
     return tuple(
-        segment for segment, _pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body)
+        segment
+        for segment, _pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body)
     )
 
 
