@@ -43,7 +43,7 @@ default, and correlated to the parent `plugin.invoked` event.
 
 | Field            | Type     | Description                                                                                                  |
 |------------------|----------|--------------------------------------------------------------------------------------------------------------|
-| `tool`           | string   | Canonical tool name as declared in the manifest's `tools.allowed` list.                                       |
+| `tool`           | string   | Canonical tool name as declared by the manifest command/tool surface.                                         |
 | `args_digest`    | string   | `sha256:<hex>` digest of the *full* serialized arguments. The hook never receives raw args.                   |
 | `args_preview`   | string   | Bounded preview of the redacted arguments, **≤ 256 chars**. Truncated with a `…` sentinel when longer.        |
 | `correlation_id` | string   | Identifier linking this hook callback to the parent `plugin.invoked` audit event for the enclosing plugin run.|
@@ -76,7 +76,7 @@ firewall constant by this PR.
 
 | Scope                       | Class        | Veto allowed | Failure policy default | Notes                                                                                     |
 |-----------------------------|--------------|--------------|------------------------|-------------------------------------------------------------------------------------------|
-| `plugin:tool:intercept`     | Mutating     | Yes          | `fail_closed`-eligible | Required for any hook that wants to *block* a tool call. Holders of this scope MUST also hold the tool-specific permission declared in `tools.allowed`. |
+| `plugin:tool:intercept`     | Mutating     | Yes          | `fail_closed`-eligible | Required for any hook that wants to *block* a tool call. Holders of this scope MUST also hold the tool-specific permission declared for the affected command/tool. |
 | `plugin:tool:observe`       | Observation  | No           | `fail_open` (required) | Hooks holding only this scope MUST NOT veto a tool call. Used for telemetry, redacted logging, and external observability surfaces. |
 
 `plugin:tool:intercept` is strictly more powerful than
@@ -144,8 +144,8 @@ Required behavior:
    along with the `failure_policy` / `permissions` conditionals
    described in §4–§5 above. v0.3 remains unchanged and continues to
    reject the new hook names.
-3. **`plugin_schema_version` gating.** A manifest using these hooks
-   MUST declare `plugin_schema_version: "0.4"`. The firewall MUST
+3. **`schema_version` gating.** A manifest using these hooks
+   MUST declare `schema_version: "0.4"`. The firewall MUST
    refuse to load a `0.4` manifest on a core build that does not
    advertise v0.4 support — the same dual-version negotiation pattern
    used everywhere else in the plugin contract.
