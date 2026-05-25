@@ -124,6 +124,8 @@ _PROMPT_SECTION_HEADER = re.compile(
     r"^\s*(?:[-*•]\s+)?[A-Za-z][A-Za-z0-9_ -]{0,40}\s*:(?:\s|$)",
 )
 
+_PROMPT_LIST_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
 
 _UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
     (
@@ -593,10 +595,15 @@ def _strip_prompt_non_goal_sections(text: str) -> str:
     The helper recognises a non-goal section header
     (``non_goals:``, ``non-goals:``, ``non goals:``, ``excludes:`` or
     ``out-of-scope:``) at the start of a line (allowing leading
-    whitespace or a list bullet) and drops every subsequent line until
-    one of these terminators is reached:
+    whitespace or a list bullet). Inline header bodies are stripped on
+    that line only. Separate section bodies are stripped only while their
+    continuation is structurally clear: indented lines or list items. This
+    intentionally fails closed for unindented prose following an inline or
+    empty non-goal header, because such prose may be active unsafe scope.
+    A multi-line body ends when one of these terminators is reached:
 
     * a blank line, or
+    * an unindented non-list line, or
     * a non-empty line that begins another labelled section header
       (``actors:``, ``inputs:``, ``- constraints:``, …), which is then
       preserved.
@@ -609,8 +616,11 @@ def _strip_prompt_non_goal_sections(text: str) -> str:
     out: list[str] = []
     skipping = False
     for line in lines:
-        if _PROMPT_NON_GOAL_HEADER.search(line):
-            skipping = True
+        header_match = _PROMPT_NON_GOAL_HEADER.search(line)
+        if header_match:
+            # Inline body belongs to this line only; do not let it swallow
+            # following active prose.
+            skipping = not line[header_match.end() :].strip()
             continue
         if not skipping:
             out.append(line)
@@ -624,8 +634,14 @@ def _strip_prompt_non_goal_sections(text: str) -> str:
             skipping = False
             out.append(line)
             continue
-        # Still inside the non-goal body (continuation line, bullet, …);
-        # drop it from the matcher input.
+        if line[:1].isspace() or _PROMPT_LIST_ITEM.match(line):
+            # Still inside a structurally clear non-goal body; drop it
+            # from the matcher input.
+            continue
+        # Unindented prose after a non-goal header is ambiguous and may be
+        # active scope. Fail closed by preserving it for matching.
+        skipping = False
+        out.append(line)
     return "\n".join(out)
 
 

@@ -96,6 +96,17 @@ def test_strip_terminates_on_blank_line() -> None:
     assert "Resume narrative about retry behaviour." in sanitized
 
 
+def test_strip_preserves_unindented_active_scope_after_inline_header() -> None:
+    text = (
+        "Goal: Build a local CLI.\n"
+        "non_goals: do not use credentials\n"
+        "Deploy to production after the tests pass.\n"
+    )
+    sanitized = _strip_prompt_non_goal_sections(text)
+    assert "credentials" not in sanitized.lower()
+    assert "Deploy to production after the tests pass." in sanitized
+
+
 def test_strip_leaves_inline_prose_mention_alone() -> None:
     # No trailing colon, no line-anchored header => the helper must not
     # remove anything; otherwise it would mangle ordinary prose.
@@ -134,6 +145,20 @@ def test_active_goal_deploy_phrase_still_trips_unsafe_matcher(
     # Without any non-goals header, the matcher must still catch a real
     # deploy intent in the goal text.
     goal = "Deploy the retry behaviour to production"
+    assert (
+        _unsafe_context_reason(empty_ledger, goal=goal, pending_question=None)
+        == "ambiguous external side effect"
+    )
+
+
+def test_active_scope_after_inline_non_goals_still_trips_unsafe_matcher(
+    empty_ledger: SeedDraftLedger,
+) -> None:
+    goal = (
+        "Goal: Build a local CLI.\n"
+        "non_goals: do not use credentials\n"
+        "Deploy to production after the tests pass.\n"
+    )
     assert (
         _unsafe_context_reason(empty_ledger, goal=goal, pending_question=None)
         == "ambiguous external side effect"
