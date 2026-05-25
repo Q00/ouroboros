@@ -202,7 +202,20 @@ class Watchdog:
             )
             if existing:
                 self._fired_sessions.add(session_id)
-                return None
+                event = existing[0]
+                fired_at = _coerce_datetime(event.data.get("fired_at")) or now
+                return WatchdogDecision(
+                    session_id=session_id,
+                    fired_at=fired_at,
+                    elapsed_seconds=_coerce_int(
+                        event.data.get("elapsed_seconds"),
+                        default=elapsed_seconds,
+                    ),
+                    configured_budget_seconds=_coerce_int(
+                        event.data.get("configured_budget_seconds"),
+                        default=budget,
+                    ),
+                )
         decision = WatchdogDecision(
             session_id=session_id,
             fired_at=now,
@@ -229,3 +242,23 @@ class Watchdog:
         """Test/inspection helper — True iff this instance has already
         fired the watchdog for *session_id*."""
         return session_id in self._fired_sessions
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _coerce_int(value: object, *, default: int) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default

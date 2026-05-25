@@ -142,6 +142,7 @@ async def test_idempotent_within_instance() -> None:
 
 @pytest.mark.asyncio
 async def test_idempotent_across_new_instance_when_event_exists() -> None:
+    """A restarted watchdog replays cancellation without appending again."""
     started = datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC)
     appender = _CapturingAppender()
     first = Watchdog(
@@ -156,8 +157,11 @@ async def test_idempotent_across_new_instance_when_event_exists() -> None:
     )
 
     assert await first.check(session_id="auto_restart", session_started_at=started) is not None
-    assert await second.check(session_id="auto_restart", session_started_at=started) is None
+    replayed = await second.check(session_id="auto_restart", session_started_at=started)
 
+    assert replayed is not None
+    assert replayed.session_id == "auto_restart"
+    assert replayed.elapsed_seconds == 60
     assert len(appender.events) == 1
     assert second.has_fired_for("auto_restart")
 

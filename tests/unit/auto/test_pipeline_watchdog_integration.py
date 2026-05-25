@@ -77,6 +77,22 @@ class _CapturingAppender:
     async def append(self, event: BaseEvent) -> None:
         self.events.append(event)
 
+    async def query_events(
+        self,
+        aggregate_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[BaseEvent]:
+        del offset
+        events = [
+            event
+            for event in self.events
+            if (aggregate_id is None or event.aggregate_id == aggregate_id)
+            and (event_type is None or event.type == event_type)
+        ]
+        return events[:limit]
+
 
 def _fill_ready(ledger: SeedDraftLedger) -> None:
     from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus
@@ -247,6 +263,65 @@ async def test_pipeline_with_watchdog_over_budget_blocks(tmp_path) -> None:
     assert event.aggregate_type == WATCHDOG_AGGREGATE_TYPE
     assert event.aggregate_id == state.auto_session_id
     assert event.data["reason"] == "wall_clock_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_when_prior_watchdog_cancel_event_exists(tmp_path) -> None:
+    """Replay must preserve a watchdog cancellation even if state was not saved."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("interview should not start after watchdog cancellation replay")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("interview should not answer after watchdog cancellation replay")
+
+    async def generate_seed(_session_id: str) -> Seed:
+        raise AssertionError("seed_generator should not run after watchdog cancellation replay")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    started = datetime.fromisoformat(state.created_at)
+    fired_at = started + timedelta(seconds=120)
+
+    appender = _CapturingAppender()
+    appender.events.append(
+        BaseEvent(
+            type=WATCHDOG_CANCEL_EVENT_TYPE,
+            aggregate_type=WATCHDOG_AGGREGATE_TYPE,
+            aggregate_id=state.auto_session_id,
+            data={
+                "reason": "wall_clock_exceeded",
+                "session_started_at": started.isoformat(),
+                "fired_at": fired_at.isoformat(),
+                "elapsed_seconds": 120,
+                "configured_budget_seconds": 60,
+            },
+        )
+    )
+    watchdog = Watchdog(
+        controls=RuntimeControls(session_wall_clock_seconds=60),
+        event_appender=appender,
+        now=lambda: started + timedelta(seconds=180),
+    )
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        watchdog=watchdog,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert result.stop_reason_code == WATCHDOG_STOP_REASON_CODE
+    assert "120s" in (state.last_error or "")
+    assert len(appender.events) == 1
 
 
 @pytest.mark.asyncio
