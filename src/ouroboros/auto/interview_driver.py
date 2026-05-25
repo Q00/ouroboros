@@ -32,6 +32,8 @@ from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 log = structlog.get_logger(__name__)
 
+INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_nonclosure"
+
 
 @dataclass(frozen=True, slots=True)
 class InterviewTurn:
@@ -431,26 +433,31 @@ class AutoInterviewDriver:
                         synthesis_pushed=False,
                     )
                     state.ledger = ledger.to_dict()
-                    state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
+                    state.mark_blocked(
+                        blocker,
+                        tool_name="interview.safe_default_synthesis",
+                        error_code=INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE,
+                    )
                     record_authoring_backend(state)
                     self._save(state)
                     return AutoInterviewResult(
                         "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
                     )
                 state.interview_session_id = synthesis_turn.session_id
-                state.pending_question = synthesis_turn.question
                 if not (synthesis_turn.seed_ready or synthesis_turn.completed):
-                    _revert_safe_default_entries(ledger, finalization.defaulted_sections)
-                    blocker = (
-                        "safe-default synthesis did not close the persisted interview: "
-                        "backend_done=False, ledger defaults rolled back"
-                    )
-                    state.ledger = ledger.to_dict()
-                    state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
-                    record_authoring_backend(state)
-                    self._save(state)
-                    return AutoInterviewResult(
-                        "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
+                    # The backend accepted the driver-originated synthesis but
+                    # treated it as another conversational answer instead of a
+                    # terminal turn. At this point the ledger is already
+                    # structurally complete and the synthesis has been written
+                    # into the persisted transcript, so fail forward as a
+                    # safe-default closure instead of rolling defaults back and
+                    # blocking a deterministic local task.
+                    log.info(
+                        "auto.interview.safe_default_synthesis_ack_nonterminal",
+                        auto_session_id=state.auto_session_id,
+                        interview_session_id=state.interview_session_id,
+                        defaulted_sections=finalization.defaulted_sections,
+                        backend_question=synthesis_turn.question,
                     )
             log.info(
                 "auto.interview.safe_default.closed",

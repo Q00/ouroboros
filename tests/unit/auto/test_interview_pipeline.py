@@ -846,6 +846,7 @@ async def test_interview_driver_rolls_back_defaults_when_synthesis_sync_fails(tm
     assert result.status == "blocked"
     assert state.interview_completed is False
     assert "transcript sync failed" in (result.blocker or "")
+    assert state.last_error_code == "interview_safe_default_synthesis_nonclosure"
     assert ledger.open_gaps()
     assert not any(
         entry.key == f"{section_name}.safe_default_finalization"
@@ -855,7 +856,9 @@ async def test_interview_driver_rolls_back_defaults_when_synthesis_sync_fails(tm
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_blocks_when_synthesis_does_not_close_backend(tmp_path) -> None:
+async def test_interview_driver_closes_when_synthesis_is_acked_without_backend_done(
+    tmp_path,
+) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What else should we know?", "interview_defaults")
 
@@ -877,12 +880,13 @@ async def test_interview_driver_blocks_when_synthesis_does_not_close_backend(tmp
 
     result = await driver.run(state, ledger)
 
-    assert result.status == "blocked"
-    assert state.interview_completed is False
-    assert state.pending_question == "Still need one more thing"
-    assert "did not close the persisted interview" in (result.blocker or "")
-    assert ledger.open_gaps()
-    assert not any(
+    assert result.status == "seed_ready"
+    assert state.interview_completed is True
+    assert state.pending_question is None
+    assert state.interview_closure_mode == "safe_default"
+    assert state.last_error_code is None
+    assert ledger.open_gaps() == []
+    assert any(
         entry.key == f"{section_name}.safe_default_finalization"
         for section_name, section in ledger.sections.items()
         for entry in section.entries
