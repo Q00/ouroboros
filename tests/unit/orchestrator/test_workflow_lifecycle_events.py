@@ -711,6 +711,29 @@ def test_lifecycle_event_rejects_too_many_refs_entries() -> None:
         )
 
 
+def test_lifecycle_event_rejects_large_ref_generator_without_full_materialization() -> None:
+    spec = _spec()
+    yielded = 0
+
+    def refs():
+        nonlocal yielded
+        for index in range(10_000):
+            yielded += 1
+            yield f"control://contract/ref-{index}"
+
+    with pytest.raises(
+        ValidationError,
+        match=f"refs exceed {MAX_WORKFLOW_LIFECYCLE_REF_COUNT} entries",
+    ):
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            refs=refs(),
+        )
+
+    assert yielded == MAX_WORKFLOW_LIFECYCLE_REF_COUNT + 1
+
+
 def test_lifecycle_event_rejects_individual_ref_over_char_bound() -> None:
     """A single oversized ref string is rejected at the validator entry point."""
     spec = _spec()

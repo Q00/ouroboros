@@ -446,6 +446,13 @@ def _normalize_refs(values: Iterable[str]) -> tuple[str, ...]:
             msg = f"Workflow lifecycle refs exceed {MAX_WORKFLOW_LIFECYCLE_REF_COUNT} entries"
             raise ValueError(msg)
         ref = _normalize_non_blank(f"refs[{index}]", value)
+        if len(ref) > MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS:
+            msg = (
+                f"Workflow lifecycle refs exceed "
+                f"{MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS} characters "
+                f"at index {index}"
+            )
+            raise ValueError(msg)
         ref_bytes = ref.encode("utf-8")
         if len(ref_bytes) > MAX_WORKFLOW_LIFECYCLE_REF_BYTES:
             msg = f"Workflow lifecycle ref exceeds {MAX_WORKFLOW_LIFECYCLE_REF_BYTES} bytes"
@@ -557,16 +564,7 @@ class WorkflowLifecycleEvent(BaseModel, frozen=True):
         if isinstance(value, str) or not isinstance(value, Iterable):
             msg = "Workflow lifecycle refs must be an iterable of strings"
             raise TypeError(msg)
-        materialized = tuple(value)
-        for index, ref in enumerate(materialized):
-            if isinstance(ref, str) and len(ref) > MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS:
-                msg = (
-                    f"Workflow lifecycle refs exceed "
-                    f"{MAX_WORKFLOW_LIFECYCLE_REF_LEN_CHARS} characters "
-                    f"at index {index}"
-                )
-                raise ValueError(msg)
-        return _normalize_refs(materialized)
+        return _normalize_refs(value)
 
     @field_validator("data", mode="before")
     @classmethod
