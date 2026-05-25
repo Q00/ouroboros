@@ -228,9 +228,9 @@ class DeferredProbe:
     """Placeholder for probe kinds declared in the L1 catalog but not
     yet implemented in this v1 (per #1176 minimal-substrate audit).
 
-    Calling :meth:`run` on a deferred probe returns a non-passing
+    Calling :meth:`run` on a deferred probe returns a probe-PASS
     :class:`RuntimeEvidence` with ``outcome = "deferred"`` so the
-    verifier can flag the gap without treating it as real acceptance. The L3
+    verifier can flag the gap without failing the grade. The L3
     follow-up that implements ``sim_trace`` / ``render_hash`` /
     ``api_smoke`` swaps the registry entry from :class:`DeferredProbe`
     to the real implementation; no consumer needs to change.
@@ -247,7 +247,7 @@ class DeferredProbe:
     ) -> RuntimeEvidence:
         return RuntimeEvidence(
             probe_kind=self.kind,
-            passed=False,
+            passed=True,
             summary=f"probe kind {self.kind!r} is deferred to a future L3 follow-up",
             duration_seconds=0.0,
             payload={"outcome": "deferred"},

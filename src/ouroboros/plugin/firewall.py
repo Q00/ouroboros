@@ -571,12 +571,13 @@ def invoke_plugin(
         # stable workspace/output contract for runtime artifacts.
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         workdir = Path.cwd()
-        env["OUROBOROS_PLUGIN_WORKDIR"] = str(workdir)
-        env["OUROBOROS_PLUGIN_OUTPUT_DIR"] = str(
-            workdir / ".ouroboros" / "plugin-artifacts" / manifest.name
+        env.setdefault("OUROBOROS_PLUGIN_WORKDIR", str(workdir))
+        env.setdefault(
+            "OUROBOROS_PLUGIN_OUTPUT_DIR",
+            str(workdir / ".ouroboros" / "plugin-artifacts" / manifest.name),
         )
         if plugin_home is not None:
-            env["OUROBOROS_PLUGIN_HOME"] = str(plugin_home)
+            env.setdefault("OUROBOROS_PLUGIN_HOME", str(plugin_home))
         return env
 
     def _run_lifecycle_hooks(hook_kind: HookKind) -> tuple[bool, str]:

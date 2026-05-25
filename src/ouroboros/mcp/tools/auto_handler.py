@@ -1219,8 +1219,6 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["stop_reason_code"] = result.stop_reason_code
     if result.interview_closure_mode is not None:
         meta["interview_closure_mode"] = result.interview_closure_mode
-    if result.active_task_class is not None:
-        meta["active_task_class"] = result.active_task_class
     if result.execution_job_status:
         meta["execution_job_status"] = result.execution_job_status
     if result.execution_job_error:
