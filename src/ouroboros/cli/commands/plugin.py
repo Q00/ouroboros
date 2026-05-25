@@ -1649,6 +1649,7 @@ def _maybe_prompt_grant_required_permissions(
     manifest: PluginManifest,
     entry: LockEntry,
     trust: TrustStore,
+    interactive: bool,
 ) -> None:
     try:
         missing = _missing_required_permissions(manifest=manifest, entry=entry, trust=trust)
@@ -1664,6 +1665,14 @@ def _maybe_prompt_grant_required_permissions(
         return
 
     _print_required_permissions(missing)
+    if not interactive:
+        console.print(
+            f"  run `ooo plugin trust {manifest.name} --scope <scope>` to grant required scopes",
+            markup=False,
+            highlight=False,
+        )
+        return
+
     destructive = [p.scope for p in missing if p.risk == "destructive"]
     if destructive:
         console.print(
@@ -1983,6 +1992,7 @@ def add_command(
             manifest=manifest,
             entry=installed_entry,
             trust=trust,
+            interactive=True,
         )
         # An install at any digest also clears the disable record for
         # this subject (per the RFC: "remove ALSO deletes any disable
@@ -2268,6 +2278,7 @@ def _install_from_local_directory(
         manifest=manifest,
         entry=installed_entry,
         trust=trust,
+        interactive=False,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
 
@@ -2367,6 +2378,7 @@ def _install_named_from_local_path(
         manifest=manifest,
         entry=installed_entry,
         trust=trust,
+        interactive=False,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
 
@@ -2480,6 +2492,7 @@ def _install_named_from_url(
         manifest=manifest,
         entry=installed_entry,
         trust=trust,
+        interactive=False,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
 

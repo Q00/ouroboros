@@ -384,10 +384,10 @@ def test_install_local_directory(runner: CliRunner, tmp_path: Path) -> None:
     assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
 
 
-def test_install_local_directory_prompts_and_grants_required_permissions(
+def test_install_local_directory_lists_required_permissions_without_prompting(
     runner: CliRunner, tmp_path: Path
 ) -> None:
-    """`install` surfaces the same required-permission prompt as `add`."""
+    """`install` remains non-interactive and never consumes stdin for trust."""
     plugin_dir = tmp_path / "github-pr-ops"
     plugin_dir.mkdir(parents=True, exist_ok=True)
     (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
@@ -405,15 +405,14 @@ def test_install_local_directory_prompts_and_grants_required_permissions(
             "--trust-root",
             str(paths["trust_root"]),
         ],
-        input="y\n",
     )
 
     assert result.exit_code == 0, result.output
     assert "Required permissions:" in result.output
-    assert "Grant required permissions now?" in result.output
+    assert "Grant required permissions now?" not in result.output
+    assert "ooo plugin trust github-pr-ops --scope <scope>" in result.output
     record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
-    assert record is not None
-    assert record.has_scope("github:read")
+    assert record is None
 
 
 def test_add_persists_absolute_plugin_home_for_relative_root(
@@ -1676,7 +1675,7 @@ def test_install_named_with_from_local_path(runner: CliRunner, tmp_path: Path) -
     )
 
 
-def test_install_direct_directory_prompts_to_grant_required_permissions(
+def test_install_direct_directory_lists_required_permissions_without_prompting(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     manifest = {
@@ -1707,18 +1706,17 @@ def test_install_direct_directory_prompts_to_grant_required_permissions(
             "--trust-root",
             str(paths["trust_root"]),
         ],
-        input="y\n",
     )
 
     assert result.exit_code == 0, result.output
     assert "Required permissions:" in result.output
-    assert "Grant required permissions now?" in result.output
+    assert "Grant required permissions now?" not in result.output
+    assert "ooo plugin trust github-pr-ops --scope <scope>" in result.output
     record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
-    assert record is not None
-    assert record.has_scope("github:read")
+    assert record is None
 
 
-def test_install_named_from_local_path_prompts_to_grant_required_permissions(
+def test_install_named_from_local_path_lists_required_permissions_without_prompting(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     manifest = {
@@ -1753,14 +1751,14 @@ def test_install_named_from_local_path_prompts_to_grant_required_permissions(
             "--catalog-state",
             str(tmp_path / "catalog-state.json"),
         ],
-        input="y\n",
     )
 
     assert result.exit_code == 0, result.output
     assert "Required permissions:" in result.output
+    assert "Grant required permissions now?" not in result.output
+    assert "ooo plugin trust github-pr-ops --scope <scope>" in result.output
     record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
-    assert record is not None
-    assert record.has_scope("github:read")
+    assert record is None
 
 
 def test_install_default_form_resolves_via_known_catalog(runner: CliRunner, tmp_path: Path) -> None:
@@ -1823,7 +1821,7 @@ def test_install_default_form_resolves_via_known_catalog(runner: CliRunner, tmp_
     assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
 
 
-def test_install_default_form_prompts_to_grant_required_permissions(
+def test_install_default_form_lists_required_permissions_without_prompting(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     manifest = {
@@ -1888,15 +1886,14 @@ def test_install_default_form_prompts_to_grant_required_permissions(
             "--catalog-state",
             str(catalog_state),
         ],
-        input="y\n",
     )
 
     assert result.exit_code == 0, result.output
     assert "Required permissions:" in result.output
-    assert "Grant required permissions now?" in result.output
+    assert "Grant required permissions now?" not in result.output
+    assert "ooo plugin trust github-pr-ops --scope <scope>" in result.output
     record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
-    assert record is not None
-    assert record.has_scope("github:read")
+    assert record is None
 
 
 def test_install_named_default_form_with_no_known_catalog_errors(
