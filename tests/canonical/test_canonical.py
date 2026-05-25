@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from ouroboros.core.types import Result
+
 from .conftest import CanonicalScenario
 
 
@@ -268,3 +270,31 @@ async def test_scenario_live_run_or_skip(
         f"CANONICAL {scenario.slug}: status={tool_result.meta['status']} "
         f"phase={tool_result.meta.get('phase')} completion_mode={scenario.completion_mode}"
     )
+
+
+@pytest.mark.asyncio
+async def test_live_run_formats_mcp_error_result(
+    scenario: CanonicalScenario,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pin the live-run failure message against the real Result API."""
+
+    async def fake_invoke(selected: CanonicalScenario, workdir: Path) -> Result[object, str]:
+        return Result.err(f"{selected.slug} handler unavailable at {workdir.name}")
+
+    monkeypatch.setattr(
+        "tests.canonical.test_canonical._invoke_ouroboros_auto",
+        fake_invoke,
+    )
+
+    with pytest.raises(AssertionError) as exc_info:
+        await test_scenario_live_run_or_skip(
+            scenario=scenario,
+            live_run_enabled=True,
+            tmp_path=tmp_path,
+        )
+
+    message = str(exc_info.value)
+    assert f"{scenario.slug}: ouroboros_auto returned MCP error" in message
+    assert f"{scenario.slug} handler unavailable" in message
