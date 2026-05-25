@@ -1,9 +1,9 @@
 """Pytest fixtures for the canonical acceptance harness.
 
 L0-a slice of #1170 — provides scenario discovery + per-scenario
-fixture loading. The actual ``ouroboros_auto`` invocation lands
-in a follow-up sub-PR; this PR ships the discovery contract,
-fixture-shape validation, and the runner skeleton.
+fixture loading. The live ``ouroboros_auto`` invocation is available
+through the explicit ``OUROBOROS_RUN_CANONICAL=1`` opt-in path; the
+default CI path remains hermetic and validates fixture shape.
 
 Per-scenario fixture is parametrized via ``pytest_generate_tests`` so
 adding a new ``tests/canonical/<slug>/`` directory automatically
