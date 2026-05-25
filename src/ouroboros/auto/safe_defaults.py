@@ -104,6 +104,27 @@ _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
     ),
 }
 
+
+# Line-anchored marker for a user-declared non-goal / exclusion section in
+# a free-form goal string. Examples that match:
+#   ``non_goals: …``         ``non-goals: …``        ``Non Goals: …``
+#   ``excludes: …``          ``Out-of-scope: …``     ``- non_goals:``
+# The trailing colon is required so that prose that merely mentions
+# ``non-goals`` in a sentence is not mistaken for a section header.
+_PROMPT_NON_GOAL_HEADER = re.compile(
+    r"^\s*(?:[-*•]\s+)?(?:non[ _-]?goals?|excludes?|out[ _-]?of[ _-]?scope)\s*:",
+    re.IGNORECASE,
+)
+
+# Any other line-anchored ``<label>:`` header, used to detect the *next*
+# section that ends a multi-line non-goals body. Matches things like
+# ``actors:``, ``inputs:``, ``- constraints:`` while leaving body lines
+# such as ``  - production deploy`` unmatched.
+_PROMPT_SECTION_HEADER = re.compile(
+    r"^\s*(?:[-*•]\s+)?[A-Za-z][A-Za-z0-9_ -]{0,40}\s*:(?:\s|$)",
+)
+
+
 _UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         "credentials/secrets",
@@ -319,9 +340,18 @@ def _unsafe_context_reason(
     interview questions and the still-open ``pending_question``, because a
     clarifying question like "should this deploy to production?" does not
     authorize a deploy — only the answer does. It also ignores ``NON_GOAL``
-    entries because confirmed non-goals are explicit *exclusions*; treating
-    "non-goals are credentials and production deployment" as active unsafe
-    scope would invert the user's intent.
+    ledger entries because confirmed non-goals are explicit *exclusions*;
+    treating "non-goals are credentials and production deployment" as active
+    unsafe scope would invert the user's intent.
+
+    The same exclusion principle is applied at the *string* level to any
+    ``non_goals: …`` / ``excludes: …`` / ``out-of-scope: …`` section in the
+    free-form ``goal`` argument — see :func:`_strip_prompt_non_goal_sections`
+    for the rationale. Without this pre-pass, a caller that already declares
+    its non-goals in the goal string (e.g. a handoff prompt body) would have
+    those exclusions silently flipped into "active unsafe scope" because the
+    interview has not yet had a chance to register them as ``NON_GOAL``
+    ledger entries.
     """
     # NFKC compatibility decomposition collapses fullwidth/half-width Latin,
     # ligatures and other compatibility variants onto their canonical ASCII
@@ -330,12 +360,13 @@ def _unsafe_context_reason(
     # block, U+FF21..U+FF5A) or ``ﬁnalize`` (the ``fi`` ligature U+FB01).
     # Without the normalization step ``\b(deploy|production|...)\b`` would
     # not match those forms, defeating the gate's purpose.
+    sanitized_goal = _strip_prompt_non_goal_sections(goal)
     context = unicodedata.normalize(
         "NFKC",
         "\n".join(
             value
             for value in (
-                goal,
+                sanitized_goal,
                 *_unsafe_ledger_values(ledger),
                 *_interview_answers(ledger),
             )
@@ -542,6 +573,60 @@ _NEGATION_CLAUSE_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _strip_prompt_non_goal_sections(text: str) -> str:
+    """Remove user-declared non-goal sections from a goal string before
+    unsafe-context matching.
+
+    :func:`_unsafe_context_reason` already excludes ledger ``NON_GOAL``
+    entries on the documented principle that confirmed non-goals are
+    explicit *exclusions* and must not be treated as active unsafe scope.
+    That exclusion only fires after the interview has structured those
+    exclusions into the ledger. Callers that pre-declare their non-goals
+    inside the free-form goal string — typically scripted invocations or
+    handoff prompts that bundle the seven canonical interview slots in
+    the request body — would otherwise see the same words leak into the
+    matcher input before the interview ever ran, flipping the gate into
+    an unsafe-context block on the user's own exclusion text.
+
+    The helper recognises a non-goal section header
+    (``non_goals:``, ``non-goals:``, ``non goals:``, ``excludes:`` or
+    ``out-of-scope:``) at the start of a line (allowing leading
+    whitespace or a list bullet) and drops every subsequent line until
+    one of these terminators is reached:
+
+    * a blank line, or
+    * a non-empty line that begins another labelled section header
+      (``actors:``, ``inputs:``, ``- constraints:``, …), which is then
+      preserved.
+
+    Free-form prose that merely mentions ``non-goals`` mid-sentence does
+    not match because the regex is line-anchored and requires a trailing
+    colon.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    skipping = False
+    for line in lines:
+        if _PROMPT_NON_GOAL_HEADER.search(line):
+            skipping = True
+            continue
+        if not skipping:
+            out.append(line)
+            continue
+        # We are inside a non-goal block — decide whether to keep skipping.
+        if not line.strip():
+            skipping = False
+            continue
+        if _PROMPT_SECTION_HEADER.match(line):
+            # A new section starts — stop skipping, keep this line.
+            skipping = False
+            out.append(line)
+            continue
+        # Still inside the non-goal body (continuation line, bullet, …);
+        # drop it from the matcher input.
+    return "\n".join(out)
 
 
 def _strip_negated_clauses(text: str) -> str:
