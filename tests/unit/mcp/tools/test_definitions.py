@@ -300,6 +300,43 @@ class TestExecuteSeedHandler:
             result.error
         )
 
+    async def test_handle_plugin_rejects_fat_harness_resume_contract(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plugin-dispatched execute_seed must not resume unenforceable fat-harness sessions."""
+        tracker = SessionTracker.create("exec_resume", "seed-123").with_progress(
+            {"fat_harness_mode": True}
+        )
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                assert session_id == "sess_resume"
+                return Result.ok(tracker)
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "session_id": "sess_resume"}
+        )
+
+        assert result.is_err
+        assert "cannot resume sessions created with fat_harness_mode=True" in str(
+            result.error
+        )
+
     async def test_handle_rejects_unknown_execution_mode(self) -> None:
         """MCP execute_seed keeps execution_mode non-configurable like the CLI."""
         handler = ExecuteSeedHandler()
@@ -1702,6 +1739,43 @@ class TestAsyncJobHandlers:
 
         assert result.is_err
         assert "execution_mode='fat_harness' is not supported in OpenCode plugin dispatch" in str(
+            result.error
+        )
+
+    async def test_start_execute_seed_plugin_rejects_fat_harness_resume_contract(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plugin-dispatched start_execute_seed must not resume unenforceable fat-harness sessions."""
+        tracker = SessionTracker.create("exec_resume", "seed-123").with_progress(
+            {"fat_harness_mode": True}
+        )
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                assert session_id == "sess_resume"
+                return Result.ok(tracker)
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        handler = StartExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "session_id": "sess_resume"}
+        )
+
+        assert result.is_err
+        assert "cannot resume sessions created with fat_harness_mode=True" in str(
             result.error
         )
 
