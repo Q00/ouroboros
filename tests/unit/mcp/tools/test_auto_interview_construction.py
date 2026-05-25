@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from ouroboros.auto.adapters import HandlerInterviewBackend
+import pytest
+
+from ouroboros.auto.adapters import HandlerError, HandlerInterviewBackend
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipelineResult
@@ -37,7 +39,7 @@ from ouroboros.mcp.tools.auto_handler import (
     _result_meta,
     _seed_initial_ledger_from_user_preferences,
 )
-from ouroboros.mcp.types import ContentType
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.providers.base import CompletionResponse, Message, UsageInfo
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 
@@ -106,6 +108,33 @@ Success criteria:
 Important dispatch rule:
 If `ouroboros_auto` is unavailable or interpreted as normal text, stop and report failure.
 """
+
+
+def test_parent_question_required_result_blocks_auto_interview_turn() -> None:
+    class _ParentQuestionHandler:
+        async def handle(self, arguments):  # type: ignore[no-untyped-def]
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="Session interview_parent\n\nAsk the user directly.",
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "session_id": "interview_parent",
+                        "status": "parent_question_required",
+                        "ask_user_directly": True,
+                        "last_question_required": True,
+                    },
+                )
+            )
+
+    backend = HandlerInterviewBackend(_ParentQuestionHandler(), cwd="/tmp")  # type: ignore[arg-type]
+
+    with pytest.raises(HandlerError, match="parent-session user question"):
+        asyncio.run(backend.start("Build a CLI", cwd="/tmp", interview_id="interview_parent"))
 
 
 def _assert_isolated_allowed_tools(factory_kwargs: dict[str, Any]) -> None:
@@ -1393,8 +1422,7 @@ def test_auto_sub_interview_spy_adapter_fails_on_any_tool_request(
 
     assert result.is_ok, result.error
     assert captured["turn"] is None
-    assert captured["error_type"] == "PartialInterviewStartError"
-    assert "ToolUseBlock" in captured["error"]
+    assert captured["error_type"] == "HandlerError"
     assert "What is the primary user goal?" not in captured["error"]
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -1538,9 +1566,7 @@ def test_auto_sub_interview_isolates_parent_skill_invocations(
 
     assert result.is_ok, result.error
     assert captured["turn"] is None
-    assert captured["error_type"] == "PartialInterviewStartError"
-    assert "ToolUseBlock" in captured["error"]
-    assert "ouroboros-auto" in captured["error"]
+    assert captured["error_type"] == "HandlerError"
     assert "What should the first auto interview question clarify?" not in captured["error"]
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -1691,9 +1717,7 @@ def test_auto_sub_interview_isolates_parent_agent_invocations(
 
     assert result.is_ok, result.error
     assert captured["turn"] is None
-    assert captured["error_type"] == "PartialInterviewStartError"
-    assert "ToolUseBlock" in captured["error"]
-    assert "researcher" in captured["error"]
+    assert captured["error_type"] == "HandlerError"
     assert "What should the first auto interview question clarify?" not in captured["error"]
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -1839,9 +1863,7 @@ def test_auto_sub_interview_isolates_parent_plugin_invocations(
 
     assert result.is_ok, result.error
     assert captured["turn"] is None
-    assert captured["error_type"] == "PartialInterviewStartError"
-    assert "ToolUseBlock" in captured["error"]
-    assert "mcp__parent_plugin__lookup" in captured["error"]
+    assert captured["error_type"] == "HandlerError"
     assert "What should the first auto interview question clarify?" not in captured["error"]
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -1998,9 +2020,7 @@ def test_auto_sub_interview_isolates_parent_hook_context(
 
     assert result.is_ok, result.error
     assert captured["turn"] is None
-    assert captured["error_type"] == "PartialInterviewStartError"
-    assert "ToolUseBlock" in captured["error"]
-    assert "Bash" in captured["error"]
+    assert captured["error_type"] == "HandlerError"
     assert "What should the first auto interview question clarify?" not in captured["error"]
 
     factory_kwargs = mock_factory.call_args.kwargs

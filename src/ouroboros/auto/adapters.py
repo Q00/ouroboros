@@ -828,6 +828,13 @@ def _turn_from_result(
     result: MCPToolResult, *, fallback_session_id: str | None = None
 ) -> InterviewTurn:
     meta = result.meta or {}
+    if meta.get("status") == "parent_question_required":
+        session_id = _optional_str(meta.get("session_id")) or fallback_session_id
+        detail = f" for session {session_id}" if session_id else ""
+        raise HandlerError(
+            "ouroboros_interview requires a parent-session user question"
+            f"{detail}; auto cannot answer the recovery instruction"
+        )
     session_id = _optional_str(meta.get("session_id")) or fallback_session_id
     if not session_id:
         raise HandlerError("ouroboros_interview did not return a session_id")

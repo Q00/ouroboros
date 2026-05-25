@@ -174,6 +174,41 @@ async def test_tool_envelope_question_failure_hands_off_to_parent_session(
 
 
 @pytest.mark.asyncio
+async def test_first_question_parent_handoff_resume_records_last_question(
+    tmp_path: Path,
+) -> None:
+    provider_error = ProviderError(
+        "Question generator produced a ToolUseBlockViolation",
+        provider="claude_code",
+        details={"error_type": "ToolUseBlockViolation"},
+    )
+    engine = _FakeInterviewEngine(state_dir=tmp_path, question_error=provider_error)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=AsyncMock(),
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    start = await handler.handle({"initial_context": "Build a CLI", "cwd": str(tmp_path)})
+    session_id = start.value.meta["session_id"]
+    answer = await handler.handle(
+        {
+            "session_id": session_id,
+            "answer": "It should scaffold plugin manifests.",
+            "last_question": "What should the CLI do first?",
+        }
+    )
+    await handler.close()
+
+    assert answer.is_ok
+    persisted_state = engine.states[session_id]
+    assert persisted_state.rounds[-1].question == "What should the CLI do first?"
+    assert persisted_state.rounds[-1].user_response == "It should scaffold plugin manifests."
+
+
+@pytest.mark.asyncio
 async def test_tool_envelope_failure_after_answer_hands_off_without_mcp_error(
     tmp_path: Path,
 ) -> None:

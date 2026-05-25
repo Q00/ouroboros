@@ -2388,7 +2388,9 @@ class InterviewHandler:
                             is_brownfield=state.is_brownfield,
                         )
 
-                    if not state.rounds:
+                    if not state.rounds and last_question:
+                        pending_question = last_question
+                    elif not state.rounds:
                         return Result.err(
                             MCPToolError(
                                 "Cannot record answer - no questions have been asked yet",
@@ -2424,7 +2426,9 @@ class InterviewHandler:
                         else "initial"
                     )
 
-                    if state.rounds[-1].user_response is None:
+                    if not state.rounds:
+                        pass
+                    elif state.rounds[-1].user_response is None:
                         pending_question = last_question or state.rounds[-1].question
                         state.rounds.pop()
                     else:
