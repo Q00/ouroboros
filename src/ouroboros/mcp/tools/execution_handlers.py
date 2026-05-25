@@ -118,6 +118,25 @@ def _validate_fresh_execution_mode(
     return Result.ok(None)
 
 
+def _validate_plugin_execution_mode(
+    execution_mode: Any,
+    *,
+    tool_name: str,
+) -> Result[None, MCPToolError]:
+    """Reject acceptance modes plugin dispatch cannot enforce."""
+    if execution_mode == "fat_harness":
+        return Result.err(
+            MCPToolError(
+                "seed.orchestrator.execution_mode='fat_harness' is not supported in "
+                "OpenCode plugin dispatch because the child task cannot enforce typed "
+                "evidence plus verifier PASS acceptance. Run without plugin dispatch or "
+                "omit the selector for the default runner.",
+                tool_name=tool_name,
+            )
+        )
+    return Result.ok(None)
+
+
 def _pause_metadata_from_progress(progress: dict[str, Any]) -> dict[str, Any]:
     """Extract pause metadata safe to expose in MCP tool results."""
     metadata: dict[str, Any] = {}
@@ -351,18 +370,25 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             if mode_result.is_err:
                 return mode_result
 
-        # --- Subagent dispatch: gate on runtime + opencode_mode ---
-        payload = build_execute_subagent(
-            seed_content=seed_content,
-            session_id=session_id,
-            seed_path=arguments.get("seed_path"),
-            cwd=str(resolved_cwd),
-            max_iterations=max_iterations,
-            skip_qa=arguments.get("skip_qa", False),
-            model_tier=model_tier,
-            max_parallel_workers=max_parallel_workers,
-        )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            if not is_resume:
+                plugin_mode_result = _validate_plugin_execution_mode(
+                    execution_mode,
+                    tool_name="ouroboros_execute_seed",
+                )
+                if plugin_mode_result.is_err:
+                    return plugin_mode_result
+            # --- Subagent dispatch: gate on runtime + opencode_mode ---
+            payload = build_execute_subagent(
+                seed_content=seed_content,
+                session_id=session_id,
+                seed_path=arguments.get("seed_path"),
+                cwd=str(resolved_cwd),
+                max_iterations=max_iterations,
+                skip_qa=arguments.get("skip_qa", False),
+                model_tier=model_tier,
+                max_parallel_workers=max_parallel_workers,
+            )
             await emit_subagent_dispatched_event(
                 self.event_store,
                 session_id=session_id,
@@ -1139,6 +1165,14 @@ class StartExecuteSeedHandler:
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # StartExecuteSeedHandler delegates to ExecuteSeedHandler internally.
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            if not is_resume:
+                plugin_mode_result = _validate_plugin_execution_mode(
+                    execution_mode,
+                    tool_name="ouroboros_start_execute_seed",
+                )
+                if plugin_mode_result.is_err:
+                    return plugin_mode_result
+
             # Initialize event store first so the audit event persists.
             await self._event_store.initialize()
 

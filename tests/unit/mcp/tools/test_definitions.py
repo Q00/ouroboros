@@ -277,6 +277,29 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "execution_mode='legacy' was removed" in str(result.error)
 
+    async def test_handle_plugin_rejects_fat_harness_execution_mode(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Plugin-dispatched execute_seed must not acknowledge unenforced fat-harness."""
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: fat_harness\nmetadata:", 1
+                )
+            }
+        )
+
+        assert result.is_err
+        assert "execution_mode='fat_harness' is not supported in OpenCode plugin dispatch" in str(
+            result.error
+        )
+
     async def test_handle_rejects_unknown_execution_mode(self) -> None:
         """MCP execute_seed keeps execution_mode non-configurable like the CLI."""
         handler = ExecuteSeedHandler()
@@ -1657,6 +1680,30 @@ class TestAsyncJobHandlers:
 
         assert result.is_err
         assert "execution_mode='legacy' was removed" in str(result.error)
+
+    async def test_start_execute_seed_plugin_rejects_fat_harness_execution_mode(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Plugin-dispatched start_execute_seed cannot enforce fat-harness acceptance."""
+        handler = StartExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: fat_harness\nmetadata:", 1
+                )
+            }
+        )
+
+        assert result.is_err
+        assert "execution_mode='fat_harness' is not supported in OpenCode plugin dispatch" in str(
+            result.error
+        )
 
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()
