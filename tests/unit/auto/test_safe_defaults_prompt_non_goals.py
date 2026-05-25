@@ -84,6 +84,20 @@ def test_strip_handles_bullet_list_body() -> None:
     assert "keep changes local" in sanitized
 
 
+def test_strip_handles_indented_labelled_body_lines() -> None:
+    text = (
+        "Goal: refactor module Y.\n"
+        "non_goals:\n"
+        "  deploy: production\n"
+        "  credentials: customer secrets\n"
+        "actors: local CLI operator\n"
+    )
+    sanitized = _strip_prompt_non_goal_sections(text)
+    assert "deploy: production" not in sanitized
+    assert "credentials: customer secrets" not in sanitized
+    assert "actors: local CLI operator" in sanitized
+
+
 def test_strip_terminates_on_blank_line() -> None:
     text = (
         "Goal line.\n"

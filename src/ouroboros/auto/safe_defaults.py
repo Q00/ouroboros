@@ -629,14 +629,20 @@ def _strip_prompt_non_goal_sections(text: str) -> str:
         if not line.strip():
             skipping = False
             continue
+        if line[:1].isspace():
+            # Still inside a structurally clear non-goal body; drop it
+            # from the matcher input. This must run before section-header
+            # detection so indented YAML-ish body lines such as
+            # ``  deploy: production`` stay scoped under non-goals.
+            continue
         if _PROMPT_SECTION_HEADER.match(line):
             # A new section starts — stop skipping, keep this line.
             skipping = False
             out.append(line)
             continue
-        if line[:1].isspace() or _PROMPT_LIST_ITEM.match(line):
-            # Still inside a structurally clear non-goal body; drop it
-            # from the matcher input.
+        if _PROMPT_LIST_ITEM.match(line):
+            # Unindented non-labelled list items still belong to the
+            # non-goal body.
             continue
         # Unindented prose after a non-goal header is ambiguous and may be
         # active scope. Fail closed by preserving it for matching.
