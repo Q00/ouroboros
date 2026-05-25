@@ -245,9 +245,9 @@ async def test_scenario_live_run_or_skip(
 
     result = await _invoke_ouroboros_auto(scenario, workdir)
 
-    assert result.is_ok(), (
+    assert result.is_ok, (
         f"{scenario.slug}: ouroboros_auto returned MCP error: "
-        f"{result.unwrap_err() if not result.is_ok() else 'unknown'}"
+        f"{result.error if result.is_err else 'unknown'}"
     )
 
     tool_result = result.unwrap()
