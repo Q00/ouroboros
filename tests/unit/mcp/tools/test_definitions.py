@@ -333,9 +333,7 @@ class TestExecuteSeedHandler:
         )
 
         assert result.is_err
-        assert "cannot resume sessions created with fat_harness_mode=True" in str(
-            result.error
-        )
+        assert "cannot resume sessions created with fat_harness_mode=True" in str(result.error)
 
     async def test_handle_rejects_unknown_execution_mode(self) -> None:
         """MCP execute_seed keeps execution_mode non-configurable like the CLI."""
@@ -1775,9 +1773,7 @@ class TestAsyncJobHandlers:
         )
 
         assert result.is_err
-        assert "cannot resume sessions created with fat_harness_mode=True" in str(
-            result.error
-        )
+        assert "cannot resume sessions created with fat_harness_mode=True" in str(result.error)
 
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()
