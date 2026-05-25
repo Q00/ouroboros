@@ -9,8 +9,9 @@ This module tests the complete CLI command execution including:
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import typer
 from typer.testing import CliRunner
@@ -85,6 +86,67 @@ class TestCLIBasics:
         assert result.exit_code == 0
         assert "runtime" in result.output.lower()
         assert "llm-backend" in result.output.lower()
+
+    def test_qa_help(self) -> None:
+        """Test that the top-level qa command is registered."""
+        result = runner.invoke(app, ["qa", "--help"])
+        assert result.exit_code == 0
+        assert "quality-bar" in result.output
+        assert "artifact-type" in result.output
+
+    def test_qa_command_delegates_to_mcp_handler(self, tmp_path: Path) -> None:
+        """The CLI wrapper should reuse the MCP QA handler and file-loading semantics."""
+        artifact = tmp_path / "artifact.txt"
+        artifact.write_text("candidate artifact", encoding="utf-8")
+        reference = tmp_path / "reference.txt"
+        reference.write_text("golden reference", encoding="utf-8")
+        seed = tmp_path / "seed.yaml"
+        seed.write_text("goal: test\n", encoding="utf-8")
+        handler_result = SimpleNamespace(
+            is_err=False,
+            value=SimpleNamespace(
+                content=[SimpleNamespace(text="QA Verdict [PASS]")],
+                meta={"passed": True},
+            ),
+        )
+
+        with patch(
+            "ouroboros.cli.commands.qa.QAHandler.handle",
+            new=AsyncMock(return_value=handler_result),
+        ) as mock_handle:
+            result = runner.invoke(
+                app,
+                [
+                    "qa",
+                    str(artifact),
+                    "--quality-bar",
+                    "Must match the reference.",
+                    "--artifact-type",
+                    "document",
+                    "--reference",
+                    str(reference),
+                    "--pass-threshold",
+                    "0.5",
+                    "--qa-session-id",
+                    "qa-session-test",
+                    "--seed-content",
+                    str(seed),
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "QA Verdict [PASS]" in result.output
+        mock_handle.assert_awaited_once()
+        call_args = mock_handle.await_args.args[0]
+        assert call_args == {
+            "artifact": "candidate artifact",
+            "quality_bar": "Must match the reference.",
+            "artifact_type": "document",
+            "pass_threshold": 0.5,
+            "reference": "golden reference",
+            "qa_session_id": "qa-session-test",
+            "seed_content": "goal: test\n",
+        }
 
 
 class TestInitCommand:
