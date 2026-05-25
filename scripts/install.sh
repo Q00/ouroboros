@@ -47,7 +47,7 @@ elif [ -f "$(dirname "$0")/../pyproject.toml" ] && grep -q "name = \"ouroboros-a
   IS_LOCAL=true
 fi
 
-# Auto-detect: if PyPI's latest published version is a pre-release, allow
+# Auto-detect: if PyPI's info.version response is a pre-release, allow
 # pre-releases. On lookup/parsing failure, stay stable-only.
 PRE_FLAG=""
 if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
