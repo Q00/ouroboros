@@ -7,7 +7,7 @@ runtime dispatch, persistence, or projection records.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -304,6 +304,8 @@ def workflow_lifecycle_from_plugin_invocation_result(
     node_id: str,
     result: InvocationResult,
     timestamp: datetime | None = None,
+    completed_plugin_node_ids: Iterable[str] = (),
+    include_run_created: bool = True,
 ) -> tuple[WorkflowLifecycleEvent, ...]:
     """Project a plugin firewall result into Workflow IR lifecycle events.
 
@@ -323,27 +325,33 @@ def workflow_lifecycle_from_plugin_invocation_result(
         raise ValueError(msg)
 
     started_at = timestamp or datetime.now(tz=UTC)
-    if result.status == "success":
-        events = [
+    events: list[WorkflowLifecycleEvent] = []
+    if include_run_created:
+        events.append(
             WorkflowLifecycleEvent(
                 event_type=WorkflowLifecycleEventType.RUN_CREATED,
                 workflow_id=spec.spec_id,
                 timestamp=started_at,
-            ),
+            )
+        )
+    if result.status == "success":
+        events.append(
             WorkflowLifecycleEvent(
                 event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
                 workflow_id=spec.spec_id,
                 node_id=node_id,
                 attempt=1,
                 timestamp=started_at + timedelta(seconds=1),
-            ),
-        ]
+            )
+        )
         plugin_task_nodes = [
             candidate
             for candidate in spec.nodes
             if candidate.owner is NodeOwner.PLUGIN and candidate.kind is NodeKind.TASK
         ]
-        if len(plugin_task_nodes) == 1:
+        plugin_task_node_ids = frozenset(candidate.node_id for candidate in plugin_task_nodes)
+        completed_after = frozenset(completed_plugin_node_ids) | {node_id}
+        if plugin_task_node_ids <= completed_after:
             events.append(
                 WorkflowLifecycleEvent(
                     event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
@@ -354,27 +362,25 @@ def workflow_lifecycle_from_plugin_invocation_result(
         return tuple(events)
 
     reason_code = "plugin_blocked" if result.status == "blocked" else "plugin_failed"
-    return (
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.RUN_CREATED,
-            workflow_id=spec.spec_id,
-            timestamp=started_at,
-        ),
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.NODE_FAILED,
-            workflow_id=spec.spec_id,
-            node_id=node_id,
-            attempt=1,
-            reason_code=reason_code,
-            timestamp=started_at + timedelta(seconds=1),
-        ),
-        WorkflowLifecycleEvent(
-            event_type=WorkflowLifecycleEventType.RUN_FAILED,
-            workflow_id=spec.spec_id,
-            reason_code=reason_code,
-            timestamp=started_at + timedelta(seconds=2),
-        ),
+    events.extend(
+        (
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.NODE_FAILED,
+                workflow_id=spec.spec_id,
+                node_id=node_id,
+                attempt=1,
+                reason_code=reason_code,
+                timestamp=started_at + timedelta(seconds=1),
+            ),
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.RUN_FAILED,
+                workflow_id=spec.spec_id,
+                reason_code=reason_code,
+                timestamp=started_at + timedelta(seconds=2),
+            ),
+        )
     )
+    return tuple(events)
 
 
 def _validate_registered_plugin_action_contract(descriptor: PluginDescriptor) -> None:
