@@ -3428,12 +3428,23 @@ class ParallelACExecutor:
             )
             # Invalid indices will be skipped in the execution loop below
 
+        dependency_edges = [
+            {"ac_index": idx, "depends_on": deps}
+            for idx in range(total_acs)
+            if (deps := tuple(execution_plan.get_dependencies(idx)))
+        ]
         log.info(
             "parallel_executor.execution.started",
             session_id=session_id,
             total_acs=total_acs,
             total_levels=total_levels,
             levels=execution_plan.execution_levels,
+        )
+        log.info(
+            "parallel_executor.dependency_graph",
+            session_id=session_id,
+            total_acs=total_acs,
+            dependency_edges=dependency_edges,
         )
 
         # Emit initial progress for TUI
@@ -5308,6 +5319,26 @@ Files present:
             result_final_message = final_message
             if fat_harness_error is not None:
                 success = False
+                log.warning(
+                    "parallel_executor.ac.verifier_rejected",
+                    ac_index=ac_index,
+                    depth=depth,
+                    reason=fat_harness_error,
+                    typed_evidence_present=typed_evidence is not None,
+                    typed_evidence_valid=(
+                        typed_validation.ok if typed_validation is not None else False
+                    ),
+                    verifier_ran=verifier_verdict is not None,
+                    verifier_passed=(
+                        verifier_verdict.passed if verifier_verdict is not None else False
+                    ),
+                    verifier_reasons=(
+                        list(verifier_verdict.reasons) if verifier_verdict is not None else []
+                    ),
+                    verifier_failure_class=(
+                        verifier_verdict.failure_class if verifier_verdict is not None else None
+                    ),
+                )
                 result_final_message = (
                     f"{fat_harness_error}\n\nRuntime final message:\n{final_message}"
                     if final_message
