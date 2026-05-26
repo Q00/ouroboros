@@ -42,6 +42,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `init` | Start interactive interview to refine requirements |
 | `auto` | Run bounded goal → A-grade Seed → execution handoff pipeline |
 | `run` | Execute Ouroboros workflows |
+| `qa` | Evaluate an artifact against a natural-language quality bar |
 | `cancel` | Cancel stuck or orphaned executions |
 | `config` | Manage Ouroboros configuration (show, switch backend, set values) |
 | `uninstall` | Cleanly remove all Ouroboros configuration from your system |
@@ -526,6 +527,37 @@ ouroboros codex refresh
 ```
 
 This command updates packaged `~/.codex/rules/ouroboros*.md` and `~/.codex/skills/ouroboros-*` artifacts. It does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. It intentionally does not prune extra `ouroboros-*` files because prefix ownership can include user-managed artifacts.
+
+## `ouroboros qa`
+
+Run a general-purpose QA verdict over an artifact using the same implementation
+as the `ouroboros_qa` MCP tool.
+
+```bash
+ouroboros qa ARTIFACT [OPTIONS]
+```
+
+`ARTIFACT` may be literal text or a path to a file. `--reference` and
+`--seed-content` accept the same literal-or-file behavior.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-q, --quality-bar TEXT` | Natural-language description of what PASS means |
+| `-t, --artifact-type TEXT` | Artifact type, such as `code`, `api_response`, `document`, `screenshot`, `test_output`, or `custom` |
+| `-r, --reference TEXT` | Optional reference text or path for comparison |
+| `--pass-threshold FLOAT` | Score threshold for PASS verdict, from `0.0` to `1.0` |
+| `--qa-session-id TEXT` | Existing QA session ID for iterative checks |
+| `--seed-content TEXT` | Optional Seed YAML text or path for additional context |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | QA completed and the verdict passed |
+| `1` | QA handler failed before producing a verdict |
+| `2` | QA completed and the verdict did not pass |
 
 ## `ouroboros uninstall`
 
