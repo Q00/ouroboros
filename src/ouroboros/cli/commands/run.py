@@ -162,6 +162,32 @@ def _directory_for_runtime(path: Path) -> Path:
     return path.parent if path.is_file() else path
 
 
+def _detect_project_root_from_seed_path(seed_file: Path, *, max_levels: int = 6) -> Path | None:
+    """Walk up from ``seed_file`` to find a directory containing ``.ouroboros/``.
+
+    Central seeds authored by the seed generator live under
+    ``<project_root>/.ouroboros/seeds/``. When the seed file is invoked from
+    a fresh worktree, the seed's parent directory (``.ouroboros/seeds/``) is
+    not the project root: joining seed-relative reference paths against it
+    produces non-existent locations. Walking up to the directory that owns
+    ``.ouroboros/`` recovers the intended project root without requiring the
+    caller to pass ``--project-dir`` explicitly.
+
+    Returns ``None`` when no ``.ouroboros/`` marker is found within
+    ``max_levels`` parents; the caller falls back to ``seed_file.parent`` in
+    that case.
+    """
+    current = seed_file.parent.resolve()
+    for _ in range(max_levels):
+        if (current / ".ouroboros").is_dir():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
 def _resolve_cli_project_dir(
     seed: "Seed",
     seed_file: Path,
@@ -174,7 +200,8 @@ def _resolve_cli_project_dir(
         return project_dir.expanduser().resolve()
 
     seed_data = seed_data or {}
-    seed_base = seed_file.parent.resolve()
+    detected_root = _detect_project_root_from_seed_path(seed_file)
+    seed_base = detected_root or seed_file.parent.resolve()
     metadata_project_dir = _resolve_raw_metadata_project_dir(seed_data, stable_base=seed_base)
     if metadata_project_dir is not None:
         return _directory_for_runtime(metadata_project_dir)
