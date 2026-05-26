@@ -1476,7 +1476,7 @@ _AC_RUNTIME_SCOPE_METADATA_KEYS = frozenset(
 _AC_RUNTIME_RESUME_METADATA_KEYS = frozenset({"runtime_event_type", "server_session_id"})
 
 # Stall detection constants
-STALL_TIMEOUT_SECONDS: float = 300.0  # 5 minutes of silence → stall
+STALL_TIMEOUT_SECONDS: float = 900.0  # 15 minutes of silence → stall for realistic test suites
 HEARTBEAT_INTERVAL_SECONDS: float = 30.0  # Heartbeat emission interval
 MAX_STALL_RETRIES: int = 2  # Max retries after stall (3 total attempts)
 _STALL_SENTINEL = "__STALL_DETECTED__"  # Sentinel error for stall results

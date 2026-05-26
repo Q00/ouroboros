@@ -41,6 +41,11 @@ from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
+def test_stall_timeout_default_allows_realistic_test_suites() -> None:
+    """The default stall watchdog should not kill long quiet test commands too early."""
+    assert STALL_TIMEOUT_SECONDS == 900.0
+
+
 def _make_seed(*acceptance_criteria: str) -> Seed:
     """Build a minimal seed for parallel executor tests."""
     return Seed(
