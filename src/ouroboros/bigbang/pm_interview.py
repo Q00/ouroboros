@@ -58,6 +58,7 @@ log = structlog.get_logger()
 _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
 _PM_SYSTEM_PROMPT_PREFIX = """\
 You are a Product Requirements interviewer helping a PM define their product.
+Assume the resulting product requirements document will drive all downstream work through AI workflows, so elicit decisions precise enough for autonomous planning, implementation, and verification.
 
 Focus on: goal, user stories, constraints, success criteria, assumptions.
 
