@@ -412,12 +412,30 @@ class AutoHandler:
         )
 
         context_provider = _build_context_provider(dict(state.user_preferences))
+
+        # Issue #1248 — construct ``lateral_thinker`` ahead of the driver so
+        # the safe-default escalation path (interview phase, runs regardless
+        # of complete-product mode) has the same lateral handle the
+        # EVALUATE → UNSTUCK_LATERAL path uses below. ``LateralThinkHandler``
+        # is plugin-mode-skipped because it dispatches to OpenCode Task
+        # panes — the synchronous auto pipeline cannot consume that
+        # out-of-band response.
+        opencode_plugin_mode = opencode_mode == "plugin"
+        lateral_thinker = None
+        if not opencode_plugin_mode:
+            lateral_handler = LateralThinkHandler(
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            )
+            lateral_thinker = HandlerLateralThinker(lateral_handler)
+
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,
             max_rounds=max_interview_rounds,
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
+            lateral_thinker=lateral_thinker,
         )
         # Q00/ouroboros#782 review-11 BLOCKING #1: pass the un-demoted
         # ``state.ralph_opencode_mode`` (already populated above at line 251-252,
@@ -451,17 +469,23 @@ class AutoHandler:
         # is RUN → COMPLETE (async run handoff) so there is no synchronous
         # artifact to grade; instantiating QAHandler would be wasted setup.
         #
-        # Plugin-mode skip: ``QAHandler`` / ``LateralThinkHandler`` dispatch
-        # to OpenCode Task panes when ``opencode_mode == "plugin"``. The
-        # auto pipeline's Phase 2.1/2.2 advisory layer is synchronous and
-        # cannot consume out-of-band subagent output, so we leave both
-        # adapters unwired in plugin mode. The chain then falls back to
-        # the pre-Phase-2.1 behaviour (RUN → RALPH_HANDOFF → COMPLETE) —
-        # the existing Ralph plugin delegation continues to drive
-        # complete-product sessions in OpenCode Task panes as before.
+        # Plugin-mode skip: ``QAHandler`` dispatches to OpenCode Task panes
+        # when ``opencode_mode == "plugin"``. The auto pipeline's Phase
+        # 2.1/2.2 advisory layer is synchronous and cannot consume
+        # out-of-band subagent output, so the evaluator stays unwired in
+        # plugin mode. The chain then falls back to the pre-Phase-2.1
+        # behaviour (RUN → RALPH_HANDOFF → COMPLETE) — the existing Ralph
+        # plugin delegation continues to drive complete-product sessions
+        # in OpenCode Task panes as before.
+        #
+        # Issue #1248 — ``lateral_thinker`` is constructed above (before
+        # the driver) so it is available to both the driver's
+        # safe-default escalation path and the pipeline's
+        # EVALUATE → UNSTUCK_LATERAL path. The EVALUATE side stays gated
+        # by ``evaluator``, which keeps the complete-product invariant
+        # for that callsite without re-instantiating ``lateral_thinker``
+        # here.
         evaluator = None
-        lateral_thinker = None
-        opencode_plugin_mode = opencode_mode == "plugin"
         if complete_product and not opencode_plugin_mode:
             qa_handler = QAHandler(
                 llm_backend=self.llm_backend,
@@ -469,14 +493,6 @@ class AutoHandler:
                 opencode_mode=opencode_mode,
             )
             evaluator = HandlerEvaluator(qa_handler)
-            # RFC #809 Phase 2.2 — wire the persona-driven lateral advisor
-            # alongside the evaluator. Same gating: only when complete-product
-            # is on and we are NOT in plugin mode.
-            lateral_handler = LateralThinkHandler(
-                agent_runtime_backend=runtime_backend,
-                opencode_mode=opencode_mode,
-            )
-            lateral_thinker = HandlerLateralThinker(lateral_handler)
         watchdog_event_store = self.event_store or EventStore()
         await watchdog_event_store.initialize()
         watchdog = Watchdog(
