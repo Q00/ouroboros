@@ -703,3 +703,140 @@ async def test_run_orchestrator_falls_back_when_artifact_generation_fails(tmp_pa
     qa_args = mock_qa_handle.call_args.args[0]
     assert qa_args["artifact"] == "Parallel Execution Verification Report"
     assert qa_args["reference"] == "Verification artifact generation failed: boom"
+
+
+# ---------------------------------------------------------------------------
+# Project-root detection (central seed cwd resolution)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectProjectRootFromSeedPath:
+    """Tests for ouroboros.cli.commands.run._detect_project_root_from_seed_path."""
+
+    def test_returns_root_when_seed_lives_under_dot_ouroboros_seeds(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Central seeds at ``<root>/.ouroboros/seeds/seed.yaml`` resolve to ``<root>``."""
+        from ouroboros.cli.commands.run import _detect_project_root_from_seed_path
+
+        root = tmp_path / "project"
+        seeds_dir = root / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        seed_file = seeds_dir / "seed.yaml"
+        seed_file.write_text("goal: x")
+
+        assert _detect_project_root_from_seed_path(seed_file) == root.resolve()
+
+    def test_returns_none_when_no_marker_found(self, tmp_path: Path) -> None:
+        from ouroboros.cli.commands.run import _detect_project_root_from_seed_path
+
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: x")
+
+        assert _detect_project_root_from_seed_path(seed_file) is None
+
+    def test_returns_none_for_example_seed_in_project_with_dot_ouroboros(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Non-central seeds in a project tree must NOT trigger detection.
+
+        Pre-fix the scan matched any ``.ouroboros`` ancestor, so
+        ``<root>/examples/dummy_seed.yaml`` in a project that happened to
+        have ``<root>/.ouroboros/`` returned ``<root>``. Detection must be
+        scoped to ``.ouroboros/seeds`` ancestry so example/local seeds
+        continue to resolve next to themselves.
+        """
+        from ouroboros.cli.commands.run import _detect_project_root_from_seed_path
+
+        root = tmp_path / "project"
+        (root / ".ouroboros").mkdir(parents=True)
+        examples = root / "examples"
+        examples.mkdir()
+        seed_file = examples / "dummy_seed.yaml"
+        seed_file.write_text("goal: x")
+
+        assert _detect_project_root_from_seed_path(seed_file) is None
+
+    def test_finds_marker_within_bound(self, tmp_path: Path) -> None:
+        from ouroboros.cli.commands.run import _detect_project_root_from_seed_path
+
+        root = tmp_path / "p"
+        nested = root / ".ouroboros" / "seeds" / "extra"
+        nested.mkdir(parents=True)
+        seed_file = nested / "seed.yaml"
+        seed_file.write_text("goal: x")
+
+        assert _detect_project_root_from_seed_path(seed_file) == root.resolve()
+
+
+def test_resolve_cli_project_dir_central_seed_existing_file_ref_returns_project_root(
+    tmp_path: Path,
+) -> None:
+    """Existing file references must not pull cwd into a subdirectory.
+
+    Pre-fix the resolver accepted any existing ``context_references[].path``
+    and let ``_directory_for_runtime`` collapse it to its parent. For a
+    central seed at ``<root>/.ouroboros/seeds/seed.yaml`` with a reference
+    to ``src/ouroboros/core/project_paths.py`` this returned
+    ``<root>/src/ouroboros/core`` as runtime cwd, so the task workspace,
+    agent execution, and post-run verification all ran from the wrong
+    directory. Post-fix the detected project root wins over heuristic
+    file-reference collapse for central seeds.
+    """
+    project_root = tmp_path / "repo"
+    seed_file = project_root / ".ouroboros" / "seeds" / "seed.yaml"
+    seed_file.parent.mkdir(parents=True)
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    # Materialize the file the reference points at — the previously
+    # broken path collapsed cwd to its parent directory.
+    existing_file = project_root / "src" / "ouroboros" / "core" / "project_paths.py"
+    existing_file.parent.mkdir(parents=True)
+    existing_file.write_text("# stub\n", encoding="utf-8")
+
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "context_references": [
+                {
+                    "path": "src/ouroboros/core/project_paths.py",
+                    "role": "primary",
+                    "summary": "source file",
+                },
+            ],
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+    assert resolved == project_root.resolve()
+    # Hard regression guard: cwd must not be the source-file's parent.
+    assert resolved != existing_file.parent.resolve()
+
+
+def test_resolve_cli_project_dir_example_seed_with_dot_ouroboros_uses_seed_parent(
+    tmp_path: Path,
+) -> None:
+    """Example/local seeds in a project tree still fall back to seed_file.parent.
+
+    Pre-fix the broad ``.ouroboros`` ancestor scan promoted any seed under
+    a project tree to project-root cwd, breaking the existing back-compat
+    contract for example seeds. Post-fix detection requires
+    ``.ouroboros/seeds`` ancestry, so a seed at ``<root>/examples/dummy_seed.yaml``
+    in a project that happens to have ``<root>/.ouroboros/`` continues to
+    resolve to ``<root>/examples``.
+    """
+    project_root = tmp_path / "project"
+    (project_root / ".ouroboros").mkdir(parents=True)
+    examples_dir = project_root / "examples"
+    examples_dir.mkdir()
+    seed_file = examples_dir / "dummy_seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    seed = Seed.from_dict(VALID_SEED_DATA)
+
+    assert (
+        _resolve_cli_project_dir(seed, seed_file, seed_data=VALID_SEED_DATA)
+        == examples_dir.resolve()
+    )
