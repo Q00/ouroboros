@@ -822,20 +822,32 @@ class AutoInterviewDriver:
         * Pick the next persona via
           :func:`select_persona_for_safe_default_block`, honoring
           ``state.personas_invoked``.
-        * Invoke the lateral thinker once. On error / transient failure
-          / chain exhaustion stamp the typed
-          ``unstuck_exhausted`` reason on ``state.last_error_code`` and
-          return the original finalization unchanged — the caller's
-          existing BLOCKED branch then surfaces the typed terminal.
-        * On success, persist the persona's text on state for audit
-          (``last_lateral_*``), append the persona to
-          ``personas_invoked``, demote every active CONSERVATIVE_DEFAULT
-          ledger entry to ASSUMPTION (so the matcher's input no longer
-          contains the auto-answerer's boundary text), and re-run
-          :func:`finalize_safe_defaultable_gaps`.
-        * If the re-run clears ``unsafe_gaps`` the new finalization is
-          returned. Otherwise the loop selects the next persona until
-          the chain exhausts.
+        * Invoke the lateral thinker once.
+
+          - On **chain exhaustion** (selector returns ``None``), stamp
+            the typed ``unstuck_exhausted`` reason on
+            ``state.last_error_code`` and return the original
+            finalization. The caller's BLOCKED branch then surfaces the
+            typed terminal.
+          - On **timeout** / **handler exception** / **transient
+            ``LateralResult.error``**, record the persona attempt for
+            audit + chain progression but leave ``state.last_error_code``
+            alone so the existing ``interview_unsafe_gaps_remain`` /
+            ``interview_max_rounds_exhausted`` code applies. Only the
+            chain-exhausted path stamps ``unstuck_exhausted``.
+
+        * On a successful lateral response, persist the persona's text
+          on state for audit (``last_lateral_*``), append the persona
+          to ``personas_invoked``, and — only if the response carries
+          the canonical ``CLEARANCE: lexical_false_positive`` marker
+          (see :func:`_lateral_response_authorizes_demotion`) — demote
+          every active CONSERVATIVE_DEFAULT ledger entry to ASSUMPTION
+          and snapshot the mutated ledger onto ``state.ledger`` before
+          checkpointing so a resume after demotion sees the same input
+          the runtime path saw. The re-run of
+          :func:`finalize_safe_defaultable_gaps` then either clears
+          ``unsafe_gaps`` (returning the new finalization) or surfaces
+          the same matcher fire to the next persona.
 
         The function only mutates the caller's path of execution; the
         existing safe-default closure / BLOCKED branches downstream are
@@ -954,6 +966,15 @@ class AutoInterviewDriver:
                     persona=persona.value,
                     demoted_entry_count=demoted,
                 )
+                # The lateral audit (last_lateral_*, personas_invoked) and the
+                # ledger mutation must persist atomically: ``AutoStore.save``
+                # only writes ``state.to_dict()``, so without this snapshot a
+                # crash between the checkpoint here and the next ledger sync
+                # later in ``run()`` would replay with the persona "spent" but
+                # the matcher input un-demoted — the matcher would re-fire on
+                # resume with no fresh persona to clear it. Snapshot the
+                # mutated ledger before saving so resume sees what runtime saw.
+                state.ledger = ledger.to_dict()
             else:
                 log.info(
                     "auto.interview.safe_default.lateral_no_clearance",

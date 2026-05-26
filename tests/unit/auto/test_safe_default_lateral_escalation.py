@@ -25,6 +25,9 @@ paths:
    chain exhausts → ``unstuck_exhausted`` (safety regression guard).
 8. Genuinely unsafe conservative_default entry survives a prompt-only
    lateral response (safety regression guard).
+9. After a clearance-marked demotion, ``state.ledger`` reloads from the
+   ``AutoStore`` checkpoint with the demoted source classifications
+   (resume contract — keeps persona audit and ledger mutation in sync).
 """
 
 from __future__ import annotations
@@ -593,3 +596,60 @@ async def test_unsafe_conservative_default_survives_advisory_lateral(tmp_path) -
     # Both personas were exercised — the chain is honoured even when the
     # ledger is not mutated.
     assert invocations == [ThinkingPersona.CONTRARIAN, ThinkingPersona.ARCHITECT]
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — durable state after clearance demotion matches the runtime ledger
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clearance_demotion_persists_ledger_for_resume(tmp_path) -> None:
+    """After a clearance-marked demotion, the AutoStore checkpoint reflects the demote.
+
+    ouroboros-agent's PR #1251 second-round review (head 85e71b1d) called
+    out the resume gap: ``AutoStore.save`` only writes ``state.to_dict()``,
+    so the lateral audit fields (``personas_invoked``, ``last_lateral_*``)
+    would be persisted while ``state.ledger`` still mirrored the pre-demote
+    source classifications. On resume the matcher would re-fire on the
+    same input, but the persona is already "spent" — turning a successful
+    clearance into a spurious retry/block.
+
+    Contract: every save after the demotion must include the snapshot of
+    the mutated ledger. Reload via ``AutoStore.load`` and verify the
+    persisted ``state.ledger`` payload no longer contains any active
+    ``CONSERVATIVE_DEFAULT`` entries (every one was demoted to
+    ``ASSUMPTION`` by the lateral resolution).
+    """
+    ledger = _ledger_with_matcher_trigger()
+    state = AutoPipelineState(goal="Build a habit-tracker CLI", cwd=str(tmp_path))
+    store = AutoStore(tmp_path)
+    thinker, _invocations = _resolving_lateral_thinker()
+    driver = AutoInterviewDriver(
+        _make_scripted_backend(answer_seed_ready=True),
+        store=store,
+        max_rounds=1,
+        timeout_seconds=1,
+        lateral_thinker=thinker,
+    )
+
+    result = await driver.run(state, ledger)
+    assert result.status == "seed_ready"
+
+    # Reload the same auto_session_id through the store — this simulates
+    # the resume path and is the only test surface that actually proves
+    # the ledger snapshot landed on disk alongside the persona audit.
+    reloaded = store.load(state.auto_session_id)
+    assert reloaded.personas_invoked == [ThinkingPersona.CONTRARIAN.value]
+    reloaded_ledger = SeedDraftLedger.from_dict(reloaded.ledger)
+    survived = [
+        entry
+        for section in reloaded_ledger.sections.values()
+        for entry in section.entries
+        if entry.source == LedgerSource.CONSERVATIVE_DEFAULT
+        and entry.status not in {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+    ]
+    assert not survived, (
+        "persisted state.ledger must reflect demoted sources so resume sees "
+        "the same matcher input the runtime path saw"
+    )
