@@ -1,10 +1,14 @@
 """Unit tests for the safe-default unsafe-context lateral persona selector.
 
-Issue #1248 — substrate-only PR (no behavior change). The selector picks
-``ThinkingPersona`` values to escalate a ``_unsafe_context_reason()`` fire
-through, instead of letting the safe-default closure die in place. These
-tests pin the selection contract; the behavior PR that consumes the
-selector lands separately.
+Issue #1248 — these tests pin the *selector contract* (which persona is
+chosen at each chain position) for the safe-default unsafe-context
+escalation. The selector itself remained substrate-only when it landed
+in PR-A (#1250); the consuming behaviour shipped in PR-B (#1251), where
+the interview driver invokes the selector at the matcher-fire site and
+gates downstream ledger demotion on a machine-checkable clearance
+marker. Tests covering the routed behaviour live in
+``test_safe_default_lateral_escalation.py``; this file stays focused on
+the deterministic CONTRARIAN → ARCHITECT chain order.
 """
 
 from __future__ import annotations

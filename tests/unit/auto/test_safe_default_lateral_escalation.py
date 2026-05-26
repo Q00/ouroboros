@@ -6,12 +6,25 @@ matcher fires on lexical false positives. Instead the driver escalates
 through a bounded lateral persona chain (CONTRARIAN, ARCHITECT) before
 falling to a typed ``unstuck_exhausted`` BLOCKED.
 
-These tests pin the four observable paths:
+PR-B review (ouroboros-agent) gate: ledger demotion is now contingent on
+the lateral response carrying the canonical
+``CLEARANCE: lexical_false_positive`` marker (see
+``_LATERAL_CLEARANCE_MARKER_RE``). A bare prompt-only response — which is
+what the production inline ``ouroboros_lateral_think`` path returns today
+— must NOT clear an unsafe matcher fire. These tests pin the observable
+paths:
 
-1. Lateral resolves on first attempt → seed_ready, no stop_reason_code.
+1. Lateral resolves on first attempt (with clearance) → seed_ready, no
+   stop_reason_code.
 2. Lateral handler errors out → existing BLOCKED path preserved.
-3. Lateral chain exhausts → BLOCKED with ``unstuck_exhausted``.
+3. Lateral chain exhausts (pre-tried) → BLOCKED with ``unstuck_exhausted``.
 4. ``lateral_thinker=None`` → pre-issue behaviour preserved (regression).
+5. Selector chain order (CONTRARIAN → ARCHITECT).
+6. Transient ``LateralResult(error=...)`` is recorded, no retry.
+7. Lateral returns prompt-only text (no clearance) → ledger untouched,
+   chain exhausts → ``unstuck_exhausted`` (safety regression guard).
+8. Genuinely unsafe conservative_default entry survives a prompt-only
+   lateral response (safety regression guard).
 """
 
 from __future__ import annotations
@@ -94,13 +107,27 @@ def _make_scripted_backend(answer_seed_ready: bool = True) -> FunctionInterviewB
     return FunctionInterviewBackend(start, answer)
 
 
+_DEFAULT_CLEARANCE_TEXT = (
+    "the matched 'contract' refers to acceptance contract, not legal contract.\n"
+    "CLEARANCE: lexical_false_positive\n"
+)
+
+
 def _resolving_lateral_thinker(
     *,
     return_persona: str | None = None,
     summary: str = "false positive — SE vocabulary, demote to assumption",
-    text: str = "the matched 'contract' refers to acceptance contract, not legal contract.",
+    text: str = _DEFAULT_CLEARANCE_TEXT,
 ) -> tuple[object, list[ThinkingPersona]]:
-    """Lateral handle that succeeds and a list capturing every invocation persona."""
+    """Lateral handle that succeeds (with clearance marker) and captures invocation personas.
+
+    The default ``text`` includes the canonical
+    ``CLEARANCE: lexical_false_positive`` line, which is what the
+    interview driver requires to authorize demoting active
+    ``CONSERVATIVE_DEFAULT`` ledger entries to ``ASSUMPTION``. Tests that
+    want to exercise the no-clearance (prompt-only) path override
+    ``text`` explicitly.
+    """
     invocations: list[ThinkingPersona] = []
 
     async def _thinker(
@@ -115,6 +142,44 @@ def _resolving_lateral_thinker(
             persona=return_persona or persona.value,
             approach_summary=summary,
             text=text,
+        )
+
+    return _thinker, invocations
+
+
+def _advisory_only_lateral_thinker() -> tuple[object, list[ThinkingPersona]]:
+    """Lateral handle that mimics the production inline ``ouroboros_lateral_think`` path.
+
+    The inline path generates a prompt template (``# Lateral Thinking: …``)
+    plus a ``## Questions to Consider`` block — it does *not* execute the
+    persona's judgement. Such a response carries no clearance marker, so
+    the interview driver must NOT demote ledger entries. This fixture
+    pins that contract: every call returns a successful ``LateralResult``
+    whose text is a prompt-shaped string only.
+    """
+    invocations: list[ThinkingPersona] = []
+    sample_text = (
+        "# Lateral Thinking: Re-examine the matcher input\n\n"
+        "Given the current approach, consider the following angles before "
+        "deciding whether the matcher fire reflects genuine unsafe scope.\n\n"
+        "## Questions to Consider\n"
+        "- Does the surrounding ledger context actually authorize the "
+        "unsafe reading?\n"
+        "- Is the matched token used in a benign SE sense?\n"
+    )
+
+    async def _thinker(
+        *,
+        persona: ThinkingPersona,
+        qa_differences: Sequence[str],
+        qa_suggestions: Sequence[str],
+        run_artifact: str,
+    ) -> LateralResult:
+        invocations.append(persona)
+        return LateralResult(
+            persona=persona.value,
+            approach_summary="advisory prompt only — no verdict",
+            text=sample_text,
         )
 
     return _thinker, invocations
@@ -398,3 +463,133 @@ async def test_lateral_transient_error_breaks_loop(tmp_path) -> None:
     assert invocations == [ThinkingPersona.CONTRARIAN]
     assert state.personas_invoked == [ThinkingPersona.CONTRARIAN.value]
     assert state.last_error_code != UNSTUCK_EXHAUSTED_STOP_REASON_CODE
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — advisory-only lateral response does not demote (safety regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_advisory_only_lateral_response_does_not_demote(tmp_path) -> None:
+    """A prompt-only lateral response (no clearance marker) must not mutate the ledger.
+
+    The production inline ``ouroboros_lateral_think`` path generates an
+    advisory prompt template (``# Lateral Thinking: …`` + questions) and
+    returns it as ``LateralResult.text`` — there is no executed persona
+    judgement. The interview driver must treat that as
+    *"lateral attempted, no machine-checkable clearance"*: the persona
+    invocation is recorded (audit + chain progression), the ledger
+    ``CONSERVATIVE_DEFAULT`` entries stay put, and the matcher fire
+    survives every persona in the chain until the typed
+    ``unstuck_exhausted`` terminal stamps the BLOCKED.
+
+    This is the safety contract requested by ouroboros-agent's PR #1251
+    review: advisory prompt generation is not authorization to reclassify
+    conservative-default content.
+    """
+    ledger = _ledger_with_matcher_trigger()
+    state = AutoPipelineState(goal="Build a habit-tracker CLI", cwd=str(tmp_path))
+    thinker, invocations = _advisory_only_lateral_thinker()
+    driver = AutoInterviewDriver(
+        _make_scripted_backend(answer_seed_ready=False),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+        lateral_thinker=thinker,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    # Both personas in the safe-default chain were tried with prompt-only
+    # responses; neither cleared the matcher fire so the chain exhausted
+    # and the typed terminal was stamped.
+    assert invocations == [ThinkingPersona.CONTRARIAN, ThinkingPersona.ARCHITECT]
+    assert ThinkingPersona.CONTRARIAN.value in state.personas_invoked
+    assert ThinkingPersona.ARCHITECT.value in state.personas_invoked
+    assert state.last_error_code == UNSTUCK_EXHAUSTED_STOP_REASON_CODE
+    # Ledger source classifications were NOT mutated: every entry the
+    # fixture wrote stays at ``CONSERVATIVE_DEFAULT``.
+    survived = [
+        entry
+        for section in ledger.sections.values()
+        for entry in section.entries
+        if entry.source == LedgerSource.CONSERVATIVE_DEFAULT
+    ]
+    demoted = [
+        entry
+        for section in ledger.sections.values()
+        for entry in section.entries
+        if entry.source == LedgerSource.ASSUMPTION
+    ]
+    assert survived, "advisory-only lateral must leave conservative_default entries intact"
+    assert not demoted, (
+        "advisory-only lateral must NOT demote any conservative_default entry to assumption"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — genuinely unsafe conservative_default entry survives an
+# advisory-only lateral response (the explicit bot regression scenario)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unsafe_conservative_default_survives_advisory_lateral(tmp_path) -> None:
+    """An entry that records genuine unsafe scope must NOT be cleared by an advisory response.
+
+    Mirrors the regression scenario called out by the PR #1251 review:
+    a ``conservative_default`` entry whose text describes a production
+    deploy with credential handling must not be reclassified to
+    ``ASSUMPTION`` just because a lateral persona returned a prompt
+    template. The matcher fire must continue to fire on subsequent
+    finalize passes, and the BLOCKED must carry the typed
+    ``unstuck_exhausted`` reason (chain exhausted with no clearance).
+    """
+    ledger = _ledger_with_matcher_trigger()
+    # Inject a genuinely unsafe conservative_default entry on top of the
+    # baseline fixture. The matcher already fires on "contract" — we want
+    # to assert the *unsafe* entry is not silently cleared either.
+    unsafe_value = (
+        "Deploy the binary to the production fleet using the operator's "
+        "admin credentials; the legal compliance check is out of scope."
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.unsafe_test",
+            value=unsafe_value,
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.85,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    state = AutoPipelineState(goal="Build a habit-tracker CLI", cwd=str(tmp_path))
+    thinker, invocations = _advisory_only_lateral_thinker()
+    driver = AutoInterviewDriver(
+        _make_scripted_backend(answer_seed_ready=False),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+        lateral_thinker=thinker,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.last_error_code == UNSTUCK_EXHAUSTED_STOP_REASON_CODE
+    # The genuinely unsafe entry is still there with its original source.
+    unsafe_entries = [
+        entry
+        for section in ledger.sections.values()
+        for entry in section.entries
+        if entry.key == "constraints.unsafe_test"
+    ]
+    assert len(unsafe_entries) == 1
+    assert unsafe_entries[0].source == LedgerSource.CONSERVATIVE_DEFAULT, (
+        "advisory lateral must not reclassify a genuinely unsafe conservative_default entry"
+    )
+    # Both personas were exercised — the chain is honoured even when the
+    # ledger is not mutated.
+    assert invocations == [ThinkingPersona.CONTRARIAN, ThinkingPersona.ARCHITECT]

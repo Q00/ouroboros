@@ -50,6 +50,45 @@ INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synt
 # can be discovered by reading the module surface.
 UNSTUCK_EXHAUSTED_STOP_REASON_CODE = "unstuck_exhausted"
 
+# Issue #1248 PR-B review — the safe-default lateral escalation may only
+# demote active ``CONSERVATIVE_DEFAULT`` ledger entries to ``ASSUMPTION``
+# when the lateral persona response includes a machine-checkable clearance
+# line. The auto pipeline's production ``ouroboros_lateral_think`` inline
+# path returns a *prompt template* (not an executed judgement), so without
+# this gate a bare prompt would be enough to reclassify entries — including
+# entries that record genuinely unsafe scope (production deploys, credential
+# handling). The canonical line, anchored to its own line so a stray mention
+# inside prose does not satisfy the gate, is:
+#
+#     CLEARANCE: lexical_false_positive
+#
+# Any other shape (no marker, an explicit ``UNSAFE_CONFIRMED: <reason>``
+# counter-marker, a plain prompt template) means *the lateral was attempted
+# but no judgement is available* — the persona invocation is still recorded
+# on ``state.personas_invoked`` for audit, but the ledger stays put and the
+# loop either tries the next persona or, after both are tried, surfaces a
+# typed ``unstuck_exhausted`` BLOCKED. This is conservative-by-default: the
+# matcher fire stays loud (no silent closure on unsafe scope) until a real
+# judge layered on top of the prompt emits the marker.
+_LATERAL_CLEARANCE_MARKER_RE = re.compile(
+    r"^\s*CLEARANCE:\s*lexical_false_positive\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _lateral_response_authorizes_demotion(text: str | None) -> bool:
+    """Return ``True`` iff the lateral response includes the canonical clearance marker.
+
+    Empty / ``None`` / unmarked responses return ``False`` — the inline
+    ``ouroboros_lateral_think`` path's bare prompt template falls in this
+    bucket, so a successful prompt-generation call is *not* enough to
+    authorize ledger demotion.
+    """
+    if not text:
+        return False
+    return bool(_LATERAL_CLEARANCE_MARKER_RE.search(text))
+
+
 # Structural alias for the production lateral-thinker callable. Mirrors the
 # alias declared on ``ouroboros.auto.pipeline``; duplicated locally because
 # ``adapters.LateralResult`` cannot be imported at module load time without
@@ -825,11 +864,18 @@ class AutoInterviewDriver:
                 "positive (e.g. 'contract' inside 'acceptance contract', "
                 "'license: MIT', 'compliance check') or does the "
                 "surrounding ledger context assert genuine unsafe "
-                "scope? After this lateral review, the safe-default "
-                "policy will demote active conservative_default ledger "
-                "entries to assumption (boundary text). If you observe "
-                "genuinely unsafe scope, surface it explicitly as a "
-                "non_goal in your response so the operator can confirm.",
+                "scope (production deploys, credential handling, "
+                "legal/medical adjudication, etc.)? The auto pipeline "
+                "will demote active conservative_default ledger entries "
+                "to assumption ONLY when your response includes the "
+                "exact line `CLEARANCE: lexical_false_positive` on its "
+                "own line. Without that marker the matcher input is "
+                "left untouched and the safe-default closure stays "
+                "blocked — this is the safety default. If you observe "
+                "genuinely unsafe scope, do NOT emit the clearance "
+                "marker; instead emit `UNSAFE_CONFIRMED: <one-line "
+                "reason>` so the audit trail records why the matcher "
+                "fire was not cleared.",
             )
             run_artifact = _build_safe_default_lateral_artifact(ledger, finalization)
 
@@ -892,13 +938,29 @@ class AutoInterviewDriver:
             state.last_lateral_approach_summary = lateral_result.approach_summary
             state.last_lateral_text = lateral_result.text
 
-            demoted = _demote_conservative_defaults_for_safe_default(ledger)
-            log.info(
-                "auto.interview.safe_default.lateral_demoted_entries",
-                auto_session_id=state.auto_session_id,
-                persona=persona.value,
-                demoted_entry_count=demoted,
-            )
+            # Demotion is gated on a machine-checkable clearance marker
+            # (see ``_LATERAL_CLEARANCE_MARKER_RE``). A bare prompt-only
+            # response from the inline ``ouroboros_lateral_think`` path
+            # — which is what the production auto pipeline gets today
+            # — does NOT authorize reclassifying ledger entries that may
+            # record genuinely unsafe scope. The persona invocation is
+            # still recorded above for audit; without clearance the
+            # loop falls through to the next persona or exhausts.
+            if _lateral_response_authorizes_demotion(lateral_result.text):
+                demoted = _demote_conservative_defaults_for_safe_default(ledger)
+                log.info(
+                    "auto.interview.safe_default.lateral_demoted_entries",
+                    auto_session_id=state.auto_session_id,
+                    persona=persona.value,
+                    demoted_entry_count=demoted,
+                )
+            else:
+                log.info(
+                    "auto.interview.safe_default.lateral_no_clearance",
+                    auto_session_id=state.auto_session_id,
+                    persona=persona.value,
+                    has_text=bool(lateral_result.text),
+                )
             self._save(state)
 
             finalization = finalize_safe_defaultable_gaps(
