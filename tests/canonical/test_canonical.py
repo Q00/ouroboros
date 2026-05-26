@@ -206,11 +206,95 @@ async def _invoke_ouroboros_auto(scenario: CanonicalScenario, workdir: Path) -> 
     return await handler.handle(arguments)
 
 
+def _persist_raw_evidence(
+    scenario: CanonicalScenario,
+    workdir: Path,
+    result: Any,
+    request: pytest.FixtureRequest,
+) -> Path:
+    """Persist the verbatim MCP handler response under
+    ``<workdir>/.ooo-observability/`` as JSON evidence.
+
+    PR-γ / #1170 evidence-integrity contract: the on-disk artifact must be
+    a faithful 1:1 capture of what the MCP tool emitted — no paraphrase,
+    no field-name normalization. R2-1709 of #1170 contained two fabricated
+    field values (``interview_closure_mode="max_rounds_reached"``,
+    ``stop_reason_code="interview_max_rounds_no_closure"``) that did not
+    exist anywhere in source; reading evidence after the fact wasted
+    investigation time chasing the imagined translation layer. The helper
+    writes whatever the handler returned plus the preflight runtime
+    metadata so future readers can verify which binary produced it.
+    """
+    from datetime import datetime, timezone
+    import json
+
+    obs_dir = workdir / ".ooo-observability"
+    obs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    out_path = obs_dir / f"canonical-{scenario.slug}-{ts}.json"
+
+    preflight = request.config.stash.get(_RUNTIME_PREFLIGHT_KEY_RUNTIME, None)
+
+    raw_meta: dict[str, Any] = {}
+    raw_is_error: Any = None
+    raw_content_repr: list[Any] = []
+    raw_text: Any = None
+    if getattr(result, "is_ok", False):
+        try:
+            tool_result = result.unwrap()
+            raw_meta = dict(getattr(tool_result, "meta", {}) or {})
+            raw_is_error = bool(getattr(tool_result, "is_error", False))
+            content = getattr(tool_result, "content", []) or []
+            raw_content_repr = [
+                {
+                    "type": getattr(item, "type", item.__class__.__name__),
+                    "text": getattr(item, "text", None),
+                }
+                for item in content
+            ]
+        except Exception as exc:  # noqa: BLE001
+            raw_text = f"unwrap_failed: {exc!r}"
+    else:
+        err = result.error if getattr(result, "is_err", False) else "unknown"
+        raw_text = f"result_not_ok: {err!r}"
+
+    payload = {
+        "scenario": scenario.slug,
+        "goal": scenario.goal,
+        "workdir": str(workdir),
+        "captured_at_utc": ts,
+        "preflight": preflight,
+        "scenario_metadata": dict(scenario.metadata),
+        # Raw passthrough — keep these keys verbatim from the MCP envelope.
+        "mcp_result_is_ok": bool(getattr(result, "is_ok", False)),
+        "mcp_result_is_error": raw_is_error,
+        "mcp_result_meta": raw_meta,
+        "mcp_result_content": raw_content_repr,
+        "mcp_result_fallback_text": raw_text,
+    }
+    out_path.write_text(json.dumps(payload, indent=2, default=str))
+    return out_path
+
+
+# Pytest stash key alias for the runtime preflight (declared in conftest).
+# Re-exported here so ``_persist_raw_evidence`` can read it without taking
+# a fixture dependency. The conftest module is loaded before test_canonical
+# at collection time, so the StashKey instance is guaranteed to exist.
+def _runtime_preflight_key() -> Any:
+    from tests.canonical.conftest import _RUNTIME_PREFLIGHT_KEY  # type: ignore[attr-defined]
+
+    return _RUNTIME_PREFLIGHT_KEY
+
+
+_RUNTIME_PREFLIGHT_KEY_RUNTIME = _runtime_preflight_key()
+
+
 @pytest.mark.asyncio
 async def test_scenario_live_run_or_skip(
     scenario: CanonicalScenario,
     live_run_enabled: bool,
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Live invocation of ``ouroboros_auto`` against the scenario.
 
@@ -246,6 +330,16 @@ async def test_scenario_live_run_or_skip(
 
     result = await _invoke_ouroboros_auto(scenario, workdir)
 
+    # PR-γ / #1170 evidence-integrity contract: persist the RAW MCP response
+    # verbatim BEFORE any assertion. R2-1709 (#1170) saved a paraphrased
+    # envelope (fabricated `interview_closure_mode="max_rounds_reached"` and
+    # `stop_reason_code="interview_max_rounds_no_closure"` — neither string
+    # exists in source). The harness must not be subject to the same defect.
+    # Even on assertion failure, the on-disk evidence is the verbatim raw
+    # handler response plus the runtime-preflight context.
+    evidence_path = _persist_raw_evidence(scenario, workdir, result, request)
+    print(f"CANONICAL {scenario.slug}: raw evidence -> {evidence_path}")
+
     assert result.is_ok, (
         f"{scenario.slug}: ouroboros_auto returned MCP error: "
         f"{result.error if result.is_err else 'unknown'}"
@@ -260,6 +354,20 @@ async def test_scenario_live_run_or_skip(
         f"{scenario.slug}: expected complete terminal status; "
         f"got {tool_result.meta.get('status')!r} with meta {tool_result.meta}"
     )
+    # PR-β / SSOT #1157 closure-policy assertion: under the ledger-primary
+    # policy, the canonical scenario must terminate with closure_mode in
+    # {ledger_only, mutual_agreement}. ``max_rounds_reached`` is not a real
+    # closure mode (it was a #1170 R2-1709 paraphrase artifact) and any
+    # ``interview_max_rounds_exhausted`` blocker indicates the AND-gate is
+    # back / not deployed (see #1170 acceptance criteria).
+    closure_mode = tool_result.meta.get("interview_closure_mode")
+    if closure_mode is not None:
+        assert closure_mode in {"ledger_only", "mutual_agreement", "safe_default"}, (
+            f"{scenario.slug}: unexpected interview_closure_mode={closure_mode!r}; "
+            f"valid modes per SSOT #1157 Closure Policy are "
+            f"{{ledger_only, mutual_agreement, safe_default}}. "
+            f"Full envelope persisted at {evidence_path}."
+        )
     if scenario.completion_mode == "product_complete":
         assert tool_result.meta.get("product_status") != "not_verified_complete", (
             f"{scenario.slug}: product_complete scenario must not stop at an "
@@ -267,7 +375,8 @@ async def test_scenario_live_run_or_skip(
         )
     print(
         f"CANONICAL {scenario.slug}: status={tool_result.meta['status']} "
-        f"phase={tool_result.meta.get('phase')} completion_mode={scenario.completion_mode}"
+        f"phase={tool_result.meta.get('phase')} "
+        f"closure_mode={closure_mode} completion_mode={scenario.completion_mode}"
     )
 
 
@@ -276,6 +385,7 @@ async def test_live_run_opt_in_invokes_auto_handler(
     scenario: CanonicalScenario,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Hermetically pin that the opt-in path calls the live runner."""
 
@@ -288,6 +398,7 @@ async def test_live_run_opt_in_invokes_auto_handler(
             "status": "complete",
             "phase": "done",
             "product_status": "verified_complete",
+            "interview_closure_mode": "ledger_only",
         }
 
     async def fake_invoke(selected: CanonicalScenario, workdir: Path) -> Result[object, str]:
@@ -303,6 +414,10 @@ async def test_live_run_opt_in_invokes_auto_handler(
         scenario=scenario,
         live_run_enabled=True,
         tmp_path=tmp_path,
+        request=request,
     )
 
     assert calls == [(scenario.slug, tmp_path / scenario.slug)]
+    # PR-γ evidence-integrity contract: the raw envelope must be persisted.
+    obs_files = list((tmp_path / scenario.slug / ".ooo-observability").glob("canonical-*.json"))
+    assert len(obs_files) == 1, f"expected one evidence file; found {obs_files}"

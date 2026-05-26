@@ -26,6 +26,12 @@ _VALID_COMPLETION_MODES: frozenset[str] = frozenset({"code_complete", "product_c
 _DEFAULT_WALL_CLOCK_BUDGET_SECONDS = 7200
 _LIVE_RUN_ENV_VAR = "OUROBOROS_RUN_CANONICAL"
 
+# Pytest stash key for the runtime-binary preflight result. Populated by
+# ``assert_runtime_is_repo_source`` so live-run helpers can record the
+# enforced runtime path/version alongside the MCP envelope (raw-passthrough
+# evidence contract — see PR-γ docs and #1170 acceptance criteria).
+_RUNTIME_PREFLIGHT_KEY = pytest.StashKey[dict[str, object]]()
+
 
 @dataclass(frozen=True, slots=True)
 class CanonicalScenario:
@@ -171,6 +177,73 @@ def _load_scenario(directory: Path) -> CanonicalScenario:
         goal=goal,
         metadata=dict(raw_metadata),
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def assert_runtime_is_repo_source(pytestconfig: pytest.Config) -> None:
+    """L0 harness runtime-binary preflight (PR-γ / #1170).
+
+    The canonical acceptance gate must exercise the repo's ouroboros source,
+    not an arbitrary installed copy. #1170 R2 (20260526-1636) and R2-1709
+    both produced false-positive BLOCKED evidence because the MCP server
+    was importing uvx-installed 0.39.1 from
+    ``/Users/.../uv/tools/ouroboros-ai/lib/...`` while the worktree carried
+    0.39.2.devNN containing the substrate fixes under test. The harness
+    must fail fast in that situation rather than emit acceptance evidence
+    against the wrong binary.
+
+    The check is opt-out via ``OUROBOROS_CANONICAL_SKIP_RUNTIME_CHECK=1``
+    for the narrow case where a maintainer is deliberately validating
+    against a published release (e.g. confirming a release-cut PR before
+    tagging). In that mode the runtime path is still recorded — just not
+    enforced.
+    """
+    import importlib
+    import sys as _sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    skip = os.environ.get("OUROBOROS_CANONICAL_SKIP_RUNTIME_CHECK", "").strip() in {
+        "1",
+        "true",
+        "yes",
+    }
+    try:
+        module = importlib.import_module("ouroboros")
+    except Exception as exc:  # pragma: no cover - imports always succeed in CI
+        pytest.fail(
+            "Canonical harness could not import ``ouroboros``. "
+            f"Install the repo as editable first: `pip install -e {repo_root}`. "
+            f"Underlying error: {exc!r}"
+        )
+    runtime_file = Path(module.__file__ or "").resolve()
+    runtime_version = getattr(module, "__version__", "<unknown>")
+    pytestconfig.stash.setdefault(
+        _RUNTIME_PREFLIGHT_KEY,
+        {
+            "runtime_path": str(runtime_file),
+            "runtime_version": runtime_version,
+            "repo_root": str(repo_root),
+            "enforced": not skip,
+            "python_executable": _sys.executable,
+        },
+    )
+    if skip:
+        return
+    if not str(runtime_file).startswith(str(repo_root)):
+        pytest.fail(
+            "L0 canonical harness must exercise repo source, not an installed copy.\n"
+            f"  repo_root:    {repo_root}\n"
+            f"  runtime_path: {runtime_file}\n"
+            f"  runtime_ver:  {runtime_version}\n"
+            f"  python_exec:  {_sys.executable}\n"
+            "Fix one of:\n"
+            f"  (a) `{_sys.executable} -m pip install -e {repo_root} --break-system-packages`\n"
+            "      (re-installs ouroboros from this worktree onto the python\n"
+            "       the MCP server / pytest uses), then restart this process.\n"
+            "  (b) Opt out for a release-cut validation only:\n"
+            "      `OUROBOROS_CANONICAL_SKIP_RUNTIME_CHECK=1 pytest ...`\n"
+            "See #1170 acceptance criteria + PR-γ rationale."
+        )
 
 
 @pytest.fixture(scope="session")
