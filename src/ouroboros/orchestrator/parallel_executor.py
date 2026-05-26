@@ -1353,7 +1353,7 @@ def _text_contains_test_success(text: str) -> bool:
     text = text.lower()
     zero_failure_pattern = (
         r"\b(0\s+(failed|failures?|errors?)|"
-        r"(failed|failures?|errors?)\s*:\s*0|"
+        r"(failed|failures?|errors?)\s*[:=]\s*0|"
         r"no\s+(tests?\s+)?(failed|failures?|errors?))\b"
     )
     failure_scan_text = re.sub(zero_failure_pattern, "", text)

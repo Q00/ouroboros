@@ -837,6 +837,8 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
         ("0 failed, 0 errors, 1 passed", True),
         ("Tests run: 3, Failures: 0, Errors: 0, Skipped: 0", False),
         ("Tests run: 3, Failures: 1, Errors: 0, Skipped: 0", False),
+        ("Tests run: 3, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS", True),
+        ("Tests run: 3, Failures=0, Errors=0, Skipped=0\n[INFO] BUILD SUCCESS", True),
         ("no errors, 3 passed", True),
         ("no tests failed, 3 passed", True),
         ("exit code 0", True),
