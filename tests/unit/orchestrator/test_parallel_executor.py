@@ -835,6 +835,8 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
         ("3 passed in 1.2s", True),
         ("0 failed, 3 passed", True),
         ("0 failed, 0 errors, 1 passed", True),
+        ("Tests run: 3, Failures: 0, Errors: 0, Skipped: 0", False),
+        ("Tests run: 3, Failures: 1, Errors: 0, Skipped: 0", False),
         ("no errors, 3 passed", True),
         ("no tests failed, 3 passed", True),
         ("exit code 0", True),
@@ -1114,7 +1116,8 @@ def test_gradle_command_claim_supports_quoted_target_and_tail_pipe() -> None:
         data={
             "tool_input": {
                 "command": (
-                    './gradlew test --tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100'
+                    "/bin/bash -lc 'set -o pipefail && ./gradlew test "
+                    '--tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100\''
                 )
             }
         },
@@ -1135,7 +1138,8 @@ def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> 
         data={
             "tool_input": {
                 "command": (
-                    './gradlew test --tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100'
+                    "/bin/bash -lc 'set -o pipefail && ./gradlew test "
+                    '--tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100\''
                 )
             }
         },
@@ -1153,6 +1157,131 @@ def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> 
     assert _runtime_messages_support_test_claim(
         value="com.example.app.unit.SomeNewTest",
         backed_commands=("./gradlew test --tests com.example.app.unit.SomeNewTest -i",),
+        messages=(command_message, result_message),
+        task_cwd=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("runtime_command", "claimed_command"),
+    (
+        ("./gradlew test -x test", "./gradlew test -x test"),
+        ("./gradlew check -x test", "./gradlew check -x test"),
+        ("./gradlew test --exclude-task test", "./gradlew test --exclude-task test"),
+        ("./gradlew check --exclude-task :test", "./gradlew check --exclude-task :test"),
+        ("mvn -DskipTests verify", "mvn -DskipTests verify"),
+        ("mvn -D skipTests test", "mvn -D skipTests test"),
+        ("mvn -Dmaven.test.skip=true test", "mvn -Dmaven.test.skip=true test"),
+        ("mvn --define skipTests test", "mvn --define skipTests test"),
+        ("mvn --define=skipTests=true test", "mvn --define=skipTests=true test"),
+    ),
+)
+def test_gradle_maven_tests_passed_rejects_skip_test_invocations(
+    runtime_command: str,
+    claimed_command: str,
+) -> None:
+    """Build success cannot prove tests_passed when the command skipped tests."""
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": runtime_command}},
+    )
+    result_message = AgentMessage(
+        type="tool_result",
+        content="BUILD SUCCESSFUL in 8s",
+        tool_name=None,
+        data={"subtype": "tool_result", "output": "BUILD SUCCESSFUL in 8s"},
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value=claimed_command,
+        backed_commands=(claimed_command,),
+        messages=(command_message, result_message),
+        task_cwd=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "mvn -DskipTests=false test",
+        "mvn -Dmaven.test.skip=false test",
+    ),
+)
+def test_maven_tests_passed_supports_explicit_false_skip_properties(command: str) -> None:
+    """Explicit false Maven skip properties still run tests and can prove success."""
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    result_message = AgentMessage(
+        type="tool_result",
+        content="[INFO] BUILD SUCCESS",
+        tool_name=None,
+        data={"subtype": "tool_result", "output": "[INFO] BUILD SUCCESS"},
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(command_message, result_message),
+        task_cwd=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        "> Task :test NO-SOURCE\nBUILD SUCCESSFUL in 1s",
+        "> Task :test SKIPPED\nBUILD SUCCESSFUL in 1s",
+        "0 tests completed\nBUILD SUCCESSFUL",
+    ),
+)
+def test_gradle_tests_passed_rejects_successful_build_with_no_tests(output: str) -> None:
+    """Gradle build success without executed tests cannot prove tests_passed."""
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": "./gradlew test"}},
+    )
+    result_message = AgentMessage(
+        type="tool_result",
+        content=output,
+        tool_name=None,
+        data={"subtype": "tool_result", "output": output},
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value="./gradlew test",
+        backed_commands=("./gradlew test",),
+        messages=(command_message, result_message),
+        task_cwd=None,
+    )
+
+
+def test_maven_tests_passed_supports_surefire_zero_failure_summary() -> None:
+    """Standard Surefire zero-failure fields plus build success prove Maven tests."""
+    output = "[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS"
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": "mvn test"}},
+    )
+    result_message = AgentMessage(
+        type="tool_result",
+        content=output,
+        tool_name=None,
+        data={"subtype": "tool_result", "output": output},
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value="mvn test",
+        backed_commands=("mvn test",),
         messages=(command_message, result_message),
         task_cwd=None,
     )

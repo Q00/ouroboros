@@ -1056,12 +1056,41 @@ def _strip_env_prefix(parts: list[str]) -> list[str]:
 
 def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:
     """Return True when a Gradle/Maven command explicitly disables tests."""
+
+    def maven_skip_property_disables_tests(value: str) -> bool:
+        normalized_value = value.lower()
+        if normalized_value in {"skiptests", "maven.test.skip"}:
+            return True
+        if normalized_value.startswith("skiptests=") or normalized_value.startswith(
+            "maven.test.skip="
+        ):
+            _, _, property_value = normalized_value.partition("=")
+            return property_value not in {"false", "0", "no", "off"}
+        return False
+
     for index, part in enumerate(parts):
         normalized = part.lower()
-        if normalized in {"-dskiptests", "-dskiptests=true", "-dmaven.test.skip=true"}:
+        if normalized == "-d" and index + 1 < len(parts):
+            if maven_skip_property_disables_tests(parts[index + 1]):
+                return True
+        if normalized == "--define" and index + 1 < len(parts):
+            if maven_skip_property_disables_tests(parts[index + 1]):
+                return True
+        if normalized.startswith("--define="):
+            _, _, define_value = normalized.partition("=")
+            if maven_skip_property_disables_tests(define_value):
+                return True
+        if normalized.startswith("-d") and maven_skip_property_disables_tests(normalized[2:]):
             return True
-        if normalized.startswith("-dskiptests=") or normalized.startswith("-dmaven.test.skip="):
-            return True
+        if normalized == "--exclude-task" and index + 1 < len(parts):
+            excluded_task = parts[index + 1].lower().lstrip(":")
+            if excluded_task == "test" or excluded_task.endswith(":test"):
+                return True
+        if normalized.startswith("--exclude-task="):
+            _, _, excluded_task = normalized.partition("=")
+            excluded_task = excluded_task.lstrip(":")
+            if excluded_task == "test" or excluded_task.endswith(":test"):
+                return True
         if normalized == "-x" and index + 1 < len(parts):
             excluded_task = parts[index + 1].lower().lstrip(":")
             if excluded_task == "test" or excluded_task.endswith(":test"):
@@ -1323,7 +1352,9 @@ def _text_contains_test_success(text: str) -> bool:
     """Return True when text contains a conservative test-success signal."""
     text = text.lower()
     zero_failure_pattern = (
-        r"\b(0\s+(failed|failures?|errors?)|no\s+(tests?\s+)?(failed|failures?|errors?))\b"
+        r"\b(0\s+(failed|failures?|errors?)|"
+        r"(failed|failures?|errors?)\s*:\s*0|"
+        r"no\s+(tests?\s+)?(failed|failures?|errors?))\b"
     )
     failure_scan_text = re.sub(zero_failure_pattern, "", text)
     if re.search(
@@ -1334,6 +1365,12 @@ def _text_contains_test_success(text: str) -> bool:
     ):
         return False
     if re.search(r"\b0\s+passed\b", text) and not re.search(r"\b[1-9]\d*\s+passed\b", text):
+        return False
+    if re.search(r"\btask\s+[:\w.-]*test\b[^\n]*(no-source|skipped)\b", text):
+        return False
+    if re.search(r"\b0\s+tests?\s+(completed|run|executed)\b", text):
+        return False
+    if re.search(r"\bno\s+tests?\s+(found|run|executed)\b", text):
         return False
     return bool(
         re.search(
