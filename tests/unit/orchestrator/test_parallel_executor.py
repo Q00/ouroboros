@@ -34,6 +34,7 @@ from ouroboros.orchestrator.parallel_executor import (
     _effective_evidence_schema_for_ac,
     _message_contains_test_success,
     _runtime_messages_support_command_claim,
+    _runtime_messages_support_test_claim,
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
@@ -1101,6 +1102,59 @@ def test_command_claim_rejects_inner_command_after_non_setup_preamble() -> None:
     assert not _runtime_messages_support_command_claim(
         "python scripts/generate.py",
         (message,),
+    )
+
+
+def test_gradle_command_claim_supports_quoted_target_and_tail_pipe() -> None:
+    """A clean Gradle claim matches a quoted runtime command with output plumbing."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    './gradlew test --tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100'
+                )
+            }
+        },
+    )
+
+    assert _runtime_messages_support_command_claim(
+        "./gradlew test --tests com.example.app.unit.SomeNewTest -i",
+        (message,),
+    )
+
+
+def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> None:
+    """Gradle BUILD SUCCESSFUL output can back a class-level tests_passed claim."""
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    './gradlew test --tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100'
+                )
+            }
+        },
+    )
+    result_message = AgentMessage(
+        type="tool_result",
+        content="> Task :test\nBUILD SUCCESSFUL in 8s",
+        tool_name=None,
+        data={
+            "subtype": "tool_result",
+            "output": "> Task :test\nBUILD SUCCESSFUL in 8s",
+        },
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value="com.example.app.unit.SomeNewTest",
+        backed_commands=("./gradlew test --tests com.example.app.unit.SomeNewTest -i",),
+        messages=(command_message, result_message),
+        task_cwd=None,
     )
 
 

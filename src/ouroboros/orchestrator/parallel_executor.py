@@ -1054,6 +1054,25 @@ def _strip_env_prefix(parts: list[str]) -> list[str]:
     return parts[index:]
 
 
+def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:
+    """Return True when a Gradle/Maven command explicitly disables tests."""
+    for index, part in enumerate(parts):
+        normalized = part.lower()
+        if normalized in {"-dskiptests", "-dskiptests=true", "-dmaven.test.skip=true"}:
+            return True
+        if normalized.startswith("-dskiptests=") or normalized.startswith("-dmaven.test.skip="):
+            return True
+        if normalized == "-x" and index + 1 < len(parts):
+            excluded_task = parts[index + 1].lower().lstrip(":")
+            if excluded_task == "test" or excluded_task.endswith(":test"):
+                return True
+        if normalized.startswith("-x") and len(normalized) > 2:
+            excluded_task = normalized[2:].lstrip(":")
+            if excluded_task == "test" or excluded_task.endswith(":test"):
+                return True
+    return False
+
+
 def _test_invocation_from_prefix(command: str) -> str | None:
     """Return a normalized test invocation only when it starts the command text.
 
@@ -1091,6 +1110,13 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         }
     ):
         return _normalized_evidence_text(" ".join(parts))
+    executable = Path(parts[0]).name
+    if (
+        executable in {"gradle", "gradlew", "mvn", "mvnw"}
+        and not _has_gradle_or_maven_test_skip(parts[1:])
+        and any(part in {"test", "check", "verify"} or part.endswith(":test") for part in parts[1:])
+    ):
+        return _normalized_evidence_text(" ".join(parts))
     return None
 
 
@@ -1126,6 +1152,27 @@ _OUTPUT_FILTER_COMMANDS = frozenset({"tail", "head", "cat", "less", "more"})
 _TRAILING_REDIRECT_RE = re.compile(
     r"\s*(?:[0-9]*>{1,2}\s*(?:&[0-9]+|[^\s|]+)|&>{1,2}\s*[^\s|]+)\s*$"
 )
+
+
+def _normalized_shell_words_text(command: str) -> str | None:
+    """Return a quote-insensitive normalized argv spelling for one shell command.
+
+    This keeps command evidence matching exact at the argv level while allowing
+    common shell spelling differences such as ``--tests "ClassName"`` versus
+    ``--tests ClassName``. Commands that cannot be parsed, still contain a
+    pipeline, or contain shell control operators are left to the stricter raw
+    aliases.
+    """
+    text = command.strip()
+    if not text:
+        return None
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return None
+    if not parts or any(part in {"|", "&&", ";", "||"} for part in parts):
+        return None
+    return _normalized_evidence_text(" ".join(parts))
 
 
 def _strip_command_output_plumbing(command: str) -> str:
@@ -1231,19 +1278,27 @@ def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
     """
     normalized = _normalized_evidence_text(command)
     aliases = [normalized] if normalized else []
+
+    def append_alias(candidate: str | None) -> None:
+        if candidate and candidate not in aliases:
+            aliases.append(candidate)
+
+    append_alias(_normalized_shell_words_text(command))
     shell_body = _shell_command_body(command)
     normalized_shell_body = _normalized_evidence_text(shell_body) if shell_body else None
-    if normalized_shell_body and normalized_shell_body not in aliases:
-        aliases.append(normalized_shell_body)
+    append_alias(normalized_shell_body)
+    append_alias(_normalized_shell_words_text(shell_body) if shell_body else None)
     test_invocation = _test_command_invocation(command)
-    if test_invocation and test_invocation not in aliases:
-        aliases.append(test_invocation)
+    append_alias(test_invocation)
     # A recorded command may append output plumbing (``... 2>&1 | tail -20``)
     # that a concise ``commands_run`` claim omits. Add plumbing-stripped variants
     # so the two still match. Alias matching stays exact (set intersection), so
-    # this does not widen proof to arbitrary substrings.
+    # this does not widen proof to arbitrary substrings. Also add argv-normalized
+    # plumbing-stripped forms so quoted arguments in the runtime command match
+    # unquoted evidence claims for the same argv vector.
     for base in tuple(aliases):
-        stripped = _normalized_evidence_text(_strip_command_output_plumbing(base))
+        stripped_raw = _strip_command_output_plumbing(base)
+        stripped = _normalized_evidence_text(stripped_raw)
         if (
             stripped
             and stripped != base
@@ -1252,8 +1307,8 @@ def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
             and not _output_filter_pipeline_is_pipefail_protected(base)
         ):
             continue
-        if stripped and stripped not in aliases:
-            aliases.append(stripped)
+        append_alias(stripped)
+        append_alias(_normalized_shell_words_text(stripped_raw))
     return tuple(aliases)
 
 
@@ -1281,7 +1336,11 @@ def _text_contains_test_success(text: str) -> bool:
     if re.search(r"\b0\s+passed\b", text) and not re.search(r"\b[1-9]\d*\s+passed\b", text):
         return False
     return bool(
-        re.search(r"\b([1-9]\d*\s+passed|passed|pass|success|succeeded)\b|exit\s*code\s*0", text)
+        re.search(
+            r"\b([1-9]\d*\s+passed|passed|pass|success|successful|succeeded)\b|"
+            r"\bbuild\s+successful\b|exit\s*code\s*0",
+            text,
+        )
         or re.search(r"\bran\s+[1-9]\d*\s+tests?\b[\s\S]*\bok\b", text)
     )
 
