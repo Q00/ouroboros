@@ -70,15 +70,19 @@ def _ledger_all_filled_except(
 
 
 @pytest.mark.asyncio
-async def test_safe_default_logs_no_gaps_to_default(tmp_path) -> None:
-    """Ledger already seed-ready but backend keeps asking → ledger-only closure path (PR-B1).
+async def test_ledger_only_closes_in_loop_when_backend_never_converges(tmp_path) -> None:
+    """Ledger already seed-ready but backend keeps asking → in-loop ledger-only closure.
 
-    The driver enters the safe-default fallback block after max_rounds with
-    backend_done=False and ledger_done=True.  ``finalize_safe_defaultable_gaps``
-    returns an empty defaulted_sections (no gaps to fill), so the driver emits
-    ``no_gaps_to_default``.  PR-B1 / #821: because ledger_done=True and
-    backend_done=False, the driver now takes the ledger-only closure path and
-    emits ``ledger_only_closure`` instead of blocking.
+    PR-β / SSOT #1157 "Closure Policy" (2026-05-27): the driver's in-loop
+    closure check is now ledger-primary. When ``ledger.is_seed_ready()`` returns
+    True the loop exits immediately as ``ledger_only`` regardless of backend
+    state — the safe-default fallback path is no longer needed in this case.
+
+    Replaces the older max_rounds-only ``ledger_only`` fallback assertion: the
+    safe-default block (``safe_default.entered``, ``no_gaps_to_default``) is
+    bypassed because closure happens before max_rounds, but the observability
+    contract is preserved via the ``auto.interview.ledger_only_closure`` event
+    emitted from the new in-loop path.
     """
     # Ledger is fully filled — is_seed_ready() returns True from round 0.
     ledger = _ledger_all_filled_except()
@@ -105,11 +109,14 @@ async def test_safe_default_logs_no_gaps_to_default(tmp_path) -> None:
         result = await driver.run(state, ledger)
 
     events = [e["event"] for e in captured]
-    assert "auto.interview.safe_default.entered" in events
-    assert "auto.interview.safe_default.no_gaps_to_default" in events
+    # In-loop ledger-primary closure means the safe-default block is bypassed.
+    assert "auto.interview.safe_default.entered" not in events
+    assert "auto.interview.safe_default.no_gaps_to_default" not in events
+    # Observability contract preserved: ledger_only_closure event still fires
+    # from the in-loop closure path.
     assert "auto.interview.ledger_only_closure" in events
 
-    # PR-B1 / #821: ledger-only consensus closes the interview rather than blocking.
+    # PR-β: ledger-primary closure on the first round, no max_rounds wait.
     assert result.status == "seed_ready"
     assert state.interview_closure_mode == "ledger_only"
 
