@@ -140,6 +140,28 @@ def test_resolve_cli_project_dir_falls_back_to_seed_parent_without_project_hints
     )
 
 
+def test_resolve_cli_project_dir_uses_project_root_for_central_seed_references(
+    tmp_path: Path,
+) -> None:
+    """Central seeds under .ouroboros should resolve fallback cwd to the repo root."""
+    project_root = tmp_path / "repo"
+    seed_file = project_root / ".ouroboros" / "seeds" / "seed.yaml"
+    seed_file.parent.mkdir(parents=True)
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "context_references": [
+                {"path": "src/ouroboros/events.py", "role": "primary", "summary": "source file"},
+            ],
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    assert _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data) == project_root.resolve()
+
+
 def test_resolve_cli_project_dir_keeps_seed_relative_metadata_project_dir(
     tmp_path: Path,
 ) -> None:
@@ -595,6 +617,7 @@ async def test_run_orchestrator_uses_seed_relative_project_dir_for_runtime_and_q
     seed_file = seed_dir / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
     expected_project_dir = (seed_dir / "repo-root").resolve()
+    expected_project_dir.mkdir()
 
     fake_exec = SimpleNamespace(
         success=True,

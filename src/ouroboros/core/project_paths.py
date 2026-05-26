@@ -74,10 +74,17 @@ def resolve_path_against_base(
 
 def project_path_candidates_from_seed(seed: Any) -> tuple[str, ...]:
     """Extract likely project directories from seed metadata and brownfield refs."""
-    if seed is None:
-        return ()
+    metadata_candidates, reference_candidates = _project_path_candidate_groups_from_seed(seed)
+    return (*metadata_candidates, *reference_candidates)
 
-    candidates: list[str] = []
+
+def _project_path_candidate_groups_from_seed(seed: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Extract metadata paths separately from heuristic brownfield references."""
+    if seed is None:
+        return (), ()
+
+    metadata_candidates: list[str] = []
+    reference_candidates: list[str] = []
     seed_meta = getattr(seed, "metadata", None)
     if seed_meta is not None:
         project_dir = getattr(seed_meta, "project_dir", None) or getattr(
@@ -86,7 +93,7 @@ def project_path_candidates_from_seed(seed: Any) -> tuple[str, ...]:
             None,
         )
         if isinstance(project_dir, str) and project_dir:
-            candidates.append(project_dir)
+            metadata_candidates.append(project_dir)
 
     brownfield_context = getattr(seed, "brownfield_context", None)
     context_references = getattr(brownfield_context, "context_references", ()) or ()
@@ -94,15 +101,26 @@ def project_path_candidates_from_seed(seed: Any) -> tuple[str, ...]:
     for reference in context_references:
         path = getattr(reference, "path", None)
         role = getattr(reference, "role", None)
-        if isinstance(path, str) and path and role == "primary" and path not in candidates:
-            candidates.append(path)
+        if (
+            isinstance(path, str)
+            and path
+            and role == "primary"
+            and path not in metadata_candidates
+            and path not in reference_candidates
+        ):
+            reference_candidates.append(path)
 
     for reference in context_references:
         path = getattr(reference, "path", None)
-        if isinstance(path, str) and path and path not in candidates:
-            candidates.append(path)
+        if (
+            isinstance(path, str)
+            and path
+            and path not in metadata_candidates
+            and path not in reference_candidates
+        ):
+            reference_candidates.append(path)
 
-    return tuple(candidates)
+    return tuple(metadata_candidates), tuple(reference_candidates)
 
 
 def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> SeedProjectPathResolution:
@@ -125,11 +143,13 @@ def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> SeedProjectPat
       encoded but every candidate escaped ``stable_base``. Callers must
       treat this as an explicit security event, not a benign empty seed.
     """
-    candidates = project_path_candidates_from_seed(seed)
-    if not candidates:
+    metadata_candidates, reference_candidates = _project_path_candidate_groups_from_seed(seed)
+    if not metadata_candidates and not reference_candidates:
         return SeedProjectPathResolution(path=None, rejected=False)
 
-    for candidate in candidates:
+    rejected = False
+
+    for candidate in metadata_candidates:
         resolved = resolve_path_against_base(
             candidate,
             stable_base=stable_base,
@@ -137,5 +157,24 @@ def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> SeedProjectPat
         )
         if resolved is not None:
             return SeedProjectPathResolution(path=resolved, rejected=False)
+        rejected = True
 
-    return SeedProjectPathResolution(path=None, rejected=True)
+    for candidate in reference_candidates:
+        resolved = resolve_path_against_base(
+            candidate,
+            stable_base=stable_base,
+            enforce_containment=True,
+        )
+        if resolved is None:
+            rejected = True
+            continue
+        if resolved.exists():
+            return SeedProjectPathResolution(path=resolved, rejected=False)
+        log.info(
+            "project_paths.reference_candidate_missing",
+            raw_path=str(candidate),
+            resolved=str(resolved),
+            stable_base=str(stable_base.resolve()),
+        )
+
+    return SeedProjectPathResolution(path=None, rejected=rejected)

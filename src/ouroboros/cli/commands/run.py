@@ -162,6 +162,15 @@ def _directory_for_runtime(path: Path) -> Path:
     return path.parent if path.is_file() else path
 
 
+def _seed_stable_base(seed_file: Path) -> Path:
+    """Return the stable base for resolving seed-local project hints."""
+    seed_parent = seed_file.parent.resolve()
+    for candidate in (seed_parent, *seed_parent.parents):
+        if candidate.name == ".ouroboros":
+            return candidate.parent.resolve()
+    return seed_parent
+
+
 def _resolve_cli_project_dir(
     seed: "Seed",
     seed_file: Path,
@@ -174,7 +183,7 @@ def _resolve_cli_project_dir(
         return project_dir.expanduser().resolve()
 
     seed_data = seed_data or {}
-    seed_base = seed_file.parent.resolve()
+    seed_base = _seed_stable_base(seed_file)
     metadata_project_dir = _resolve_raw_metadata_project_dir(seed_data, stable_base=seed_base)
     if metadata_project_dir is not None:
         return _directory_for_runtime(metadata_project_dir)

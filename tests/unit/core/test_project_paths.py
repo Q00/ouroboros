@@ -265,3 +265,32 @@ class TestResolveSeedProjectPath:
 
         assert empty_result.path is None and not empty_result.rejected
         assert rejected_result.path is None and rejected_result.rejected
+
+    def test_nonexistent_brownfield_reference_falls_through_without_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        ref = SimpleNamespace(path="src/missing.py", role="primary")
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=[ref]),
+        )
+
+        result = resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        assert result.path is None
+        assert result.rejected is False
+
+    def test_existing_brownfield_file_reference_still_resolves(self, tmp_path: Path) -> None:
+        source_file = tmp_path / "src" / "main.py"
+        source_file.parent.mkdir()
+        source_file.write_text("print('hi')\n", encoding="utf-8")
+        ref = SimpleNamespace(path="src/main.py", role="primary")
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=[ref]),
+        )
+
+        result = resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        assert result.path == source_file.resolve()
+        assert result.rejected is False
