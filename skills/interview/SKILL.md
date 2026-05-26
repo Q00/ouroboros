@@ -79,7 +79,7 @@ Compare the result with the current version in the active runtime's local plugin
        - Check which tool installed `ouroboros-ai` by running these in order:
          - `uv tool list 2>/dev/null | grep "^ouroboros-ai "` → if found, use `uv tool upgrade ouroboros-ai`
          - `pipx list 2>/dev/null | grep "^  ouroboros-ai "` → if found, use `pipx upgrade ouroboros-ai`
-         - Otherwise, print: "Also upgrade the MCP server: `pip install --upgrade ouroboros-ai`" (do NOT run pip automatically)
+         - Otherwise, print: "Also upgrade the MCP server: `pip install --upgrade ouroboros-ai`
     4. Tell the user: "Updated! Restart your session to apply, then run `ooo interview` again."
   - If "Skip": proceed immediately.
 - If versions match, the check fails (network error, timeout, rate limit 403/429), or parsing fails/returns empty: **silently skip** and proceed.
@@ -563,7 +563,7 @@ If MCP returns `is_error=true` with `meta.recoverable=true`:
 response carries this `meta.reason` (with `meta.recoverable=true` and
 `is_error=false` — the wire success/failure axis is intentionally **not**
 flipped, to keep existing callers like the auto driver working), the text
-body is a meta-directive asking *you* to re-send a shorter context — it is
+body is a meta-directive requesting a shorter context summary — it is
 **NOT** an interview question. Do not route it through the active runtime's `ask_user` capability.
 Instead, produce a concise summary of the original `initial_context`
 (≤ `meta.max_chars` characters; covers goal, constraints, success criteria)

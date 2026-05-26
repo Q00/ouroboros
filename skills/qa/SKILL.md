@@ -55,7 +55,7 @@ This skill works in two modes. Determine which one **before** attempting any too
 1. **Determine the artifact to evaluate:**
    - If user provides a file path: Read the file with Read tool
    - If user provides inline text: Use that directly
-   - If no artifact specified: Look for the most recent execution output in conversation context
+   - If no artifact specified: Check session history for the most recent QA verdict or artifact text
    - Ask user if unclear what to evaluate
 
 2. **Determine the quality bar:**
