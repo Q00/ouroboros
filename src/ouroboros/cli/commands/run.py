@@ -163,24 +163,33 @@ def _directory_for_runtime(path: Path) -> Path:
 
 
 def _detect_project_root_from_seed_path(seed_file: Path, *, max_levels: int = 6) -> Path | None:
-    """Walk up from ``seed_file`` to find a directory containing ``.ouroboros/``.
+    """Recover the project root for a *central* seed.
 
-    Central seeds authored by the seed generator live under
-    ``<project_root>/.ouroboros/seeds/``. When the seed file is invoked from
-    a fresh worktree, the seed's parent directory (``.ouroboros/seeds/``) is
-    not the project root: joining seed-relative reference paths against it
-    produces non-existent locations. Walking up to the directory that owns
-    ``.ouroboros/`` recovers the intended project root without requiring the
-    caller to pass ``--project-dir`` explicitly.
+    Central seeds authored by the seed generator live at
+    ``<project_root>/.ouroboros/seeds/<...>/seed.yaml`` (any nesting depth
+    under ``.ouroboros/seeds/``). When such a seed is invoked from a fresh
+    worktree without ``--project-dir``, the seed's parent directory is
+    inside ``.ouroboros/seeds/`` — not the project root — so joining
+    seed-relative reference paths against it produces non-existent
+    locations. Walking up the ancestry until ``.ouroboros/seeds`` is
+    found recovers the intended project root.
 
-    Returns ``None`` when no ``.ouroboros/`` marker is found within
-    ``max_levels`` parents; the caller falls back to ``seed_file.parent`` in
-    that case.
+    Detection is intentionally scoped to the ``.ouroboros/seeds`` ancestry,
+    not to any ancestor that happens to contain a ``.ouroboros/`` directory.
+    Non-central seeds such as ``examples/dummy_seed.yaml`` continue to
+    resolve via the existing ``seed_file.parent`` fallback in the caller
+    even when they live inside a project tree whose root has
+    ``.ouroboros/``; otherwise local/example seeds would create or verify
+    files at the repository root rather than next to the seed.
+
+    Returns ``None`` when no ``.ouroboros/seeds`` ancestry is found within
+    ``max_levels`` parents; the caller falls back to ``seed_file.parent``
+    in that case.
     """
     current = seed_file.parent.resolve()
     for _ in range(max_levels):
-        if (current / ".ouroboros").is_dir():
-            return current
+        if current.name == "seeds" and current.parent.name == ".ouroboros":
+            return current.parent.parent
         parent = current.parent
         if parent == current:
             break
@@ -209,8 +218,6 @@ def _resolve_cli_project_dir(
     target_dir = _resolve_brownfield_target_dir(seed_data)
     stable_base = target_dir or seed_base
     resolution = resolve_seed_project_path(seed, stable_base=stable_base)
-    if resolution.path is not None:
-        return _directory_for_runtime(resolution.path)
     if resolution.rejected:
         print_error(
             "Seed encodes a project_dir/brownfield path that escapes the seed "
@@ -219,6 +226,18 @@ def _resolve_cli_project_dir(
             "with --project-dir pointing at the target project."
         )
         raise typer.Exit(1)
+    if detected_root is not None and target_dir is None:
+        # Central seed: the detected root *is* the project root.
+        # context_references are documentation pointers — collapsing an
+        # existing-file reference (e.g. ``src/.../foo.py``) to its parent
+        # would push the runtime cwd into a subdirectory and break the
+        # downstream task workspace and verification cwd. The metadata
+        # branch above already handled any user-declared override, and
+        # the containment check above still surfaces escapes. Honor the
+        # detected root directly.
+        return detected_root
+    if resolution.path is not None:
+        return _directory_for_runtime(resolution.path)
     return stable_base
 
 

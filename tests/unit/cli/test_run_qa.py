@@ -789,3 +789,82 @@ class TestResolveCliProjectDirForCentralSeed:
         assert resolved == root.resolve()
         # Hard regression guard: never return a path under .ouroboros/seeds/.
         assert ".ouroboros/seeds" not in str(resolved)
+
+    def test_central_seed_with_existing_file_reference_returns_project_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Existing file references must not pull cwd into a subdirectory.
+
+        Pre-fix the resolver accepted any existing ``context_references[].path``
+        and let ``_directory_for_runtime`` collapse it to its parent. For a
+        central seed at ``<root>/.ouroboros/seeds/seed.yaml`` with a reference
+        to ``src/ouroboros/core/project_paths.py`` this returned
+        ``<root>/src/ouroboros/core`` as runtime cwd, so the task workspace,
+        agent execution, and post-run verification all ran from the wrong
+        directory. Post-fix the detected project root wins over heuristic
+        file-reference collapse for central seeds.
+        """
+        root = tmp_path / "project"
+        seeds_dir = root / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        # Create the existing file the reference points at — this is the
+        # boundary the previous behavior mis-handled.
+        source_file = root / "src" / "ouroboros" / "core" / "project_paths.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("# stub\n", encoding="utf-8")
+
+        seed_file = seeds_dir / "seed_central.yaml"
+        seed_file.write_text("goal: dummy")
+
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(
+                context_references=[
+                    SimpleNamespace(
+                        path="src/ouroboros/core/project_paths.py",
+                        role="primary",
+                    ),
+                ],
+            ),
+        )
+
+        resolved = _resolve_cli_project_dir(seed, seed_file, seed_data={})
+
+        assert resolved == root.resolve()
+        # Hard regression guard: cwd must never collapse into a file's parent
+        # when the detected project root is available.
+        assert resolved != source_file.parent.resolve()
+
+
+class TestResolveCliProjectDirForNonCentralSeed:
+    """Non-central seeds must not adopt project-root detection from an unrelated ``.ouroboros/``."""
+
+    def test_example_seed_under_project_with_dot_ouroboros_uses_seed_parent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A seed under ``examples/`` must resolve next to itself, not at repo root.
+
+        Without this scoping, any seed living inside a project tree whose root
+        contains ``.ouroboros/`` (e.g. running ``ooo run examples/dummy_seed.yaml``
+        from inside the Ouroboros repo) would have its runtime cwd silently
+        rewritten to the repository root. That would make example/local seeds
+        create or verify files at the wrong location.
+        """
+        from ouroboros.cli.commands.run import _resolve_cli_project_dir
+
+        repo_root = tmp_path / "repo"
+        # Marker dir exists, but seed does not live under .ouroboros/seeds/.
+        (repo_root / ".ouroboros").mkdir(parents=True)
+        examples_dir = repo_root / "examples"
+        examples_dir.mkdir()
+        seed_file = examples_dir / "dummy_seed.yaml"
+        seed_file.write_text("goal: dummy")
+
+        seed = SimpleNamespace(metadata=None, brownfield_context=None)
+
+        resolved = _resolve_cli_project_dir(seed, seed_file, seed_data={})
+
+        assert resolved == examples_dir.resolve()
+        assert resolved != repo_root.resolve()
