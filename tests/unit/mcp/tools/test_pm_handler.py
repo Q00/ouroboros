@@ -18,6 +18,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.tools.pm_handler import (
     _DATA_DIR,
     PMInterviewHandler,
+    PM_UNCERTAINTY_GUIDANCE,
     _check_completion,
     _compute_deferred_diff,
     _detect_action,
@@ -628,6 +629,26 @@ class TestGetEngine:
 
             call_kwargs = mock_engine_cls.create.call_args
             assert call_kwargs.kwargs["state_dir"] == tmp_path
+
+    @pytest.mark.asyncio
+    async def test_start_response_places_uncertainty_guidance_before_question(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """MCP start response must show PM uncertainty guidance before question text."""
+        engine = _make_engine_stub()
+        state = _make_state(interview_id="pm_guidance")
+        engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("What should we build first?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "pm_guidance.json"))
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        result = await handler.handle({"initial_context": "Build a launch checklist"})
+
+        assert result.is_ok
+        text = result.value.text_content
+        assert PM_UNCERTAINTY_GUIDANCE in text
+        assert text.index(PM_UNCERTAINTY_GUIDANCE) < text.index("What should we build first?")
 
 
 # ── Action auto-detection tests (AC 13) ───────────────────────

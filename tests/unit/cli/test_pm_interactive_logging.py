@@ -10,6 +10,7 @@ import pytest
 import typer
 
 from ouroboros.bigbang.interview import InterviewRound
+from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE
 from ouroboros.cli.commands.pm import _run_pm_interview, pm_command
 from ouroboros.core.types import Result
 
@@ -82,7 +83,7 @@ def test_pm_command_enables_debug_logging_when_requested() -> None:
 async def test_run_pm_interview_new_session_uses_multiline_prompt_and_shows_progress(
     tmp_path: Path,
 ) -> None:
-    """New PM sessions should use the multiline prompt for both answers."""
+    """New PM sessions should show uncertainty guidance before the first prompt."""
     initial_state = _build_state()
     recorded_state = _build_state()
     recorded_state.is_complete = True
@@ -98,6 +99,16 @@ async def test_run_pm_interview_new_session_uses_multiline_prompt_and_shows_prog
     engine.decide_later_items = []
     engine.format_decide_later_summary.return_value = ""
 
+    info_messages: list[str] = []
+
+    async def fake_multiline_prompt(prompt: str) -> str:
+        if prompt == "Your response" and not fake_multiline_prompt.answers_used:
+            assert PM_UNCERTAINTY_GUIDANCE in info_messages
+        fake_multiline_prompt.answers_used += 1
+        return ["Initial context", "Actual answer"][fake_multiline_prompt.answers_used - 1]
+
+    fake_multiline_prompt.answers_used = 0
+
     with (
         patch.object(Path, "home", return_value=tmp_path),
         patch("ouroboros.cli.commands.pm.create_llm_adapter", return_value=object()),
@@ -108,9 +119,12 @@ async def test_run_pm_interview_new_session_uses_multiline_prompt_and_shows_prog
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
         patch(
             "ouroboros.cli.commands.pm.multiline_prompt_async",
-            side_effect=["Initial context", "Actual answer"],
+            side_effect=fake_multiline_prompt,
         ) as mock_prompt,
-        patch("ouroboros.cli.commands.pm.print_info") as mock_print_info,
+        patch(
+            "ouroboros.cli.commands.pm.print_info",
+            side_effect=info_messages.append,
+        ) as mock_print_info,
         patch("ouroboros.cli.commands.pm.print_success"),
     ):
         await _run_pm_interview(resume_id=None, model="test-model", backend="codex", debug=False)
@@ -127,8 +141,10 @@ async def test_run_pm_interview_new_session_uses_multiline_prompt_and_shows_prog
     assert engine.save_state.await_args_list[-1].args[0] is recorded_state
 
     messages = [call.args[0] for call in mock_print_info.call_args_list]
+    assert PM_UNCERTAINTY_GUIDANCE in messages
     assert "Starting interview..." in messages
     assert "Generating next question..." in messages
+    assert messages.index(PM_UNCERTAINTY_GUIDANCE) < messages.index("Starting interview...")
     assert messages.index("Starting interview...") < messages.index("Generating next question...")
 
 

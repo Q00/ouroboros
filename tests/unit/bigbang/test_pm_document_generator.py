@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.bigbang.pm_document import (
+    _PM_GENERATION_SYSTEM_PROMPT,
     PMDocumentGenerator,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
@@ -50,6 +51,14 @@ Build a task management tool for small teams.
 *PM ID: pm_seed_test123*
 *Interview ID: int_abc*
 """
+
+
+def test_pm_generation_prompt_preserves_uncertainty_sections() -> None:
+    """LLM PM generation keeps uncertainty in existing Assumptions/Decide Later buckets."""
+    assert "Preserve uncertainty explicitly" in _PM_GENERATION_SYSTEM_PROMPT
+    assert "Assumptions" in _PM_GENERATION_SYSTEM_PROMPT
+    assert "Decide Later" in _PM_GENERATION_SYSTEM_PROMPT
+    assert "unknown items" in _PM_GENERATION_SYSTEM_PROMPT
 
 
 def _make_seed(**overrides) -> PMSeed:

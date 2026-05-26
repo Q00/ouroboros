@@ -21,6 +21,7 @@ from ouroboros.bigbang.pm_completion import (
     build_pm_completion_summary,
     maybe_complete_pm_interview,
 )
+from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
@@ -493,7 +494,8 @@ async def _run_pm_interview(
 
         print_success(f"Resumed session: {resume_id}")
     else:
-        # New session — ask the opening question first
+        # New session — show uncertainty guidance before the first PM answer
+        print_info(PM_UNCERTAINTY_GUIDANCE)
         opening = engine.get_opening_question()
         console.print(f"\n[bold yellow]?[/] {opening}\n")
 
