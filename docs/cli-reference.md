@@ -934,6 +934,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary |
+| `OUROBOROS_SESSION_WALL_CLOCK_SECONDS` | `runtime_controls.session_wall_clock_seconds` | Override the Auto session wall-clock watchdog budget; `0` disables the watchdog |
 | `OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS` | `runtime_controls.mcp_tool_timeout_seconds` | Optional adapter-level MCP timeout; `0` disables the fixed wall-clock cap |
 | `OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS` | `runtime_controls.generation_idle_timeout_seconds` | Stop an evolve generation after no lineage/execution activity is observed |
 | `OUROBOROS_GENERATION_NO_PROGRESS_TIMEOUT_SECONDS` | `runtime_controls.generation_no_progress_timeout_seconds` | Stop an evolve generation after activity continues without material progress |
