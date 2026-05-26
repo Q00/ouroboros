@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from ouroboros.core.types import Result
+
 from .conftest import CanonicalScenario
 
 
@@ -279,16 +281,6 @@ async def test_live_run_opt_in_invokes_auto_handler(
 
     calls: list[tuple[str, Path]] = []
 
-    class _Ok:
-        def is_ok(self) -> bool:
-            return True
-
-        def unwrap(self) -> object:
-            return _ToolResult()
-
-        def unwrap_err(self) -> str:
-            return "unexpected"
-
     class _ToolResult:
         is_error = False
         content: list[object] = []
@@ -298,9 +290,9 @@ async def test_live_run_opt_in_invokes_auto_handler(
             "product_status": "verified_complete",
         }
 
-    async def fake_invoke(selected: CanonicalScenario, workdir: Path) -> _Ok:
+    async def fake_invoke(selected: CanonicalScenario, workdir: Path) -> Result[object, str]:
         calls.append((selected.slug, workdir))
-        return _Ok()
+        return Result.ok(_ToolResult())
 
     monkeypatch.setattr(
         "tests.canonical.test_canonical._invoke_ouroboros_auto",
