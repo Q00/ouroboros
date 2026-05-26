@@ -47,17 +47,15 @@ elif [ -f "$(dirname "$0")/../pyproject.toml" ] && grep -q "name = \"ouroboros-a
   IS_LOCAL=true
 fi
 
-# Auto-detect: if a stable release exists on PyPI, use it. Otherwise allow pre-release.
-# PyPI /json info.version returns latest stable only.
-# If python3 is unavailable for JSON parsing, PRE_FLAG stays "yes" which is safe:
-# --pre/--prerelease=allow still installs stable versions when they're the latest.
-PRE_FLAG="yes"
+# Auto-detect: if PyPI's latest published version is a pre-release, allow
+# pre-releases. On lookup/parsing failure, stay stable-only.
+PRE_FLAG=""
 if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
-  STABLE=$(curl -fsSL "https://pypi.org/pypi/${PACKAGE_NAME}/json" 2>/dev/null \
+  LATEST=$(curl -fsSL "https://pypi.org/pypi/${PACKAGE_NAME}/json" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || true)
-  if [ -n "$STABLE" ]; then
-    if ! echo "$STABLE" | grep -qE '(a|b|rc|dev)'; then
-      PRE_FLAG=""
+  if [ -n "$LATEST" ]; then
+    if echo "$LATEST" | grep -qE '(a|b|rc|dev)'; then
+      PRE_FLAG="yes"
     fi
   fi
 fi
