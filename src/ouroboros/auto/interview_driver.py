@@ -32,6 +32,8 @@ from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 log = structlog.get_logger(__name__)
 
+INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_nonclosure"
+
 
 @dataclass(frozen=True, slots=True)
 class InterviewTurn:
@@ -431,7 +433,11 @@ class AutoInterviewDriver:
                         synthesis_pushed=False,
                     )
                     state.ledger = ledger.to_dict()
-                    state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
+                    state.mark_blocked(
+                        blocker,
+                        tool_name="interview.safe_default_synthesis",
+                        error_code=INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE,
+                    )
                     record_authoring_backend(state)
                     self._save(state)
                     return AutoInterviewResult(
@@ -455,7 +461,11 @@ class AutoInterviewDriver:
                         synthesis_pushed=synthesis_pushed,
                     )
                     state.ledger = ledger.to_dict()
-                    state.mark_blocked(blocker, tool_name="interview.safe_default_synthesis")
+                    state.mark_blocked(
+                        blocker,
+                        tool_name="interview.safe_default_synthesis",
+                        error_code=INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE,
+                    )
                     record_authoring_backend(state)
                     self._save(state)
                     return AutoInterviewResult(

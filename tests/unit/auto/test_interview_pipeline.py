@@ -846,6 +846,7 @@ async def test_interview_driver_rolls_back_defaults_when_synthesis_sync_fails(tm
     assert result.status == "blocked"
     assert state.interview_completed is False
     assert "transcript sync failed" in (result.blocker or "")
+    assert state.last_error_code == "interview_safe_default_synthesis_nonclosure"
     assert ledger.open_gaps()
     assert not any(
         entry.key == f"{section_name}.safe_default_finalization"
@@ -881,6 +882,7 @@ async def test_interview_driver_blocks_when_synthesis_does_not_close_backend(tmp
     assert state.interview_completed is False
     assert state.pending_question == "Still need one more thing"
     assert "did not close the persisted interview" in (result.blocker or "")
+    assert state.last_error_code == "interview_safe_default_synthesis_nonclosure"
     assert ledger.open_gaps()
     assert not any(
         entry.key == f"{section_name}.safe_default_finalization"
