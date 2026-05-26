@@ -244,6 +244,12 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_llm=True,
         supports_interview_driver=False,
     ),
+    BackendCapability(
+        name="outio",
+        aliases=("outio_code", "outiocode"),
+        supports_llm=True,
+        supports_interview_driver=False,
+    ),
 )
 
 _BY_NAME: dict[str, BackendCapability] = {

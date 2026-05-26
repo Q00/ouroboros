@@ -1,9 +1,10 @@
 [project]
-name = "ouroboros-ai"
+name = "outio-code"
 dynamic = ["version"]
-description = "Specification-first workflow engine for AI coding agents. Works with Claude Code and Codex CLI."
-readme = "README.md"
+description = "OutioCode — autonomous code agent on the Outio platform. Specification-first workflow engine forked from Ouroboros (MIT)."
+readme = "OUTIO.md"
 authors = [
+    { name = "Outio", email = "support@outio.app" },
     { name = "Q00", email = "jqyu.lee@gmail.com" }
 ]
 requires-python = ">=3.12"
@@ -32,10 +33,16 @@ dashboard = [
 ]
 mcp = ["mcp>=1.26.0,<2.0.0"]
 tui = ["textual>=1.0.0,<9.0.0"]
-all = ["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]
+all = ["outio-code[claude,copilot,litellm,mcp,tui,dashboard]"]
 
 [project.scripts]
+# OutioCode est le rebranding du CLI Ouroboros. Le binaire principal
+# est `outio-code` ; `ouroboros` reste comme alias pour les utilisateurs
+# qui connaissaient le projet upstream.
+outio-code = "ouroboros.cli.main:app"
+outio = "ouroboros.cli.main:app"
 ouroboros = "ouroboros.cli.main:app"
+ooo = "ouroboros.cli.main:app"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

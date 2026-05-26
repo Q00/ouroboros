@@ -259,6 +259,45 @@ def create_llm_adapter(
             timeout=timeout,
             max_retries=max_retries,
         )
+    # Outio — endpoint OpenAI-compatible hébergé sur ton compte Outio.
+    # On délègue à LiteLLM (qui parle OpenAI-compatible) en pré-câblant
+    # api_base et api_key sur la plateforme Outio. C'est ce que le CLI
+    # `outio-code` utilise par défaut (cf. config/loader.py).
+    if resolved_backend == "outio":
+        import os
+
+        try:
+            from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+        except ImportError as exc:
+            msg = (
+                "outio backend requires litellm. "
+                "Install with: pip install 'outio-code[litellm]' "
+                "(or 'ouroboros-ai[litellm]')"
+            )
+            raise RuntimeError(msg) from exc
+
+        outio_key = os.environ.get("OUTIO_API_KEY") or api_key
+        outio_base = (
+            os.environ.get("OUTIO_API_BASE")
+            or api_base
+            or "https://outio.app/api/v1"
+        )
+        if not outio_key:
+            msg = (
+                "Outio backend requires OUTIO_API_KEY env var. "
+                "Get one at https://outio.app/dashboard/settings?tab=integrations "
+                "(Business plan required)."
+            )
+            raise RuntimeError(msg)
+
+        return LiteLLMAdapter(
+            api_key=outio_key,
+            api_base=outio_base,
+            timeout=timeout,
+            max_retries=max_retries,
+            io_recorder=io_recorder,
+        )
+
     # litellm is the fallback
     try:
         from ouroboros.providers.litellm_adapter import LiteLLMAdapter

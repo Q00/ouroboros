@@ -1150,7 +1150,10 @@ def get_llm_backend() -> str:
         2. OUROBOROS_RUNTIME environment variable, when it names a runtime
            that also implements the LLM adapter contract
         3. config.yaml llm.backend
-        4. "claude_code"
+        4. "outio" — défaut OutioCode : la plateforme Outio expose un
+           endpoint OpenAI-compatible (clé OUTIO_API_KEY). Si l'env var
+           n'est pas définie, l'adapter lèvera une erreur explicite avec
+           le lien vers /dashboard/settings.
 
     Returns:
         Normalized LLM backend name.
@@ -1170,7 +1173,7 @@ def get_llm_backend() -> str:
         config = load_config()
         return config.llm.backend
     except ConfigError:
-        return "claude_code"
+        return "outio"
 
 
 def get_llm_permission_mode(backend: str | None = None) -> str:
