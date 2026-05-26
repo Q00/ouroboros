@@ -160,7 +160,65 @@ def select_persona_for_qa_failure(
     return None
 
 
+# Selection order for the safe-default unsafe-context matcher escalation
+# (Issue #1248). Distinct from the QA-failure pattern selector because the
+# safe-default matcher fires on lexical false positives in the matcher input
+# (e.g. the word "contract" inside an SE phrase like "acceptance contract"),
+# not on a QA failure shape. The two personas best suited to disambiguating
+# *"is this benign vocabulary, or genuinely unsafe scope?"* are:
+#
+# * **CONTRARIAN** — inverts the matcher's assumption ("this looks unsafe")
+#   and asks whether the surrounding context actually authorizes the unsafe
+#   reading. First because false positives are the dominant case.
+# * **ARCHITECT** — restructures the ledger framing if CONTRARIAN cannot
+#   resolve the call, surfacing the scope decision instead of leaving the
+#   matcher to guess.
+#
+# After both have been tried in the same session, the caller transitions to
+# BLOCKED with stop_reason_code ``unstuck_exhausted`` — the L5 invariant's
+# typed terminal rather than another regex stalemate.
+_SAFE_DEFAULT_BLOCK_CHAIN: tuple[ThinkingPersona, ...] = (
+    ThinkingPersona.CONTRARIAN,
+    ThinkingPersona.ARCHITECT,
+)
+
+
+def select_persona_for_safe_default_block(
+    *,
+    already_tried_personas: Sequence[ThinkingPersona] = (),
+) -> ThinkingPersona | None:
+    """Pick a persona for a safe-default unsafe-context matcher fire.
+
+    Issue #1248 — when ``_unsafe_context_reason()`` flags a safe-default
+    closure attempt, the L5 ladder requires escalation through a lateral
+    persona before falling to BLOCKED. This selector is the matcher's
+    equivalent of :func:`select_persona_for_qa_failure`, but tailored to a
+    *matcher self-trigger* signal (not a QA failure shape):
+
+    1. **CONTRARIAN** — first attempt. Optimised for lexical false
+       positives (e.g. "acceptance contract", "license: MIT", "SOC2
+       compliance check") that share vocabulary with the matcher's
+       alternation bank but do not assert active unsafe scope.
+    2. **ARCHITECT** — second attempt. Restructures the ledger framing
+       when CONTRARIAN's inversion was already tried and a non-trivial
+       scope decision remains.
+    3. ``None`` — both attempts exhausted. The caller surfaces a typed
+       ``unstuck_exhausted`` BLOCKED.
+
+    Deterministic: same ``already_tried_personas`` always yields the same
+    result, so the resume contract (mapped through
+    ``state.personas_invoked``) holds without persisting a separate
+    routing hint.
+    """
+    tried = frozenset(already_tried_personas)
+    for persona in _SAFE_DEFAULT_BLOCK_CHAIN:
+        if persona not in tried:
+            return persona
+    return None
+
+
 __all__ = [
     "classify_qa_failure_to_pattern",
     "select_persona_for_qa_failure",
+    "select_persona_for_safe_default_block",
 ]

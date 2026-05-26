@@ -7,8 +7,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import inspect
 import re
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    # Imported under TYPE_CHECKING to avoid a runtime cycle: adapters.py
+    # imports ``InterviewBackend`` / ``InterviewTurn`` from this module.
+    from ouroboros.auto.adapters import LateralResult
 
 import structlog
 
@@ -33,6 +38,22 @@ from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 log = structlog.get_logger(__name__)
 
 INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_incomplete"
+
+# Issue #1248 — L5 ladder typed terminal for a safe-default lateral escalation
+# that exhausted every available persona without resolving the matcher fire.
+# Mirrors the runtime ``watchdog_wall_clock_exceeded`` / interview
+# ``interview_unsafe_gaps_remain`` patterns: a module-level const so callers
+# emit the same string, and so the alphabet of valid stop_reason_code values
+# can be discovered by reading the module surface.
+UNSTUCK_EXHAUSTED_STOP_REASON_CODE = "unstuck_exhausted"
+
+# Structural alias for the production lateral-thinker callable. Mirrors the
+# alias declared on ``ouroboros.auto.pipeline``; duplicated locally because
+# ``adapters.LateralResult`` cannot be imported at module load time without
+# creating a cycle (adapters imports ``InterviewBackend`` from this module).
+# At runtime the alias is just ``Callable[..., Awaitable[Any]]``; the typing
+# block above gives mypy the precise return type.
+LateralThinker = Callable[..., Awaitable["LateralResult"]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +126,14 @@ class AutoInterviewDriver:
     timeout_seconds: float = 60.0
     max_rounds: int = 12
     progress_callback: AutoProgressCallback | None = None
+    # Issue #1248 — optional lateral-thinker handle used by the safe-default
+    # escalation path to disambiguate matcher-fire false positives from
+    # real unsafe scope before falling to BLOCKED. ``None`` preserves the
+    # pre-issue behavior (matcher fire → immediate
+    # ``interview_unsafe_gaps_remain`` BLOCKED), so existing call sites and
+    # tests that construct the driver without this argument are unaffected.
+    # The behavior change that consumes this field ships in a separate PR.
+    lateral_thinker: LateralThinker | None = None
     _last_emitted_message: str | None = field(default=None, init=False, repr=False)
 
     def _emit(self, state: AutoPipelineState) -> None:
