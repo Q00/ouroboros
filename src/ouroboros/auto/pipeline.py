@@ -1078,60 +1078,116 @@ class AutoPipeline:
                             return self._result(
                                 state, ledger, review=review, blocker=state.last_error
                             )
-                        if terminal_run_meta is not None:
-                            run_status_resume = _optional_str(terminal_run_meta.get("status"))
-                            run_success_resume = terminal_run_meta.get("success")
-                            failed_run_statuses = {"failed", "cancelled", "interrupted"}
-                            if run_success_resume is False or (
-                                run_status_resume in failed_run_statuses
-                            ):
-                                resolved_status = run_status_resume or "failed"
-                                state.mark_blocked(
-                                    "resumed run execution finished unsuccessfully "
-                                    f"before Ralph handoff: {resolved_status}",
-                                    tool_name="run_starter",
-                                )
-                                self._save(state)
-                                return self._result(
-                                    state,
-                                    ledger,
-                                    review=review,
-                                    blocker=state.last_error,
-                                    run_subagent=None,
-                                )
-                            incomplete_run_statuses = {
-                                "queued",
-                                "running",
-                                "cancel_requested",
-                            }
-                            if run_status_resume in incomplete_run_statuses:
-                                state.mark_blocked(
-                                    "resumed run execution did not finish "
-                                    f"before Ralph handoff: {run_status_resume}",
-                                    tool_name="run_starter",
-                                )
-                                self._save(state)
-                                return self._result(
-                                    state,
-                                    ledger,
-                                    review=review,
-                                    blocker=state.last_error,
-                                    run_subagent=None,
-                                )
-                            if run_status_resume == "paused":
-                                state.mark_blocked(
-                                    "resumed run execution paused before Ralph handoff; "
-                                    "resume the paused run before continuing",
-                                    tool_name="run_starter",
-                                )
-                                self._save(state)
-                                return self._result(
-                                    state,
-                                    ledger,
-                                    review=review,
-                                    blocker=state.last_error,
-                                    run_subagent=None,
-                                )
+                        # ``_wait_owned_run_job_terminal`` returns ``None``
+                        # when the configured run starter does not expose
+                        # ``handler._job_manager.get_snapshot``. The bot
+                        # review explicitly flags this as "treats an
+                        # unverified persisted run handle as enough to
+                        # start Ralph" — a persisted ``job_id`` proves
+                        # *dispatch*, not terminal success. Without a
+                        # reconciliation channel the resume cannot prove
+                        # the run finished successfully, so refuse the
+                        # Ralph handoff just as the jobless-synchronous
+                        # branch below does for ``execution_id``-only
+                        # handles.
+                        if terminal_run_meta is None:
+                            state.mark_blocked(
+                                "Cannot resume complete-product Ralph handoff: "
+                                "the owned run job snapshot is unavailable "
+                                f"(job_id={state.job_id!r}) so the persisted run "
+                                "handle cannot be confirmed as terminal-success. "
+                                "Resolve the run job to a terminal state, or clear "
+                                "the persisted handle before retrying.",
+                                tool_name="run_starter",
+                            )
+                            self._save(state)
+                            return self._result(
+                                state,
+                                ledger,
+                                review=review,
+                                blocker=state.last_error,
+                                run_subagent=None,
+                            )
+                        run_status_resume = _optional_str(terminal_run_meta.get("status"))
+                        run_success_resume = terminal_run_meta.get("success")
+                        failed_run_statuses = {"failed", "cancelled", "interrupted"}
+                        if run_success_resume is False or (
+                            run_status_resume in failed_run_statuses
+                        ):
+                            resolved_status = run_status_resume or "failed"
+                            state.mark_blocked(
+                                "resumed run execution finished unsuccessfully "
+                                f"before Ralph handoff: {resolved_status}",
+                                tool_name="run_starter",
+                            )
+                            self._save(state)
+                            return self._result(
+                                state,
+                                ledger,
+                                review=review,
+                                blocker=state.last_error,
+                                run_subagent=None,
+                            )
+                        incomplete_run_statuses = {
+                            "queued",
+                            "running",
+                            "cancel_requested",
+                        }
+                        if run_status_resume in incomplete_run_statuses:
+                            state.mark_blocked(
+                                "resumed run execution did not finish "
+                                f"before Ralph handoff: {run_status_resume}",
+                                tool_name="run_starter",
+                            )
+                            self._save(state)
+                            return self._result(
+                                state,
+                                ledger,
+                                review=review,
+                                blocker=state.last_error,
+                                run_subagent=None,
+                            )
+                        if run_status_resume == "paused":
+                            state.mark_blocked(
+                                "resumed run execution paused before Ralph handoff; "
+                                "resume the paused run before continuing",
+                                tool_name="run_starter",
+                            )
+                            self._save(state)
+                            return self._result(
+                                state,
+                                ledger,
+                                review=review,
+                                blocker=state.last_error,
+                                run_subagent=None,
+                            )
+                        # Allowlist-style terminal-success check: a poll
+                        # that returned terminal metadata but does not
+                        # advertise an explicit success signal (e.g. the
+                        # snapshot's ``result_meta`` is empty or carries
+                        # an unknown status) is NOT evidence the product
+                        # run reached terminal success. Refuse the
+                        # handoff just like the unreconcilable cases
+                        # above so a malformed or unfamiliar snapshot
+                        # cannot pass the gate by omission.
+                        if run_success_resume is not True and run_status_resume != "completed":
+                            state.mark_blocked(
+                                "Cannot resume complete-product Ralph handoff: "
+                                "owned run job snapshot did not confirm terminal "
+                                f"success (status={run_status_resume!r}, "
+                                f"success={run_success_resume!r}). Resolve the run "
+                                "to terminal-success or clear the persisted handle "
+                                "before retrying.",
+                                tool_name="run_starter",
+                            )
+                            self._save(state)
+                            return self._result(
+                                state,
+                                ledger,
+                                review=review,
+                                blocker=state.last_error,
+                                run_subagent=None,
+                            )
                     else:
                         # Synchronous starters
                         # (``HandlerSynchronousRunStarter``) return
