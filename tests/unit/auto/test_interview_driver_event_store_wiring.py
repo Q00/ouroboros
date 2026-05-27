@@ -103,6 +103,10 @@ async def test_run_emits_opened_and_finalized_on_clean_exit(tmp_path) -> None:
     with _patch_inner(return_value=stub_result):
         result = await driver.run(state, ledger)
 
+    # §I4 dispatch is fire-and-forget: drain background emit tasks
+    # before asserting against ``store.appended``.
+    await driver.wait_for_pending_emits()
+
     assert result.status == "ready"
     assert [event.type for event in store.appended] == [
         "auto.interview.opened",
@@ -134,6 +138,8 @@ async def test_run_marks_resumed_when_state_has_interview_session_id(tmp_path) -
     with _patch_inner(return_value=_result()):
         await driver.run(state, MagicMock(spec=SeedDraftLedger))
 
+    await driver.wait_for_pending_emits()
+
     opened = store.appended[0]
     assert opened.data["resumed"] is True
 
@@ -153,6 +159,8 @@ async def test_run_emits_failed_event_and_reraises_on_inner_exception(tmp_path) 
     with _patch_inner(side_effect=_Boom("backend offline")):
         with pytest.raises(_Boom):
             await driver.run(state, MagicMock(spec=SeedDraftLedger))
+
+    await driver.wait_for_pending_emits()
 
     types = [event.type for event in store.appended]
     assert types == ["auto.interview.opened", "auto.interview.failed"]
@@ -197,6 +205,8 @@ async def test_event_store_failure_does_not_break_interview_loop(tmp_path) -> No
     state = _build_state(tmp_path)
     with _patch_inner(return_value=expected):
         result = await driver.run(state, MagicMock(spec=SeedDraftLedger))
+
+    await driver.wait_for_pending_emits()
 
     assert result is expected
     # Both append attempts failed → nothing recorded, no exception leaked.
@@ -296,8 +306,10 @@ async def test_keyboard_interrupt_propagates_without_emitting_failed(tmp_path) -
         with pytest.raises(KeyboardInterrupt):
             await driver.run(state, MagicMock(spec=SeedDraftLedger))
 
-    # ``opened`` was emitted before the inner call; ``failed`` was NOT
-    # emitted because the catch is narrowed to ``Exception``.
+    # Drain any pending background emit (``opened``); ``failed`` was
+    # NOT scheduled because the catch is narrowed to ``Exception``.
+    await driver.wait_for_pending_emits()
+
     assert [event.type for event in store.appended] == ["auto.interview.opened"]
 
 
@@ -350,16 +362,21 @@ async def test_slow_opened_append_does_not_block_interview_loop(tmp_path) -> Non
     expected = _result(status="ready", rounds=1, session_id="iv_slow")
     state = _build_state(tmp_path)
 
-    # The bot's reproducer shape: outer wait_for budget is well above
-    # the inner fast-path (~1.5 s leaves room for the 1.0 s fail-open
-    # bound + driver overhead) but well below the 5 s slow append.
-    # Before the fix, this would raise TimeoutError. After the fix,
-    # the inner result returns cleanly.
+    # The bot's reproducer shape: outer wait_for budget is well below
+    # the slow append's 5 s. After the dispatch fix, the inner result
+    # returns essentially instantly because the slow ``opened`` append
+    # runs as a BACKGROUND task — it never touches the wait_for
+    # boundary. Before the dispatch fix, even a 1.0 s fail-open
+    # inline await would have exceeded a sub-second budget.
     with _patch_inner(return_value=expected):
         result = await asyncio.wait_for(
             driver.run(state, MagicMock(spec=SeedDraftLedger)),
-            timeout=1.5,
+            timeout=0.5,
         )
+    # Drain background emits; the slow ``opened`` append will time out
+    # (5 s sleep, 1.0 s fail-open bound), the fast ``finalized`` will
+    # complete.
+    await driver.wait_for_pending_emits()
 
     assert result is expected
     # ``opened`` was dropped (fail-open on latency); ``finalized``
@@ -395,9 +412,64 @@ async def test_slow_finalized_append_does_not_block_pipeline_deadline(tmp_path) 
     with _patch_inner(return_value=expected):
         result = await asyncio.wait_for(
             driver.run(state, MagicMock(spec=SeedDraftLedger)),
-            timeout=1.5,
+            timeout=0.5,
         )
+    await driver.wait_for_pending_emits()
 
     assert result is expected
     # ``opened`` recorded; ``finalized`` dropped (fail-open on latency).
     assert [event.type for event in store.appended] == ["auto.interview.opened"]
+
+
+@pytest.mark.asyncio
+async def test_deadline_capped_outer_timeout_below_observer_timeout(tmp_path) -> None:
+    """Bot-review blocker (commit 4fd6cfc1 → req_1779890159_141): the
+    ``AutoPipeline.run`` interview ``asyncio.wait_for`` budget is
+    ``_deadline_capped_timeout(...)``, which can validly fall BELOW
+    the observer's own fail-open bound (1.0 s) when the top-level
+    deadline is nearly expired, or when ``phase_timeout_seconds``
+    policy sets the interview phase to 1 s. Under those conditions, a
+    bounded INLINE await would still spend the entire pipeline
+    deadline before its own bound fires — the bot's exact probe
+    (slow 5 s ``opened`` + outer 0.1 s wait_for) raised
+    ``TimeoutError`` after ~0.102 s on commit 4fd6cfc1.
+
+    The dispatch fix moves the append off the critical path entirely:
+    ``_emit_event`` schedules a background ``asyncio.Task`` and
+    returns immediately. The pipeline's wait_for never sees the
+    observer at all. This test pins that contract with the bot's
+    exact deadline-capped reproducer shape.
+    """
+
+    class _StuckOpenedStore:
+        def __init__(self) -> None:
+            self.appended: list[BaseEvent] = []
+
+        async def append(self, event: BaseEvent, **_: Any) -> None:
+            await asyncio.sleep(5.0)
+            self.appended.append(event)
+
+    store = _StuckOpenedStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    expected = _result(status="ready", rounds=1)
+    state = _build_state(tmp_path)
+
+    # Outer timeout 0.1 s — BELOW the 1.0 s observer fail-open bound.
+    # Before the dispatch fix, even the bounded-await shape exceeded
+    # this. After the dispatch fix, driver.run returns essentially
+    # instantly because the append never blocks the wait_for boundary.
+    with _patch_inner(return_value=expected):
+        result = await asyncio.wait_for(
+            driver.run(state, MagicMock(spec=SeedDraftLedger)),
+            timeout=0.1,
+        )
+
+    assert result is expected
+    # The background tasks are still in flight; they will eventually
+    # time out (5 s sleep, 1.0 s observer bound). We do NOT drain
+    # them here — the contract under test is that the OUTER wait_for
+    # was honored, not that the appends succeeded. Cancel pending
+    # tasks so they don't leak into the next test.
+    for task in list(driver._pending_emit_tasks):
+        task.cancel()
+    await driver.wait_for_pending_emits()
