@@ -768,6 +768,66 @@ def test_complete_product_synchronous_run_timeout_has_completion_grace(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_complete_product_synchronous_success_after_deadline_blocks_as_timeout(
+    tmp_path,
+) -> None:
+    """Sync completion grace must not turn into extra execution budget.
+
+    ``_run_start_timeout`` adds ``_SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS``
+    on top of the remaining pipeline deadline so the inline ``await`` for a
+    synchronous starter can finish handler teardown without
+    ``asyncio.wait_for`` tripping. The grace is for teardown only — a
+    synchronous run that returns ``success=True`` AFTER ``deadline_at`` has
+    already passed has still exceeded the public ``pipeline_timeout``
+    contract. The pre-COMPLETE deadline gate must catch that case and
+    surface ``pipeline_timeout`` BLOCKED instead of recording the
+    over-budget run as complete.
+    """
+
+    state = _state_at_run_phase(tmp_path)
+
+    class OverBudgetSyncStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            # Backdate the deadline as if the inline await had run past it
+            # within the synchronous completion grace; returning success here
+            # would otherwise mark COMPLETE without re-checking the deadline.
+            state.deadline_at = time.monotonic() - 1.0
+            state.deadline_at_epoch = time.time() - 1.0
+            return {
+                "job_id": None,
+                "session_id": "sync_over_budget",
+                "execution_id": "sync_over_budget_exec",
+                "status": "completed",
+                "success": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run when sync execution is over deadline")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=OverBudgetSyncStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.is_deadline_expired()
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
 async def test_complete_product_waits_for_owned_run_job_before_ralph(tmp_path) -> None:
     """A queued execute_seed job must reach terminal success before Ralph starts."""
     state = _state_at_run_phase(tmp_path)

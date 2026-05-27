@@ -1325,6 +1325,27 @@ class AutoPipeline:
                         and bool(getattr(self.run_starter, "synchronous_execution", False))
                         and run_success is True
                     ):
+                        # ``_run_start_timeout`` adds
+                        # ``_SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS`` on top of
+                        # the remaining deadline so the inline ``await`` can
+                        # finish handler teardown without tripping
+                        # ``asyncio.wait_for``. That grace is intended for
+                        # teardown, not for extra execution budget: a
+                        # synchronous run that returns ``success=True`` AFTER
+                        # ``deadline_at`` has passed has still exceeded the
+                        # top-level ``pipeline_timeout`` contract. Enforce the
+                        # deadline before persisting COMPLETE so the envelope
+                        # surfaces ``pipeline_timeout`` BLOCKED instead of
+                        # advertising the over-budget run as a successful
+                        # complete-product outcome.
+                        if self._enforce_deadline(state):
+                            return self._result(
+                                state,
+                                ledger,
+                                review=review,
+                                blocker=state.last_error,
+                                run_subagent=run_subagent,
+                            )
                         state.run_handoff_status = "completed"
                         state.run_handoff_guidance = None
                         state.transition(
