@@ -111,9 +111,9 @@ When the user invokes this skill:
    - If installed via **pip** (fallback):
      ```bash
      # For pre-release targets:
-     python3 -m pip install --upgrade --pre ouroboros-ai[claude]
-     # For stable targets:
-     python3 -m pip install --upgrade ouroboros-ai[claude]
+     python3 -m pip install -U --pre ouroboros-ai[claude]
+         # For stable targets:
+         python3 -m pip install -U ouroboros-ai[claude]
      ```
 
    > **Note**: The `[claude]` extra is critical — it installs `claude-agent-sdk` and
@@ -147,18 +147,18 @@ When the user invokes this skill:
    This ensures `~/.claude/mcp.json` has the latest MCP command and args
    (e.g., `ouroboros-ai[claude]` extras). Skips if already up to date.
 
-   d. **Verify and update CLAUDE.md version marker**:
+   d. **Verify and update agent config version marker**:
    ```bash
    NEW_VERSION=$(ouroboros --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.]*')
    echo "Installed: v$NEW_VERSION"
 
-   if [ -n "$NEW_VERSION" ] && grep -q "ooo:VERSION" CLAUDE.md 2>/dev/null; then
-     OLD_VERSION=$(grep "ooo:VERSION" CLAUDE.md | sed 's/.*ooo:VERSION:\(.*\) -->/\1/' | tr -d ' ')
+   if [ -n "$NEW_VERSION" ] && grep -q "ooo:VERSION" agent_config 2>/dev/null; then
+     OLD_VERSION=$(grep "ooo:VERSION" agent_config | sed 's/.*ooo:VERSION:\(.*\) -->/\1/' | tr -d ' ')
      if [ "$OLD_VERSION" != "$NEW_VERSION" ]; then
-       sed -i.bak "s/<!-- ooo:VERSION:.*-->/<!-- ooo:VERSION:$NEW_VERSION -->/" CLAUDE.md && rm -f CLAUDE.md.bak
-       echo "CLAUDE.md version marker updated: v$OLD_VERSION → v$NEW_VERSION"
+       sed -i.bak "s/<!-- ooo:VERSION:.*-->/<!-- ooo:VERSION:$NEW_VERSION -->/" agent_config && rm -f agent_config.bak
+       echo "agent config version marker updated: v$OLD_VERSION → v$NEW_VERSION"
      else
-       echo "CLAUDE.md version marker already up to date (v$NEW_VERSION)"
+       echo "agent config version marker already up to date (v$NEW_VERSION)"
      fi
    fi
    ```
@@ -173,7 +173,7 @@ When the user invokes this skill:
    Restart your Claude Code session to apply the update.
    (Close this session and start a new one with `claude`)
 
-   If CLAUDE.md block content changed, regenerate it:
+   If agent config block content changed, regenerate it:
      ooo setup
 
    Run `ooo help` to see what's new.

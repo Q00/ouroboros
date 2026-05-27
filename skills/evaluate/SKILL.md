@@ -60,7 +60,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 
 2. Gather the artifact to evaluate:
    - If user specifies a file: Read it with Read tool
-   - If recent execution output exists in conversation: Use that
+   - If recent session output exists in conversation: Use that
    - Ask user if unclear what to evaluate
 
 3. Call the `ouroboros_evaluate` MCP tool:

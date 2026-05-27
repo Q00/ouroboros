@@ -29,9 +29,9 @@ ooo setup
 
 > **Note**: Setup does two things:
 > 1. **MCP server registration** (`~/.claude/mcp.json`) — one-time, global across all projects
-> 2. **CLAUDE.md integration** (optional) — per-project, adds an Ouroboros command reference block
+> 2. **agent config integration** (optional) — per-project, adds an Ouroboros command reference block
 >
-> After the first run, you only need to re-run setup in new projects if you want the CLAUDE.md integration.
+> After the first run, you only need to re-run setup in new projects if you want the agent config integration.
 
 ---
 
@@ -255,16 +255,16 @@ MCP Server Registered! You can now:
 
 ---
 
-### Step 3: CLAUDE.md Integration (Optional)
+### Step 3: agent config Integration (Optional)
 
 Ask with clear value proposition:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  CLAUDE.md Integration
+  agent config Integration
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Add Ouroboros quick-reference to your CLAUDE.md?
+Add Ouroboros quick-reference to your agent config?
 
 This gives you instant command reminders without leaving
 your project context.
@@ -274,7 +274,7 @@ What gets added (~40 lines):
 - Command routing table with lazy-loaded agents
 - Agent catalog summary
 
-A backup will be created: CLAUDE.md.bak
+A backup will be created: agent config.bak
 
 [Integrate / Skip / Preview first]
 ```
@@ -330,13 +330,13 @@ wonder, reflect, advocate, contrarian, judge
 ````
 
 **If Integrate:**
-1. Backup existing CLAUDE.md to CLAUDE.md.bak
+1. Backup existing agent config to agent config.bak
 2. Append the block above
 3. Confirm successful integration
 
 **Celebration Checkpoint 3:**
 ```
-CLAUDE.md updated! You now have instant Ouroboros reference
+agent config updated! You now have instant Ouroboros reference
 available in every project.
 ```
 
@@ -382,7 +382,7 @@ Mode:                     Full Mode (Python >= 3.12 + MCP)
 Skills Registered:        15 workflow skills
 Agents Available:         9 specialized agents
 MCP Server:               ✓ Registered
-CLAUDE.md:                ✓ Integrated
+Agent config:              ✓ Integrated
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   You're Ready to Go!
@@ -576,7 +576,7 @@ When invoked with `--uninstall`:
 
 This will remove:
 - MCP server registration from ~/.claude/mcp.json
-- Ouroboros block from CLAUDE.md
+- Ouroboros block from agent config
 
 This will NOT remove:
 - Plugin files in .claude-plugin/
@@ -588,7 +588,7 @@ Uninstall Ouroboros configuration? [Yes / No]
 
 If Yes:
 1. Remove `ouroboros` entry from `~/.claude/mcp.json` (if exists)
-2. Remove `<!-- ooo:START -->` to `<!-- ooo:END -->` block from CLAUDE.md (if exists)
+2. Remove the Ouroboros block from agent config (if exists)
 3. Confirm: "Ouroboros plugin configuration removed. To remove plugin files, run: claude plugin uninstall ouroboros"
 
 ---
@@ -636,7 +636,7 @@ Track these checkpoints for conversion optimization:
 - [ ] Started setup (skill invoked)
 - [ ] Environment detected successfully
 - [ ] MCP server registration accepted
-- [ ] CLAUDE.md integration accepted
+- [ ] agent config integration accepted
 - [ ] Verification passed
 - [ ] Brownfield repos scanned and registered
 - [ ] Default brownfield repo selected

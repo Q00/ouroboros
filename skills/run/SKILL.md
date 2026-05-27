@@ -47,7 +47,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 ### Execution Steps
 
 1. **Detect git workflow** (before any code changes):
-   - Read the project's `CLAUDE.md` for git workflow preferences
+   - Read the project's agent config for git workflow preferences
    - If PR-based workflow detected and currently on `main`/`master`:
      - Create a feature branch: `ooo/run/<session_id>`
      - All code changes go to this branch
@@ -231,7 +231,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      job_id: <job_id>
    ```
 
-9. Present the execution results to the user:
+9. Present the generation output to the user:
    - Show success/failure status
    - Show session ID (for later status checks)
    - Show execution summary

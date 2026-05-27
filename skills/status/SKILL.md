@@ -59,7 +59,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    Tool: ouroboros_measure_drift
    Arguments:
      session_id: <session ID>
-     current_output: <current execution output or file contents>
+     current_output: <current generation output or file contents>
      seed_content: <original seed YAML>
      constraint_violations: []  (any known violations)
      current_concepts: []       (concepts in current output)
