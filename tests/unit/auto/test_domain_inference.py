@@ -604,6 +604,29 @@ def test_cli_still_matches_on_positive_modal_goal() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_cli_still_matches_on_affirmative_not_just_or_not_only_expansion() -> None:
+    """Bot's round-5 reproduction: `not just a CLI` / `not only a CLI`
+    are AFFIRMATIVE expansions ("a CLI and also something else"), not
+    denials. The negation stripper must NOT collapse them, so the CLI
+    signal survives and goal_signal fires."""
+    for goal in (
+        "Build not just a CLI for habits",
+        "Build not only a CLI for habits",
+        "Build a tool that is not only a CLI but also a library",
+        "Build a tool that is not just a CLI but also a library",
+        "Build a tool that should not just be a CLI but also a library",
+    ):
+        ledger = _bare_ledger(goal)
+        # Neutral output so the gate is satisfied but no output/runtime
+        # signal contributes — the test isolates the goal-signal path.
+        _seed_section(ledger, "outputs", value="Persistent JSON state file")
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI in result.classes, (
+            f"affirmative 'not just/only a CLI' must still match cli: "
+            f"goal={goal!r}, result={result}"
+        )
+
+
 def test_cli_does_not_match_on_exclusion_phrasing() -> None:
     """Bot's named scenario (`Build a Python library, without a CLI`) +
     the other common exclusion shapes — each must drop CLI from the

@@ -72,7 +72,12 @@ _NEGATED_CLI_GOAL_RE = re.compile(
     r"can[’']?t|cannot|"
     r"doesn[’']?t|don[’']?t|didn[’']?t|"
     r"instead\s+of|rather\s+than)"
-    r"(?:\s+(?:be|being|become|a|an|the|just|only|really|actually|"
+    # "just" / "only" are intentionally NOT connectors: they flip the
+    # phrase into an affirmative expansion ("not just a CLI", "not only
+    # a CLI" — both mean *and a CLI* + something else), so they must
+    # block the negation strip rather than be absorbed into it (PR
+    # #1264 review round 5).
+    r"(?:\s+(?:be|being|become|a|an|the|really|actually|"
     r"have|has|had|need|needs|to|of)){0,5}"
     r"\s+(?:cli|command[\s\-]line)\b"
 )
