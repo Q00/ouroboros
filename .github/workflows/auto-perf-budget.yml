@@ -8,6 +8,13 @@ name: ooo-auto-perf-budget
 on:
   pull_request:
     branches: [main]
+    # The check reads the PR body, so it must rerun whenever the body
+    # can change. Default `pull_request` activity types only fire on
+    # `opened`, `synchronize`, and `reopened` — they do NOT fire on
+    # `edited`, which means a contributor could land a previously
+    # passing PR by deleting the R-run section after a successful run.
+    # Listing `edited` explicitly closes that bypass per the bot review.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read

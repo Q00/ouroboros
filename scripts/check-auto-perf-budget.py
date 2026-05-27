@@ -20,7 +20,11 @@ The check runs in two contexts:
 Exit codes:
     0 — compliant or not applicable
     1 — applicable but the PR body is missing the R-run section
-    2 — unexpected error reading inputs
+    2 — unexpected error reading inputs OR changed-path discovery failed
+        (the gate fails closed: if we cannot enumerate changed files, we
+        cannot prove the PR is non-applicable, so we refuse to silently
+        return 0 — this is the bot-review blocker that flagged the
+        prior fail-open behavior)
 """
 
 from __future__ import annotations
@@ -41,12 +45,25 @@ REQUIRED_METRIC_TOKENS = (
 )
 
 
+class ChangedPathsUnavailable(RuntimeError):
+    """Raised when changed-path discovery cannot produce a definitive
+    list. The caller must treat this as fail-closed (exit 2) rather
+    than as "no auto/ files changed" — the latter is a silent bypass."""
+
+
 def _changed_paths_from_event(event: dict) -> list[str]:
     """Return the list of changed paths for the PR described by ``event``.
 
     Uses ``git diff --name-only`` against the merge base; this is more
-    accurate than walking the GitHub API and works for any fork that mirrors
-    the upstream main branch.
+    accurate than walking the GitHub API and works for any fork that
+    mirrors the upstream main branch.
+
+    Fails closed: if the diff cannot be enumerated, raises
+    :class:`ChangedPathsUnavailable` so the caller surfaces the
+    discovery failure as a CI error (exit 2) instead of silently
+    treating the PR as non-applicable. The earlier fail-open behavior
+    was flagged as a guard bypass — a checkout/ref layout failure
+    would have disabled the budget requirement without anyone noticing.
     """
 
     pr = event.get("pull_request") or {}
@@ -59,12 +76,10 @@ def _changed_paths_from_event(event: dict) -> list[str]:
             check=True,
             text=True,
         )
-        return [line for line in out.stdout.splitlines() if line.strip()]
-    except subprocess.CalledProcessError:
-        # If the merge base is missing locally, fall back to the GitHub
-        # event-supplied changed_files list. CI workflows do a full
-        # checkout, so this path is rarely taken.
-        return []
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise ChangedPathsUnavailable(f"git diff against origin/{base} failed: {exc}") from exc
+
+    return [line for line in out.stdout.splitlines() if line.strip()]
 
 
 def _section_present(body: str) -> bool:
@@ -100,7 +115,12 @@ def main() -> int:
 
     if args.body is not None:
         body = args.body.read_text(encoding="utf-8")
-        # Local dry-run: read changed paths from git working tree vs main.
+        # Local dry-run: read changed paths from git working tree vs
+        # main. A dev-mode failure is informative, not load-bearing —
+        # we still surface it to stderr so the operator sees why the
+        # decision was made, but we exit 2 (fail closed) to match the
+        # CI contract: indeterminate inputs never produce a silent
+        # pass.
         try:
             out = subprocess.run(
                 ["git", "diff", "--name-only", "origin/main...HEAD"],
@@ -109,8 +129,15 @@ def main() -> int:
                 text=True,
             )
             changed = [line for line in out.stdout.splitlines() if line.strip()]
-        except subprocess.CalledProcessError:
-            changed = []
+        except (subprocess.CalledProcessError, OSError) as exc:
+            print(
+                "check-auto-perf-budget: local --body dry-run could not "
+                f"enumerate changed paths via git: {exc}. "
+                "Fix the local checkout (e.g., `git fetch origin main`) "
+                "or run in CI where origin/main is always available.",
+                file=sys.stderr,
+            )
+            return 2
     else:
         event_path = os.environ.get("GITHUB_EVENT_PATH")
         if not event_path or not Path(event_path).is_file():
@@ -126,7 +153,17 @@ def main() -> int:
             return 2
         pr = event.get("pull_request") or {}
         body = pr.get("body") or ""
-        changed = _changed_paths_from_event(event)
+        try:
+            changed = _changed_paths_from_event(event)
+        except ChangedPathsUnavailable as exc:
+            print(
+                "check-auto-perf-budget: could not enumerate changed "
+                f"paths — {exc}. Refusing to silently treat the PR as "
+                f"non-applicable; ensure the workflow checks out with "
+                "`fetch-depth: 0` and that origin/main is reachable.",
+                file=sys.stderr,
+            )
+            return 2
 
     applies = any(path.startswith(AUTO_PATH_PREFIX) for path in changed)
     if not applies:
