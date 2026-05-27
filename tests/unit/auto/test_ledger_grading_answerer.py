@@ -2497,9 +2497,7 @@ def _high_ambiguity_seed(*, ambiguity: float = 0.50) -> Seed:
     return Seed(
         goal="Build a habit tracker",
         constraints=("Use existing project patterns",),
-        acceptance_criteria=(
-            "`habit list` prints stable stdout containing created habits",
-        ),
+        acceptance_criteria=("`habit list` prints stable stdout containing created habits",),
         ontology_schema=OntologySchema(
             name="CliTask",
             description="CLI task ontology",
@@ -2614,9 +2612,7 @@ def test_seed_reviewer_propagates_closure_mode_to_grade_gate() -> None:
 
     assert review.grade_result.grade == SeedGrade.A
     assert review.may_run
-    assert "high_ambiguity_score" not in {
-        finding.code for finding in review.grade_result.blockers
-    }
+    assert "high_ambiguity_score" not in {finding.code for finding in review.grade_result.blockers}
 
 
 def test_seed_repairer_converge_propagates_closure_mode() -> None:
