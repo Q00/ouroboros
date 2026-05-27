@@ -6,7 +6,7 @@ from ouroboros.auto.task_class_application import (
     has_explicit_verification_contract,
     has_explicit_verification_text,
 )
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import ExitCondition, Seed
 
 _AUTO_WRAPPER_CRITERIA = frozenset(
     {
@@ -147,6 +147,12 @@ _MINIMAL_VERIFICATION_METADATA_CONSTRAINT = (
     "needed to run the exact verification command is allowed."
 )
 
+_REAL_VERIFICATION_TOOL_CONSTRAINT = (
+    "Use the real verification tool named by the exact command; do not satisfy it "
+    "with a local shim or replacement executable. Minimal project metadata and "
+    "dependencies needed for that tool are allowed."
+)
+
 
 def _relax_minimality_constraints_for_exact_verification(seed: Seed) -> Seed:
     """Allow the smallest runnable test metadata for exact verification commands.
@@ -168,11 +174,18 @@ def _relax_minimality_constraints_for_exact_verification(seed: Seed) -> Seed:
             continue
         filtered.append(constraint)
 
-    if not relaxed:
+    exit_conditions, exit_relaxed = _relax_exit_conditions_for_exact_verification(
+        seed.exit_conditions
+    )
+    if not relaxed and not exit_relaxed:
         return seed
+    if _REAL_VERIFICATION_TOOL_CONSTRAINT not in filtered:
+        filtered.append(_REAL_VERIFICATION_TOOL_CONSTRAINT)
     if _MINIMAL_VERIFICATION_METADATA_CONSTRAINT not in filtered:
         filtered.append(_MINIMAL_VERIFICATION_METADATA_CONSTRAINT)
-    return seed.model_copy(update={"constraints": tuple(filtered)})
+    return seed.model_copy(
+        update={"constraints": tuple(filtered), "exit_conditions": exit_conditions}
+    )
 
 
 def _drop_repaired_fragments_when_exact_verification_exists(
@@ -282,9 +295,35 @@ def _is_overstrict_exact_verification_constraint(constraint: str) -> bool:
         or ("no additional files" in key)
         or ("avoid new dependencies" in key)
         or ("no new dependencies" in key)
+        or ("do not add new dependencies" in key)
         or ("no additional" in key and "dependencies" in key)
         or ("implementation limited to" in key and "test" in key)
     )
+
+
+def _relax_exit_conditions_for_exact_verification(
+    exit_conditions: tuple[ExitCondition, ...],
+) -> tuple[tuple[ExitCondition, ...], bool]:
+    updated: list[ExitCondition] = []
+    relaxed = False
+    for condition in exit_conditions:
+        if _is_overstrict_exact_verification_constraint(condition.evaluation_criteria):
+            relaxed = True
+            updated.append(
+                condition.model_copy(
+                    update={
+                        "evaluation_criteria": (
+                            "No unrelated dependencies, frameworks, deployment targets, "
+                            "credentials, or external side effects are introduced; "
+                            "minimal project metadata and dependencies needed to run the "
+                            "exact verification command are allowed."
+                        )
+                    }
+                )
+            )
+            continue
+        updated.append(condition)
+    return tuple(updated), relaxed
 
 
 def _normalize_known_observation_execution_line(criterion: str) -> str:

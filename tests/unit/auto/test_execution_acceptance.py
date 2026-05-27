@@ -225,7 +225,18 @@ def test_normalize_execution_acceptance_relaxes_conflicting_minimality_constrain
             "constraints": (
                 "No extra files or behavior beyond the exact return-value test",
                 "Avoid new dependencies",
+                "Do not add new dependencies",
                 "Verification command must be uv run pytest tests/test_hello_auto.py",
+            ),
+            "exit_conditions": (
+                ExitCondition(
+                    name="scope_preserved",
+                    description="No unauthorized expansion occurred",
+                    evaluation_criteria=(
+                        "no new dependencies, frameworks, deployment targets, credentials, "
+                        "or external side effects are introduced"
+                    ),
+                ),
             ),
         }
     )
@@ -234,8 +245,16 @@ def test_normalize_execution_acceptance_relaxes_conflicting_minimality_constrain
 
     assert normalized.constraints == (
         "Verification command must be uv run pytest tests/test_hello_auto.py",
+        "Use the real verification tool named by the exact command; do not satisfy it "
+        "with a local shim or replacement executable. Minimal project metadata and "
+        "dependencies needed for that tool are allowed.",
         "Do not add unrelated files, dependencies, or behavior; minimal project metadata "
         "needed to run the exact verification command is allowed.",
+    )
+    assert normalized.exit_conditions[0].evaluation_criteria == (
+        "No unrelated dependencies, frameworks, deployment targets, credentials, or external "
+        "side effects are introduced; minimal project metadata and dependencies needed to run "
+        "the exact verification command are allowed."
     )
 
 
