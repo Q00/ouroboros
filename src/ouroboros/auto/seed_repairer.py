@@ -2,16 +2,41 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import inspect
 import re
 import threading
+from typing import Any
 from uuid import uuid4
 
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.core.seed import Seed
+
+
+def _review_accepts_closure_mode(review_callable: Callable[..., Any]) -> bool:
+    """Return True iff ``review_callable`` declares ``closure_mode``.
+
+    Older test stubs / external reviewer implementations declared
+    ``review(self, seed, *, ledger=None)`` without ``closure_mode``.
+    PR-ζ-B added the kwarg to :class:`SeedReviewer`; the repair loop
+    must keep working against those stubs by *omitting* the kwarg
+    when the callable does not accept it. Mirrors
+    ``pipeline._accepts_keyword``.
+    """
+    try:
+        sig = inspect.signature(review_callable)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.name == "closure_mode":
+            return True
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
 
 
 class RepairCancelled(Exception):
@@ -172,6 +197,7 @@ class SeedRepairer:
         *,
         ledger: SeedDraftLedger | None = None,
         cancel_event: threading.Event | None = None,
+        closure_mode: str | None = None,
     ) -> tuple[Seed, SeedReview, list[RepairResult]]:
         """Review/repair until A-grade or bounded stop.
 
@@ -209,8 +235,16 @@ class SeedRepairer:
                     "repair phase cancelled by pipeline timeout before next reviewer call"
                 )
 
+        # SSOT #1157 *Closure Policy* (PR-ζ-B): forward closure_mode to the
+        # reviewer only when its ``review`` method declares the kwarg.
+        # Legacy test stubs / external reviewers that only accept
+        # ``(seed, *, ledger)`` continue to work unchanged.
+        review_kwargs: dict[str, Any] = {"ledger": ledger}
+        if _review_accepts_closure_mode(self.reviewer.review):
+            review_kwargs["closure_mode"] = closure_mode
+
         _check_cancelled()
-        review = self.reviewer.review(current, ledger=ledger)
+        review = self.reviewer.review(current, **review_kwargs)
         for _ in range(self.max_iterations):
             _check_cancelled()
             if review.grade_result.grade == SeedGrade.A and review.may_run:
@@ -228,15 +262,15 @@ class SeedRepairer:
                 # still describes the previous (pre-repair) seed. Re-review
                 # ``current`` once so the returned pair is consistent.
                 _check_cancelled()
-                review = self.reviewer.review(current, ledger=ledger)
+                review = self.reviewer.review(current, **review_kwargs)
                 return current, review, history
             if high and high == previous_high_fingerprints:
                 _check_cancelled()
-                review = self.reviewer.review(current, ledger=ledger)
+                review = self.reviewer.review(current, **review_kwargs)
                 return current, review, history
             previous_high_fingerprints = high
             _check_cancelled()
-            review = self.reviewer.review(current, ledger=ledger)
+            review = self.reviewer.review(current, **review_kwargs)
         return current, review, history
 
 

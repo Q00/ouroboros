@@ -895,6 +895,13 @@ class AutoPipeline:
             # ``SeedRepairer.converge`` does declare it.
             if _accepts_keyword(repairer.converge, "cancel_event"):
                 converge_kwargs["cancel_event"] = cancel_event
+            # SSOT #1157 *Closure Policy* (PR-ζ-B): propagate the
+            # interview's closure mode so the grading-half of the policy
+            # (suppress standalone ambiguity blocker under
+            # ledger_only / safe_default) applies inside the repair loop.
+            # Same stub-tolerant gate as cancel_event above.
+            if _accepts_keyword(repairer.converge, "closure_mode"):
+                converge_kwargs["closure_mode"] = state.interview_closure_mode
             bounded_repair_timeout = self._deadline_capped_timeout(state, repair_timeout)
             try:
                 seed, review, repairs = await asyncio.wait_for(
@@ -1002,9 +1009,17 @@ class AutoPipeline:
                 review_timeout = self._deadline_capped_timeout(
                     state, state.phase_timeout_seconds(AutoPhase.REVIEW)
                 )
+                # SSOT #1157 *Closure Policy* (PR-ζ-B): same stub-tolerant
+                # closure_mode propagation as the REVIEW-phase converge
+                # call above. Direct ``reviewer.review`` callers (test
+                # stubs, alternative reviewer implementations) may not
+                # accept the kwarg yet.
+                review_kwargs: dict[str, Any] = {"ledger": ledger}
+                if _accepts_keyword(reviewer.review, "closure_mode"):
+                    review_kwargs["closure_mode"] = state.interview_closure_mode
                 try:
                     review = await asyncio.wait_for(
-                        asyncio.to_thread(reviewer.review, seed, ledger=ledger),
+                        asyncio.to_thread(reviewer.review, seed, **review_kwargs),
                         timeout=review_timeout,
                     )
                 except TimeoutError:

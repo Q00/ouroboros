@@ -2477,3 +2477,194 @@ def test_assumption_sources_dedupes_same_text_across_sections() -> None:
     records = ledger.assumption_sources()
     assert len(records) == 1
     assert records[0].text == "Single local CLI user"
+
+
+# ---------------------------------------------------------------------------
+# PR-ζ-B · closure_mode-aware ambiguity grading
+#
+# SSOT #1157 *Closure Policy* (grading half — back-fill of PR-β).
+# When the interview closed on ledger evidence (`ledger_only` /
+# `safe_default`), the standalone `high_ambiguity_score` blocker is
+# suppressed because the ledger's structural completeness IS the
+# acceptance signal. Other grading axes remain in force. Locks
+# #1170 R2 (2026-05-27) root cause RC-B.
+# ---------------------------------------------------------------------------
+
+
+def _high_ambiguity_seed(*, ambiguity: float = 0.50) -> Seed:
+    """Build the same minimal observable Seed as ``_seed`` but with
+    ``ambiguity_score`` deliberately above the 0.20 LLM threshold."""
+    return Seed(
+        goal="Build a habit tracker",
+        constraints=("Use existing project patterns",),
+        acceptance_criteria=(
+            "`habit list` prints stable stdout containing created habits",
+        ),
+        ontology_schema=OntologySchema(
+            name="CliTask",
+            description="CLI task ontology",
+            fields=(OntologyField(name="command", field_type="string", description="Command"),),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(name="testability", description="Observable behavior", weight=1.0),
+        ),
+        exit_conditions=(
+            ExitCondition(
+                name="verified",
+                description="Checks pass",
+                evaluation_criteria="All acceptance criteria pass",
+            ),
+        ),
+        metadata=SeedMetadata(ambiguity_score=ambiguity),
+    )
+
+
+def test_grade_gate_ledger_only_suppresses_high_ambiguity_blocker() -> None:
+    """Closure mode = `ledger_only` → standalone ambiguity blocker
+    suppressed. Other axes unchanged. Reproduces the cli-todo R2 fix
+    path."""
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _high_ambiguity_seed(ambiguity=0.50)
+
+    result = GradeGate().grade_seed(seed, ledger=ledger, closure_mode="ledger_only")
+
+    assert "high_ambiguity_score" not in {b.code for b in result.blockers}
+    assert result.grade == SeedGrade.A
+    assert result.may_run
+
+
+def test_grade_gate_safe_default_also_suppresses_high_ambiguity_blocker() -> None:
+    """`safe_default` is the same closure-policy tier as `ledger_only`
+    (see #1157 Closure Policy hierarchy) — the ambiguity blocker is
+    suppressed there too."""
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _high_ambiguity_seed(ambiguity=0.50)
+
+    result = GradeGate().grade_seed(seed, ledger=ledger, closure_mode="safe_default")
+
+    assert "high_ambiguity_score" not in {b.code for b in result.blockers}
+    assert result.grade == SeedGrade.A
+
+
+def test_grade_gate_mutual_agreement_keeps_ambiguity_blocker() -> None:
+    """`mutual_agreement` closure means backend signal aligned with
+    ledger — the LLM-derived ambiguity_score is treated as
+    authoritative, so the > 0.20 blocker still fires."""
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _high_ambiguity_seed(ambiguity=0.50)
+
+    result = GradeGate().grade_seed(seed, ledger=ledger, closure_mode="mutual_agreement")
+
+    assert "high_ambiguity_score" in {b.code for b in result.blockers}
+    assert result.grade == SeedGrade.C
+    assert not result.may_run
+
+
+def test_grade_gate_closure_mode_none_uses_strict_default() -> None:
+    """Backwards compatibility: callers that do not pass closure_mode
+    (legacy paths, isolated unit tests) keep the strict pre-PR-ζ-B
+    behavior. The ambiguity blocker still fires."""
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _high_ambiguity_seed(ambiguity=0.50)
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)  # closure_mode omitted
+
+    assert "high_ambiguity_score" in {b.code for b in result.blockers}
+    assert result.grade == SeedGrade.C
+
+
+def test_grade_gate_ledger_only_still_blocks_when_other_blockers_exist() -> None:
+    """The PR-ζ-B relaxation is narrow: ONLY the standalone ambiguity
+    blocker is suppressed. Other grading axes (open_gaps, goal
+    mismatch, missing AC, etc.) continue to produce blockers and
+    grade C under `ledger_only` exactly as under any other closure."""
+    # Use an empty ledger so `ledger_open_gap` blockers fire for every
+    # required section even though closure_mode says ledger_only.
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    seed = _high_ambiguity_seed(ambiguity=0.50)
+
+    result = GradeGate().grade_seed(seed, ledger=ledger, closure_mode="ledger_only")
+
+    blocker_codes = {b.code for b in result.blockers}
+    # Ambiguity blocker IS suppressed.
+    assert "high_ambiguity_score" not in blocker_codes
+    # But ledger_open_gap blockers continue to fire for the unresolved
+    # required sections.
+    assert "ledger_open_gap" in blocker_codes
+    assert result.grade == SeedGrade.C
+    assert not result.may_run
+
+
+def test_seed_reviewer_propagates_closure_mode_to_grade_gate() -> None:
+    """The SeedReviewer must forward ``closure_mode`` to GradeGate so
+    the ledger-primary policy applies whether the pipeline calls the
+    reviewer directly or through SeedRepairer.converge."""
+    from ouroboros.auto.seed_reviewer import SeedReviewer
+
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _high_ambiguity_seed(ambiguity=0.50)
+
+    reviewer = SeedReviewer(GradeGate())
+    review = reviewer.review(seed, ledger=ledger, closure_mode="ledger_only")
+
+    assert review.grade_result.grade == SeedGrade.A
+    assert review.may_run
+    assert "high_ambiguity_score" not in {
+        finding.code for finding in review.grade_result.blockers
+    }
+
+
+def test_seed_repairer_converge_propagates_closure_mode() -> None:
+    """SeedRepairer.converge must forward ``closure_mode`` through every
+    reviewer.review call inside the repair loop. Without this, a
+    high-ambiguity seed would survive the direct review path but get
+    repeatedly re-graded as C inside the repair loop."""
+    from ouroboros.auto.seed_repairer import SeedRepairer
+    from ouroboros.auto.seed_reviewer import SeedReviewer
+
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _high_ambiguity_seed(ambiguity=0.50)
+
+    repairer = SeedRepairer(reviewer=SeedReviewer(GradeGate()))
+    converged_seed, review, history = repairer.converge(
+        seed, ledger=ledger, closure_mode="ledger_only"
+    )
+
+    # First-iteration review under ledger_only should already be grade
+    # A — no repair attempts needed.
+    assert review.grade_result.grade == SeedGrade.A
+    assert review.may_run
+    assert history == []
+    # Seed unchanged because already-A seeds skip repair.
+    assert converged_seed.metadata.ambiguity_score == 0.50
+
+
+def test_pipeline_accepts_keyword_sees_closure_mode_on_production_signatures() -> None:
+    """Locks the pipeline-side propagation contract: pipeline.py uses
+    ``_accepts_keyword(callable, "closure_mode")`` to decide whether to
+    forward ``state.interview_closure_mode`` into ``repairer.converge``
+    and ``reviewer.review`` (see pipeline.py REVIEW-phase plumbing).
+    Both production callables MUST declare ``closure_mode`` so the gate
+    fires and the kwarg is actually forwarded; otherwise PR-ζ-B is
+    silently inert in production while unit tests pass."""
+    from ouroboros.auto.pipeline import _accepts_keyword
+    from ouroboros.auto.seed_repairer import SeedRepairer
+    from ouroboros.auto.seed_reviewer import SeedReviewer
+
+    reviewer = SeedReviewer(GradeGate())
+    repairer = SeedRepairer(reviewer=reviewer)
+
+    assert _accepts_keyword(reviewer.review, "closure_mode"), (
+        "SeedReviewer.review must declare closure_mode so the "
+        "pipeline REVIEW-phase forwarder activates"
+    )
+    assert _accepts_keyword(repairer.converge, "closure_mode"), (
+        "SeedRepairer.converge must declare closure_mode so the "
+        "pipeline REPAIR-phase forwarder activates"
+    )

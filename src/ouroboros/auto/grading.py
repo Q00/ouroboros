@@ -144,8 +144,27 @@ class GradeGate:
         }
         return self._result(scores=scores, findings=findings, blockers=blockers)
 
-    def grade_seed(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> GradeResult:
-        """Grade a generated Seed deterministically."""
+    def grade_seed(
+        self,
+        seed: Seed,
+        *,
+        ledger: SeedDraftLedger | None = None,
+        closure_mode: str | None = None,
+    ) -> GradeResult:
+        """Grade a generated Seed deterministically.
+
+        ``closure_mode`` carries the interview's terminal closure mode
+        from :class:`AutoPipelineState` so the grader can honor SSOT
+        #1157 *Closure Policy*: when the interview closed on ledger
+        evidence (``ledger_only`` / ``safe_default``), the LLM-derived
+        ``ambiguity_score`` is acknowledged-stale by design — the
+        ledger's structural completeness IS the ambiguity invariant
+        and the standalone ``high_ambiguity_score`` blocker is
+        suppressed. Other grading axes (coverage / testability /
+        open_gap / blocker count / risk) remain unchanged. When
+        ``closure_mode`` is None (legacy callers, tests, non-pipeline
+        usage) the strict pre-#1157 behavior is retained.
+        """
         findings: list[GradeFinding] = []
         blockers: list[GradeFinding] = []
 
@@ -161,7 +180,15 @@ class GradeGate:
                     "Regenerate or repair the Seed so its goal matches the auto interview ledger goal.",
                 )
             )
-        if seed.metadata.ambiguity_score > 0.20:
+        # SSOT #1157 *Closure Policy* (grading half — PR-ζ-B follow-up to PR-β):
+        # when the interview closed on ledger evidence, the LLM-derived
+        # ambiguity_score is stale by design (the ledger's structural
+        # completeness IS the acceptance signal). Suppress the standalone
+        # ambiguity blocker; other grading axes still constrain quality.
+        # See #1170 R2 (2026-05-27): cli-todo terminated BLOCKED at this
+        # very gate with ambiguity_score=0.467 despite ledger_only closure.
+        ledger_primary_closure = closure_mode in {"ledger_only", "safe_default"}
+        if not ledger_primary_closure and seed.metadata.ambiguity_score > 0.20:
             blockers.append(
                 GradeFinding(
                     "high_ambiguity_score",

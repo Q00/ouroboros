@@ -54,9 +54,23 @@ class SeedReviewer:
     def __init__(self, grade_gate: GradeGate | None = None) -> None:
         self.grade_gate = grade_gate or GradeGate()
 
-    def review(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> SeedReview:
-        """Return structured review findings for ``seed``."""
-        grade = self.grade_gate.grade_seed(seed, ledger=ledger)
+    def review(
+        self,
+        seed: Seed,
+        *,
+        ledger: SeedDraftLedger | None = None,
+        closure_mode: str | None = None,
+    ) -> SeedReview:
+        """Return structured review findings for ``seed``.
+
+        ``closure_mode`` is passed through to :meth:`GradeGate.grade_seed`
+        so the SSOT #1157 closure policy (PR-ζ-B) applies uniformly
+        whether the pipeline calls ``review`` directly or via
+        :class:`SeedRepairer`. When ``None`` (legacy callers and tests
+        without pipeline context) the strict pre-policy behavior is
+        retained.
+        """
+        grade = self.grade_gate.grade_seed(seed, ledger=ledger, closure_mode=closure_mode)
         findings = tuple(
             ReviewFinding.from_parts(
                 code=finding.code,
