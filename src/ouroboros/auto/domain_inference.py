@@ -130,6 +130,8 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
     if not (outputs or runtime):
+        # Gate: require *some* ledger-side evidence beyond the goal text
+        # so single-word "cli" mentions in goal cannot classify alone.
         return False
     output_signal = _any_of(
         outputs,
@@ -137,8 +139,14 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     )
     runtime_signal = _any_of(runtime, ("shell", "terminal", "subprocess", "command line"))
     goal_signal = _any_of(_goal_text(ledger), ("cli", "command line", "command-line"))
-    # CLI requires either explicit runtime *or* a goal+output combo.
-    return runtime_signal or (output_signal and (goal_signal or outputs))
+    # Each of the three signals is independently sufficient once the
+    # ledger-evidence gate above is satisfied. The earlier form
+    # `runtime_signal or (output_signal and (goal_signal or outputs))`
+    # made `goal_signal` dead code (outputs is already non-empty past
+    # the gate), which blocked cli-todo on ledger_only closures whose
+    # conservative-default outputs lack stdout/exit-code vocabulary.
+    # See #1170 R2 evidence and #1157 closure policy.
+    return runtime_signal or goal_signal or output_signal
 
 
 def _matches_webhook(ledger: SeedDraftLedger) -> bool:
@@ -231,12 +239,16 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     goal = _goal_text(ledger)
     if not (outputs or goal):
         return False
+    # "module" intentionally omitted — it is a generic Python term used
+    # for any code unit (including CLI entry points) and produced too
+    # many false positives that shadowed cli / web_service inference
+    # under ledger_only closures. The remaining keywords are
+    # library-distinctive surface terms. See #1170 R2 evidence.
     return _any_of(
         outputs + " " + goal,
         (
             "library",
             "package",
-            "module",
             "api surface",
             "importable",
             "public api",

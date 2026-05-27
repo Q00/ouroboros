@@ -243,3 +243,111 @@ def test_domain_inference_dataclass_properties() -> None:
     )
     assert unmatched.is_unmatched
     assert unmatched.single is TaskClass.LIBRARY
+
+
+# ---------------------------------------------------------------------------
+# #1170 R2 regression locks (PR-ζ-A)
+#
+# The PR-β ledger_only closure path produces ledgers whose `outputs` and
+# `runtime_context` are filled by conservative defaults that do NOT
+# contain cli-specific vocabulary (stdout / exit code / shell / …).
+# Before PR-ζ-A, ``_matches_cli`` made ``goal_signal`` structurally
+# redundant — only runtime/output vocabulary could classify cli — which
+# left cli-todo terminating BLOCKED with ``active_task_class='library'``.
+# The cases below lock the goal-signal sufficiency in, and tighten
+# ``_matches_library`` so the generic word "module" no longer shadows
+# other classes.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_matches_on_goal_signal_alone() -> None:
+    """A ledger whose `goal` says CLI but whose `outputs` lacks cli
+    vocabulary should still classify as CLI as long as the
+    ledger-evidence gate is satisfied (outputs OR runtime is non-empty)."""
+    ledger = _bare_ledger("Build a habit-tracker CLI for end users")
+    # Generic non-cli output vocabulary — what a ledger_only closure
+    # would typically write.
+    _seed_section(ledger, "outputs", value="JSON file stored in the working directory")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_cli_matches_on_conservative_default_ledger() -> None:
+    """R2 evidence reproduction: conservative-default-heavy ledger whose
+    goal explicitly says "CLI" must classify as CLI, not fall back to
+    LIBRARY. Locks #1170 R2 root cause RC-A."""
+    ledger = _bare_ledger(
+        "Build a small habit-tracker CLI that lets the user add, list, "
+        "and check off habits, persisting them as JSON in the working "
+        "directory."
+    )
+    # Mimic CONSERVATIVE_DEFAULT entries seen in R2-cli-todo evidence:
+    # vocabulary chosen by the standardizer's safe defaults rather than
+    # by user confirmation, so cli-specific tokens are absent.
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Persistent JSON state file in the working directory",
+        source=LedgerSource.CONSERVATIVE_DEFAULT,
+    )
+    _seed_section(
+        ledger,
+        "runtime_context",
+        value="Local Python 3.x environment",
+        source=LedgerSource.CONSERVATIVE_DEFAULT,
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single, f"expected single match, got {result}"
+    assert result.single is TaskClass.CLI
+
+
+def test_cli_and_library_no_longer_dual_match_on_module_keyword() -> None:
+    """Before PR-ζ-A, an output saying "Python module" caused
+    ``_matches_library`` to fire on the generic Python-module sense
+    (any code unit), shadowing cli/web-service classification. After
+    removing "module" from the library keyword set, this should NOT
+    fire library."""
+    ledger = _bare_ledger("Build a habit-tracker CLI")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="A small Python module that prints habit list to stdout",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.LIBRARY not in result.classes
+    # Positive: cli should still fire from goal_signal + output_signal
+    # (stdout is a cli token).
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_library_still_matches_on_explicit_surface_keywords() -> None:
+    """Positive regression lock — removing "module" must not weaken
+    the library predicate on its actual distinctive keywords."""
+    for surface in (
+        "An importable Python package",
+        "Public API surface for downstream consumers",
+        "An SDK for the foo service",
+        "A reusable library exposing helpers",
+    ):
+        ledger = _bare_ledger("Publish a foo helper")
+        _seed_section(ledger, "outputs", value=surface)
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.LIBRARY in result.classes, (
+            f"library should still match on surface={surface!r}"
+        )
+
+
+def test_cli_does_not_fire_without_any_ledger_evidence() -> None:
+    """The ledger-evidence gate must remain in force: a goal that says
+    "cli" but with empty outputs AND empty runtime_context must NOT
+    classify as cli. This preserves the SSOT #1157 L1 invariant that
+    classification is ledger-derived, not goal-text-derived alone."""
+    ledger = _bare_ledger("Build a CLI tool")
+    # Deliberately seed only non-output/non-runtime sections so the gate
+    # fails. (The gate requires outputs OR runtime_context to be
+    # non-empty before any signal contributes.)
+    _seed_section(ledger, "actors", value="Single end user")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.CLI not in result.classes
