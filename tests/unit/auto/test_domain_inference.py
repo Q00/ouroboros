@@ -351,3 +351,95 @@ def test_cli_does_not_fire_without_any_ledger_evidence() -> None:
     _seed_section(ledger, "actors", value="Single end user")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.CLI not in result.classes
+
+
+# ---------------------------------------------------------------------------
+# PR-ζ-A review-feedback regression locks (#1264 word-boundary blocker).
+#
+# ouroboros-agent[bot] flagged that promoting `goal_signal` to be
+# independently sufficient (above) exposed the underlying *substring*
+# matcher: a goal like "Build a Python client library for the Foo API"
+# would have CLI fire because "client" contains "cli", producing an
+# ambiguous {CLI, LIBRARY} match. Ambiguous classifications skip default
+# AC injection (pipeline.py:732-740), so legitimate client-library tasks
+# would lose their library contract.
+#
+# The fix tightens the goal-side "cli" check to a token-bounded regex
+# (`\bcli\b`) so substrings inside other words no longer trigger.
+# Multi-word phrases ("command line", "command-line") still match as
+# literal substrings — they are not vulnerable to this class of false
+# positive.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_does_not_false_match_on_client_library_goal() -> None:
+    """Goal: "Build a Python client library for the Foo API" with library
+    outputs must NOT trigger CLI via substring "cli" inside "client".
+    Locks the PR #1264 reviewer's blocker scenario."""
+    ledger = _bare_ledger("Build a Python client library for the Foo API")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="An importable Python package exposing a public API surface",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.CLI not in result.classes, (
+        f"cli must not false-match on 'client library' goal, got {result}"
+    )
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_cli_token_does_not_false_match_on_click_clinic_etc() -> None:
+    """Token-boundary regression lock for other words containing the
+    letters c-l-i: click (CLI framework name, but inside a noun), clinic,
+    cliché, etc. None of these should fire CLI from goal alone."""
+    for false_friend in (
+        "Build a click-tracking analytics dashboard",
+        "Build a clinic appointment scheduler",
+        "Build a clipboard manager",
+        "Build a clipper service for short URLs",
+    ):
+        ledger = _bare_ledger(false_friend)
+        # Provide neutral outputs so the gate is satisfied but no other
+        # signal fires CLI from outputs/runtime.
+        _seed_section(ledger, "outputs", value="Persistent JSON state file")
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI not in result.classes, (
+            f"cli must not match goal={false_friend!r}; got {result}"
+        )
+
+
+def test_cli_still_matches_on_standalone_cli_token() -> None:
+    """Positive regression lock: standalone "cli" as a word (with
+    surrounding whitespace, punctuation, or end-of-string) must still
+    fire the goal-signal CLI path after the regex tightening."""
+    for goal in (
+        "Build a CLI for habits",
+        "Make a small cli.",
+        "habit-tracker cli, persisting JSON",
+        "build cli",
+    ):
+        ledger = _bare_ledger(goal)
+        # Gate-satisfying neutral output.
+        _seed_section(ledger, "outputs", value="Persistent JSON state file")
+        result = derive_domain_from_ledger(ledger)
+        assert result.is_single, f"expected single match for goal={goal!r}, got {result}"
+        assert result.single is TaskClass.CLI, (
+            f"goal={goal!r} should classify as cli, got {result.single}"
+        )
+
+
+def test_cli_still_matches_on_command_line_phrase() -> None:
+    """The multi-word "command line" / "command-line" goal phrases are
+    not vulnerable to the substring false-positive class and remain
+    plain substring matches."""
+    for goal in (
+        "Build a command line habit tracker",
+        "Build a command-line habit tracker",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(ledger, "outputs", value="Persistent JSON state file")
+        result = derive_domain_from_ledger(ledger)
+        assert result.is_single
+        assert result.single is TaskClass.CLI

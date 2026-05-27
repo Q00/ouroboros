@@ -26,9 +26,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+import re
 
 from ouroboros.auto.ledger import LedgerSection, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.task_classes import TaskClass
+
+# Word-boundary token regex for the single-word "cli" goal signal. Avoids
+# false-positive substring matches against words that happen to contain
+# the letters "cli" (e.g. "client", "click", "clinic", "command-clinic")
+# now that `goal_signal` is independently sufficient (see review on PR
+# #1264 / #1170 R2 follow-up).
+_CLI_GOAL_TOKEN_RE = re.compile(r"\bcli\b")
 
 __all__ = [
     "DomainInference",
@@ -138,7 +146,15 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
         ("stdout", "exit code", "printed", "console output", "command output"),
     )
     runtime_signal = _any_of(runtime, ("shell", "terminal", "subprocess", "command line"))
-    goal_signal = _any_of(_goal_text(ledger), ("cli", "command line", "command-line"))
+    # Goal-side CLI signal: token-bounded "cli" OR explicit "command line"
+    # / "command-line" multi-word phrase. Substring-only matching against
+    # "cli" would false-positive on "client", "click", "clinic", etc.,
+    # which would shadow LIBRARY for legitimate "Python client library"
+    # goals (PR #1264 review blocker).
+    goal_text = _goal_text(ledger)
+    goal_signal = bool(_CLI_GOAL_TOKEN_RE.search(goal_text)) or _any_of(
+        goal_text, ("command line", "command-line")
+    )
     # Each of the three signals is independently sufficient once the
     # ledger-evidence gate above is satisfied. The earlier form
     # `runtime_signal or (output_signal and (goal_signal or outputs))`
