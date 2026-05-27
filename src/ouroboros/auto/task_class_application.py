@@ -19,6 +19,7 @@ The helper is intentionally split out from the inference module so:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from ouroboros.auto.task_classes import TASK_CLASS_CATALOG, TaskClass
 from ouroboros.core.seed import Seed
@@ -26,6 +27,8 @@ from ouroboros.core.seed import Seed
 __all__ = [
     "AppliedTaskClassDefaults",
     "apply_default_ac_template",
+    "has_explicit_verification_contract",
+    "has_explicit_verification_text",
 ]
 
 
@@ -92,3 +95,41 @@ def apply_default_ac_template(seed: Seed, task_class: TaskClass) -> AppliedTaskC
     updated_ac = new_entries + tuple(seed.acceptance_criteria)
     new_seed = seed.model_copy(update={"acceptance_criteria": updated_ac})
     return AppliedTaskClassDefaults(seed=new_seed, injected_ac=new_entries, task_class=task_class)
+
+
+_EXPLICIT_VERIFICATION_COMMAND_RE = re.compile(
+    r"\b("
+    r"uv\s+run\s+pytest|pytest|python\s+-m\s+pytest|"
+    r"npm\s+test|pnpm\s+test|yarn\s+test|bun\s+test|"
+    r"go\s+test|cargo\s+test|cargo\s+nextest|"
+    r"ruff\s+check|mypy|pyright|basedpyright|tsc\b|"
+    r"vitest|jest|playwright\s+test"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def has_explicit_verification_contract(seed: Seed) -> bool:
+    """Return True when the Seed already names concrete verification commands.
+
+    Task-class default ACs are a safety net for underspecified Seeds. When the
+    user has already provided an exact local verification command, prepending a
+    broad class template can expand the runtime contract beyond the requested
+    task and make simple ``ooo auto`` jobs spend their whole budget on generic
+    quality checks. This detector is intentionally command-based, not a vague
+    "tests mentioned" heuristic, so generic requirements such as "covered by
+    tests" still receive task-class defaults.
+    """
+    parts: list[str] = [
+        seed.goal,
+        *seed.constraints,
+        *seed.acceptance_criteria,
+        *(condition.evaluation_criteria for condition in seed.exit_conditions),
+    ]
+    text = "\n".join(part for part in parts if isinstance(part, str) and part.strip())
+    return has_explicit_verification_text(text)
+
+
+def has_explicit_verification_text(text: str) -> bool:
+    """Return True when *text* contains a concrete local verification command."""
+    return bool(_EXPLICIT_VERIFICATION_COMMAND_RE.search(text))

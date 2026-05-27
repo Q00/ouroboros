@@ -311,7 +311,8 @@ class CheckpointStore:
 
             # Log corruption details for debugging
             error = result.error
-            print(f"Checkpoint corruption at level {level} for {seed_id}: {error.message}")
+            if error.details.get("reason") != "missing":
+                print(f"Checkpoint corruption at level {level} for {seed_id}: {error.message}")
 
         # No valid checkpoint found at any level
         return Result.err(
@@ -344,7 +345,7 @@ class CheckpointStore:
                 PersistenceError(
                     f"Checkpoint not found at level {level}",
                     operation="read",
-                    details={"seed_id": seed_id, "level": level},
+                    details={"seed_id": seed_id, "level": level, "reason": "missing"},
                 )
             )
 

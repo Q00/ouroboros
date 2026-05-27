@@ -18,6 +18,7 @@ from ouroboros.auto.adapters import (
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
+    HandlerSynchronousRunStarter,
     load_seed,
     save_seed,
 )
@@ -511,7 +512,11 @@ async def _run_auto(
     pipeline = AutoPipeline(
         driver,
         HandlerSeedGenerator(generate_seed),
-        run_starter=HandlerRunStarter(start_execute, cwd=state.cwd),
+        run_starter=(
+            HandlerSynchronousRunStarter(execute_seed, cwd=state.cwd)
+            if complete_product
+            else HandlerRunStarter(start_execute, cwd=state.cwd)
+        ),
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
         seed_saver=save_seed,

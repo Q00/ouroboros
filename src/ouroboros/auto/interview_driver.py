@@ -41,6 +41,7 @@ from ouroboros.resilience.lateral import ThinkingPersona
 log = structlog.get_logger(__name__)
 
 INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_incomplete"
+BACKEND_READY_AMBIGUITY_THRESHOLD = 0.20
 
 # Issue #1248 — L5 ladder typed terminal for a safe-default lateral escalation
 # that exhausted every available persona without resolving the matcher fire.
@@ -256,6 +257,10 @@ class AutoInterviewDriver:
                 self._save(state)
         except TimeoutError as exc:
             self._record_evidence_based_session_id(state, exc, preassigned_id)
+            if interview_tool_name == "interview.start":
+                fallback = self._try_close_after_backend_start_failure(state, ledger, exc)
+                if fallback is not None:
+                    return fallback
             message = str(exc)
             state.mark_blocked(message, tool_name=interview_tool_name)
             record_authoring_backend(state)
@@ -355,6 +360,14 @@ class AutoInterviewDriver:
             self._save(state)
 
             if backend_done and not ledger_done:
+                backend_ready_defaults = await self._try_close_backend_ready_safe_defaults(
+                    state,
+                    ledger,
+                    turn,
+                )
+                if backend_ready_defaults is not None:
+                    return backend_ready_defaults
+
                 # Backend said done but ledger isn't — pick the first detected
                 # gap and answer it. This drives the backend to reopen with
                 # substantive new content; we never accept closure unilaterally.
@@ -1143,6 +1156,122 @@ class AutoInterviewDriver:
 
         return finalization
 
+    async def _try_close_backend_ready_safe_defaults(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        turn: InterviewTurn,
+    ) -> AutoInterviewResult | None:
+        """Close benign remaining gaps after a low-ambiguity backend completion.
+
+        Backend completion alone is not enough to close auto interviews: the
+        ledger still owns structural readiness. When the backend also reports a
+        concrete ambiguity score at the seed threshold, any remaining
+        missing/weak sections are safe to route through the same audited
+        safe-default finalizer used at max_rounds. Unsafe/conflicting gaps keep
+        the existing gap-reopen path.
+        """
+        if turn.ambiguity_score is None or turn.ambiguity_score > BACKEND_READY_AMBIGUITY_THRESHOLD:
+            return None
+        if ledger.is_seed_ready():
+            return None
+
+        finalization = finalize_safe_defaultable_gaps(
+            ledger,
+            goal=state.goal,
+            provenance=(
+                "backend readiness "
+                f"ambiguity_score={turn.ambiguity_score:.2f} "
+                f"round={state.current_round}"
+            ),
+            pending_question=turn.question,
+            active_profile=getattr(self.answerer, "active_profile", None),
+        )
+        if not finalization.completed or not ledger.is_seed_ready():
+            _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+            log.info(
+                "auto.interview.backend_ready_safe_default.skipped",
+                auto_session_id=state.auto_session_id,
+                ambiguity_score=turn.ambiguity_score,
+                defaulted_sections=finalization.defaulted_sections,
+                unsafe_gaps=finalization.unsafe_gaps,
+                open_gaps=ledger.open_gaps(),
+            )
+            return None
+
+        synthesis = build_safe_default_synthesis(finalization)
+        if synthesis and state.interview_session_id:
+            try:
+                synthesis_turn = _validate_turn(
+                    await self._with_timeout(
+                        self.backend.answer(
+                            state.interview_session_id,
+                            synthesis,
+                            last_question=(
+                                "[driver safe-default finalization: "
+                                f"backend_ambiguity={turn.ambiguity_score:.2f}]"
+                            ),
+                        ),
+                        state,
+                        tool_name="interview.backend_ready_safe_default_synthesis",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - keep ledger/transcript in sync
+                _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                blocker = (
+                    "backend-ready safe-default synthesis transcript sync failed; "
+                    f"rolled back defaulted sections: {', '.join(finalization.defaulted_sections)}; "
+                    f"error={exc}"
+                )
+                state.ledger = ledger.to_dict()
+                state.mark_blocked(
+                    blocker,
+                    tool_name="interview.backend_ready_safe_default_synthesis",
+                    error_code=INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE,
+                )
+                record_authoring_backend(state)
+                self._save(state)
+                return AutoInterviewResult(
+                    "blocked", state.interview_session_id, ledger, state.current_round, blocker
+                )
+            state.interview_session_id = synthesis_turn.session_id
+            state.pending_question = synthesis_turn.question
+            if not (synthesis_turn.seed_ready or synthesis_turn.completed):
+                _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                blocker = (
+                    "backend-ready safe-default synthesis did not close the persisted interview: "
+                    "ledger defaults rolled back"
+                )
+                state.ledger = ledger.to_dict()
+                state.mark_blocked(
+                    blocker,
+                    tool_name="interview.backend_ready_safe_default_synthesis",
+                    error_code=INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE,
+                )
+                record_authoring_backend(state)
+                self._save(state)
+                return AutoInterviewResult(
+                    "blocked", state.interview_session_id, ledger, state.current_round, blocker
+                )
+
+        log.info(
+            "auto.interview.backend_ready_safe_default.closed",
+            auto_session_id=state.auto_session_id,
+            ambiguity_score=turn.ambiguity_score,
+            defaulted_sections=finalization.defaulted_sections,
+        )
+        state.ledger = ledger.to_dict()
+        state.pending_question = None
+        state.interview_completed = True
+        state.interview_closure_mode = "safe_default"
+        state.mark_progress(
+            "backend-ready safe-default finalization closed interview gaps: "
+            + ", ".join(finalization.defaulted_sections),
+            tool_name="interview_driver",
+        )
+        self._save(state)
+        return AutoInterviewResult("seed_ready", state.interview_session_id, ledger, state.current_round)
+
     async def _with_timeout(
         self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str
     ) -> InterviewTurn:
@@ -1384,6 +1513,8 @@ def _is_authoring_backend_unavailable(exc: Exception) -> bool:
         "profile",
         "codex",
         "provider",
+        "timed out",
+        "timeout",
         "api key",
         "authentication",
         "rate limit",

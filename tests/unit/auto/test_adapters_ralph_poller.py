@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -75,3 +76,69 @@ async def test_handler_ralph_poller_prefers_generations_over_iterations(
     result = await poller(job_id="job_ralph_existing")
 
     assert result["current_generation"] == 10
+
+
+@pytest.mark.asyncio
+async def test_wait_for_job_terminal_cancels_live_job_on_timeout() -> None:
+    """A deadline-expired auto handoff must not leave the in-process Ralph job alive."""
+
+    class _RunningSnapshot:
+        is_terminal = False
+
+    class _TimeoutJobManager:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        async def get_snapshot(self, _job_id: str) -> _RunningSnapshot:
+            return _RunningSnapshot()
+
+        async def cancel_job(self, job_id: str) -> _RunningSnapshot:
+            self.cancelled.append(job_id)
+            return _RunningSnapshot()
+
+    job_manager = _TimeoutJobManager()
+
+    result = await adapters._wait_for_job_terminal(  # noqa: SLF001
+        job_manager,  # type: ignore[arg-type]
+        "job_ralph_timeout",
+        poll_interval=0,
+        timeout_seconds=0.001,
+        cancel_on_timeout=True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["stop_reason"] == "wall_clock_exhausted"
+    assert job_manager.cancelled == ["job_ralph_timeout"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_job_terminal_cleans_up_when_outer_wait_cancels() -> None:
+    """The auto pipeline wraps Ralph handoff in wait_for, so adapter cancellation must clean up."""
+
+    class _RunningSnapshot:
+        is_terminal = False
+
+    class _CancellableJobManager:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        async def get_snapshot(self, _job_id: str) -> _RunningSnapshot:
+            return _RunningSnapshot()
+
+        async def cancel_job(self, job_id: str) -> _RunningSnapshot:
+            self.cancelled.append(job_id)
+            return _RunningSnapshot()
+
+    job_manager = _CancellableJobManager()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            adapters._wait_for_job_terminal_with_cancel_cleanup(  # noqa: SLF001
+                job_manager,  # type: ignore[arg-type]
+                "job_ralph_outer_timeout",
+                timeout_seconds=60,
+            ),
+            timeout=0.001,
+        )
+
+    assert job_manager.cancelled == ["job_ralph_outer_timeout"]

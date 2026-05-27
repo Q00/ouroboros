@@ -53,7 +53,10 @@ from ouroboros.auto.state import (
     SeedOrigin,
     utc_now_iso,
 )
-from ouroboros.auto.task_class_application import apply_default_ac_template
+from ouroboros.auto.task_class_application import (
+    apply_default_ac_template,
+    has_explicit_verification_contract,
+)
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 from ouroboros.resilience.lateral import ThinkingPersona
@@ -155,6 +158,10 @@ def _is_authoring_backend_unavailable(exc: Exception) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _is_no_backend_interview_closure(state: AutoPipelineState) -> bool:
+    return state.interview_closure_mode in {"ledger_only_no_backend", "safe_default_no_backend"}
+
+
 class RunStarter(Protocol):
     """Protocol for run-starter callables.
 
@@ -213,6 +220,11 @@ _MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
 # the top-level pipeline deadline contract pinned by Q00/ouroboros#779.
 _MIN_RALPH_PER_ITERATION_SECONDS = 30.0
 _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
+# Inline complete-product execution may finish the worker task at the deadline
+# and still need a small amount of handler teardown time to return terminal
+# metadata. This grace applies only to synchronous execution starters; async
+# handoff starters still use the strict enqueue timeout.
+_SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS = 60.0
 
 # Q00/ouroboros#782 review-12 BLOCKING #1: when the top-level deadline has
 # already expired but a persisted Ralph job awaits reconciliation, give the
@@ -587,13 +599,20 @@ class AutoPipeline:
                 self._save(state)
             if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
                 if not state.interview_session_id:
-                    state.mark_blocked(
-                        "Completed interview is missing interview_session_id",
-                        tool_name="auto_pipeline",
-                    )
-                    self._save(state)
-                    return self._result(state, ledger, blocker=state.last_error)
-                if not ledger.is_seed_ready():
+                    if _is_no_backend_interview_closure(state) and ledger.is_seed_ready():
+                        state.transition(
+                            AutoPhase.SEED_GENERATION,
+                            "resuming Seed generation after no-backend interview closure",
+                        )
+                        self._save(state)
+                    else:
+                        state.mark_blocked(
+                            "Completed interview is missing interview_session_id",
+                            tool_name="auto_pipeline",
+                        )
+                        self._save(state)
+                        return self._result(state, ledger, blocker=state.last_error)
+                elif not ledger.is_seed_ready():
                     gaps = ", ".join(ledger.open_gaps())
                     state.mark_blocked(
                         f"Completed interview has unresolved ledger gaps: {gaps}",
@@ -601,10 +620,12 @@ class AutoPipeline:
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
-                state.transition(
-                    AutoPhase.SEED_GENERATION, "resuming Seed generation after completed interview"
-                )
-                self._save(state)
+                else:
+                    state.transition(
+                        AutoPhase.SEED_GENERATION,
+                        "resuming Seed generation after completed interview",
+                    )
+                    self._save(state)
             else:
                 _answerer = getattr(self.interview_driver, "answerer", None)
                 if _answerer is not None:
@@ -759,7 +780,7 @@ class AutoPipeline:
                     if self._enforce_deadline(state):
                         record_authoring_backend(state)
                         return self._result(state, ledger, blocker=state.last_error)
-                    if ledger.is_seed_ready() and _is_authoring_backend_unavailable(exc):
+                    if ledger.is_seed_ready():
                         seed = synthesize_seed_from_ledger(
                             ledger, interview_id=state.interview_session_id
                         )
@@ -1144,7 +1165,7 @@ class AutoPipeline:
             state.run_start_attempted = True
             self._save(state)
             run_meta: dict[str, Any] | None = None
-            run_start_timeout = self._deadline_capped_timeout(state, self.run_start_timeout_seconds)
+            run_start_timeout = self._run_start_timeout(state)
             try:
                 run_kwargs: dict[str, Any] = {}
                 if _accepts_keyword(self.run_starter, IDEMPOTENCY_KWARG_NAME):
@@ -1166,7 +1187,7 @@ class AutoPipeline:
                         f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}"
                     ).strip()
                     state.mark_blocked(
-                        f"run start timed out after {self.run_start_timeout_seconds:.0f}s; "
+                        f"run start timed out after {run_start_timeout:.0f}s; "
                         f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}",
                         tool_name="run_starter",
                     )
@@ -1225,6 +1246,73 @@ class AutoPipeline:
                 if any((state.job_id, state.execution_id, state.run_session_id)):
                     state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                     state.run_handoff_guidance = None
+                    if self.complete_product and state.job_id:
+                        terminal_run_meta = await _wait_owned_run_job_terminal(
+                            self.run_starter,
+                            state.job_id,
+                            timeout_seconds=self._deadline_capped_timeout(
+                                state, state.phase_timeout_seconds(AutoPhase.RUN)
+                            ),
+                        )
+                        if terminal_run_meta is not None:
+                            run_meta.update(terminal_run_meta)
+                            if self._enforce_deadline(state):
+                                return self._result(
+                                    state, ledger, review=review, blocker=state.last_error
+                                )
+                    run_success = run_meta.get("success")
+                    run_status = _optional_str(run_meta.get("status"))
+                    failed_run_statuses = {"failed", "cancelled", "interrupted"}
+                    if self.complete_product and (
+                        run_success is False or run_status in failed_run_statuses
+                    ):
+                        run_status = _optional_str(run_meta.get("status")) or "failed"
+                        state.mark_blocked(
+                            f"run execution finished unsuccessfully before Ralph handoff: {run_status}",
+                            tool_name="run_starter",
+                        )
+                        self._save(state)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            blocker=state.last_error,
+                            run_subagent=run_subagent,
+                        )
+                    incomplete_run_statuses = {"queued", "running", "cancel_requested"}
+                    if self.complete_product and run_status in incomplete_run_statuses:
+                        state.mark_blocked(
+                            "run execution did not finish before Ralph handoff: "
+                            f"{run_status}",
+                            tool_name="run_starter",
+                        )
+                        self._save(state)
+                        await _cancel_owned_run_job(self.run_starter, state.job_id)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            blocker=state.last_error,
+                            run_subagent=run_subagent,
+                        )
+                    if (
+                        self.complete_product
+                        and bool(getattr(self.run_starter, "synchronous_execution", False))
+                        and run_success is True
+                    ):
+                        state.run_handoff_status = "completed"
+                        state.run_handoff_guidance = None
+                        state.transition(
+                            AutoPhase.COMPLETE,
+                            "synchronous execution completed for complete-product run",
+                        )
+                        self._save(state)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            run_subagent=run_subagent,
+                        )
                     # Q00/ouroboros#773: when ``--complete-product`` is set
                     # and a ralph starter is configured, chain RUN →
                     # RALPH_HANDOFF instead of going straight to COMPLETE.
@@ -1345,6 +1433,23 @@ class AutoPipeline:
         if remaining <= 0:
             return 0.0
         return float(min(float(phase_timeout), remaining))
+
+    def _run_start_timeout(self, state: AutoPipelineState) -> float:
+        """Return the timeout budget for the run starter invocation.
+
+        Async run starters only enqueue work, so they keep the short
+        ``run_start_timeout_seconds`` budget. The CLI complete-product path can
+        use a synchronous starter that owns the actual execution; treat that as
+        RUN phase work and let the top-level pipeline deadline bound it.
+        """
+        if self.complete_product and bool(
+            getattr(self.run_starter, "synchronous_execution", False)
+        ):
+            remaining = self._remaining_deadline_seconds(state)
+            if remaining is not None:
+                return remaining + _SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS
+            return float(state.phase_timeout_seconds(AutoPhase.RUN))
+        return self._deadline_capped_timeout(state, self.run_start_timeout_seconds)
 
     async def _handoff_to_ralph(
         self,
@@ -1502,6 +1607,8 @@ class AutoPipeline:
             # server-side (the dispatch checkpoint above persisted its
             # handle). Resume will then poll it via ``_resume_ralph_handoff``
             # rather than treating the session as terminally lost.
+            await _cancel_ralph_status_mirror(ralph_mirror_task)
+            await _cancel_owned_ralph_job(self.ralph_starter, state.ralph_job_id)
             if self._enforce_deadline(state):
                 return self._result(
                     state,
@@ -2662,6 +2769,7 @@ class AutoPipeline:
                 ralph_meta = await asyncio.wait_for(poll_call, timeout=poll_timeout)
         except TimeoutError:
             await _cancel_ralph_status_mirror(ralph_mirror_task)
+            await _cancel_owned_ralph_job(self.ralph_resumer, state.ralph_job_id)
             if self._enforce_deadline(state):
                 return self._result(state, ledger, review=review, blocker=state.last_error)
             state.mark_blocked(
@@ -2924,11 +3032,12 @@ class AutoPipeline:
         inference = derive_domain_from_ledger(ledger)
         task_class = inference.single
         if task_class is not None:
-            applied = apply_default_ac_template(seed, task_class)
-            if applied.injected_ac:
-                seed = applied.seed
-                state.seed_id = seed.metadata.seed_id
-                state.seed_artifact = seed.to_dict()
+            if not has_explicit_verification_contract(seed):
+                applied = apply_default_ac_template(seed, task_class)
+                if applied.injected_ac:
+                    seed = applied.seed
+                    state.seed_id = seed.metadata.seed_id
+                    state.seed_artifact = seed.to_dict()
             state.active_task_class = task_class.value
         return seed
 
@@ -3411,6 +3520,61 @@ async def _cancel_ralph_status_mirror(task: asyncio.Task[None] | None) -> None:
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
+
+
+async def _cancel_owned_ralph_job(adapter: object | None, job_id: str | None) -> None:
+    if not job_id:
+        return
+    handler = getattr(adapter, "handler", None)
+    job_manager = getattr(handler, "_job_manager", None)
+    cancel_job = getattr(job_manager, "cancel_job", None)
+    if cancel_job is None:
+        return
+    try:
+        await asyncio.wait_for(cancel_job(job_id), timeout=5.0)
+    except (Exception, TimeoutError):
+        return
+
+
+async def _cancel_owned_run_job(adapter: object | None, job_id: str | None) -> None:
+    if not job_id:
+        return
+    handler = getattr(adapter, "handler", None)
+    job_manager = getattr(handler, "_job_manager", None)
+    cancel_job = getattr(job_manager, "cancel_job", None)
+    if cancel_job is None:
+        return
+    try:
+        await asyncio.wait_for(cancel_job(job_id), timeout=5.0)
+    except (Exception, TimeoutError):
+        return
+
+
+async def _wait_owned_run_job_terminal(
+    adapter: object | None,
+    job_id: str,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any] | None:
+    handler = getattr(adapter, "handler", None)
+    job_manager = getattr(handler, "_job_manager", None)
+    get_snapshot = getattr(job_manager, "get_snapshot", None)
+    if get_snapshot is None:
+        return None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout_seconds)
+    while True:
+        snapshot = await get_snapshot(job_id)
+        if getattr(snapshot, "is_terminal", False):
+            meta = dict(getattr(snapshot, "result_meta", None) or {})
+            status = getattr(getattr(snapshot, "status", None), "value", None)
+            if isinstance(status, str):
+                meta.setdefault("status", status)
+            return meta
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return {"status": "running"}
+        await asyncio.sleep(min(0.1, remaining))
 
 
 def _artifact_text(value: object) -> str | None:

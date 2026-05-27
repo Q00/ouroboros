@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from ouroboros.auto.task_class_application import (
+    has_explicit_verification_contract,
+    has_explicit_verification_text,
+)
 from ouroboros.core.seed import Seed
 
 _AUTO_WRAPPER_CRITERIA = frozenset(
@@ -122,10 +126,81 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     context.
     """
     criteria = tuple(ac for ac in seed.acceptance_criteria if ac and ac.strip())
-    if not criteria or not _has_auto_wrapper_context(seed.goal, criteria):
+    if not criteria:
+        return seed
+
+    seed = _relax_minimality_constraints_for_exact_verification(seed)
+    seed = _drop_repaired_fragments_when_exact_verification_exists(seed, criteria)
+    criteria = tuple(seed.acceptance_criteria)
+
+    if not _has_auto_wrapper_context(seed.goal, criteria):
         return seed
 
     filtered = normalize_observation_execution_criteria(criteria, context_text=seed.goal)
+    if not filtered or filtered == criteria:
+        return seed
+    return seed.model_copy(update={"acceptance_criteria": filtered})
+
+
+_MINIMAL_VERIFICATION_METADATA_CONSTRAINT = (
+    "Do not add unrelated files, dependencies, or behavior; minimal project metadata "
+    "needed to run the exact verification command is allowed."
+)
+
+
+def _relax_minimality_constraints_for_exact_verification(seed: Seed) -> Seed:
+    """Allow the smallest runnable test metadata for exact verification commands.
+
+    In a clean greenfield cwd, an exact command such as ``uv run pytest ...`` may
+    require project metadata declaring pytest. Seed repair/generation sometimes
+    adds broad "no extra files/dependencies" constraints that make that command
+    impossible. Keep the scope guard, but phrase it so verification metadata is
+    permitted.
+    """
+    if not has_explicit_verification_contract(seed):
+        return seed
+
+    filtered: list[str] = []
+    relaxed = False
+    for constraint in seed.constraints:
+        if _is_overstrict_exact_verification_constraint(constraint):
+            relaxed = True
+            continue
+        filtered.append(constraint)
+
+    if not relaxed:
+        return seed
+    if _MINIMAL_VERIFICATION_METADATA_CONSTRAINT not in filtered:
+        filtered.append(_MINIMAL_VERIFICATION_METADATA_CONSTRAINT)
+    return seed.model_copy(update={"constraints": tuple(filtered)})
+
+
+def _drop_repaired_fragments_when_exact_verification_exists(
+    seed: Seed,
+    criteria: tuple[str, ...],
+) -> Seed:
+    """Remove repairer-split requirement fragments behind an exact test command.
+
+    The Seed repairer can turn one concrete criterion such as "create these
+    files and run this exact pytest command" into multiple generic
+    "command/API check proves original requirement" ACs. When a Seed already
+    contains a non-repaired executable verification command, those fragments
+    only expand runtime work without adding a stronger contract.
+    """
+    if not has_explicit_verification_contract(seed):
+        return seed
+    if not any(
+        _contains_explicit_verification_command(criterion)
+        and not _is_seed_repairer_original_requirement_line(criterion)
+        for criterion in criteria
+    ):
+        return seed
+
+    filtered = tuple(
+        criterion
+        for criterion in criteria
+        if not _is_seed_repairer_original_requirement_line(criterion)
+    )
     if not filtered or filtered == criteria:
         return seed
     return seed.model_copy(update={"acceptance_criteria": filtered})
@@ -196,6 +271,22 @@ def _criterion_key(criterion: str) -> str:
     return " ".join(criterion.casefold().strip().rstrip(".").split())
 
 
+def _contains_explicit_verification_command(criterion: str) -> bool:
+    return has_explicit_verification_text(criterion)
+
+
+def _is_overstrict_exact_verification_constraint(constraint: str) -> bool:
+    key = _criterion_key(constraint)
+    return (
+        ("no extra files" in key)
+        or ("no additional files" in key)
+        or ("avoid new dependencies" in key)
+        or ("no new dependencies" in key)
+        or ("no additional" in key and "dependencies" in key)
+        or ("implementation limited to" in key and "test" in key)
+    )
+
+
 def _normalize_known_observation_execution_line(criterion: str) -> str:
     """Canonicalize only known-equivalent hello_auto execution AC phrasings."""
     key = _criterion_key(criterion)
@@ -238,13 +329,21 @@ def _is_hello_auto_observation_unit_line(criterion: str) -> bool:
 def _is_observation_report_wrapper(criterion: str) -> bool:
     """Return true for repairer-wrapped observation report requirements."""
     key = _criterion_key(criterion)
-    if not key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
+    if not _is_seed_repairer_original_requirement_key(key):
         return False
     return "observation report" in key or "plain chat summary" in key
 
 
 def _unwrap_seed_repairer_original_requirement(criterion: str) -> str:
     key = _criterion_key(criterion)
-    if not key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
+    if not _is_seed_repairer_original_requirement_key(key):
         return criterion
     return key.removeprefix(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX)
+
+
+def _is_seed_repairer_original_requirement_line(criterion: str) -> bool:
+    return _is_seed_repairer_original_requirement_key(_criterion_key(criterion))
+
+
+def _is_seed_repairer_original_requirement_key(key: str) -> bool:
+    return key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX)

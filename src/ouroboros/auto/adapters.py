@@ -22,7 +22,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
 )
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
-from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
@@ -237,7 +237,44 @@ class HandlerRunStarter:
             "job_id": _optional_str(meta.get("job_id")),
             "session_id": _optional_str(meta.get("session_id")),
             "execution_id": _optional_str(meta.get("execution_id")),
+            "status": _optional_str(meta.get("status")),
         }
+        if isinstance(meta.get("success"), bool):
+            run_meta["success"] = meta["success"]
+        if isinstance(meta.get("_subagent"), dict):
+            run_meta["_subagent"] = meta["_subagent"]
+        return run_meta
+
+
+class HandlerSynchronousRunStarter:
+    """Callable run starter backed by inline ``ouroboros_execute_seed`` execution."""
+
+    synchronous_execution = True
+
+    def __init__(self, handler: ExecuteSeedHandler, *, cwd: str) -> None:
+        self.handler = handler
+        self.cwd = cwd
+
+    async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:  # noqa: ARG002
+        seed_yaml = yaml.dump(
+            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
+        result = _unwrap(
+            await self.handler.handle(
+                {"seed_content": seed_yaml, "cwd": self.cwd},
+                synchronous=True,
+            ),
+            tool_name="ouroboros_execute_seed",
+        )
+        meta = result.meta or {}
+        run_meta: dict[str, object] = {
+            "job_id": None,
+            "session_id": _optional_str(meta.get("session_id")),
+            "execution_id": _optional_str(meta.get("execution_id")),
+            "status": _optional_str(meta.get("status")),
+        }
+        if isinstance(meta.get("success"), bool):
+            run_meta["success"] = meta["success"]
         if isinstance(meta.get("_subagent"), dict):
             run_meta["_subagent"] = meta["_subagent"]
         return run_meta
@@ -311,7 +348,7 @@ class HandlerRalphStarter:
                         "status": "reattaching",
                     }
                 )
-            terminal_meta = await _wait_for_job_terminal(
+            terminal_meta = await _wait_for_job_terminal_with_cancel_cleanup(
                 job_manager,
                 existing_job_id,
                 timeout_seconds=max_total_seconds,
@@ -411,7 +448,7 @@ class HandlerRalphStarter:
         if max_total_seconds is None:
             terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         else:
-            terminal_meta = await _wait_for_job_terminal(
+            terminal_meta = await _wait_for_job_terminal_with_cancel_cleanup(
                 job_manager,
                 job_id,
                 timeout_seconds=max_total_seconds,
@@ -471,7 +508,7 @@ class HandlerRalphPoller:
         if max_total_seconds is None:
             terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         else:
-            terminal_meta = await _wait_for_job_terminal(
+            terminal_meta = await _wait_for_job_terminal_with_cancel_cleanup(
                 job_manager,
                 job_id,
                 timeout_seconds=max_total_seconds,
@@ -743,6 +780,7 @@ async def _wait_for_job_terminal(
     *,
     poll_interval: float = 0.05,
     timeout_seconds: float | None = None,
+    cancel_on_timeout: bool = False,
 ) -> dict[str, Any]:
     """Poll the job manager until ``job_id`` reaches a terminal state.
 
@@ -774,6 +812,8 @@ async def _wait_for_job_terminal(
         if deadline is not None:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                if cancel_on_timeout:
+                    await _cancel_job_after_terminal_wait_timeout(job_manager, job_id)
                 return {
                     "job_id": job_id,
                     "status": "failed",
@@ -782,6 +822,35 @@ async def _wait_for_job_terminal(
             await asyncio.sleep(min(poll_interval, remaining))
             continue
         await asyncio.sleep(poll_interval)
+
+
+async def _wait_for_job_terminal_with_cancel_cleanup(
+    job_manager: JobManager,
+    job_id: str,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    try:
+        return await _wait_for_job_terminal(
+            job_manager,
+            job_id,
+            timeout_seconds=timeout_seconds,
+            cancel_on_timeout=True,
+        )
+    except asyncio.CancelledError:
+        await _cancel_job_after_terminal_wait_timeout(job_manager, job_id)
+        raise
+
+
+async def _cancel_job_after_terminal_wait_timeout(job_manager: JobManager, job_id: str) -> None:
+    """Best-effort cleanup for jobs that outlive the auto pipeline deadline."""
+    cancel_job = getattr(job_manager, "cancel_job", None)
+    if cancel_job is None:
+        return
+    try:
+        await cancel_job(job_id)
+    except Exception:
+        return
 
 
 def _terminal_job_status(status: JobStatus) -> str:

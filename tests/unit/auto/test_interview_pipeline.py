@@ -939,7 +939,7 @@ async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("done", session_id, seed_ready=True)
 
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state = AutoPipelineState(goal="Deploy to production", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer),
@@ -964,7 +964,7 @@ async def test_interview_driver_timeout_message_records_state_policy_source(tmp_
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("done", session_id, seed_ready=True)
 
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state = AutoPipelineState(goal="Deploy to production", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer),
@@ -978,6 +978,35 @@ async def test_interview_driver_timeout_message_records_state_policy_source(tmp_
     assert "interview.start timed out after 0s" in blocker
     assert "policy: state.timeout_seconds_by_phase[interview]" in blocker
     assert state.last_error == blocker
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_closes_with_safe_defaults_when_start_times_out(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str, *, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG001
+        await asyncio.sleep(0.05)
+        return InterviewTurn("What should we verify?", interview_id or "interview_timeout")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("answer must not run when start times out")
+
+    state = AutoPipelineState(goal="Build a small local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    store = AutoStore(tmp_path)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, is_session_persisted=lambda _id: False),
+        store=store,
+        timeout_seconds=0.001,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert result.blocker is None
+    assert state.interview_session_id is None
+    assert state.interview_closure_mode == "safe_default_no_backend"
+    assert ledger.is_seed_ready()
 
 
 @pytest.mark.asyncio
@@ -2776,6 +2805,76 @@ async def test_pipeline_seed_generation_without_interview_session_synthesizes_co
 
 
 @pytest.mark.asyncio
+async def test_pipeline_resumes_no_backend_interview_closure_without_session_id(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("no-backend resume should synthesize without handler seed generation")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_completed = True
+    state.interview_closure_mode = "safe_default_no_backend"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase == AutoPhase.COMPLETE
+    assert result.interview_session_id is None
+    assert state.seed_artifact is not None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_generation_timeout_falls_back_to_completed_ledger(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("seed phase should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("seed phase should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        await asyncio.sleep(0.05)
+        return _seed()
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.interview_session_id = "interview_timeout_seed"
+    state.interview_completed = True
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        skip_run=True,
+        seed_timeout_seconds=0.001,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.grade == "A"
+    assert state.last_tool_name == "ledger_seed_generator"
+    assert state.seed_artifact is not None
+
+
+@pytest.mark.asyncio
 async def test_pipeline_retry_after_blocked_run_start_replay_from_seed_path(tmp_path) -> None:
     """Resuming a blocked run-start session retries the run starter once."""
 
@@ -3690,6 +3789,58 @@ async def test_interview_driver_supplies_last_question_for_seed_ready_gap_reopen
 
 
 @pytest.mark.asyncio
+async def test_backend_ready_low_ambiguity_closes_safe_defaultable_gaps(tmp_path) -> None:
+    """Low-ambiguity backend completion should not reopen on benign safe gaps."""
+    observed_last_questions: list[str | None] = []
+    observed_answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "ready",
+            "interview_backend_ready_defaults",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.16,
+        )
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        observed_last_questions.append(last_question)
+        observed_answers.append(text)
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.16,
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["non_goals"].entries.clear()
+    ledger.sections["failure_modes"].entries.clear()
+    ledger.sections["runtime_context"].entries.clear()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert state.interview_closure_mode == "safe_default"
+    assert ledger.is_seed_ready()
+    assert observed_last_questions == [
+        "[driver safe-default finalization: backend_ambiguity=0.16]"
+    ]
+    assert observed_answers and "[safe-default-synthesis]" in observed_answers[0]
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_does_not_replace_specific_verification_answer_with_gap_prompt(
     tmp_path,
 ) -> None:
@@ -4397,8 +4548,9 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
 
     result = await driver.run(state, ledger)
 
-    assert result.status == "blocked"
+    assert result.status == "seed_ready"
     assert state.interview_session_id, "probe-confirmed id must be saved on auto state"
+    assert state.interview_closure_mode == "safe_default_no_backend"
     assert received_ids == [state.interview_session_id], (
         "backend.start must receive the pre-allocated interview_id so the "
         "persisted interview file matches auto state"
@@ -4501,7 +4653,7 @@ async def test_interview_driver_persists_partial_session_id_on_start_failure(tmp
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("answer must not be called when start fails")
 
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state = AutoPipelineState(goal="Deploy to production", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     store = AutoStore(tmp_path)
     driver = AutoInterviewDriver(

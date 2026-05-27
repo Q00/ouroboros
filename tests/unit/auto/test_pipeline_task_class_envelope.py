@@ -214,6 +214,70 @@ async def test_envelope_carries_active_task_class_on_single_match(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_envelope_skips_default_ac_when_seed_has_exact_verification_command(
+    tmp_path,
+) -> None:
+    """Concrete user verification commands should not gain broad class defaults."""
+    profile = TASK_CLASS_CATALOG[TaskClass.LIBRARY]
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_exact_command")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    user_ac = (
+        "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+        "`hello_auto() -> str` returns exactly `hello from ooo auto`, "
+        "the test imports `hello_auto` and asserts that exact value, and "
+        "the exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    )
+
+    async def generate_seed(_session_id: str) -> Seed:
+        seed = _build_seed(ac=user_ac)
+        return seed.model_copy(
+            update={
+                "goal": (
+                    "Create hello_auto.py with hello_auto() returning exactly "
+                    "'hello from ooo auto'. Verification command is "
+                    "uv run pytest tests/test_hello_auto.py."
+                )
+            }
+        )
+
+    state = AutoPipelineState(
+        goal=(
+            "Create hello_auto.py with hello_auto() returning exactly "
+            "'hello from ooo auto'. Verification command is "
+            "uv run pytest tests/test_hello_auto.py."
+        ),
+        cwd=str(tmp_path),
+    )
+    ledger = _unmatched_ledger()
+    state.ledger = ledger.to_dict()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.active_task_class == TaskClass.LIBRARY.value
+    ac = state.seed_artifact["acceptance_criteria"]
+    assert ac == list(user_ac)
+    for template_entry in profile.default_ac_template:
+        assert template_entry not in ac
+
+
+@pytest.mark.asyncio
 async def test_envelope_uses_library_fallback_when_unmatched(tmp_path) -> None:
     """Unmatched inference applies the L1-b safe LIBRARY fallback instead
     of silently skipping default AC injection."""

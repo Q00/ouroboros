@@ -198,6 +198,73 @@ def test_normalize_execution_acceptance_unwraps_repaired_observation_criteria() 
     assert normalized.acceptance_criteria == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
 
 
+def test_normalize_execution_acceptance_drops_repaired_fragments_with_exact_command() -> None:
+    exact_contract = (
+        "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+        "`hello_auto() -> str` returns exactly `hello from ooo auto`, "
+        "the test imports `hello_auto` and asserts that exact value, and "
+        "the exact command `uv run pytest tests/test_hello_auto.py` passes."
+    )
+    seed = _seed(
+        exact_contract,
+        "A command/API check returns stable observable output or artifacts proving the original requirement for hello_auto.py exists at repository root.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for hello_auto() function exists.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Test imports exactly from hello_auto import hello_auto.",
+    ).model_copy(update={"goal": "Create a tiny Python module and exact pytest verification."})
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (exact_contract,)
+
+
+def test_normalize_execution_acceptance_relaxes_conflicting_minimality_constraints() -> None:
+    seed = _seed(
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    ).model_copy(
+        update={
+            "constraints": (
+                "No extra files or behavior beyond the exact return-value test",
+                "Avoid new dependencies",
+                "Verification command must be uv run pytest tests/test_hello_auto.py",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.constraints == (
+        "Verification command must be uv run pytest tests/test_hello_auto.py",
+        "Do not add unrelated files, dependencies, or behavior; minimal project metadata "
+        "needed to run the exact verification command is allowed.",
+    )
+
+
+def test_normalize_execution_acceptance_keeps_minimality_constraints_without_exact_command() -> None:
+    seed = _seed("Tests cover the behavior.").model_copy(
+        update={
+            "constraints": (
+                "No extra files or behavior beyond the exact return-value test",
+                "Avoid new dependencies",
+            ),
+        }
+    )
+
+    assert normalize_execution_acceptance(seed) is seed
+
+
+def test_normalize_execution_acceptance_keeps_repaired_fragments_without_exact_ac_command() -> None:
+    seed = _seed(
+        "A command/API check returns stable observable output or artifacts proving the original requirement for hello_auto.py exists at repository root.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Test imports exactly from hello_auto import hello_auto.",
+    ).model_copy(
+        update={
+            "constraints": ("Verification command must be uv run pytest tests/test_hello_auto.py",),
+        }
+    )
+
+    assert normalize_execution_acceptance(seed) is seed
+
+
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:
     seed = _seed("Final report includes auto session id and seed id.")
 

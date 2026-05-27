@@ -158,13 +158,14 @@ class TestCheckpointStore:
         assert loaded.state == sample_checkpoint.state
 
     def test_load_returns_error_for_nonexistent_checkpoint(
-        self, checkpoint_store: CheckpointStore
+        self, checkpoint_store: CheckpointStore, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """CheckpointStore.load() returns error for nonexistent checkpoint."""
         result = checkpoint_store.load("nonexistent-seed")
         assert result.is_err
         # Message indicates no valid checkpoint was found
         assert "no valid checkpoint" in result.error.message.lower()
+        assert "Checkpoint corruption" not in capsys.readouterr().out
 
     def test_load_validates_integrity(
         self, checkpoint_store: CheckpointStore, sample_checkpoint: CheckpointData

@@ -43,6 +43,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.job_manager import JobStatus
 
 
 def _build_seed(seed_id: str = "seed_test_001") -> Seed:
@@ -619,6 +620,202 @@ async def test_ralph_handoff_resume_does_not_dispatch_duplicate_work(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_complete_product_blocks_when_initial_run_reports_failure(tmp_path) -> None:
+    """Do not launch Ralph when the synchronous run handoff already failed."""
+    state = _state_at_run_phase(tmp_path)
+
+    async def failed_run_starter(_seed: Seed) -> dict[str, Any]:
+        return {
+            "job_id": "job_run_failed",
+            "session_id": "exec_session_failed",
+            "execution_id": "execution_failed",
+            "status": "failed",
+            "success": False,
+        }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run after failed execution")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=failed_run_starter,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "finished unsuccessfully" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_complete_product_synchronous_run_uses_pipeline_deadline_not_handoff_timeout(
+    tmp_path,
+) -> None:
+    """Inline complete-product execution is terminal RUN work, not quick enqueue work."""
+    state = _state_at_run_phase(tmp_path)
+    state.pipeline_timeout_seconds = 120.0
+    state.arm_deadline()
+
+    class SlowSynchronousRunStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            await asyncio.sleep(0.02)
+            return {
+                "job_id": None,
+                "session_id": "sync_session",
+                "execution_id": "sync_exec",
+                "status": "completed",
+                "success": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("successful synchronous run must not dispatch Ralph")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=SlowSynchronousRunStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        run_start_timeout_seconds=0.001,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_handoff_status == "completed"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.execution_id == "sync_exec"
+    assert state.run_handoff_status == "completed"
+    assert state.ralph_job_id is None
+    assert state.last_tool_name != "run_starter"
+
+
+def test_complete_product_synchronous_run_timeout_has_completion_grace(tmp_path) -> None:
+    """Synchronous run teardown gets a small grace beyond the strict deadline."""
+    state = _state_at_run_phase(tmp_path)
+    state.deadline_at = time.monotonic() + 5.0
+
+    class SynchronousRunStarter:
+        synchronous_execution = True
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=SynchronousRunStarter(),
+        reviewer=_PassReviewer(),
+        complete_product=True,
+        run_start_timeout_seconds=0.001,
+    )
+
+    assert pipeline._run_start_timeout(state) > 5.0
+
+
+@pytest.mark.asyncio
+async def test_complete_product_waits_for_owned_run_job_before_ralph(tmp_path) -> None:
+    """A queued execute_seed job must reach terminal success before Ralph starts."""
+    state = _state_at_run_phase(tmp_path)
+
+    class _RunSnapshot:
+        is_terminal = True
+        status = JobStatus.FAILED
+        result_meta = {"status": "failed", "success": False}
+
+    class _RunJobManager:
+        async def get_snapshot(self, job_id: str) -> _RunSnapshot:
+            assert job_id == "job_run_background"
+            return _RunSnapshot()
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class BackgroundRunStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed) -> dict[str, Any]:
+            return {
+                "job_id": "job_run_background",
+                "session_id": "exec_session_background",
+                "execution_id": "execution_background",
+                "status": "queued",
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run before failed run is surfaced")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=BackgroundRunStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == "run_starter"
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_complete_product_blocks_when_owned_run_job_is_still_running(tmp_path) -> None:
+    """Do not start Ralph against an unfinished execute_seed job."""
+    state = _state_at_run_phase(tmp_path)
+    cancelled_jobs: list[str] = []
+
+    class _RunJobManager:
+        async def cancel_job(self, job_id: str) -> None:
+            cancelled_jobs.append(job_id)
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class BackgroundRunStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed) -> dict[str, Any]:
+            return {
+                "job_id": "job_run_background",
+                "session_id": "exec_session_background",
+                "execution_id": "execution_background",
+                "status": "queued",
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run while execution is still running")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=BackgroundRunStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == "run_starter"
+    assert "did not finish" in (state.last_error or "")
+    assert state.ralph_job_id is None
+    assert cancelled_jobs == ["job_run_background"]
+
+
+@pytest.mark.asyncio
 async def test_insufficient_ralph_deadline_budget_blocks_as_pipeline_timeout(tmp_path) -> None:
     state = _state_at_run_phase(tmp_path)
     state.deadline_at = time.monotonic() + 0.25
@@ -1143,6 +1340,74 @@ async def test_ralph_handoff_resume_poller_cancels_status_mirror_on_poll_error(
     assert state.phase is AutoPhase.FAILED
     assert state.last_error == "ralph resume poll failed: snapshot unavailable"
     assert event_store.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_fresh_ralph_handoff_timeout_cancels_status_mirror(tmp_path) -> None:
+    """A deadline timeout during fresh Ralph handoff must not leave the mirror running."""
+    state = _state_at_run_phase(tmp_path)
+    state.deadline_at = time.monotonic() + 1.05
+    state.deadline_at_epoch = time.time() + 1.05
+    auto_store = AutoStore(tmp_path)
+    event_store = _ResumeMirrorEventStore(state)
+    event_store.block_first_fetch = True
+    cancelled_jobs: list[str] = []
+
+    class _JobManager:
+        async def cancel_job(self, job_id: str) -> None:
+            cancelled_jobs.append(job_id)
+
+    class _Handler:
+        _job_manager = _JobManager()
+
+    class SlowStarter:
+        job_event_store = event_store
+        handler = _Handler()
+
+        async def __call__(
+            self,
+            seed: Seed,  # noqa: ARG002
+            *,
+            lineage_id: str,
+            on_dispatched,
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            on_dispatched(
+                {
+                    "job_id": "job_fresh_timeout",
+                    "lineage_id": lineage_id,
+                    "dispatch_mode": "job",
+                }
+            )
+            await asyncio.wait_for(event_store.started.wait(), timeout=1.0)
+            await asyncio.sleep(2.0)
+            return {
+                "job_id": "job_fresh_timeout",
+                "lineage_id": lineage_id,
+                "dispatch_mode": "job",
+                "terminal_status": "completed",
+                "stop_reason": "qa passed",
+            }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        store=auto_store,
+        reviewer=_PassReviewer(),
+        ralph_starter=SlowStarter(),
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
+    assert state.ralph_job_id == "job_fresh_timeout"
+    assert event_store.cancelled is True
+    assert cancelled_jobs == ["job_fresh_timeout"]
 
 
 @pytest.mark.asyncio
