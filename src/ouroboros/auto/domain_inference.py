@@ -45,42 +45,56 @@ _CLI_GOAL_TOKEN_RE = re.compile(r"\bcli\b")
 _CLI_GOAL_PHRASE_RE = re.compile(r"\bcommand[\s\-]line\b")
 
 # Explicit-negation pattern matching common natural-language denials of
-# the CLI signal. Covers three shapes:
+# the CLI signal. The earlier whitelist-of-connectors strategy
+# (rounds 2-6) proved too narrow — every review round surfaced another
+# descriptive participle that was missing from the list ("intended",
+# "meant", "designed", "exposed", "for", …). Switching to a generic
+# distance-bounded path with an *affirmative-qualifier blocklist* is
+# both more robust and easier to reason about:
 #
-#   1. Direct negation: "not a CLI", "no CLI", "never a CLI",
-#      "isn't a CLI", "won't be a CLI".
-#   2. Modal/copular negation: "should not be a CLI", "must not be a
-#      CLI", "shouldn't be a CLI", "cannot be a CLI", "doesn't have to
-#      be a CLI".
-#   3. Exclusion phrasing: "without a CLI", "excluding a CLI", "sans
-#      CLI", "instead of a CLI", "rather than a CLI".
+#   <negation cue>   <path of up to 7 tokens>   <cli|command-line>
 #
-# Each variant works the same way for the multi-word "command line" /
-# "command-line" phrase. Up to five whitelisted connector tokens may
-# appear between the cue and the CLI signal so e.g. "should not be a
-# CLI" or "instead of being a CLI" both collapse.
+# The strip is *suppressed* if the path contains an affirmative-flip
+# qualifier — "just", "only", "also", "rather", "but" — because those
+# tokens turn the phrase into an affirmative expansion ("not just a
+# CLI", "not only a CLI", "not a webhook but rather a CLI") that
+# genuinely asserts CLI. Those cases must keep their CLI signal.
 #
-# Matched spans are removed from the goal text before re-applying the
-# positive regexes, so a goal like
-#     "Build a Python library, without a CLI"
-# does not classify as CLI (PR #1264 review blockers, rounds 2-4).
-_NEGATED_CLI_GOAL_RE = re.compile(
-    r"\b(?:not|no|never|"
+# Covers the shapes flagged across rounds 2-7:
+#   - Direct:           "not a CLI", "no CLI", "never a CLI",
+#                       "isn't a CLI".
+#   - Modal/copular:    "should not be a CLI", "cannot be a CLI",
+#                       "shouldn't be a CLI", "doesn't have to be a CLI".
+#   - Exclusion:        "without a CLI", "excluding a CLI", "sans CLI",
+#                       "instead of a CLI", "rather than a CLI".
+#   - Participle:       "not intended to be a CLI", "not meant to be
+#                       a CLI", "not designed to be a CLI",
+#                       "not exposed as a CLI", "not for CLI use".
+#
+# Each variant also works for the multi-word "command line" /
+# "command-line" phrase. See PR #1264 review rounds 2-7.
+_NEGATION_CUE_FRAGMENT = (
+    r"(?:not|no|never|"
     r"without|excluding|sans|"
     r"isn[’']?t|aren[’']?t|wasn[’']?t|weren[’']?t|"
     r"won[’']?t|wouldn[’']?t|shouldn[’']?t|"
     r"can[’']?t|cannot|"
     r"doesn[’']?t|don[’']?t|didn[’']?t|"
     r"instead\s+of|rather\s+than)"
-    # "just" / "only" are intentionally NOT connectors: they flip the
-    # phrase into an affirmative expansion ("not just a CLI", "not only
-    # a CLI" — both mean *and a CLI* + something else), so they must
-    # block the negation strip rather than be absorbed into it (PR
-    # #1264 review round 5).
-    r"(?:\s+(?:be|being|become|a|an|the|really|actually|"
-    r"have|has|had|need|needs|to|of)){0,5}"
+)
+_NEGATED_CLI_GOAL_RE = re.compile(
+    rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
+    r"(?P<path>(?:\s+\S+){0,7}?)"  # Up to 7 intervening tokens (non-greedy).
     r"\s+(?:cli|command[\s\-]line)\b"
 )
+
+# Words that, when they appear in the intervening path between a
+# negation cue and the CLI signal, flip the phrase into an affirmative
+# expansion. "not just a CLI" / "not only a CLI" mean "a CLI AND
+# something else"; "but rather a CLI" / "not X but a CLI" mean "the
+# tool IS a CLI". When any of these appears in a candidate strip span,
+# the strip is suppressed so the positive CLI signal survives.
+_AFFIRMATIVE_FLIP_RE = re.compile(r"\b(?:just|only|also|rather|but)\b")
 
 # Prefix-style negation ("non-CLI" / "non CLI" / "non-command-line").
 # `\b` boundaries prevent false matches on unrelated words containing
@@ -106,7 +120,26 @@ def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
     )
     if not has_signal:
         return False
-    stripped = _NEGATED_CLI_GOAL_RE.sub(" ", goal_text)
+
+    def _strip_if_not_affirmative(match: re.Match[str]) -> str:
+        """Drop the matched negation span unless its **path** (the text
+        between the negation cue and the CLI token) contains an
+        affirmative-flip qualifier (just/only/also/rather/but), in
+        which case the phrase is actually an affirmative expansion and
+        the CLI signal must survive.
+
+        The cue itself ("rather than", "instead of", …) is excluded
+        from the affirmative check on purpose — otherwise the
+        "rather" inside the cue "rather than" would mis-block the
+        strip for legitimate negation phrases like "rather than a
+        CLI".
+        """
+        path = match.group("path") or ""
+        if _AFFIRMATIVE_FLIP_RE.search(path):
+            return match.group(0)
+        return " "
+
+    stripped = _NEGATED_CLI_GOAL_RE.sub(_strip_if_not_affirmative, goal_text)
     stripped = _NEGATED_CLI_PREFIX_RE.sub(" ", stripped)
     return bool(_CLI_GOAL_TOKEN_RE.search(stripped)) or bool(_CLI_GOAL_PHRASE_RE.search(stripped))
 

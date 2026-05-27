@@ -648,6 +648,34 @@ def test_cli_does_not_match_on_non_prefix_negation() -> None:
         )
 
 
+def test_cli_does_not_match_on_participle_negation() -> None:
+    """Bot's round-7 reproductions: descriptive participles between the
+    negation cue and the CLI token. With the connector whitelist
+    replaced by a distance-bounded path + affirmative-flip blocker,
+    arbitrary participles ("intended", "meant", "designed", "exposed",
+    "for") no longer need to be enumerated."""
+    for goal in (
+        "Build a Python library that is not intended to be a CLI",
+        "Build a Python library that is not meant to be a CLI",
+        "Build a Python library that is not designed to be a CLI",
+        "Build a Python library that is not exposed as a CLI",
+        "Build a Python library, not for CLI use",
+        # Multi-word phrase variants.
+        "Build a Python library that is not intended to be a command-line tool",
+        "Build a Python library that is not designed to be a command line tool",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(
+            ledger,
+            "outputs",
+            value="An importable Python package exposing a public API surface",
+        )
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI not in result.classes, (
+            f"participle-negated goal must not match cli: goal={goal!r}, result={result}"
+        )
+
+
 def test_cli_token_unaffected_by_non_prefix_in_other_words() -> None:
     """Positive lock for the `non-` prefix regex: words like
     `non-client`, `non-clinic`, `nonprofit` must not be falsely
