@@ -275,7 +275,22 @@ class AutoInterviewDriver:
         )
         try:
             result = await self._run_inner(state, ledger)
-        except BaseException as exc:
+        except Exception as exc:
+            # NOTE: we intentionally catch ``Exception`` (NOT
+            # ``BaseException``) so ``asyncio.CancelledError`` — which
+            # inherits from ``BaseException`` — propagates immediately
+            # without awaiting the best-effort ``_emit_event`` append.
+            # ``AutoPipeline.run`` wraps this call in
+            # ``asyncio.wait_for(..., timeout=interview_timeout)``; if
+            # the wrapper awaited persistence during cancellation, the
+            # phase deadline could be exceeded by whatever the
+            # EventStore's append latency happens to be. The §I4
+            # observer must never weaken deadlines or cancellation —
+            # that is a hard runtime control path, not a
+            # best-effort persistence path. Bot review on commit
+            # 0a1a9c34 (req_1779886484_124) reproduced the overrun
+            # with a 0.05s wait_for and a 0.2s blocking append; the
+            # narrowed catch closes that contract failure.
             await self._emit_event(
                 "auto.interview.failed",
                 state.auto_session_id,

@@ -200,3 +200,95 @@ async def test_event_store_failure_does_not_break_interview_loop(tmp_path) -> No
     assert result is expected
     # Both append attempts failed → nothing recorded, no exception leaked.
     assert store.appended == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_from_wait_for_propagates_without_emitting_failed(tmp_path) -> None:
+    """Bot-review blocker (commit 0a1a9c34 → req_1779886484_124):
+    ``asyncio.CancelledError`` is the cancellation primitive
+    ``AutoPipeline.run`` delivers via
+    ``asyncio.wait_for(self.interview_driver.run(...), timeout=...)``.
+    If the §I4 wrapper caught it as a generic exception and awaited the
+    best-effort ``_emit_event`` append before re-raising, a slow
+    EventStore could blow through the phase deadline by whatever the
+    append latency happens to be — exactly the contract failure the
+    bot reproduced with a 0.05 s wait_for and a 0.2 s blocking append.
+
+    The fix narrowed the catch to ``Exception``; this test pins that:
+
+    * ``CancelledError`` from ``_run_inner`` propagates immediately.
+    * The ``failed`` event is NOT emitted — cancellation is a control
+      signal, not an interview failure.
+    * The pipeline-side ``asyncio.wait_for`` timeout window is
+      respected (we assert the whole run completes inside it).
+    """
+
+    # An EventStore whose append would block for 0.2 s mimics the
+    # bot's slow-persistence probe. The ``failed`` event must NOT be
+    # appended during cancellation — if the regression returned, this
+    # test would time out (asyncio.wait_for would expire before the
+    # store finished its append).
+    class _SlowStore:
+        def __init__(self) -> None:
+            self.appended: list[BaseEvent] = []
+
+        async def append(self, event: BaseEvent, **_: Any) -> None:
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(0.2)
+            self.appended.append(event)
+
+    import asyncio
+
+    store = _SlowStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    state = _build_state(tmp_path)
+
+    async def _inner_raises_cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    with patch.object(
+        AutoInterviewDriver,
+        "_run_inner",
+        AsyncMock(side_effect=_inner_raises_cancelled),
+    ):
+        # 0.05 s budget is well under the slow-append 0.2 s; the fix
+        # must let CancelledError propagate WITHOUT awaiting any
+        # ``failed`` append, so the whole call returns inside the
+        # budget. The prior ``except BaseException`` shape exceeded
+        # the budget by ~0.15 s on the bot's probe.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                driver.run(state, MagicMock(spec=SeedDraftLedger)),
+                timeout=0.5,  # generous ceiling — the fast path is sub-ms
+            )
+
+    # No ``failed`` event emitted — cancellation is a control signal,
+    # not an observable interview failure. The slow-store would have
+    # been mid-append for ``finalized`` if the catch had widened back
+    # to BaseException; that did not happen.
+    assert all(event.type != "auto.interview.failed" for event in store.appended)
+
+
+@pytest.mark.asyncio
+async def test_keyboard_interrupt_propagates_without_emitting_failed(tmp_path) -> None:
+    """Conjugate of the cancellation test: ``KeyboardInterrupt`` is
+    the other commonly-encountered ``BaseException`` subclass. Like
+    ``CancelledError``, it MUST propagate immediately so the operator's
+    Ctrl-C is honored — the EventStore append path must not delay it.
+    """
+    store = _RecordingEventStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    state = _build_state(tmp_path)
+
+    with patch.object(
+        AutoInterviewDriver,
+        "_run_inner",
+        AsyncMock(side_effect=KeyboardInterrupt()),
+    ):
+        with pytest.raises(KeyboardInterrupt):
+            await driver.run(state, MagicMock(spec=SeedDraftLedger))
+
+    # ``opened`` was emitted before the inner call; ``failed`` was NOT
+    # emitted because the catch is narrowed to ``Exception``.
+    assert [event.type for event in store.appended] == ["auto.interview.opened"]
