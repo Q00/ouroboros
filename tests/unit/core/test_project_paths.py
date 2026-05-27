@@ -265,3 +265,122 @@ class TestResolveSeedProjectPath:
 
         assert empty_result.path is None and not empty_result.rejected
         assert rejected_result.path is None and rejected_result.rejected
+
+    def test_reference_nonexistent_path_skipped_falls_through(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A primary reference resolving to a non-existent path is skipped.
+
+        Reproduces the central-seed cwd bug: seed-generator emits primary
+        ``context_references`` as file pointers (e.g. ``src/foo/bar.py``).
+        When the seed lives somewhere whose stable_base does not actually
+        contain those files (the common case for central seeds invoked
+        from a fresh worktree), joining the reference path against
+        stable_base produces a non-existent location. That synthetic join
+        must not be returned as the runtime cwd — the resolver falls
+        through to the next candidate (or back to the caller's stable_base).
+        """
+        safe_dir = tmp_path / "safe-dir"
+        safe_dir.mkdir()
+
+        refs = [
+            # Resolves to <stable_base>/src/events.py which does not exist.
+            SimpleNamespace(path="src/events.py", role="primary"),
+            SimpleNamespace(path="safe-dir", role="secondary"),
+        ]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        result = resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        assert result.path == safe_dir.resolve()
+        assert result.rejected is False
+
+    def test_reference_only_all_nonexistent_returns_unrejected_empty(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Seeds whose only references all miss yield path=None, rejected=False.
+
+        Heuristic misses (reference candidates resolved inside stable_base
+        but pointing at non-existent paths) are not security events: the
+        caller falls back to ``stable_base`` rather than aborting. Only
+        containment violations flip ``rejected=True``.
+        """
+        refs = [
+            SimpleNamespace(path="does/not/exist.py", role="primary"),
+            SimpleNamespace(path="also/missing.py", role="secondary"),
+        ]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        result = resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        assert result.path is None
+        assert result.rejected is False
+
+    def test_reference_existing_file_returned_for_caller_to_normalize(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An existing-file reference is returned so the caller can collapse it.
+
+        ``_resolve_cli_project_dir`` follows this with
+        ``_directory_for_runtime`` to use the file's parent directory as
+        the runtime cwd. Filtering files at the resolver level would
+        regress that established behavior.
+        """
+        target_file = tmp_path / "src" / "events.py"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_text("# fixture file")
+
+        refs = [SimpleNamespace(path="src/events.py", role="primary")]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        result = resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        assert result.path == target_file.resolve()
+        assert result.rejected is False
+
+    def test_reference_skip_emits_info_log(self, tmp_path: Path) -> None:
+        """Skipped non-existent reference candidates are observable in logs."""
+        refs = [SimpleNamespace(path="src/events.py", role="primary")]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        with capture_logs() as cap_logs:
+            resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        skipped = [
+            entry
+            for entry in cap_logs
+            if entry.get("event") == "project_paths.reference_skipped_nonexistent"
+        ]
+        assert len(skipped) == 1
+        assert skipped[0]["raw_path"] == "src/events.py"
+
+    def test_containment_violation_still_flips_rejected(self, tmp_path: Path) -> None:
+        """An escaping candidate is rejected; subsequent misses do not unset it."""
+        refs = [
+            SimpleNamespace(path="../escape", role="primary"),
+            SimpleNamespace(path="missing.py", role="secondary"),
+        ]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        result = resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        assert result.path is None
+        assert result.rejected is True
