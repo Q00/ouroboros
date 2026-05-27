@@ -3605,6 +3605,10 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     if second.status == "seed_ready":
         assert state.interview_closure_mode == "ledger_only"
         assert len(state.auto_answer_log) >= 1
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_supplies_last_question_for_seed_ready_gap_reopen(tmp_path) -> None:
     """A backend-completed interview can be reopened by a driver gap probe.
 
     The MCP interview handler rejects answers against an already-answered
