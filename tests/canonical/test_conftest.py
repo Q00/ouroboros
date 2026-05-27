@@ -113,9 +113,7 @@ class TestRuntimeIsInsideRepo:
 
         assert _runtime_is_inside_repo(runtime_file, repo_root) is True
 
-    def test_sibling_with_matching_string_prefix_rejected(
-        self, tmp_path: Path
-    ) -> None:
+    def test_sibling_with_matching_string_prefix_rejected(self, tmp_path: Path) -> None:
         """Sibling ``ouroboros-old`` shares the string prefix ``ouroboros``
         but is NOT inside the repo. The original ``startswith`` check
         would have wrongly accepted it, masking a stale-binary run.

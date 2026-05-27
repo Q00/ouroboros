@@ -218,9 +218,11 @@ def assert_runtime_is_repo_source(pytestconfig: pytest.Config) -> None:
     import sys as _sys
 
     repo_root = Path(__file__).resolve().parents[2]
-    skip = os.environ.get(
-        "OUROBOROS_CANONICAL_SKIP_RUNTIME_CHECK", ""
-    ).strip().lower() in {"1", "true", "yes"}
+    skip = os.environ.get("OUROBOROS_CANONICAL_SKIP_RUNTIME_CHECK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     try:
         module = importlib.import_module("ouroboros")
     except Exception as exc:  # pragma: no cover - imports always succeed in CI
