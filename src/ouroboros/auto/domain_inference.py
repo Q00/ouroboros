@@ -45,15 +45,29 @@ _CLI_GOAL_TOKEN_RE = re.compile(r"\bcli\b")
 _CLI_GOAL_PHRASE_RE = re.compile(r"\bcommand[\s\-]line\b")
 
 # Explicit-negation pattern matching common natural-language denials of
-# the CLI signal: "not a CLI", "no CLI", "never a CLI", "isn't a CLI",
-# and the same shapes wrapping "command line" / "command-line". The
-# match is removed from the goal text before re-applying the positive
-# regexes, so a goal like
-#     "Build a Python client library for the Foo API, not a CLI"
-# does not classify as CLI (PR #1264 second-round review blocker).
+# the CLI signal. Covers two shapes:
+#
+#   1. Direct negation: "not a CLI", "no CLI", "never a CLI",
+#      "isn't a CLI", "won't be a CLI", and the same wrapping
+#      "command line" / "command-line".
+#   2. Modal/copular negation: "should not be a CLI", "must not be a
+#      CLI", "shouldn't be a CLI", "cannot be a CLI", "doesn't have to
+#      be a CLI" — up to four short connector words ("be", "being",
+#      "become", "a/an/the", "just/only/really/actually", "have to")
+#      may appear between the negation cue and the CLI token.
+#
+# Matched spans are removed from the goal text before re-applying the
+# positive regexes, so a goal like
+#     "Build a Python library that should not be a CLI"
+# does not classify as CLI (PR #1264 review blockers, rounds 2-3).
 _NEGATED_CLI_GOAL_RE = re.compile(
-    r"\b(?:not|no|never|isn[’']?t|aren[’']?t|won[’']?t)"
-    r"\s+(?:an?\s+)?(?:cli|command[\s\-]line)\b"
+    r"\b(?:not|no|never|"
+    r"isn[’']?t|aren[’']?t|wasn[’']?t|weren[’']?t|"
+    r"won[’']?t|wouldn[’']?t|shouldn[’']?t|"
+    r"can[’']?t|cannot|"
+    r"doesn[’']?t|don[’']?t|didn[’']?t)"
+    r"(?:\s+(?:be|being|become|a|an|the|just|only|really|actually|have|has|had|need|needs|to)){0,5}"
+    r"\s+(?:cli|command[\s\-]line)\b"
 )
 
 

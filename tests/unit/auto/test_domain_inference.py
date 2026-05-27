@@ -529,3 +529,64 @@ def test_cli_still_matches_when_negated_mention_appears_alongside_positive_one()
     _seed_section(ledger, "outputs", value="Persistent JSON state file")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.CLI in result.classes
+
+
+# ---------------------------------------------------------------------------
+# PR-ζ-A third-round design-notes regression locks (#1264 modal/copular
+# negation gap).
+#
+# After the direct-negation pass (above), the bot's design notes still
+# flagged modal/copular negation forms — "should not be a CLI",
+# "shouldn't be a CLI", "cannot be a CLI", "must not be a CLI" — where
+# short connector words ("be", "a") sit between the negation cue and
+# the CLI token. The negation regex now allows up to five whitelisted
+# connectors between the cue and the CLI signal, which closes the
+# residual design-notes weak point.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_does_not_match_on_modal_copular_negation() -> None:
+    """Bot's named modal/copular scenarios — distance-1 to distance-3
+    connectors between the negation cue and the CLI token."""
+    for goal in (
+        "Build a Python library that should not be a CLI",
+        "Build a Python library that shouldn't be a CLI",
+        "Build a Python library that must not be a CLI",
+        "Build a Python library that cannot be a CLI",
+        "Build a Python library that can't be a CLI",
+        "Build a Python library that doesn't have to be a CLI",
+        "Build a Python library that doesn't need to be a CLI",
+        "Build a Python library that wouldn't be a CLI",
+        "Build a Python library that won't be a CLI",
+        # Same shapes wrapping the multi-word command-line phrase.
+        "Build a Python library that should not be a command line tool",
+        "Build a Python library that shouldn't be a command-line tool",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(
+            ledger,
+            "outputs",
+            value="An importable Python package exposing a public API surface",
+        )
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI not in result.classes, (
+            f"modal-negated goal must not match cli: goal={goal!r}, result={result}"
+        )
+
+
+def test_cli_still_matches_on_positive_modal_goal() -> None:
+    """Positive lock: when the modal/copular phrase asserts CLI rather
+    than negates it ("should be a CLI"), the goal MUST still classify
+    as CLI — only *negated* shapes should be stripped."""
+    for goal in (
+        "Build a tool that should be a CLI",
+        "Build a tool that must be a CLI",
+        "Build a tool that has to be a CLI",
+        "Build a tool that needs to be a CLI",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(ledger, "outputs", value="Persistent JSON state file")
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI in result.classes, (
+            f"positive modal goal must still match cli: goal={goal!r}, result={result}"
+        )
