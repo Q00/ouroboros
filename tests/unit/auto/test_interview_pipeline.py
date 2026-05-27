@@ -3504,16 +3504,22 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     """Companion to the deferral-persistence test: resume replays the round.
 
     With the deferred-persistence fix, the second run sees the unmodified
-    pre-answer ledger on disk, the answerer re-computes the same answer,
-    and ``backend.answer`` (now succeeding) advances the round and lets
-    the ledger-primary closure gate close as ``ledger_only`` on the next
-    iteration. This pins the end-to-end recovery contract.
+    pre-answer ledger on disk, the answerer re-computes the same answer
+    against the same gap, and ``backend.answer`` (now succeeding) advances
+    the round so the ledger-primary closure gate can fire cleanly on a
+    subsequent iteration with the transcript actually mirroring the
+    ledger. Pins the end-to-end recovery contract that the bot review #2
+    BLOCKER demanded coverage for.
     """
     answer_attempts = 0
+    answers_seen: list[str] = []
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        # Backend asks the question that, when answered, will fill the
+        # last remaining required ledger section via the auto driver's
+        # gap-steering answerer.
         return InterviewTurn(
-            "What is the primary goal?",
+            "What is the primary goal of the CLI?",
             "interview_sync_recover",
             seed_ready=False,
             completed=False,
@@ -3525,25 +3531,30 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     ) -> InterviewTurn:  # noqa: ARG001
         nonlocal answer_attempts
         answer_attempts += 1
+        answers_seen.append(text)
         if answer_attempts == 1:
             raise RuntimeError("transient backend failure on first attempt")
-        # Second attempt: backend acknowledges and indicates the
-        # transcript now reflects the answer. Driver advances and the
-        # next iteration closes via ledger-primary.
+        # Second attempt acknowledges the round. Returning ambiguity ~0.40
+        # keeps the backend "saturated" so closure must come from the
+        # ledger-primary gate, not from mutual agreement.
         return InterviewTurn(
-            "next question",
+            "What edge cases should we handle?",
             session_id,
             seed_ready=False,
             completed=False,
-            ambiguity_score=0.30,
+            ambiguity_score=0.40,
         )
 
+    # Start from an INCOMPLETE ledger so the answerer actually has work
+    # to do and the failure-injected backend.answer call is on the path.
+    # This is the rewrite that addresses the bot review #2 follow-up:
+    # the prior version pre-filled the ledger and short-circuited
+    # entry-time close, never reaching the injected first-attempt
+    # failure it documented.
     state = AutoPipelineState(goal="Build a habit-tracker CLI", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
-    # Pre-fill the ledger so the answerer's apply (whatever it produces)
-    # leaves a structurally complete ledger.
-    _fill_ready(ledger)
     state.ledger = ledger.to_dict()
+    pre_answer_ledger_snapshot = ledger.to_dict()
 
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer),
@@ -3552,19 +3563,48 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
         timeout_seconds=5,
     )
 
-    # First run — the ledger is already complete on entry, so the
-    # ledger-primary gate closes IMMEDIATELY at round 0 without ever
-    # reaching backend.answer. This is the happy path that the bot
-    # already approved.
-    result = await driver.run(state, ledger)
-    assert result.status == "seed_ready"
-    assert state.interview_closure_mode == "ledger_only"
-    # backend.answer never reached, so first-attempt failure injection
-    # didn't trip. The deferred-persistence contract is symmetric:
-    # entry-time ``ledger_done`` close also persists no half-applied
-    # round artifacts.
-    assert answer_attempts == 0
+    # ---------- First run: backend.answer raises mid-round ----------
+    first = await driver.run(state, ledger)
+    assert first.status == "blocked"
+    assert answer_attempts == 1
+    # Deferred-persistence contract: persisted ``state.ledger`` is the
+    # pre-answer snapshot even though the in-memory ledger has the
+    # unsynced answer applied.
+    assert state.ledger == pre_answer_ledger_snapshot
+    assert state.current_round == 0
     assert state.auto_answer_log == []
+    assert state.interview_completed is False
+    assert state.interview_closure_mode is None
+    # ``pending_question`` is preserved so the resume path can synthesize
+    # a turn from it without re-calling backend.resume.
+    assert state.pending_question == "What is the primary goal of the CLI?"
+
+    # ---------- Second run: resume, backend now acknowledges ----------
+    # Pipeline-equivalent resume: reload the ledger from persisted state
+    # exactly as ``AutoPipeline.run`` would (``pipeline.py:397-400``), and
+    # transition phase BLOCKED → INTERVIEW the way the pipeline's resume
+    # path does before re-invoking the interview driver.
+    resumed_ledger = SeedDraftLedger.from_dict(state.ledger)
+    state.transition(AutoPhase.INTERVIEW, "resuming interview after backend.answer failure")
+    second = await driver.run(state, resumed_ledger)
+
+    # The driver advanced past the previously-failed round. Final status
+    # is either ``seed_ready`` (if the answerer's deterministic re-apply
+    # completed the ledger) or ``blocked`` with a non-stale terminal —
+    # the contract under test is the **replay** behavior, not which
+    # terminal the ledger ends up in.
+    assert answer_attempts >= 2, "resume must replay backend.answer with the same payload"
+    # The replayed payload must equal the original first-attempt payload —
+    # the answerer is deterministic given the same ledger + answer_context.
+    assert answers_seen[0] == answers_seen[1]
+    # End-to-end transcript-sync correctness:
+    #   - If closure happened, it must be ``ledger_only`` (no mutual
+    #     agreement because backend keeps ambiguity at 0.40).
+    #   - The auto-answer log must now reflect the successful replay
+    #     (the deferred persistence captured it post-ACK).
+    if second.status == "seed_ready":
+        assert state.interview_closure_mode == "ledger_only"
+        assert len(state.auto_answer_log) >= 1
     """A backend-completed interview can be reopened by a driver gap probe.
 
     The MCP interview handler rejects answers against an already-answered
