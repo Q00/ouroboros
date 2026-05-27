@@ -20,6 +20,7 @@ These tests pin the public contract added by the first-slice wiring:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -223,24 +224,28 @@ async def test_cancellation_from_wait_for_propagates_without_emitting_failed(tmp
       respected (we assert the whole run completes inside it).
     """
 
-    # An EventStore whose append would block for 0.2 s mimics the
-    # bot's slow-persistence probe. The ``failed`` event must NOT be
-    # appended during cancellation — if the regression returned, this
-    # test would time out (asyncio.wait_for would expire before the
-    # store finished its append).
-    class _SlowStore:
+    # The cancellation contract probes the CATCH shape, not the
+    # latency bound — so ``opened`` must be FAST (so it does not eat
+    # the outer wait_for budget by itself) but ``failed`` must be
+    # slow enough that a regression to ``except BaseException``
+    # (which would await the ``failed`` append before re-raising)
+    # would surface as a ``TimeoutError`` instead of a
+    # ``CancelledError``. A regression-vs-bot-blocker proof needs
+    # both halves: the ``opened`` write completes in microseconds,
+    # but a hypothetical ``failed`` write would block past the
+    # outer 0.1 s budget.
+    class _FastOpenSlowFailedStore:
         def __init__(self) -> None:
             self.appended: list[BaseEvent] = []
 
         async def append(self, event: BaseEvent, **_: Any) -> None:
-            import asyncio as _asyncio
-
-            await _asyncio.sleep(0.2)
+            if event.type == "auto.interview.failed":
+                # The regression would await this for the full 5 s,
+                # exceeding the 0.1 s outer wait_for budget below.
+                await asyncio.sleep(5.0)
             self.appended.append(event)
 
-    import asyncio
-
-    store = _SlowStore()
+    store = _FastOpenSlowFailedStore()
     driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
     state = _build_state(tmp_path)
 
@@ -252,15 +257,17 @@ async def test_cancellation_from_wait_for_propagates_without_emitting_failed(tmp
         "_run_inner",
         AsyncMock(side_effect=_inner_raises_cancelled),
     ):
-        # 0.05 s budget is well under the slow-append 0.2 s; the fix
-        # must let CancelledError propagate WITHOUT awaiting any
-        # ``failed`` append, so the whole call returns inside the
-        # budget. The prior ``except BaseException`` shape exceeded
-        # the budget by ~0.15 s on the bot's probe.
+        # The fast path here is sub-ms — ``CancelledError`` must
+        # propagate WITHOUT awaiting any ``failed`` append. ``timeout``
+        # is set well under the slow ``failed`` append's 5 s so a
+        # regression to ``except BaseException`` (which awaited the
+        # append on cancel and added ~5 s before re-raising) would
+        # surface as a ``TimeoutError`` here instead of a
+        # ``CancelledError``.
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(
                 driver.run(state, MagicMock(spec=SeedDraftLedger)),
-                timeout=0.5,  # generous ceiling — the fast path is sub-ms
+                timeout=0.1,
             )
 
     # No ``failed`` event emitted — cancellation is a control signal,
@@ -291,4 +298,106 @@ async def test_keyboard_interrupt_propagates_without_emitting_failed(tmp_path) -
 
     # ``opened`` was emitted before the inner call; ``failed`` was NOT
     # emitted because the catch is narrowed to ``Exception``.
+    assert [event.type for event in store.appended] == ["auto.interview.opened"]
+
+
+@pytest.mark.asyncio
+async def test_slow_opened_append_does_not_block_interview_loop(tmp_path) -> None:
+    """Bot-review blocker (commit 2ca22628 → req_1779889312_138): the
+    ``opened`` event is awaited inline BEFORE ``_run_inner`` runs, so
+    a slow or lock-contended EventStore could consume the
+    ``AutoPipeline.run`` interview ``asyncio.wait_for(interview_timeout)``
+    budget and cause the phase to time out even though the inner
+    interview would have completed.
+
+    The bot reproduced this with a 0.05 s wait_for + a 0.2 s blocking
+    append: ``TimeoutError`` raised before ``_run_inner`` ran.
+    Production ``EventStore.append`` can also wait on SQLite locks
+    (``busy_timeout=30000``), so the failure mode is not synthetic.
+
+    Fix: ``_emit_event`` now wraps the append with a 1.0 s fail-open
+    ``asyncio.wait_for``; a stuck observer is downgraded to a
+    ``auto.interview.event_store_emit_timed_out`` warning and the loop
+    proceeds.
+
+    This test pins that contract: a 5 s slow ``opened`` append no
+    longer holds up the interview — the inner result is returned
+    promptly, the ``opened`` event is dropped (fail-open), and the
+    ``finalized`` event still records the inner result.
+    """
+
+    class _StuckOpenedStore:
+        """EventStore where ``opened`` hangs past the fail-open
+        timeout but ``finalized`` is fast — mimics a transient SQLite
+        lock contention that clears after the first append."""
+
+        def __init__(self) -> None:
+            self.appended: list[BaseEvent] = []
+            self._calls = 0
+
+        async def append(self, event: BaseEvent, **_: Any) -> None:
+            self._calls += 1
+            if self._calls == 1:
+                # Sleep well past the 1.0 s fail-open bound to prove
+                # the wrapper does not wait for us. A regression to
+                # the unbounded shape would block here for the full
+                # 5 s and the surrounding wait_for would fire.
+                await asyncio.sleep(5.0)
+            self.appended.append(event)
+
+    store = _StuckOpenedStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    expected = _result(status="ready", rounds=1, session_id="iv_slow")
+    state = _build_state(tmp_path)
+
+    # The bot's reproducer shape: outer wait_for budget is well above
+    # the inner fast-path (~1.5 s leaves room for the 1.0 s fail-open
+    # bound + driver overhead) but well below the 5 s slow append.
+    # Before the fix, this would raise TimeoutError. After the fix,
+    # the inner result returns cleanly.
+    with _patch_inner(return_value=expected):
+        result = await asyncio.wait_for(
+            driver.run(state, MagicMock(spec=SeedDraftLedger)),
+            timeout=1.5,
+        )
+
+    assert result is expected
+    # ``opened`` was dropped (fail-open on latency); ``finalized``
+    # succeeded because the second append was fast. The interview
+    # proceeded — observability did not block the loop.
+    assert [event.type for event in store.appended] == ["auto.interview.finalized"]
+
+
+@pytest.mark.asyncio
+async def test_slow_finalized_append_does_not_block_pipeline_deadline(tmp_path) -> None:
+    """Conjugate of the slow-opened test: a slow ``finalized`` append
+    must also be bounded, otherwise an interview that completed inside
+    the phase deadline could still trip ``asyncio.wait_for`` on the
+    way out because the wrapper awaits ``finalized`` after
+    ``_run_inner`` returns."""
+
+    class _StuckFinalizedStore:
+        def __init__(self) -> None:
+            self.appended: list[BaseEvent] = []
+            self._calls = 0
+
+        async def append(self, event: BaseEvent, **_: Any) -> None:
+            self._calls += 1
+            if self._calls == 2:
+                await asyncio.sleep(5.0)
+            self.appended.append(event)
+
+    store = _StuckFinalizedStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    expected = _result(status="ready", rounds=1)
+    state = _build_state(tmp_path)
+
+    with _patch_inner(return_value=expected):
+        result = await asyncio.wait_for(
+            driver.run(state, MagicMock(spec=SeedDraftLedger)),
+            timeout=1.5,
+        )
+
+    assert result is expected
+    # ``opened`` recorded; ``finalized`` dropped (fail-open on latency).
     assert [event.type for event in store.appended] == ["auto.interview.opened"]

@@ -42,6 +42,23 @@ from ouroboros.resilience.lateral import ThinkingPersona
 
 log = structlog.get_logger(__name__)
 
+# RFC #1256 §I4 — bounded fail-open for observer latency.
+#
+# The observer is `await`-ed inline at `opened` and `finalized`, so a
+# slow or lock-contended EventStore (production `EventStore.append()`
+# can wait on SQLite locks for up to `busy_timeout=30000` ms) would
+# otherwise consume the pipeline's `asyncio.wait_for(interview_timeout)`
+# budget before the interview loop even runs. Bot review on commit
+# 2ca22628 (req_1779889312_138) reproduced this with a 0.05 s wait_for
+# + a 0.2 s blocking append → `TimeoutError` before `_run_inner`.
+#
+# 1.0 s is generous enough for any healthy append (SQLite single-row
+# writes are sub-ms locally and ~5-50 ms over slow disks), and short
+# enough that a stuck observer cannot consume the per-round budget,
+# which historically sits at ~6 s/round. The fail-open contract
+# already covers exceptions; this bound extends it to latency.
+_EVENT_STORE_EMIT_TIMEOUT_SECONDS = 1.0
+
 INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_incomplete"
 
 # Issue #1248 — L5 ladder typed terminal for a safe-default lateral escalation
@@ -212,13 +229,31 @@ class AutoInterviewDriver:
         if not aggregate_id:
             return
         try:
-            await self.event_store.append(
-                BaseEvent(
-                    type=event_type,
-                    aggregate_type="auto_interview",
-                    aggregate_id=aggregate_id,
-                    data=dict(data),
-                )
+            # Bound the append with a short fail-open timeout so a slow
+            # or locked EventStore cannot consume the pipeline-side
+            # ``asyncio.wait_for(interview_timeout)`` budget (see the
+            # module-level constant for the full rationale and the
+            # bot-review reproducer that motivated it).
+            await asyncio.wait_for(
+                self.event_store.append(
+                    BaseEvent(
+                        type=event_type,
+                        aggregate_type="auto_interview",
+                        aggregate_id=aggregate_id,
+                        data=dict(data),
+                    )
+                ),
+                timeout=_EVENT_STORE_EMIT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # Latency-side fail-open: the observer is too slow to be
+            # safe on the critical path; log and continue so the
+            # interview loop is not starved by observability.
+            log.warning(
+                "auto.interview.event_store_emit_timed_out",
+                event_type=event_type,
+                auto_session_id=aggregate_id,
+                timeout_seconds=_EVENT_STORE_EMIT_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 — observer must not break the loop
             log.warning(
