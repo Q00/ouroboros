@@ -97,6 +97,77 @@ def test_section_present_returns_false_when_metric_row_missing() -> None:
     assert module._section_present(body) is False
 
 
+def test_section_present_returns_false_for_partially_filled_rows() -> None:
+    """Bot-review blocker (commit 074e24bd → req_1779886636_125): a row
+    where only ONE of the three comparison cells is non-empty (e.g.
+    ``Baseline=TBD`` with PR and Ratio blank) MUST be rejected.
+
+    The prior ``any(cells)`` check accepted this shape, which let an
+    applicable PR pass the gate with a placeholder in one column and
+    no actual side-by-side measurement — the exact §I5 process
+    bypass the gate exists to prevent.
+    """
+    module = _load_module()
+    body = (
+        "## R-run comparison\n\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | TBD |  |  |\n"
+        "| Per-round wall-clock (s/round) | TBD |  |  |\n"
+        "| Terminal reason | TBD |  |  |\n"
+    )
+    assert module._section_present(body) is False
+
+
+def test_section_present_returns_false_when_only_ratio_missing() -> None:
+    """Two filled, one blank still fails. The contract is ALL three
+    comparison cells populated — the Ratio column is what makes the
+    measurement comparable, so it cannot be left empty even when
+    Baseline and This PR are both filled."""
+    module = _load_module()
+    body = (
+        "## R-run comparison\n\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | 100 | 95 |  |\n"
+        "| Per-round wall-clock (s/round) | 6.0 | 6.3 |  |\n"
+        "| Terminal reason | ready | ready |  |\n"
+    )
+    assert module._section_present(body) is False
+
+
+def test_section_present_accepts_explicit_na_in_every_cell() -> None:
+    """Authors who genuinely have no comparison (e.g. substrate-only
+    PRs) must mark every cell explicitly. Filling all three with
+    ``N/A`` / ``n/a`` is auditable and accepted; one filled cell with
+    two blanks is not."""
+    module = _load_module()
+    body = (
+        "## R-run comparison\n\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | N/A | N/A | n/a |\n"
+        "| Per-round wall-clock (s/round) | N/A | N/A | n/a |\n"
+        "| Terminal reason | N/A | N/A | n/a |\n"
+    )
+    assert module._section_present(body) is True
+
+
+def test_section_present_returns_false_when_one_row_partial_others_filled() -> None:
+    """Even a single partially-filled row inside an otherwise complete
+    table fails the gate — the contract is per-row, not aggregate."""
+    module = _load_module()
+    body = (
+        "## R-run comparison\n\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
+        "| Per-round wall-clock (s/round) | 6.0 |  |  |\n"  # partial
+        "| Terminal reason | ready | ready | n/a |\n"
+    )
+    assert module._section_present(body) is False
+
+
 # --- _changed_paths_from_event fail-closed contract ---------------------
 
 

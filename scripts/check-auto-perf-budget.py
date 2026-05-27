@@ -82,20 +82,38 @@ def _changed_paths_from_event(event: dict) -> list[str]:
     return [line for line in out.stdout.splitlines() if line.strip()]
 
 
+REQUIRED_COMPARISON_COLUMNS = 3  # Baseline | This PR | Ratio
+
+
 def _section_present(body: str) -> bool:
     if SECTION_HEADER not in body:
         return False
-    # Require at least one metric row to be filled in (any non-empty cell
-    # between the metric name and the next pipe). A blank table is the
-    # default template and indicates the author skipped the requirement.
+    # Every required metric row must have ALL three comparison-bearing
+    # cells (Baseline, This PR, Ratio) populated. Accepting a row where
+    # only one cell is non-empty — e.g. `Baseline=TBD` with the PR and
+    # Ratio columns blank — would let an applicable PR pass without
+    # supplying any actual side-by-side measurement, which is the exact
+    # process bypass §I5 exists to close (bot review on commit
+    # 074e24bd flagged this as the remaining blocker after the prior
+    # `any() → all()` patch went only halfway).
+    #
+    # Authors who genuinely want to mark a row as "not applicable" (e.g.
+    # substrate-only PRs) must fill every cell — `N/A | N/A | n/a` is
+    # accepted; one filled cell with two blanks is not.
     section = body.split(SECTION_HEADER, 1)[1]
     for token in REQUIRED_METRIC_TOKENS:
         if token not in section:
             return False
         line = next((row for row in section.splitlines() if token in row), "")
-        # Markdown table row: `| Metric ... | val | val | val |`
+        # Markdown table row: `| Metric ... | Baseline | This PR | Ratio |`.
+        # The leading and trailing pipes produce empty boundary cells;
+        # the metric name sits at index 1; the three comparison cells
+        # follow at index 2..4. We require every comparison cell to be
+        # non-empty.
         cells = [c.strip() for c in line.split("|")][2:-1]
-        if not any(cells):
+        if len(cells) < REQUIRED_COMPARISON_COLUMNS:
+            return False
+        if not all(cells[:REQUIRED_COMPARISON_COLUMNS]):
             return False
     return True
 
