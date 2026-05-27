@@ -1052,6 +1052,86 @@ class AutoPipeline:
                         )
                         self._save(state)
                         return self._result(state, ledger, review=review, blocker=state.last_error)
+                    # Persisted run handles prove the execute_seed job was
+                    # *dispatched*, not that it reached terminal success.
+                    # The fresh-path RUN → RALPH_HANDOFF contract
+                    # (lines ~1242-1340) refuses to hand off to Ralph until
+                    # the owned run job has finished successfully — paused
+                    # and queued/running/cancel_requested both BLOCK with
+                    # ``tool_name="run_starter"``, which
+                    # ``_recoverable_phase_for_tool`` maps back to ``RUN``.
+                    # Without re-polling here, a resume after one of those
+                    # blockers would walk past the gate and start Ralph
+                    # against a still-pending product run. Mirror the
+                    # fresh-path snapshot poll + status gate so resume and
+                    # fresh dispatch share the same terminal-success
+                    # contract.
+                    if state.job_id:
+                        terminal_run_meta = await _wait_owned_run_job_terminal(
+                            self.run_starter,
+                            state.job_id,
+                            timeout_seconds=self._deadline_capped_timeout(
+                                state, state.phase_timeout_seconds(AutoPhase.RUN)
+                            ),
+                        )
+                        if self._enforce_deadline(state):
+                            return self._result(
+                                state, ledger, review=review, blocker=state.last_error
+                            )
+                        if terminal_run_meta is not None:
+                            run_status_resume = _optional_str(terminal_run_meta.get("status"))
+                            run_success_resume = terminal_run_meta.get("success")
+                            failed_run_statuses = {"failed", "cancelled", "interrupted"}
+                            if run_success_resume is False or (
+                                run_status_resume in failed_run_statuses
+                            ):
+                                resolved_status = run_status_resume or "failed"
+                                state.mark_blocked(
+                                    "resumed run execution finished unsuccessfully "
+                                    f"before Ralph handoff: {resolved_status}",
+                                    tool_name="run_starter",
+                                )
+                                self._save(state)
+                                return self._result(
+                                    state,
+                                    ledger,
+                                    review=review,
+                                    blocker=state.last_error,
+                                    run_subagent=None,
+                                )
+                            incomplete_run_statuses = {
+                                "queued",
+                                "running",
+                                "cancel_requested",
+                            }
+                            if run_status_resume in incomplete_run_statuses:
+                                state.mark_blocked(
+                                    "resumed run execution did not finish "
+                                    f"before Ralph handoff: {run_status_resume}",
+                                    tool_name="run_starter",
+                                )
+                                self._save(state)
+                                return self._result(
+                                    state,
+                                    ledger,
+                                    review=review,
+                                    blocker=state.last_error,
+                                    run_subagent=None,
+                                )
+                            if run_status_resume == "paused":
+                                state.mark_blocked(
+                                    "resumed run execution paused before Ralph handoff; "
+                                    "resume the paused run before continuing",
+                                    tool_name="run_starter",
+                                )
+                                self._save(state)
+                                return self._result(
+                                    state,
+                                    ledger,
+                                    review=review,
+                                    blocker=state.last_error,
+                                    run_subagent=None,
+                                )
                     return await self._handoff_to_ralph(
                         state, ledger, seed, review, run_subagent=None
                     )
