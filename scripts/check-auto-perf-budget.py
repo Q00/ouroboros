@@ -33,8 +33,16 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+
+# Strip ``<!-- ... -->`` comments before parsing. DOTALL because PR
+# bodies wrap multi-line guidance blocks. Bot review on commit dc191d02
+# (req_1779887927_132) flagged that hidden comments could carry fully
+# populated metric rows while the visible table stayed blank — the
+# parser must validate visible evidence only.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 AUTO_PATH_PREFIX = "src/ouroboros/auto/"
 SECTION_HEADER = "## R-run comparison"
@@ -93,7 +101,24 @@ def _changed_paths_from_event(event: dict) -> list[str]:
 REQUIRED_COMPARISON_COLUMNS = 3  # Baseline | This PR | Ratio
 
 
+def _strip_html_comments(text: str) -> str:
+    """Return ``text`` with every ``<!-- ... -->`` comment removed.
+
+    The R-run contract is that **reviewers see the comparison data
+    inline**. A caller-controlled PR body can otherwise hide a fully
+    populated metric table inside an HTML comment, leave the visible
+    Markdown table blank, and still pass the gate — bot review on
+    commit dc191d02 verified this exact bypass against the prior
+    parser. Stripping comments here closes the loophole.
+    """
+    return _HTML_COMMENT_RE.sub("", text)
+
+
 def _section_present(body: str) -> bool:
+    # The HTML-comment scrub must run BEFORE the header check so a
+    # body whose only ``## R-run comparison`` reference lives inside a
+    # commented-out instructions block also fails the gate.
+    body = _strip_html_comments(body)
     if SECTION_HEADER not in body:
         return False
     # Every required metric row must have ALL three comparison-bearing

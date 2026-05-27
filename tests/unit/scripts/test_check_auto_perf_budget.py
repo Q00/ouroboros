@@ -192,6 +192,73 @@ def test_section_present_returns_false_when_eventstore_row_blank() -> None:
     assert module._section_present(body) is False
 
 
+def test_section_present_rejects_hidden_html_comment_rows() -> None:
+    """Bot-review blocker (commit dc191d02 → req_1779887927_132): a
+    caller-controlled PR body must not be able to satisfy the gate by
+    hiding fully populated rows inside ``<!-- ... -->`` while the
+    visible Markdown table stays blank. The R-run contract is that
+    reviewers see the comparison data INLINE, not in source-view
+    comments."""
+    module = _load_module()
+    body = (
+        "## R-run comparison\n\n"
+        "<!--\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
+        "| Per-round wall-clock (s/round) | 6.0 | 6.3 | 1.05 |\n"
+        "| Terminal reason | ready | ready | n/a |\n"
+        "| EventStore event count | 0 | 2 | n/a |\n"
+        "-->\n\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s |  |  |  |\n"
+        "| Per-round wall-clock (s/round) |  |  |  |\n"
+        "| Terminal reason |  |  |  |\n"
+        "| EventStore event count |  |  |  |\n"
+    )
+    assert module._section_present(body) is False
+
+
+def test_section_present_rejects_section_header_inside_html_comment() -> None:
+    """Conjugate of the above: the section header itself, if only
+    present inside a comment, must not satisfy the gate. Stripping
+    comments before the header check is what closes this corner."""
+    module = _load_module()
+    body = (
+        "## Summary\nno visible R-run section\n\n"
+        "<!--\n"
+        "## R-run comparison\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
+        "| Per-round wall-clock (s/round) | 6.0 | 6.3 | 1.05 |\n"
+        "| Terminal reason | ready | ready | n/a |\n"
+        "| EventStore event count | 0 | 2 | n/a |\n"
+        "-->\n"
+    )
+    assert module._section_present(body) is False
+
+
+def test_section_present_accepts_table_with_unrelated_html_comments() -> None:
+    """Stripping HTML comments must not break the happy path: a body
+    with comment-wrapped guidance ABOVE a fully filled visible table
+    must still pass. (Regression guard for over-eager comment
+    handling.)"""
+    module = _load_module()
+    body = (
+        "## R-run comparison\n\n"
+        "<!-- Guidance: fill all four rows; see PULL_REQUEST_TEMPLATE.md -->\n\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
+        "| Per-round wall-clock (s/round) | 6.0 | 6.3 | 1.05 |\n"
+        "| Terminal reason | ready | ready | n/a |\n"
+        "| EventStore event count | 0 | 2 | n/a |\n"
+    )
+    assert module._section_present(body) is True
+
+
 def test_required_metric_tokens_matches_template() -> None:
     """Meta-contract: every metric row name in the PR template must
     appear in ``REQUIRED_METRIC_TOKENS``. Catches the exact
