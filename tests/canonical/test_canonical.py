@@ -225,12 +225,12 @@ def _persist_raw_evidence(
     writes whatever the handler returned plus the preflight runtime
     metadata so future readers can verify which binary produced it.
     """
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
     import json
 
     obs_dir = workdir / ".ooo-observability"
     obs_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
     out_path = obs_dir / f"canonical-{scenario.slug}-{ts}.json"
 
     preflight = request.config.stash.get(_RUNTIME_PREFLIGHT_KEY_RUNTIME, None)
@@ -272,7 +272,7 @@ def _persist_raw_evidence(
         "mcp_result_content": raw_content_repr,
         "mcp_result_fallback_text": raw_text,
     }
-    out_path.write_text(json.dumps(payload, indent=2, default=str))
+    out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return out_path
 
 

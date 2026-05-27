@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from . import conftest as canonical_conftest
-from .conftest import _load_scenario, format_canonical_summary_line
+from .conftest import (
+    _load_scenario,
+    _runtime_is_inside_repo,
+    format_canonical_summary_line,
+)
 
 
 def _scenario_dir(
@@ -91,6 +95,58 @@ def test_format_canonical_summary_line_is_copyable() -> None:
         "budget=1800s "
         "live=available_opt_in"
     )
+
+
+class TestRuntimeIsInsideRepo:
+    """Regression coverage for the L0 runtime-preflight path-containment check.
+
+    The original ``str.startswith`` implementation false-passed siblings
+    that happened to share a textual prefix with the repo root (#1170 R2
+    failure mode). Tests pin the boundary that
+    ``_runtime_is_inside_repo`` MUST treat path components, not strings.
+    """
+
+    def test_runtime_inside_repo_root_accepts(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "ouroboros"
+        repo_root.mkdir()
+        runtime_file = repo_root / "src" / "ouroboros" / "__init__.py"
+
+        assert _runtime_is_inside_repo(runtime_file, repo_root) is True
+
+    def test_sibling_with_matching_string_prefix_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """Sibling ``ouroboros-old`` shares the string prefix ``ouroboros``
+        but is NOT inside the repo. The original ``startswith`` check
+        would have wrongly accepted it, masking a stale-binary run.
+        """
+        repo_root = tmp_path / "ouroboros"
+        repo_root.mkdir()
+        sibling_install = tmp_path / "ouroboros-old" / "src" / "ouroboros" / "__init__.py"
+
+        assert _runtime_is_inside_repo(sibling_install, repo_root) is False
+
+    def test_uvx_install_outside_repo_rejected(self, tmp_path: Path) -> None:
+        """The exact #1170 R2 case: uvx-installed package outside repo."""
+        repo_root = tmp_path / "Users" / "me" / "ouroboros"
+        repo_root.mkdir(parents=True)
+        uvx_install = (
+            tmp_path
+            / "Users"
+            / "me"
+            / ".local"
+            / "share"
+            / "uv"
+            / "tools"
+            / "ouroboros-ai"
+            / "lib"
+            / "python3.12"
+            / "site-packages"
+            / "ouroboros"
+            / "__init__.py"
+        )
+
+        assert _runtime_is_inside_repo(uvx_install, repo_root) is False
 
 
 def test_pytest_terminal_summary_emits_copyable_lines(

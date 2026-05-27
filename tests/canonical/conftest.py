@@ -179,6 +179,22 @@ def _load_scenario(directory: Path) -> CanonicalScenario:
     )
 
 
+def _runtime_is_inside_repo(runtime_file: Path, repo_root: Path) -> bool:
+    """Return True iff ``runtime_file`` is contained under ``repo_root``.
+
+    Uses real path-component containment (``is_relative_to``) rather than
+    string-prefix matching. A sibling install at a path that happens to
+    share the repo-root prefix (e.g. ``/Users/me/proj-old/...`` while the
+    repo is ``/Users/me/proj/...``) MUST be rejected — that is the
+    exact false-positive class this preflight is supposed to catch
+    (#1170 R2 / R2-1709). Both paths are assumed resolved by the caller.
+    """
+    try:
+        return runtime_file.is_relative_to(repo_root)
+    except (ValueError, TypeError):
+        return False
+
+
 @pytest.fixture(scope="session", autouse=True)
 def assert_runtime_is_repo_source(pytestconfig: pytest.Config) -> None:
     """L0 harness runtime-binary preflight (PR-γ / #1170).
@@ -202,11 +218,9 @@ def assert_runtime_is_repo_source(pytestconfig: pytest.Config) -> None:
     import sys as _sys
 
     repo_root = Path(__file__).resolve().parents[2]
-    skip = os.environ.get("OUROBOROS_CANONICAL_SKIP_RUNTIME_CHECK", "").strip() in {
-        "1",
-        "true",
-        "yes",
-    }
+    skip = os.environ.get(
+        "OUROBOROS_CANONICAL_SKIP_RUNTIME_CHECK", ""
+    ).strip().lower() in {"1", "true", "yes"}
     try:
         module = importlib.import_module("ouroboros")
     except Exception as exc:  # pragma: no cover - imports always succeed in CI
@@ -229,7 +243,7 @@ def assert_runtime_is_repo_source(pytestconfig: pytest.Config) -> None:
     )
     if skip:
         return
-    if not str(runtime_file).startswith(str(repo_root)):
+    if not _runtime_is_inside_repo(runtime_file, repo_root):
         pytest.fail(
             "L0 canonical harness must exercise repo source, not an installed copy.\n"
             f"  repo_root:    {repo_root}\n"
