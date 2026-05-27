@@ -271,6 +271,23 @@ def test_normalize_execution_acceptance_keeps_minimality_constraints_without_exa
     assert normalize_execution_acceptance(seed) is seed
 
 
+def test_normalize_execution_acceptance_adds_real_tool_guard_for_exact_ac() -> None:
+    seed = _seed("The exact command `uv run pytest tests/test_hello_auto.py` passes.").model_copy(
+        update={"constraints": ("Keep scope to the requested files",)}
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.constraints == (
+        "Keep scope to the requested files",
+        "Use the real verification tool named by the exact command; do not satisfy it "
+        "with a local shim or replacement executable. Minimal project metadata and "
+        "dependencies needed for that tool are allowed.",
+        "Do not add unrelated files, dependencies, or behavior; minimal project metadata "
+        "needed to run the exact verification command is allowed.",
+    )
+
+
 def test_normalize_execution_acceptance_keeps_repaired_fragments_without_exact_ac_command() -> None:
     seed = _seed(
         "A command/API check returns stable observable output or artifacts proving the original requirement for hello_auto.py exists at repository root.",

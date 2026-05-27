@@ -129,7 +129,7 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     if not criteria:
         return seed
 
-    seed = _relax_minimality_constraints_for_exact_verification(seed)
+    seed = _relax_minimality_constraints_for_exact_verification(seed, criteria)
     seed = _drop_repaired_fragments_when_exact_verification_exists(seed, criteria)
     criteria = tuple(seed.acceptance_criteria)
 
@@ -154,7 +154,10 @@ _REAL_VERIFICATION_TOOL_CONSTRAINT = (
 )
 
 
-def _relax_minimality_constraints_for_exact_verification(seed: Seed) -> Seed:
+def _relax_minimality_constraints_for_exact_verification(
+    seed: Seed,
+    criteria: tuple[str, ...],
+) -> Seed:
     """Allow the smallest runnable test metadata for exact verification commands.
 
     In a clean greenfield cwd, an exact command such as ``uv run pytest ...`` may
@@ -177,9 +180,10 @@ def _relax_minimality_constraints_for_exact_verification(seed: Seed) -> Seed:
     exit_conditions, exit_relaxed = _relax_exit_conditions_for_exact_verification(
         seed.exit_conditions
     )
-    if not relaxed and not exit_relaxed:
+    add_real_tool_guard = _has_non_repaired_exact_verification_criterion(criteria)
+    if not relaxed and not exit_relaxed and not add_real_tool_guard:
         return seed
-    if _REAL_VERIFICATION_TOOL_CONSTRAINT not in filtered:
+    if add_real_tool_guard and _REAL_VERIFICATION_TOOL_CONSTRAINT not in filtered:
         filtered.append(_REAL_VERIFICATION_TOOL_CONSTRAINT)
     if _MINIMAL_VERIFICATION_METADATA_CONSTRAINT not in filtered:
         filtered.append(_MINIMAL_VERIFICATION_METADATA_CONSTRAINT)
@@ -286,6 +290,14 @@ def _criterion_key(criterion: str) -> str:
 
 def _contains_explicit_verification_command(criterion: str) -> bool:
     return has_explicit_verification_text(criterion)
+
+
+def _has_non_repaired_exact_verification_criterion(criteria: tuple[str, ...]) -> bool:
+    return any(
+        _contains_explicit_verification_command(criterion)
+        and not _is_seed_repairer_original_requirement_line(criterion)
+        for criterion in criteria
+    )
 
 
 def _is_overstrict_exact_verification_constraint(constraint: str) -> bool:

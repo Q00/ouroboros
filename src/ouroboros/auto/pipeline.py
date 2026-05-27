@@ -224,7 +224,7 @@ _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
 # and still need a small amount of handler teardown time to return terminal
 # metadata. This grace applies only to synchronous execution starters; async
 # handoff starters still use the strict enqueue timeout.
-_SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS = 60.0
+_SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS = 300.0
 
 # Q00/ouroboros#782 review-12 BLOCKING #1: when the top-level deadline has
 # already expired but a persisted Ralph job awaits reconciliation, give the
@@ -1355,26 +1355,33 @@ class AutoPipeline:
                     msg = f"run starter returned {type(run_meta).__name__}, expected dict"
                     raise TypeError(msg)
             except TimeoutError as exc:
-                if self._enforce_deadline(state):
+                recovered_run_meta = await _recover_timed_out_synchronous_run(
+                    self.run_starter,
+                    timeout_seconds=5.0,
+                )
+                if recovered_run_meta is not None:
+                    run_meta = recovered_run_meta
+                elif self._enforce_deadline(state):
                     return self._result(state, ledger, review=review, blocker=state.last_error)
-                _mark_unknown_run_handoff(state, status=UNKNOWN_TIMEOUT_STATUS)
-                if retried:
-                    state.run_handoff_guidance = (
-                        f"{state.run_handoff_guidance or ''} "
-                        f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}"
-                    ).strip()
-                    state.mark_blocked(
-                        f"run start timed out after {run_start_timeout:.0f}s; "
-                        f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}",
-                        tool_name="run_starter",
-                    )
-                    self._save(state)
-                    return self._result(
-                        state,
-                        ledger,
-                        review=review,
-                        blocker=state.last_error or str(exc),
-                    )
+                else:
+                    _mark_unknown_run_handoff(state, status=UNKNOWN_TIMEOUT_STATUS)
+                    if retried:
+                        state.run_handoff_guidance = (
+                            f"{state.run_handoff_guidance or ''} "
+                            f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}"
+                        ).strip()
+                        state.mark_blocked(
+                            f"run start timed out after {run_start_timeout:.0f}s; "
+                            f"{RETRY_GUIDANCE_PHRASE} {idempotency_key}",
+                            tool_name="run_starter",
+                        )
+                        self._save(state)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            blocker=state.last_error or str(exc),
+                        )
             except Exception as exc:
                 if retried:
                     # Retry attempt itself raised — bound is exhausted. The
@@ -1515,7 +1522,14 @@ class AutoPipeline:
                         # surfaces ``pipeline_timeout`` BLOCKED instead of
                         # advertising the over-budget run as a successful
                         # complete-product outcome.
-                        if self._enforce_deadline(state):
+                        if (
+                            state.is_deadline_expired()
+                            and not (
+                                _allows_synchronous_completion_grace(run_meta)
+                                and _within_synchronous_completion_grace(state)
+                            )
+                            and self._enforce_deadline(state)
+                        ):
                             return self._result(
                                 state,
                                 ledger,
@@ -3633,6 +3647,31 @@ def _arm_legacy_missing_deadline(state: AutoPipelineState) -> bool:
         return False
     state.arm_deadline()
     return True
+
+
+def _allows_synchronous_completion_grace(run_meta: dict[str, Any]) -> bool:
+    return bool(run_meta.get("_allow_deadline_completion_grace"))
+
+
+def _within_synchronous_completion_grace(state: AutoPipelineState) -> bool:
+    if state.deadline_at is None:
+        return False
+    return 0.0 <= time.monotonic() - state.deadline_at <= _SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS
+
+
+async def _recover_timed_out_synchronous_run(
+    adapter: object | None,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any] | None:
+    recover = getattr(adapter, "recover_timed_out_run", None)
+    if not callable(recover):
+        return None
+    try:
+        recovered = await asyncio.wait_for(recover(), timeout=timeout_seconds)
+    except (Exception, TimeoutError):
+        return None
+    return recovered if isinstance(recovered, dict) else None
 
 
 def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool:

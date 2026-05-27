@@ -262,6 +262,28 @@ def test_unsafe_context_match_logs_pattern_name_without_raw_text() -> None:
     assert "Use the access token" not in event_repr
 
 
+def test_unsafe_context_ignores_benign_software_contract_terms() -> None:
+    """Software test/acceptance contracts are not legal authority."""
+    goal = (
+        "Create a local pytest file and define the acceptance contract as: "
+        "the exact verification command passes."
+    )
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    assert _unsafe_context_reason(ledger, goal=goal, pending_question=None) is None
+
+
+def test_unsafe_context_still_flags_legal_contract_terms() -> None:
+    """Narrowing software-contract terms must not clear legal contract risk."""
+    goal = "Draft a legal contract review checklist for liability clauses."
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    assert (
+        _unsafe_context_reason(ledger, goal=goal, pending_question=None)
+        == "legal/medical judgment"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 4: unsafe_context_observed emitted when finalization stays blocked
 # ---------------------------------------------------------------------------

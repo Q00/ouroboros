@@ -375,6 +375,7 @@ def _unsafe_context_reason(
             if value.strip()
         ),
     ).lower()
+    context = _strip_benign_software_contract_phrases(context)
     context = _strip_negated_clauses(context)
     for reason, pattern in _UNSAFE_CONTEXT_PATTERNS:
         match = re.search(pattern, context)
@@ -389,6 +390,18 @@ def _unsafe_context_reason(
             )
             return reason
     return None
+
+
+_BENIGN_SOFTWARE_CONTRACT_RE = re.compile(
+    r"\b(?:acceptance|test|testing|verification|api|runtime|interface|import|command|"
+    r"behavior|behavioral|software|code|seed|handoff|resume)\s+contract\b"
+    r"|\bcontract\s+(?:test|tests|testing)\b",
+)
+
+
+def _strip_benign_software_contract_phrases(text: str) -> str:
+    """Remove software-engineering uses of "contract" before legal-risk matching."""
+    return _BENIGN_SOFTWARE_CONTRACT_RE.sub(" ", text)
 
 
 # Imperative verbs that mark a *new* action clause when they follow a comma.

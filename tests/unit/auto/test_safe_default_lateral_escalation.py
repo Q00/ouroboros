@@ -69,7 +69,7 @@ def _ledger_with_matcher_trigger(goal: str = "Build a habit-tracker CLI") -> See
         "outputs": "Stable stdout and a JSON file",
         "constraints": "Use existing project patterns; no new dependencies",
         "acceptance_criteria": (
-            "Should we define the acceptance contract as: success prints "
+            "Should we define the contract for success as: success prints "
             "one fixed stdout line; failure prints one fixed stderr line "
             "and exits 1?"
         ),

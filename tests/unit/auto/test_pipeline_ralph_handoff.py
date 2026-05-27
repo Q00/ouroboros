@@ -828,6 +828,105 @@ async def test_complete_product_synchronous_success_after_deadline_blocks_as_tim
 
 
 @pytest.mark.asyncio
+async def test_first_party_synchronous_success_within_grace_completes(tmp_path) -> None:
+    """First-party inline execution may return terminal metadata during teardown grace."""
+    state = _state_at_run_phase(tmp_path)
+
+    class FirstPartySyncStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            state.deadline_at = time.monotonic() - 1.0
+            state.deadline_at_epoch = time.time() - 1.0
+            return {
+                "job_id": None,
+                "session_id": "sync_grace",
+                "execution_id": "sync_grace_exec",
+                "status": "completed",
+                "success": True,
+                "_allow_deadline_completion_grace": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("successful first-party sync execution must not dispatch Ralph")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=FirstPartySyncStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_handoff_status == "completed"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.last_tool_name != PIPELINE_DEADLINE_TOOL_NAME
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_first_party_synchronous_timeout_recovers_completed_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If inline handler teardown times out, recover terminal session metadata."""
+    monkeypatch.setattr(pipeline_module, "_SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS", 0.05)
+    state = _state_at_run_phase(tmp_path)
+    state.deadline_at = time.monotonic() + 0.2
+    state.deadline_at_epoch = time.time() + 0.2
+
+    class TimeoutAfterCompletionStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            await asyncio.sleep(1.0)
+            raise AssertionError("wait_for should time out first")
+
+        async def recover_timed_out_run(self) -> dict[str, Any]:
+            state.deadline_at = time.monotonic() - 0.01
+            state.deadline_at_epoch = time.time() - 0.01
+            return {
+                "job_id": None,
+                "session_id": "sync_recovered",
+                "execution_id": "sync_recovered_exec",
+                "status": "completed",
+                "success": True,
+                "_allow_deadline_completion_grace": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("successful recovered sync execution must not dispatch Ralph")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=TimeoutAfterCompletionStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        run_start_timeout_seconds=0.001,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_handoff_status == "completed"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.execution_id == "sync_recovered_exec"
+    assert state.run_session_id == "sync_recovered"
+    assert state.last_tool_name != PIPELINE_DEADLINE_TOOL_NAME
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
 async def test_complete_product_waits_for_owned_run_job_before_ralph(tmp_path) -> None:
     """A queued execute_seed job must reach terminal success before Ralph starts."""
     state = _state_at_run_phase(tmp_path)
