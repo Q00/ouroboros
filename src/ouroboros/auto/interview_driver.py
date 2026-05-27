@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     # Imported under TYPE_CHECKING to avoid a runtime cycle: adapters.py
     # imports ``InterviewBackend`` / ``InterviewTurn`` from this module.
     from ouroboros.auto.adapters import LateralResult
+    from ouroboros.persistence.event_store import EventStore
 
 import structlog
 
@@ -36,6 +37,7 @@ from ouroboros.auto.safe_defaults import (
     finalize_safe_defaultable_gaps,
 )
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+from ouroboros.events.base import BaseEvent
 from ouroboros.resilience.lateral import ThinkingPersona
 
 log = structlog.get_logger(__name__)
@@ -176,7 +178,55 @@ class AutoInterviewDriver:
     # tests that construct the driver without this argument are unaffected.
     # The behavior change that consumes this field ships in a separate PR.
     lateral_thinker: LateralThinker | None = None
+    # RFC #1256 §I4 — Unified observability for ooo auto interview.
+    # When set, the driver emits typed ``auto.interview.*`` events to the
+    # EventStore alongside the existing structlog ``log.info(...)`` calls,
+    # so post-hoc evidence inspection via ``ouroboros_query_events`` can
+    # surface the interview's lifecycle. Defaults to ``None`` to preserve
+    # back-compat for every existing call site (CLI, MCP handler, tests)
+    # that constructs the driver without observability wiring. Errors
+    # raised by the event store are caught and logged as warnings — an
+    # observer is never permitted to break the interview loop.
+    event_store: EventStore | None = None
     _last_emitted_message: str | None = field(default=None, init=False, repr=False)
+
+    async def _emit_event(
+        self,
+        event_type: str,
+        aggregate_id: str | None,
+        **data: object,
+    ) -> None:
+        """Append a typed ``auto.interview.*`` event to the EventStore.
+
+        Best-effort observer: returns silently when no event store is wired
+        (the default for back-compat call sites), and downgrades any
+        EventStore error to a structlog warning rather than propagating —
+        observability never breaks the interview loop.
+
+        ``aggregate_id`` is the ``auto_session_id`` of the live state so
+        ``ouroboros_query_events(auto_session_id)`` finds every interview
+        event for that session.
+        """
+        if self.event_store is None:
+            return
+        if not aggregate_id:
+            return
+        try:
+            await self.event_store.append(
+                BaseEvent(
+                    type=event_type,
+                    aggregate_type="auto_interview",
+                    aggregate_id=aggregate_id,
+                    data=dict(data),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — observer must not break the loop
+            log.warning(
+                "auto.interview.event_store_emit_failed",
+                event_type=event_type,
+                auto_session_id=aggregate_id,
+                error=str(exc),
+            )
 
     def _emit(self, state: AutoPipelineState) -> None:
         """Emit a progress snapshot for the current state via the callback.
@@ -203,7 +253,50 @@ class AutoInterviewDriver:
             pass
 
     async def run(self, state: AutoPipelineState, ledger: SeedDraftLedger) -> AutoInterviewResult:
-        """Run bounded auto interview until Seed-ready or blocked."""
+        """Run bounded auto interview until Seed-ready or blocked.
+
+        Public entry point that wraps :meth:`_run_inner` with RFC #1256 §I4
+        lifecycle event emission: ``auto.interview.opened`` before the loop
+        starts, and ``auto.interview.finalized`` (or
+        ``auto.interview.failed`` if an exception escapes the inner loop)
+        once a terminal result is known. The 13 internal ``return
+        AutoInterviewResult(...)`` paths inside ``_run_inner`` keep their
+        existing structlog instrumentation untouched; this wrapper only
+        adds the typed events that ``ouroboros_query_events`` consumes.
+        """
+
+        await self._emit_event(
+            "auto.interview.opened",
+            state.auto_session_id,
+            goal=state.goal,
+            max_rounds=self.max_rounds,
+            cwd=state.cwd,
+            resumed=bool(state.interview_session_id),
+        )
+        try:
+            result = await self._run_inner(state, ledger)
+        except BaseException as exc:
+            await self._emit_event(
+                "auto.interview.failed",
+                state.auto_session_id,
+                exception_type=type(exc).__name__,
+                exception_message=str(exc)[:500],
+            )
+            raise
+        await self._emit_event(
+            "auto.interview.finalized",
+            state.auto_session_id,
+            status=result.status,
+            rounds=result.rounds,
+            interview_session_id=result.session_id,
+            blocker=(result.blocker or "")[:500],
+        )
+        return result
+
+    async def _run_inner(
+        self, state: AutoPipelineState, ledger: SeedDraftLedger
+    ) -> AutoInterviewResult:
+        """Bounded auto interview loop. See :meth:`run` for §I4 wrapping."""
         self._last_emitted_message = None
         self._ensure_interview_phase(state)
         answer_context = self.context_provider(state.cwd)
