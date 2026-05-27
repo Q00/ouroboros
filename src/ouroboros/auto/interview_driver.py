@@ -266,6 +266,10 @@ class AutoInterviewDriver:
         except Exception as exc:
             self._record_evidence_based_session_id(state, exc, preassigned_id)
             action = "resume" if interview_tool_name == "interview.resume" else "start"
+            if action == "start":
+                fallback = self._try_close_after_backend_start_failure(state, ledger, exc)
+                if fallback is not None:
+                    return fallback
             blocker = f"interview {action} failed: {exc}"
             state.mark_blocked(blocker, tool_name=interview_tool_name)
             record_authoring_backend(state)
@@ -773,6 +777,55 @@ class AutoInterviewDriver:
         self._save(state)
         return AutoInterviewResult(
             "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
+        )
+
+    def _try_close_after_backend_start_failure(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        exc: Exception,
+    ) -> AutoInterviewResult | None:
+        """Close from deterministic ledger evidence when backend start is unavailable.
+
+        A start-time provider/config failure means the LLM interview never
+        produced a question, but it does not invalidate facts already present
+        in the initial goal or facts that the audited safe-default policy can
+        fill for benign local tasks. When those facts make the ledger complete,
+        proceed without a persisted interview transcript; the pipeline's ledger
+        Seed generator owns the next phase.
+        """
+        if not _is_authoring_backend_unavailable(exc):
+            return None
+        closure_mode = "ledger_only_no_backend"
+        if not ledger.is_seed_ready():
+            finalization = finalize_safe_defaultable_gaps(
+                ledger,
+                goal=state.goal,
+                provenance=f"auto interview backend start failed: {exc}",
+                pending_question=None,
+                active_profile=getattr(self.answerer, "active_profile", None),
+            )
+            if finalization is None or not finalization.completed or not ledger.is_seed_ready():
+                return None
+            closure_mode = "safe_default_no_backend"
+
+        state.ledger = ledger.to_dict()
+        state.pending_question = None
+        state.interview_completed = True
+        state.interview_closure_mode = closure_mode
+        state.mark_progress(
+            f"interview closed via {closure_mode} after backend start failure",
+            tool_name="interview_driver",
+        )
+        log.warning(
+            "auto.interview.backend_start_failed_ledger_fallback",
+            auto_session_id=state.auto_session_id,
+            closure_mode=closure_mode,
+            error=str(exc),
+        )
+        self._save(state)
+        return AutoInterviewResult(
+            "seed_ready", state.interview_session_id, ledger, state.current_round
         )
 
     def _answer_with_gap_steering(
@@ -1321,6 +1374,23 @@ _BROAD_PROMPT_RE = re.compile(
 def _can_steer_with_gap_prompt(question: str) -> bool:
     """Return True when ``question`` is broad enough to benefit from gap-targeted steering."""
     return bool(_BROAD_PROMPT_RE.search(question.lower()))
+
+
+def _is_authoring_backend_unavailable(exc: Exception) -> bool:
+    """Return True for provider/config failures that deterministic auto can bypass."""
+    text = str(exc).casefold()
+    markers = (
+        "config.toml",
+        "profile",
+        "codex",
+        "provider",
+        "api key",
+        "authentication",
+        "rate limit",
+        "connection refused",
+        "network",
+    )
+    return any(marker in text for marker in markers)
 
 
 _AUTO_ANSWER_LOG_LIMIT = 25

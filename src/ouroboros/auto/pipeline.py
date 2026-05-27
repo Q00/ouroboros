@@ -32,6 +32,7 @@ from ouroboros.auto.handoff_contract import (
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
 from ouroboros.auto.ledger import AssumptionRecord, SeedDraftLedger
+from ouroboros.auto.ledger_seed import synthesize_seed_from_ledger
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON, mirror_ralph_job_events
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.recovery_plan import (
@@ -135,6 +136,23 @@ def _seed_generator_accepts_force(seed_generator: SeedGenerator) -> bool:
         return True
     # A callable that accepts arbitrary ``**kwargs`` can also take ``force``.
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
+def _is_authoring_backend_unavailable(exc: Exception) -> bool:
+    """Return True for provider/config failures that ledger Seed fallback may bypass."""
+    text = str(exc).casefold()
+    markers = (
+        "config.toml",
+        "profile",
+        "codex",
+        "provider",
+        "api key",
+        "authentication",
+        "rate limit",
+        "connection refused",
+        "network",
+    )
+    return any(marker in text for marker in markers)
 
 
 class RunStarter(Protocol):
@@ -663,13 +681,46 @@ class AutoPipeline:
                 state.transition(AutoPhase.REVIEW, "resuming review from persisted Seed")
                 self._save(state)
             else:
-                if not state.interview_session_id:
-                    state.mark_failed(
-                        "seed generation cannot resume without interview_session_id",
-                        tool_name="seed_generator",
+                if (
+                    state.interview_closure_mode
+                    in {"ledger_only_no_backend", "safe_default_no_backend"}
+                    and ledger.is_seed_ready()
+                ):
+                    seed = synthesize_seed_from_ledger(
+                        ledger, interview_id=state.interview_session_id
+                    )
+                    seed = self._record_generated_seed(state, ledger, seed)
+                    state.mark_progress(
+                        "Seed generated from completed ledger without authoring backend",
+                        tool_name="ledger_seed_generator",
                     )
                     self._save(state)
-                    return self._result(state, ledger, blocker=state.last_error)
+                    state.transition(
+                        AutoPhase.REVIEW,
+                        f"reviewing Seed for required grade {state.required_grade}",
+                    )
+                    self._save(state)
+                    return await self.run(state)
+                if not state.interview_session_id:
+                    if not ledger.is_seed_ready():
+                        state.mark_failed(
+                            "seed generation cannot resume without interview_session_id",
+                            tool_name="seed_generator",
+                        )
+                        self._save(state)
+                        return self._result(state, ledger, blocker=state.last_error)
+                    seed = synthesize_seed_from_ledger(ledger)
+                    seed = self._record_generated_seed(state, ledger, seed)
+                    state.mark_progress(
+                        "Seed generated from completed ledger", tool_name="ledger_seed_generator"
+                    )
+                    self._save(state)
+                    state.transition(
+                        AutoPhase.REVIEW,
+                        f"reviewing Seed for required grade {state.required_grade}",
+                    )
+                    self._save(state)
+                    return await self.run(state)
                 seed_timeout = self._deadline_capped_timeout(state, self.seed_timeout_seconds)
                 # SSOT #1157 *Closure Policy* (2026-05-27): when the interview
                 # closed on ledger evidence (``ledger_only`` / ``safe_default``)
@@ -703,45 +754,27 @@ class AutoPipeline:
                     if not isinstance(seed, Seed):
                         msg = f"seed generator returned {type(seed).__name__}, expected Seed"
                         raise TypeError(msg)
-                    # Apply deterministic floor: the LLM-derived ambiguity_score
-                    # cannot fall below what code can objectively measure from the
-                    # ledger (open gaps, conflicting entries, assumption-only
-                    # sections). Seals self-rationalization at the A-grade gate.
-                    floor = deterministic_floor(ledger)
-                    if floor > seed.metadata.ambiguity_score:
-                        seed = seed.model_copy(
-                            update={
-                                "metadata": seed.metadata.model_copy(
-                                    update={"ambiguity_score": floor}
-                                ),
-                            }
-                        )
-                    seed = normalize_execution_acceptance(seed)
-                    state.seed_id = seed.metadata.seed_id
-                    state.seed_artifact = seed.to_dict()
-                    state.seed_origin = SeedOrigin.AUTO_PIPELINE
-                    # L1-d / #1171: derive the task class from the already-
-                    # standardized ledger and prepend the catalog's default
-                    # AC template to the Seed. Single match → apply that class;
-                    # unmatched → apply the safe LIBRARY fallback from L1-b;
-                    # ambiguous → leave the user's AC untouched until the
-                    # L1-c interview-driver disambiguation hook resolves it.
-                    # ``state.active_task_class`` is set only when a concrete
-                    # class/fallback actually fired, so the envelope does not
-                    # pretend an unresolved ambiguous class was active.
-                    _inference = derive_domain_from_ledger(ledger)
-                    _task_class = _inference.single
-                    if _task_class is not None:
-                        _applied = apply_default_ac_template(seed, _task_class)
-                        if _applied.injected_ac:
-                            seed = _applied.seed
-                            state.seed_id = seed.metadata.seed_id
-                            state.seed_artifact = seed.to_dict()
-                        state.active_task_class = _task_class.value
+                    seed = self._record_generated_seed(state, ledger, seed)
                 except TimeoutError as exc:
                     if self._enforce_deadline(state):
                         record_authoring_backend(state)
                         return self._result(state, ledger, blocker=state.last_error)
+                    if ledger.is_seed_ready() and _is_authoring_backend_unavailable(exc):
+                        seed = synthesize_seed_from_ledger(
+                            ledger, interview_id=state.interview_session_id
+                        )
+                        seed = self._record_generated_seed(state, ledger, seed)
+                        state.mark_progress(
+                            "Seed generated from completed ledger after seed generator timeout",
+                            tool_name="ledger_seed_generator",
+                        )
+                        self._save(state)
+                        state.transition(
+                            AutoPhase.REVIEW,
+                            f"reviewing Seed for required grade {state.required_grade}",
+                        )
+                        self._save(state)
+                        return await self.run(state)
                     state.mark_blocked(
                         f"seed generation timed out after {self.seed_timeout_seconds:.0f}s",
                         tool_name="seed_generator",
@@ -750,6 +783,22 @@ class AutoPipeline:
                     self._save(state)
                     return self._result(state, ledger, blocker=str(exc) or state.last_error)
                 except Exception as exc:
+                    if ledger.is_seed_ready() and _is_authoring_backend_unavailable(exc):
+                        seed = synthesize_seed_from_ledger(
+                            ledger, interview_id=state.interview_session_id
+                        )
+                        seed = self._record_generated_seed(state, ledger, seed)
+                        state.mark_progress(
+                            f"Seed generated from completed ledger after seed generator failure: {exc}",
+                            tool_name="ledger_seed_generator",
+                        )
+                        self._save(state)
+                        state.transition(
+                            AutoPhase.REVIEW,
+                            f"reviewing Seed for required grade {state.required_grade}",
+                        )
+                        self._save(state)
+                        return await self.run(state)
                     message = f"seed generation failed: {exc}"
                     if _is_seed_generation_blocker(exc):
                         state.mark_blocked(message, tool_name="seed_generator")
@@ -2850,6 +2899,38 @@ class AutoPipeline:
             state.seed_artifact = normalized.to_dict()
             self._save(state)
         return normalized
+
+    def _record_generated_seed(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+    ) -> Seed:
+        """Persist a newly generated Seed and apply deterministic auto enrichments."""
+        floor = deterministic_floor(ledger)
+        if floor > seed.metadata.ambiguity_score:
+            seed = seed.model_copy(
+                update={
+                    "metadata": seed.metadata.model_copy(update={"ambiguity_score": floor}),
+                }
+            )
+        seed = normalize_execution_acceptance(seed)
+        state.seed_id = seed.metadata.seed_id
+        state.seed_artifact = seed.to_dict()
+        state.seed_origin = SeedOrigin.AUTO_PIPELINE
+
+        # L1-d / #1171: derive the task class from the standardized ledger
+        # and prepend the catalog's default AC template to the Seed.
+        inference = derive_domain_from_ledger(ledger)
+        task_class = inference.single
+        if task_class is not None:
+            applied = apply_default_ac_template(seed, task_class)
+            if applied.injected_ac:
+                seed = applied.seed
+                state.seed_id = seed.metadata.seed_id
+                state.seed_artifact = seed.to_dict()
+            state.active_task_class = task_class.value
+        return seed
 
     def _load_seed(self, state: AutoPipelineState, seed_path: str) -> Seed | None:
         if self.seed_loader is None:

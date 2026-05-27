@@ -433,6 +433,7 @@ def _high_risk_assumption_count(ledger: SeedDraftLedger) -> int:
         for section in ledger.sections.values()
         for entry in section.entries
         if entry.source == LedgerSource.ASSUMPTION
+        and section.name != "non_goals"
         and entry.status not in inactive_statuses
         and any(term in entry.value.lower() for term in risky_terms)
     )
