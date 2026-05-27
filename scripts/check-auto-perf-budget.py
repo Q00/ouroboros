@@ -42,6 +42,14 @@ REQUIRED_METRIC_TOKENS = (
     "Rounds completed",
     "Per-round wall-clock",
     "Terminal reason",
+    # Bot review on commit c860fa6b (req_1779887321_129) flagged that
+    # the parser must enforce every metric row the template asks for.
+    # ``EventStore event count`` was in the template at
+    # ``.github/PULL_REQUEST_TEMPLATE.md`` but missing here, so an
+    # applicable auto PR could leave it blank and still pass. Adding
+    # the token closes that bypass; the template and parser are now
+    # one list.
+    "EventStore event count",
 )
 
 

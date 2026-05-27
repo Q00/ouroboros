@@ -45,7 +45,7 @@ def _load_module():
 
 
 def test_section_present_returns_true_for_filled_table() -> None:
-    """A real PR body with all three required metric rows filled
+    """A real PR body with all four required metric rows filled
     passes the presence check."""
     module = _load_module()
     body = (
@@ -56,6 +56,7 @@ def test_section_present_returns_true_for_filled_table() -> None:
         "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
         "| Per-round wall-clock (s/round) | 6.0 | 6.3 | 1.05 |\n"
         "| Terminal reason | ready | ready | n/a |\n"
+        "| EventStore event count | 0 | 2 | n/a |\n"
     )
     assert module._section_present(body) is True
 
@@ -149,6 +150,7 @@ def test_section_present_accepts_explicit_na_in_every_cell() -> None:
         "| Rounds completed in 600 s | N/A | N/A | n/a |\n"
         "| Per-round wall-clock (s/round) | N/A | N/A | n/a |\n"
         "| Terminal reason | N/A | N/A | n/a |\n"
+        "| EventStore event count | N/A | N/A | n/a |\n"
     )
     assert module._section_present(body) is True
 
@@ -164,8 +166,48 @@ def test_section_present_returns_false_when_one_row_partial_others_filled() -> N
         "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
         "| Per-round wall-clock (s/round) | 6.0 |  |  |\n"  # partial
         "| Terminal reason | ready | ready | n/a |\n"
+        "| EventStore event count | 0 | 0 | n/a |\n"
     )
     assert module._section_present(body) is False
+
+
+def test_section_present_returns_false_when_eventstore_row_blank() -> None:
+    """Bot-review blocker (commit c860fa6b → req_1779887321_129):
+    every metric row in the template MUST be enforced by the parser.
+    ``EventStore event count`` was in the template but missing from
+    ``REQUIRED_METRIC_TOKENS``, which let an applicable auto PR leave
+    that row entirely blank and still pass — exactly the
+    template/parser misalignment the bot probed.
+    """
+    module = _load_module()
+    body = (
+        "## R-run comparison\n\n"
+        "| Metric | Baseline | This PR | Ratio |\n"
+        "|---|---|---|---|\n"
+        "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
+        "| Per-round wall-clock (s/round) | 6.0 | 6.3 | 1.05 |\n"
+        "| Terminal reason | ready | ready | n/a |\n"
+        "| EventStore event count |  |  |  |\n"  # entirely blank
+    )
+    assert module._section_present(body) is False
+
+
+def test_required_metric_tokens_matches_template() -> None:
+    """Meta-contract: every metric row name in the PR template must
+    appear in ``REQUIRED_METRIC_TOKENS``. Catches the exact
+    template-vs-parser drift that the bot flagged — adding a row to
+    the template without updating the token list would silently
+    reopen the bypass."""
+    module = _load_module()
+    template = (REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+    assert "## R-run comparison" in template
+    section = template.split("## R-run comparison", 1)[1]
+    for token in module.REQUIRED_METRIC_TOKENS:
+        assert token in section, (
+            f"template missing required metric row {token!r} — either "
+            f"add the row to PULL_REQUEST_TEMPLATE.md or drop it from "
+            f"REQUIRED_METRIC_TOKENS"
+        )
 
 
 # --- _changed_paths_from_event fail-closed contract ---------------------
@@ -250,6 +292,7 @@ def test_main_returns_zero_for_auto_pr_with_filled_section(
         "| Rounds completed in 600 s | 100 | 95 | 0.95 |\n"
         "| Per-round wall-clock (s/round) | 6.0 | 6.3 | 1.05 |\n"
         "| Terminal reason | ready | ready | n/a |\n"
+        "| EventStore event count | 0 | 2 | n/a |\n"
     )
     event_path = _write_event(tmp_path, body=body)
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
