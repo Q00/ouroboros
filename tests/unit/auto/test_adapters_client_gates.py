@@ -123,6 +123,42 @@ async def test_synchronous_run_starter_returns_persisted_terminal_meta_before_te
 
 
 @pytest.mark.asyncio
+async def test_synchronous_run_starter_cancels_inner_execute_seed_on_outer_cancel(
+    tmp_path,
+) -> None:
+    """A timed-out auto pipeline must not leave inline execution running."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    handler = AsyncMock()
+
+    async def hanging_handle(*_args: object, **_kwargs: object) -> object:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    handler.handle = AsyncMock(side_effect=hanging_handle)
+    starter = HandlerSynchronousRunStarter(
+        handler,
+        cwd=str(tmp_path),
+        terminal_poll_interval_seconds=60,
+    )
+
+    call_task = asyncio.create_task(starter(_FakeSeed()))  # type: ignore[arg-type]
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    call_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call_task
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+    assert starter._latest_run_meta is not None
+    assert starter._latest_run_meta["status"] == "cancelled"
+    assert starter._latest_run_meta["success"] is False
+
+
+@pytest.mark.asyncio
 async def test_auto_interview_backend_forwards_last_question_for_reopened_answers(
     tmp_path,
 ) -> None:

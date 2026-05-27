@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import os
@@ -290,17 +291,29 @@ class HandlerSynchronousRunStarter:
             )
         )
         task.add_done_callback(_consume_background_result)
-        while True:
-            done, _pending = await asyncio.wait(
-                {task},
-                timeout=max(0.1, self.terminal_poll_interval_seconds),
-            )
-            if done:
-                result = _unwrap(await task, tool_name="ouroboros_execute_seed")
-                break
-            recovered = await self.recover_timed_out_run()
-            if recovered is not None:
-                return recovered
+        try:
+            while True:
+                done, _pending = await asyncio.wait(
+                    {task},
+                    timeout=max(0.1, self.terminal_poll_interval_seconds),
+                )
+                if done:
+                    result = _unwrap(await task, tool_name="ouroboros_execute_seed")
+                    break
+                recovered = await self.recover_timed_out_run()
+                if recovered is not None:
+                    return recovered
+        except asyncio.CancelledError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            if self._latest_run_meta is not None:
+                self._latest_run_meta = {
+                    **self._latest_run_meta,
+                    "status": "cancelled",
+                    "success": False,
+                }
+            raise
         meta = result.meta or {}
         run_meta: dict[str, object] = {
             "job_id": None,
