@@ -822,6 +822,18 @@ class AutoInterviewDriver:
                 return None
             closure_mode = "safe_default_no_backend"
 
+        # SSOT transcript/ledger boundary: this fallback never pushes
+        # safe-default synthesis through ``backend.answer`` (the backend is
+        # by definition unavailable here), so any probe-confirmed
+        # ``interview_session_id`` recorded by ``_record_evidence_based_session_id``
+        # points at a persisted interview file that holds only the silent
+        # start frame — none of the facts that produced the closed ledger.
+        # Advertising that id as Seed lineage would have downstream consumers
+        # treat the empty backend transcript as the source of the Seed.
+        # Clear the id so the result envelope and persisted state
+        # represent the actual lineage: ledger-only, no backend transcript.
+        cleared_session_id = state.interview_session_id
+        state.interview_session_id = None
         state.ledger = ledger.to_dict()
         state.pending_question = None
         state.interview_completed = True
@@ -835,10 +847,11 @@ class AutoInterviewDriver:
             auto_session_id=state.auto_session_id,
             closure_mode=closure_mode,
             error=str(exc),
+            cleared_session_id=cleared_session_id,
         )
         self._save(state)
         return AutoInterviewResult(
-            "seed_ready", state.interview_session_id, ledger, state.current_round
+            "seed_ready", None, ledger, state.current_round
         )
 
     def _answer_with_gap_steering(

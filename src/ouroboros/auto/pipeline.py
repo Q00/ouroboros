@@ -1295,6 +1295,31 @@ class AutoPipeline:
                             blocker=state.last_error,
                             run_subagent=run_subagent,
                         )
+                    # ``paused`` is mapped from ``SessionStatus.PAUSED`` by
+                    # :class:`ExecuteSeedHandler` with ``success=None`` — the
+                    # synchronous execution is waiting on operator input and
+                    # has NOT reached terminal success. Treat it as
+                    # non-terminal and block the Ralph handoff (and the
+                    # synchronous-complete short-circuit below): handing off
+                    # here would start the persistence loop while the run
+                    # session is still pending resume, decoupling Ralph from
+                    # the actual product run. The owned job is left running
+                    # (do not cancel — the operator may still resume it);
+                    # callers can re-enter the pipeline after resume.
+                    if self.complete_product and run_status == "paused":
+                        state.mark_blocked(
+                            "run execution paused before Ralph handoff; "
+                            "resume the paused run before continuing",
+                            tool_name="run_starter",
+                        )
+                        self._save(state)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            blocker=state.last_error,
+                            run_subagent=run_subagent,
+                        )
                     if (
                         self.complete_product
                         and bool(getattr(self.run_starter, "synchronous_execution", False))

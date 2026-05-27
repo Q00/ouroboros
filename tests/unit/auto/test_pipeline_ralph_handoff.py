@@ -655,6 +655,51 @@ async def test_complete_product_blocks_when_initial_run_reports_failure(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_complete_product_blocks_when_synchronous_run_is_paused(tmp_path) -> None:
+    """A paused synchronous execution is non-terminal — do not hand off to Ralph.
+
+    ``ExecuteSeedHandler`` maps :class:`SessionStatus.PAUSED` to
+    ``status="paused"`` / ``success=None`` — the run is waiting on
+    operator input, not finished. The previous guard only blocked the
+    ``failed/cancelled/interrupted`` and ``queued/running/cancel_requested``
+    sets, so ``paused`` fell through and started Ralph against a
+    still-pending product run. Block the handoff and leave the owned job
+    alone (operator may still resume it).
+    """
+
+    state = _state_at_run_phase(tmp_path)
+
+    async def paused_run_starter(_seed: Seed) -> dict[str, Any]:
+        return {
+            "job_id": "job_run_paused",
+            "session_id": "exec_session_paused",
+            "execution_id": "execution_paused",
+            "status": "paused",
+            "success": None,
+        }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run while execution is paused")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=paused_run_starter,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "paused" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
 async def test_complete_product_synchronous_run_uses_pipeline_deadline_not_handoff_timeout(
     tmp_path,
 ) -> None:

@@ -4509,15 +4509,28 @@ async def test_invalid_reconcile_on_complete_does_not_poison_future_resume(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence(
+async def test_interview_driver_clears_probe_confirmed_id_on_safe_default_no_backend_closure(
     tmp_path,
 ) -> None:
-    """Driver retains the pre-allocated id only when persistence is verifiable.
+    """No-backend safe-default closure must not advertise an unsynced transcript.
 
-    Models the issue's primary scenario: the driver's ``asyncio.wait_for``
-    cancels the backend mid-flight, but the engine has already persisted
-    the interview state.  The driver must consult ``is_session_persisted``
-    to confirm before saving the id on auto state.
+    Models the start-time timeout where the engine persisted a session file
+    before the driver's ``asyncio.wait_for`` cancelled the backend
+    mid-flight. ``is_session_persisted`` confirms the file exists, so
+    ``_record_evidence_based_session_id`` saves the pre-allocated id on
+    auto state. The safe-default fallback then closes the ledger
+    deterministically *without* pushing the synthesis through
+    ``backend.answer``.
+
+    The persisted backend file therefore contains only the silent start
+    frame — none of the facts that produced the closed ledger. Leaving
+    ``interview_session_id`` populated on the seed_ready envelope would
+    advertise that empty transcript as the Seed's interview lineage,
+    contradicting the SSOT contract that the existing safe-default path
+    enforces by rolling back if ``backend.answer`` sync fails. The driver
+    must instead clear the id when it closes via
+    ``safe_default_no_backend`` (or ``ledger_only_no_backend``), so the
+    envelope and reloaded state both report no backend lineage.
     """
 
     received_ids: list[str | None] = []
@@ -4549,16 +4562,28 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
     result = await driver.run(state, ledger)
 
     assert result.status == "seed_ready"
-    assert state.interview_session_id, "probe-confirmed id must be saved on auto state"
+    assert result.session_id is None, (
+        "result envelope must not advertise an unsynchronized backend transcript "
+        "as Seed lineage"
+    )
+    assert state.interview_session_id is None, (
+        "auto state must clear the probe-confirmed id on no-backend safe-default "
+        "closure because the persisted interview never received the synthesis"
+    )
     assert state.interview_closure_mode == "safe_default_no_backend"
-    assert received_ids == [state.interview_session_id], (
-        "backend.start must receive the pre-allocated interview_id so the "
-        "persisted interview file matches auto state"
+    # The driver still forwards the pre-allocated id to backend.start; that
+    # contract (engine.start_interview must honour the supplied id when it
+    # persists the file before failing) is independent of the lineage-clear
+    # decision above.
+    assert len(received_ids) == 1
+    assert received_ids[0] is not None and received_ids[0] in persisted_ids, (
+        "backend.start must receive the pre-allocated interview_id so any "
+        "persisted file matches what the driver probed"
     )
 
     reloaded = store.load(state.auto_session_id)
     assert reloaded is not None
-    assert reloaded.interview_session_id == state.interview_session_id
+    assert reloaded.interview_session_id is None
 
 
 @pytest.mark.asyncio
