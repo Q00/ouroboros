@@ -627,6 +627,48 @@ def test_cli_still_matches_on_affirmative_not_just_or_not_only_expansion() -> No
         )
 
 
+def test_cli_does_not_match_on_non_prefix_negation() -> None:
+    """Bot's round-6 reproduction: "non-CLI" / "non CLI" prefix forms.
+    These must be treated as exclusion, not as positive CLI evidence."""
+    for goal in (
+        "Build a non-CLI Python library",
+        "Build a non CLI Python library",
+        "Build a non-command-line Python library",
+        "Build a non-command line Python library",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(
+            ledger,
+            "outputs",
+            value="An importable Python package exposing a public API surface",
+        )
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI not in result.classes, (
+            f"non-prefix goal must not match cli: goal={goal!r}, result={result}"
+        )
+
+
+def test_cli_token_unaffected_by_non_prefix_in_other_words() -> None:
+    """Positive lock for the `non-` prefix regex: words like
+    `non-client`, `non-clinic`, `nonprofit` must not be falsely
+    stripped or affect the CLI signal."""
+    # No CLI signal in any of these; the test ensures the strip regex
+    # does not bleed into adjacent legitimate words that happen to
+    # contain "non" + cl-prefixed letters.
+    for goal in (
+        "Build a non-client analytics dashboard",
+        "Build a non-clinic appointment scheduler",
+        "Build a nonprofit donation tracker",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(ledger, "outputs", value="Persistent JSON state file")
+        result = derive_domain_from_ledger(ledger)
+        # No CLI signal here — neither positive nor false-stripped.
+        assert TaskClass.CLI not in result.classes, (
+            f"unrelated `non-` word must not affect cli matcher: goal={goal!r}, result={result}"
+        )
+
+
 def test_cli_does_not_match_on_exclusion_phrasing() -> None:
     """Bot's named scenario (`Build a Python library, without a CLI`) +
     the other common exclusion shapes — each must drop CLI from the

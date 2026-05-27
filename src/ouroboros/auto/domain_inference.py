@@ -82,6 +82,15 @@ _NEGATED_CLI_GOAL_RE = re.compile(
     r"\s+(?:cli|command[\s\-]line)\b"
 )
 
+# Prefix-style negation ("non-CLI" / "non CLI" / "non-command-line").
+# `\b` boundaries prevent false matches on unrelated words containing
+# the letters (e.g. "non-client" or "non-clinic" — the `cli\b` boundary
+# fails because the following letters extend the word). Tracked
+# separately from `_NEGATED_CLI_GOAL_RE` because the cue ("non") is
+# directly fused to the CLI token rather than separated by connectors.
+# See PR #1264 review round 6.
+_NEGATED_CLI_PREFIX_RE = re.compile(r"\bnon[\s\-]?(?:cli|command[\s\-]line)\b")
+
 
 def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
     """Return True iff *goal_text* contains a CLI signal that is not
@@ -98,6 +107,7 @@ def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
     if not has_signal:
         return False
     stripped = _NEGATED_CLI_GOAL_RE.sub(" ", goal_text)
+    stripped = _NEGATED_CLI_PREFIX_RE.sub(" ", stripped)
     return bool(_CLI_GOAL_TOKEN_RE.search(stripped)) or bool(_CLI_GOAL_PHRASE_RE.search(stripped))
 
 
