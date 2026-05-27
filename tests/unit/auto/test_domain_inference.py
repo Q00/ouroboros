@@ -590,3 +590,42 @@ def test_cli_still_matches_on_positive_modal_goal() -> None:
         assert TaskClass.CLI in result.classes, (
             f"positive modal goal must still match cli: goal={goal!r}, result={result}"
         )
+
+
+# ---------------------------------------------------------------------------
+# PR-ζ-A fourth-round review-feedback regression locks (#1264 exclusion
+# phrasing blocker).
+#
+# After the modal/copular pass (above), the bot flagged a further
+# exclusion-phrasing class: "without a CLI", "excluding a CLI",
+# "instead of a CLI", "rather than a CLI", "sans CLI". The negation
+# regex now treats these as additional negation cues alongside the
+# round-2/3 forms, so all of them strip cleanly.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_does_not_match_on_exclusion_phrasing() -> None:
+    """Bot's named scenario (`Build a Python library, without a CLI`) +
+    the other common exclusion shapes — each must drop CLI from the
+    classification."""
+    for goal in (
+        "Build a Python library, without a CLI",
+        "Build a Python library, excluding a CLI",
+        "Build a Python library, sans CLI",
+        "Build a Python library, instead of a CLI",
+        "Build a Python library, rather than a CLI",
+        # Multi-word "command line" / "command-line" variants.
+        "Build a Python library, without a command line tool",
+        "Build a Python library, instead of a command-line tool",
+        "Build a Python library, rather than a command line tool",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(
+            ledger,
+            "outputs",
+            value="An importable Python package exposing a public API surface",
+        )
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI not in result.classes, (
+            f"exclusion-phrased goal must not match cli: goal={goal!r}, result={result}"
+        )
