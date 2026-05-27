@@ -38,6 +38,43 @@ from ouroboros.auto.task_classes import TaskClass
 # #1264 / #1170 R2 follow-up).
 _CLI_GOAL_TOKEN_RE = re.compile(r"\bcli\b")
 
+# Multi-word "command line" / "command-line" phrase regex. Not vulnerable
+# to the substring-false-friend class, but folded into the same negation
+# pipeline below so "not a command-line tool" is rejected consistently
+# with "not a CLI".
+_CLI_GOAL_PHRASE_RE = re.compile(r"\bcommand[\s\-]line\b")
+
+# Explicit-negation pattern matching common natural-language denials of
+# the CLI signal: "not a CLI", "no CLI", "never a CLI", "isn't a CLI",
+# and the same shapes wrapping "command line" / "command-line". The
+# match is removed from the goal text before re-applying the positive
+# regexes, so a goal like
+#     "Build a Python client library for the Foo API, not a CLI"
+# does not classify as CLI (PR #1264 second-round review blocker).
+_NEGATED_CLI_GOAL_RE = re.compile(
+    r"\b(?:not|no|never|isn[’']?t|aren[’']?t|won[’']?t)"
+    r"\s+(?:an?\s+)?(?:cli|command[\s\-]line)\b"
+)
+
+
+def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
+    """Return True iff *goal_text* contains a CLI signal that is not
+    inside a recognized negation clause.
+
+    Strategy: detect any positive CLI signal (token or multi-word
+    phrase), then strip recognized negation wrappers from the text and
+    re-check. If a positive signal survives the strip, the goal
+    genuinely asserts CLI.
+    """
+    has_signal = bool(_CLI_GOAL_TOKEN_RE.search(goal_text)) or bool(
+        _CLI_GOAL_PHRASE_RE.search(goal_text)
+    )
+    if not has_signal:
+        return False
+    stripped = _NEGATED_CLI_GOAL_RE.sub(" ", goal_text)
+    return bool(_CLI_GOAL_TOKEN_RE.search(stripped)) or bool(_CLI_GOAL_PHRASE_RE.search(stripped))
+
+
 __all__ = [
     "DomainInference",
     "derive_domain_from_ledger",
@@ -147,14 +184,14 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     )
     runtime_signal = _any_of(runtime, ("shell", "terminal", "subprocess", "command line"))
     # Goal-side CLI signal: token-bounded "cli" OR explicit "command line"
-    # / "command-line" multi-word phrase. Substring-only matching against
-    # "cli" would false-positive on "client", "click", "clinic", etc.,
-    # which would shadow LIBRARY for legitimate "Python client library"
-    # goals (PR #1264 review blocker).
+    # / "command-line" multi-word phrase, with explicit-negation
+    # stripping. Substring-only matching against "cli" would false-
+    # positive on "client", "click", "clinic", etc. (first-round PR
+    # #1264 blocker), and naked token matching still classifies "not a
+    # CLI" / "no CLI" goals as CLI (second-round PR #1264 blocker), so
+    # both classes route through `_goal_has_unnegated_cli_signal`.
     goal_text = _goal_text(ledger)
-    goal_signal = bool(_CLI_GOAL_TOKEN_RE.search(goal_text)) or _any_of(
-        goal_text, ("command line", "command-line")
-    )
+    goal_signal = _goal_has_unnegated_cli_signal(goal_text)
     # Each of the three signals is independently sufficient once the
     # ledger-evidence gate above is satisfied. The earlier form
     # `runtime_signal or (output_signal and (goal_signal or outputs))`

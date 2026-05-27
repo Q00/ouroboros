@@ -443,3 +443,89 @@ def test_cli_still_matches_on_command_line_phrase() -> None:
         result = derive_domain_from_ledger(ledger)
         assert result.is_single
         assert result.single is TaskClass.CLI
+
+
+# ---------------------------------------------------------------------------
+# PR-ζ-A second-round review-feedback regression locks (#1264 negation
+# blocker).
+#
+# After tightening the goal-side `cli` substring to a word-boundary
+# token (above), ouroboros-agent[bot] flagged a follow-up false-positive
+# class: explicitly *negated* CLI mentions. A goal like "Build a Python
+# client library for the Foo API, not a CLI" still matches `\bcli\b`
+# against the literal "CLI" inside "not a CLI", so the inference
+# returned {CLI, LIBRARY} — ambiguous. Ambiguous classifications skip
+# default AC injection (pipeline.py:732-740), so a goal that *explicitly*
+# excludes CLI would silently lose its library contract.
+#
+# The fix adds a small negation-context regex
+# (`_NEGATED_CLI_GOAL_RE`) and re-checks the goal text with the
+# negated mentions stripped. The tests below lock the named scenarios
+# from the bot's review plus a positive case (mixed negation + positive
+# assertion).
+# ---------------------------------------------------------------------------
+
+
+def test_cli_does_not_match_on_explicitly_negated_goal() -> None:
+    """Reviewer's exact named scenario: "Build a Python client library
+    for the Foo API, not a CLI" with library outputs must return a
+    single LIBRARY classification, not ambiguous {CLI, LIBRARY}."""
+    ledger = _bare_ledger("Build a Python client library for the Foo API, not a CLI")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="An importable Python package exposing a public API surface",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.CLI not in result.classes, f"cli must not match negated goal; got {result}"
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_cli_does_not_match_on_various_negation_forms() -> None:
+    """Cover the common natural-language negation shapes the matcher
+    must reject — "not a CLI", "no CLI", "isn't a CLI", "never a CLI",
+    and the same shapes wrapping the "command line" / "command-line"
+    multi-word phrase."""
+    for goal in (
+        "Build a Python library, not a CLI",
+        "Build a Python library — no CLI here",
+        "Publish an SDK; isn't a CLI",
+        "Ship a package; never a CLI",
+        "Build a Python library, not a command line tool",
+        "Build a Python library, not a command-line tool",
+    ):
+        ledger = _bare_ledger(goal)
+        _seed_section(
+            ledger,
+            "outputs",
+            value="An importable Python package exposing a public API surface",
+        )
+        result = derive_domain_from_ledger(ledger)
+        assert TaskClass.CLI not in result.classes, (
+            f"negated goal must not match cli: goal={goal!r}, result={result}"
+        )
+
+
+def test_cli_still_matches_when_negation_is_about_other_class() -> None:
+    """Positive lock: when the negation clause is about a *different*
+    class (e.g. "not a webhook"), the CLI signal from the rest of the
+    goal must still fire."""
+    ledger = _bare_ledger("Build a CLI for habit tracking, not a webhook receiver")
+    _seed_section(ledger, "outputs", value="Persistent JSON state file")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.CLI in result.classes
+    # Webhook should not fire because outputs lacks the side-effect
+    # signals; CLI is the sole match.
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_cli_still_matches_when_negated_mention_appears_alongside_positive_one() -> None:
+    """Edge case: a goal that contains both a positive CLI assertion AND
+    a negated CLI mention (e.g. "CLI, not a CLI library") must still
+    classify as CLI — the positive mention survives the strip."""
+    ledger = _bare_ledger("Build a CLI for habits — not a CLI testing library")
+    _seed_section(ledger, "outputs", value="Persistent JSON state file")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.CLI in result.classes
