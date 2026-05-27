@@ -1132,6 +1132,47 @@ class AutoPipeline:
                                     blocker=state.last_error,
                                     run_subagent=None,
                                 )
+                    else:
+                        # Synchronous starters
+                        # (``HandlerSynchronousRunStarter``) return
+                        # ``job_id=None`` while still persisting
+                        # ``execution_id`` / ``run_session_id``, so the
+                        # fresh-path terminal-success validation relies on
+                        # the starter's returned dict — there is no
+                        # job-manager snapshot to reconcile against on
+                        # resume. A resume that reaches this branch with no
+                        # persisted ``job_id`` is therefore unreconcilable:
+                        # the most common cause is a fresh-path BLOCK on
+                        # paused/failed/non-terminal synchronous
+                        # execution, after which
+                        # ``_recoverable_phase_for_tool("run_starter")``
+                        # returns ``AutoPhase.RUN`` and re-enters the
+                        # persisted-handle branch. Dispatching Ralph from
+                        # ``execution_id``/``run_session_id`` alone would
+                        # advertise a non-terminal product run as ready
+                        # for the persistence loop, breaking the same
+                        # contract the fresh-path paused guard enforces.
+                        # Block with actionable guidance instead — the
+                        # operator must resolve the synchronous run
+                        # itself (resume it, or wipe the persisted handle)
+                        # before complete-product can continue.
+                        state.mark_blocked(
+                            "Cannot resume complete-product Ralph handoff for "
+                            "jobless synchronous execution: no job-manager "
+                            "snapshot is available to verify the persisted "
+                            "execution_id/run_session_id reached terminal "
+                            "success. Resume the synchronous run to completion "
+                            "or clear the persisted handle before retrying.",
+                            tool_name="run_starter",
+                        )
+                        self._save(state)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            blocker=state.last_error,
+                            run_subagent=None,
+                        )
                     return await self._handoff_to_ralph(
                         state, ledger, seed, review, run_subagent=None
                     )

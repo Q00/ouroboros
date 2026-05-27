@@ -1815,6 +1815,64 @@ async def test_run_resume_with_persisted_handle_blocks_when_owned_job_still_runn
 
 
 @pytest.mark.asyncio
+async def test_run_resume_with_jobless_sync_handle_blocks_complete_product_ralph(
+    tmp_path,
+) -> None:
+    """Jobless synchronous executions cannot be reconciled on resume.
+
+    ``HandlerSynchronousRunStarter`` always returns ``job_id=None`` and
+    relies on the starter's returned dict for terminal-success
+    validation. On resume that dict is gone, so persisted
+    ``execution_id``/``run_session_id`` alone are not evidence of
+    terminal success — they only prove an execution session existed.
+    Most often this branch is reached after the fresh-path paused/failed
+    guard blocked the synchronous run; ``_recoverable_phase_for_tool``
+    sends the resume back into RUN, where without an explicit guard
+    Ralph would launch against the still-pending product session.
+    Resume must block until the operator resolves the synchronous run
+    itself.
+    """
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = None
+    state.execution_id = "execution_paused_sync"
+    state.run_session_id = "session_paused_sync"
+    state.complete_product = True
+
+    class JoblessSyncStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            raise AssertionError("resume must not redispatch a synchronous run")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError(
+            "ralph_starter must not run while jobless sync execution is unreconcilable"
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=JoblessSyncStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "jobless synchronous execution" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
 async def test_run_resume_with_persisted_handle_blocks_when_owned_job_failed(
     tmp_path,
 ) -> None:
