@@ -94,7 +94,47 @@ _RECOVERY_BLOCKED_CHOICES: str = (
     "be edited mid-session); (2) abandon this session"
 )
 
-SeedGenerator = Callable[[str], Awaitable[Seed]]
+
+class SeedGenerator(Protocol):
+    """Protocol for seed-generator callables.
+
+    Implementations accept an optional ``force`` keyword that bypasses the
+    ambiguity-score gate inside ``SeedGenerator.generate`` (see
+    ``bigbang/seed_generator.py``). The auto pipeline sets ``force=True``
+    when ``state.interview_closure_mode`` indicates the interview closed
+    on ledger evidence rather than backend agreement
+    (``ledger_only`` / ``safe_default``) — under SSOT #1157 *Closure Policy*
+    (2026-05-27), the ledger's structural completeness IS the acceptance
+    signal, so the persisted backend ambiguity score is acknowledged-stale
+    by design and must not re-block at the SEED_GENERATION boundary.
+
+    Implementations that don't honor ``force`` should still accept it for
+    interface compatibility; the kwarg defaults to ``False`` so legacy
+    ``mutual_agreement`` closures behave exactly as before.
+    """
+
+    async def __call__(self, session_id: str, *, force: bool = False) -> Seed: ...
+
+
+def _seed_generator_accepts_force(seed_generator: SeedGenerator) -> bool:
+    """Return True if ``seed_generator`` advertises a ``force`` kwarg.
+
+    ``AutoPipeline`` uses this to keep the SSOT #1157 ledger-primary force
+    contract backwards-compatible with legacy ``async def(session_id)``
+    callables (the dominant pattern in tests/unit/). Detection is via
+    ``inspect.signature`` rather than EAFP — calling unconditionally and
+    catching ``TypeError`` would mask genuine signature errors inside the
+    callable's body.
+    """
+    try:
+        signature = inspect.signature(seed_generator)
+    except (TypeError, ValueError):  # builtins / non-introspectable wrappers
+        return False
+    parameters = signature.parameters
+    if "force" in parameters:
+        return True
+    # A callable that accepts arbitrary ``**kwargs`` can also take ``force``.
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 class RunStarter(Protocol):
@@ -631,9 +671,33 @@ class AutoPipeline:
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
                 seed_timeout = self._deadline_capped_timeout(state, self.seed_timeout_seconds)
+                # SSOT #1157 *Closure Policy* (2026-05-27): when the interview
+                # closed on ledger evidence (``ledger_only`` / ``safe_default``)
+                # rather than backend ``mutual_agreement``, the persisted
+                # backend ambiguity_score is acknowledged-stale by design —
+                # the ledger's structural completeness IS the acceptance
+                # signal. Without forcing past the ambiguity gate here the
+                # seed generator would re-block ledger-only sessions at
+                # exactly the same threshold that the interview driver
+                # explicitly chose to ignore, defeating PR-β's purpose for
+                # the canonical #1170 R2-diag failure mode.
+                force_seed_generation = state.interview_closure_mode in {
+                    "ledger_only",
+                    "safe_default",
+                }
+                # Only forward ``force`` when (a) we actually want to force
+                # AND (b) the seed_generator implementation advertises a
+                # ``force`` parameter. Legacy callables declare
+                # ``async def(session_id)`` without a ``force`` kwarg;
+                # passing it unconditionally would raise ``TypeError``.
+                # PR-β-aware implementations (``HandlerSeedGenerator``)
+                # opt in by declaring ``force``.
+                seed_kwargs: dict[str, Any] = {}
+                if force_seed_generation and _seed_generator_accepts_force(self.seed_generator):
+                    seed_kwargs["force"] = True
                 try:
                     seed = await asyncio.wait_for(
-                        self.seed_generator(state.interview_session_id),
+                        self.seed_generator(state.interview_session_id, **seed_kwargs),
                         timeout=seed_timeout,
                     )
                     if not isinstance(seed, Seed):

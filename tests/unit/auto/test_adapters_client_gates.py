@@ -109,3 +109,61 @@ async def test_auto_seed_generator_passes_client_gate_acknowledgements() -> None
             ),
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_seed_generator_forwards_force_kwarg_to_handler() -> None:
+    """PR-β / SSOT #1157 *Closure Policy* (2026-05-27) — Bot review #1 BLOCKER.
+
+    When ``HandlerSeedGenerator`` is called with ``force=True`` (the
+    contract ``AutoPipeline`` honors for ``ledger_only`` / ``safe_default``
+    closure modes), the adapter must forward ``"force": True`` into the
+    handler arguments. That argument is what causes ``GenerateSeedHandler``
+    to call ``SeedGenerator.generate(..., force=True)`` and bypass the 0.2
+    ambiguity gate at ``bigbang/seed_generator.py:141``. Without this
+    forwarding, the driver-side ledger-primary closure would only move the
+    block from INTERVIEW to SEED_GENERATION at exactly the same threshold.
+    """
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.err(
+            MCPToolError("stop after capturing arguments", tool_name="ouroboros_generate_seed")
+        )
+    )
+    generator = HandlerSeedGenerator(handler)
+
+    with pytest.raises(HandlerError):
+        await generator("interview_auto", force=True)
+
+    handler.handle.assert_awaited_once_with(
+        {
+            "session_id": "interview_auto",
+            "client_gates": (
+                "seed_ready_acceptance_guard",
+                "restate_goal_approved",
+            ),
+            "force": True,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_seed_generator_omits_force_when_not_requested() -> None:
+    """Default contract preserved: when ``AutoPipeline`` does NOT request
+    a force (i.e. ``mutual_agreement`` closures), the adapter must omit the
+    ``force`` key entirely so the maintained MCP gate keeps its legacy
+    semantics. Pin both directions of the new contract.
+    """
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.err(
+            MCPToolError("stop after capturing arguments", tool_name="ouroboros_generate_seed")
+        )
+    )
+    generator = HandlerSeedGenerator(handler)
+
+    with pytest.raises(HandlerError):
+        await generator("interview_auto")
+
+    arguments = handler.handle.await_args.args[0]
+    assert "force" not in arguments

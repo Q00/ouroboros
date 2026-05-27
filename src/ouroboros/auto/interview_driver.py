@@ -203,16 +203,23 @@ class AutoInterviewDriver:
                 "blocked", state.interview_session_id, ledger, state.current_round, blocker
             )
 
-        # Closure gate: an interview closes only when the backend (semantic
-        # ambiguity model) AND the driver-side ledger (structural completeness)
-        # agree on the same turn. Disagreement in either direction is reframed
-        # as the next answer instead of being treated as a terminal block:
+        # Closure gate (ledger-primary, backend-advisory per SSOT #1157
+        # *Closure Policy* section, 2026-05-27): an interview closes the
+        # moment ``ledger.is_seed_ready()`` returns True, regardless of
+        # backend ``seed_ready`` state. Backend signals remain useful as
+        # advisory metadata but no longer gate closure on their own.
+        # Disagreement is reframed as the next answer instead of a terminal
+        # block:
         #
         # * backend signals completion but the ledger has open gaps → answer
         #   the first open gap so the backend re-scores against substantive
-        #   new content and either accepts or asks a follow-up.
-        # * backend keeps asking but the ledger is structurally full → keep
-        #   answering normally; let the backend drive the dialogue.
+        #   new content; the loop refuses backend-only closure (the
+        #   premature-closure invariant preserved below).
+        # * backend keeps asking but the ledger is structurally full → close
+        #   immediately as ``ledger_only``; do NOT let the backend extend the
+        #   dialogue past structural completeness, because an LLM evaluator
+        #   never saturates and waiting for its agreement stalls indefinitely
+        #   (the #1170 R2-diag failure mode).
         #
         # ``max_rounds`` is the budget for ledger-filling rounds. The interview
         # closes the moment ``ledger.is_seed_ready()`` returns True

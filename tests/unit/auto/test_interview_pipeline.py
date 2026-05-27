@@ -3176,17 +3176,13 @@ async def test_premature_backend_only_closure_still_blocked_under_ledger_primary
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         # Backend says it's done from round 0, but ledger has open gaps.
-        return InterviewTurn(
-            "ready", "interview_premature", seed_ready=True, completed=True
-        )
+        return InterviewTurn("ready", "interview_premature", seed_ready=True, completed=True)
 
     async def answer(session_id, text, *, last_question=None):  # noqa: ARG001
         nonlocal answer_rounds
         answer_rounds += 1
         # Still says done — driver should keep steering until ledger fills.
-        return InterviewTurn(
-            "still ready", session_id, seed_ready=True, completed=True
-        )
+        return InterviewTurn("still ready", session_id, seed_ready=True, completed=True)
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
@@ -3214,6 +3210,133 @@ async def test_premature_backend_only_closure_still_blocked_under_ledger_primary
     assert result.status in ("seed_ready", "blocked")
     if result.status == "seed_ready":
         assert state.interview_closure_mode == "ledger_only"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_forwards_force_to_seed_generator_on_ledger_only_closure(
+    tmp_path,
+) -> None:
+    """SEED_GENERATION boundary honors PR-β closure semantics.
+
+    PR-β / SSOT #1157 *Closure Policy* (2026-05-27) Bot review #1 BLOCKER:
+    when the interview closes as ``ledger_only`` the persisted backend
+    ambiguity score is acknowledged-stale by design — the ledger's
+    structural completeness IS the acceptance signal. The pipeline must
+    therefore call ``seed_generator(..., force=True)`` so the downstream
+    ``GenerateSeedHandler`` / ``SeedGenerator.generate`` ambiguity gate
+    cannot re-block at the same threshold the interview driver explicitly
+    chose to ignore. ``mutual_agreement`` closures preserve the legacy
+    behavior (no ``force``).
+    """
+    seed_calls: list[dict[str, object]] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        # Backend never converges — saturates around 0.40 like #1170 R2-diag.
+        return InterviewTurn(
+            "What else should we know?",
+            "interview_force_ledger_only",
+            seed_ready=False,
+            completed=False,
+            ambiguity_score=0.40,
+        )
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("complete ledger should close on round 0 without answering")
+
+    async def generate_seed(session_id: str, *, force: bool = False) -> Seed:
+        seed_calls.append({"session_id": session_id, "force": force})
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
+        return {"job_id": "job_seed_force", "execution_id": "exec_seed_force"}
+
+    state = AutoPipelineState(goal="Build a habit-tracker CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)  # ledger arrives structurally complete on round 0
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=4,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+
+    result = await pipeline.run(state)
+
+    # Interview closes as ledger_only at round 0 (no backend touches).
+    assert state.interview_closure_mode == "ledger_only"
+    # Seed generation actually runs and ``force=True`` is forwarded —
+    # this is the contract that closes the bot review #1 blocker.
+    assert len(seed_calls) == 1
+    assert seed_calls[0]["force"] is True
+    # End-to-end: the pipeline reaches RUN (or beyond) — i.e. the
+    # SEED_GENERATION boundary did NOT re-block ledger-only sessions.
+    assert result.status in ("complete", "blocked", "seed_ready")
+    if result.status == "blocked":
+        # Whatever blocked must NOT be the ambiguity-gate ValidationError
+        # the bot called out — that would mean ``force`` was not honored.
+        assert "Ambiguity score" not in (result.blocker or "")
+        assert "ambiguity_score" not in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_force_seed_generator_on_mutual_agreement_closure(
+    tmp_path,
+) -> None:
+    """Companion to the ledger-only force test: ``mutual_agreement`` closures
+    preserve the legacy contract (no ``force`` kwarg). PR-β narrows the
+    force-eligible set to ledger-evidence-driven closure modes only.
+    """
+    seed_calls: list[dict[str, object]] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "ready",
+            "interview_mutual_force",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.15,
+        )
+
+    async def answer(session_id, text, *, last_question=None):  # noqa: ARG001
+        raise AssertionError("mutual_agreement closure should not reach backend.answer")
+
+    async def generate_seed(session_id: str, *, force: bool = False) -> Seed:
+        seed_calls.append({"session_id": session_id, "force": force})
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
+        return {"job_id": "job_mutual", "execution_id": "exec_mutual"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=4,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+    )
+
+    await pipeline.run(state)
+
+    assert state.interview_closure_mode == "mutual_agreement"
+    assert len(seed_calls) == 1
+    # Legacy contract preserved: no ``force`` forwarded on mutual agreement.
+    assert seed_calls[0]["force"] is False
 
 
 @pytest.mark.asyncio

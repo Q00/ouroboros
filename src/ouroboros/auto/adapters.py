@@ -182,18 +182,28 @@ class HandlerSeedGenerator:
     def __init__(self, handler: GenerateSeedHandler) -> None:
         self.handler = handler
 
-    async def __call__(self, session_id: str) -> Seed:
+    async def __call__(self, session_id: str, *, force: bool = False) -> Seed:
         # AutoPipeline reaches this adapter only after its own interview driver
         # closure gate records a seed-ready interview. Pass the maintained
         # first-party acknowledgement set so the opt-in MCP hard gate can be
         # enabled without breaking `ooo auto` seed generation.
+        #
+        # ``force`` is set by ``AutoPipeline`` when the interview closed on
+        # ledger evidence (``interview_closure_mode in {ledger_only,
+        # safe_default}``) per SSOT #1157 *Closure Policy* (2026-05-27).
+        # That bypasses the persisted-ambiguity gate in
+        # ``GenerateSeedHandler`` / ``SeedGenerator.generate`` — necessary
+        # because under ledger-primary closure the backend ambiguity score
+        # is acknowledged-stale by design and would otherwise re-block at
+        # exactly the same threshold the interview driver chose to ignore.
+        arguments: dict[str, object] = {
+            "session_id": session_id,
+            "client_gates": REQUIRED_CLIENT_GATES,
+        }
+        if force:
+            arguments["force"] = True
         result = _unwrap(
-            await self.handler.handle(
-                {
-                    "session_id": session_id,
-                    "client_gates": REQUIRED_CLIENT_GATES,
-                }
-            ),
+            await self.handler.handle(arguments),
             tool_name="ouroboros_generate_seed",
         )
         text = result.content[0].text if result.content else ""
