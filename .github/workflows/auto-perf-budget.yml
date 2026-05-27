@@ -1,0 +1,33 @@
+name: ooo-auto-perf-budget
+
+# Enforces RFC #1256 §I5: PRs touching `src/ouroboros/auto/` must include
+# an R-run comparison section in the PR body so silent per-round
+# wall-clock regressions (as observed in the PR-A/B/β/γ merge train, #1258)
+# cannot land without explicit per-round cost data.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  enforce-perf-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history so the script can diff against origin/main
+          # to enumerate changed paths.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Enforce R-run comparison section
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python3 scripts/check-auto-perf-budget.py
