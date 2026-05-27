@@ -336,22 +336,30 @@ class AutoInterviewDriver:
                     state.current_round,
                     blocker_text,
                 )
-            state.current_round = round_number
+            # Apply the answer to the in-memory ledger only. Do NOT persist
+            # ``state.ledger`` / ``state.current_round`` / ``state.pending_question``
+            # / ``state.auto_answer_log`` until ``backend.answer`` acknowledges
+            # the round.
+            #
+            # Why deferred persistence (SSOT #1157 *Closure Policy* — bot review #2
+            # BLOCKER on 17703155): persisting a complete ledger before the
+            # backend transcript reflects the answer creates a resume-time
+            # transcript-sync gap. The previous order saved the complete
+            # ledger first, then called ``backend.answer``; if that backend
+            # call timed out or raised, resume would see the persisted
+            # complete ledger, hit the ledger-primary closure gate above,
+            # close as ``ledger_only``, and proceed to SEED_GENERATION —
+            # but ``GenerateSeedHandler`` reads the persisted interview
+            # transcript, not the ledger, and the backend never accepted
+            # the last answer, so the Seed would be generated from stale
+            # transcript evidence. Deferring the persistence keeps
+            # ``state.ledger`` and the backend transcript monotonically in
+            # sync: on backend.answer failure, ``state.ledger`` on disk is
+            # the pre-answer state, resume re-enters the loop, the answerer
+            # deterministically re-computes the same answer, and the next
+            # ``backend.answer`` attempt either succeeds (round completes
+            # cleanly) or returns the same blocker.
             self.answerer.apply(answer, ledger, question=question_for_record)
-            state.ledger = ledger.to_dict()
-            state.pending_question = None
-            _record_auto_answer(
-                state,
-                round_number=round_number,
-                source=answer.source.value,
-                question=question_for_record,
-                answer=answer.text,
-            )
-            state.mark_progress(
-                f"answered round {round_number}/{self.max_rounds} from {answer.source.value}",
-                tool_name="auto_answerer",
-            )
-            self._save(state)
 
             try:
                 turn = _validate_turn(
@@ -366,6 +374,10 @@ class AutoInterviewDriver:
                     )
                 )
             except TimeoutError as exc:
+                # In-memory ledger has the unsynced answer applied, but
+                # ``state.ledger`` on disk does NOT (deferred persistence
+                # above). Persist only the blocker context; the next resume
+                # re-computes the answer from the pre-answer ledger.
                 message = str(exc)
                 state.mark_blocked(message, tool_name="interview.answer")
                 record_authoring_backend(state)
@@ -382,8 +394,26 @@ class AutoInterviewDriver:
                     "blocked", state.interview_session_id, ledger, round_number, blocker
                 )
 
+            # Backend acknowledged the round — NOW safe to persist all the
+            # round's effects in a single ``self._save(state)`` flush. The
+            # ledger and backend transcript are guaranteed mirrored at this
+            # point, so the next iteration's ledger-primary closure gate
+            # can safely short-circuit close.
+            state.current_round = round_number
+            state.ledger = ledger.to_dict()
             state.interview_session_id = turn.session_id
             state.pending_question = turn.question
+            _record_auto_answer(
+                state,
+                round_number=round_number,
+                source=answer.source.value,
+                question=question_for_record,
+                answer=answer.text,
+            )
+            state.mark_progress(
+                f"answered round {round_number}/{self.max_rounds} from {answer.source.value}",
+                tool_name="auto_answerer",
+            )
             self._save(state)
 
         # max_rounds exhausted — one final ledger-primary closure check, then
