@@ -1,0 +1,53 @@
+spec_version: "0.1.0"
+name: ouroboros
+version: 1.0.0
+description: >
+  Ouroboros is a specification-first Agent OS for AI coding workflows. It replaces
+  ad-hoc prompting with a structured interview → seed → execute → evaluate →
+  evolve cycle, enforcing clarity (ambiguity ≤ 0.2) before any code is written.
+  Works across Claude Code, Codex CLI, OpenCode, and Hermes runtimes via MCP.
+author: Q00
+license: MIT
+
+model:
+  preferred: anthropic:claude-sonnet-4-6
+  fallback:
+    - anthropic:claude-opus-4-7
+  constraints:
+    temperature: 0.1
+
+skills:
+  - interview
+  - seed
+  - run
+  - evaluate
+  - evolve
+  - auto
+  - qa
+  - unstuck
+  - status
+  - ralph
+  - brownfield
+  - pm
+  - publish
+  - tutorial
+  - setup
+  - update
+  - cancel
+  - resume-session
+  - welcome
+  - help
+
+runtime:
+  max_turns: 100
+  timeout: 1800
+
+compliance:
+  risk_tier: standard
+  supervision:
+    human_in_the_loop: destructive
+    kill_switch: true
+  recordkeeping:
+    audit_logging: true
+  data_governance:
+    pii_handling: redact
