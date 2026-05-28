@@ -528,6 +528,7 @@ class TestCodexSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+            patch("ouroboros.cli.commands.setup.print_warning") as mock_warning,
         ):
             setup_cmd._register_codex_default_profiles(codex_path="/usr/local/bin/codex")
 
@@ -537,6 +538,11 @@ class TestCodexSetup:
         assert "[profiles.ouroboros-fast]" in contents
         assert 'model = "custom-cheap-model"' in contents
         assert 'model_reasoning_effort = "low"' in fast_profile
+        mock_warning.assert_called_once()
+        warning = mock_warning.call_args.args[0]
+        assert "Preserved legacy Codex profile table(s)" in warning
+        assert "ouroboros-fast" in warning
+        assert "manually reconcile" in warning
 
     def test_register_codex_worker_profile_writes_section(self, tmp_path: Path) -> None:
         """First-time setup creates the [profiles.ouroboros-worker] block."""
@@ -784,6 +790,7 @@ class TestCodexSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+            patch("ouroboros.cli.commands.setup.print_warning") as mock_warning,
         ):
             setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
 
@@ -793,6 +800,11 @@ class TestCodexSetup:
         assert "[profiles.ouroboros-worker]" in contents
         assert 'model = "o3-mini"' in contents
         assert 'sandbox = "read-only"' in worker_profile
+        mock_warning.assert_called_once()
+        warning = mock_warning.call_args.args[0]
+        assert "Preserved legacy Codex profile table(s)" in warning
+        assert "ouroboros-worker" in warning
+        assert "manually reconcile" in warning
 
     def test_install_codex_artifacts_installs_rules_and_skills(self, tmp_path: Path) -> None:
         """Codex setup should install both managed rules and managed skills."""

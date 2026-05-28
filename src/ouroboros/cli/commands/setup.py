@@ -867,6 +867,21 @@ def _codex_profile_v2_file_exists(codex_dir: Path, profile_name: str) -> bool:
     return (codex_dir / f"{profile_name}.config.toml").exists()
 
 
+def _warn_preserved_legacy_codex_profiles(codex_config: Path, profile_names: set[str]) -> None:
+    """Warn when setup preserves legacy profiles to avoid deleting user overrides."""
+    if not profile_names:
+        return
+
+    profiles = ", ".join(sorted(profile_names))
+    print_warning(
+        "Preserved legacy Codex profile table(s) in "
+        f"{codex_config} because matching profile-v2 file(s) already exist: {profiles}. "
+        "If your Codex CLI rejects startup because both legacy and profile-v2 profiles "
+        "are present, manually reconcile the settings and remove the legacy "
+        "[profiles.<name>] table(s)."
+    )
+
+
 def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
@@ -881,6 +896,13 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
             for name in _CODEX_DEFAULT_PROFILE_SECTIONS
             if _codex_profile_v2_file_exists(codex_config.parent, name)
         }
+        try:
+            legacy_profiles = _existing_codex_profile_names(raw)
+        except (tomllib.TOMLDecodeError, ValueError) as exc:
+            print_error(f"Could not parse {codex_config} - skipping Codex profile registration.")
+            print_info(str(exc))
+            return
+        preserved_legacy_profiles = legacy_profiles & existing_v2_profiles
         removable_profiles = set(_CODEX_DEFAULT_PROFILE_SECTIONS) - existing_v2_profiles
         try:
             updated_raw, migrated_profiles = _remove_codex_legacy_profile_sections(
@@ -898,6 +920,7 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
         added_profiles = _write_codex_profile_v2_files(codex_config.parent, profile_settings)
         if updated_raw != raw:
             codex_config.write_text(updated_raw, encoding="utf-8")
+        _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
 
         if added_profiles:
             print_success(
@@ -945,10 +968,14 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
 
     if _codex_uses_profile_v2(codex_path):
         profile_path = codex_config.parent / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml"
+        legacy_profiles = _existing_codex_profile_names(raw)
         removable_profiles = (
             set()
             if _codex_profile_v2_file_exists(codex_config.parent, _CODEX_WORKER_PROFILE_NAME)
             else {_CODEX_WORKER_PROFILE_NAME}
+        )
+        preserved_legacy_profiles = (
+            legacy_profiles & {_CODEX_WORKER_PROFILE_NAME} - removable_profiles
         )
         try:
             updated_raw, migrated_profiles = _remove_codex_legacy_profile_sections(
@@ -971,10 +998,13 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
             created_profile = True
         if updated_raw != raw:
             codex_config.write_text(updated_raw, encoding="utf-8")
+            _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
             print_success(f"Migrated legacy Codex worker profile out of {codex_config}")
         elif created_profile:
+            _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
             print_success(f"Registered Codex worker profile-v2 file in {profile_path}")
         else:
+            _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
             print_info("Codex worker profile-v2 file already present.")
         return
 
