@@ -327,10 +327,17 @@ async def test_slow_opened_append_does_not_block_interview_loop(tmp_path) -> Non
     Production ``EventStore.append`` can also wait on SQLite locks
     (``busy_timeout=30000``), so the failure mode is not synthetic.
 
-    Fix: ``_emit_event`` now wraps the append with a 1.0 s fail-open
-    ``asyncio.wait_for``; a stuck observer is downgraded to a
-    ``auto.interview.event_store_emit_timed_out`` warning and the loop
-    proceeds.
+    Fix: ``_emit_event`` dispatches the append as a background
+    ``asyncio.Task`` and returns immediately — see the module-level
+    comment in ``interview_driver.py``. The append is bounded by
+    ``_EVENT_STORE_EMIT_TIMEOUT_SECONDS`` (1.0 s) inside that task,
+    so a stuck observer is downgraded to a typed
+    ``auto.interview.event_store_emit_timed_out`` warning. ``run()``
+    then drains pending tasks under a SHIELDED ``wait_for`` capped at
+    ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS`` (0.05 s) so the wrapper's
+    caller-visible latency stays bounded; an ``opened`` append that
+    cannot complete inside that drain budget falls through to the
+    background-cancel path under the slow-store fail-open contract.
 
     This test pins that contract: a 5 s slow ``opened`` append no
     longer holds up the interview — the inner result is returned
@@ -473,3 +480,144 @@ async def test_deadline_capped_outer_timeout_below_observer_timeout(tmp_path) ->
     for task in list(driver._pending_emit_tasks):
         task.cancel()
     await driver.wait_for_pending_emits()
+
+
+@pytest.mark.asyncio
+async def test_run_persists_events_before_returning_for_ordinary_caller(tmp_path) -> None:
+    """Bot-review blocker (commit ``ef0fec17`` → ``req_1779891123_145``):
+    the previous fire-and-forget dispatch shape kept EventStore
+    latency off the pipeline's ``asyncio.wait_for`` budget but lost
+    every lifecycle event the moment the owning event loop closed
+    after ``run()`` returned. The bot reproduced this with a store
+    whose ``append()`` sleeps 0.01 s, awaiting ``driver.run(...)``,
+    and not invoking the test-only ``wait_for_pending_emits()`` helper:
+    after ``asyncio.run()`` returned, ``store.appended`` was ``[]``.
+
+    The §I4 substrate contract — "supply an EventStore, get queryable
+    lifecycle evidence" — cannot rely on every production composition
+    root remembering to drain a helper that is itself best-effort.
+    The fix bakes the durability boundary into ``run()`` via a small
+    SHIELDED drain: every emit task that completes inside
+    ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS`` (50 ms) persists before
+    return, while the shield+wait_for shape preserves cancellation
+    contracts and slow-store fail-open semantics.
+
+    This test pins the public surface: an ordinary caller that simply
+    ``await driver.run(...)`` observes both lifecycle events in the
+    EventStore without calling ``wait_for_pending_emits``.
+    """
+
+    class _SmallSleepStore:
+        """Mirrors the bot's reproducer shape: ``append`` is not
+        instantaneous (so a fire-and-forget shape would race the
+        caller out) but completes well inside the drain budget."""
+
+        def __init__(self) -> None:
+            self.appended: list[BaseEvent] = []
+
+        async def append(self, event: BaseEvent, **_: Any) -> None:
+            await asyncio.sleep(0.01)
+            self.appended.append(event)
+
+    store = _SmallSleepStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    state = _build_state(tmp_path)
+
+    with _patch_inner(return_value=_result(status="ready", session_id="iv_drain", rounds=2)):
+        # NOTE: deliberately no ``await driver.wait_for_pending_emits()``
+        # here. That helper is intentionally test/operator-only — the
+        # §I4 substrate contract under test is that ``run()`` itself
+        # provides the durability boundary, so an ordinary caller
+        # observes the events without remembering to drain.
+        result = await driver.run(state, MagicMock(spec=SeedDraftLedger))
+
+    assert result.status == "ready"
+    assert [event.type for event in store.appended] == [
+        "auto.interview.opened",
+        "auto.interview.finalized",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_drains_pending_emits_on_inner_exception_path(tmp_path) -> None:
+    """Companion to the ordinary-caller drain test: when ``_run_inner``
+    raises a regular ``Exception``, the wrapper still emits
+    ``auto.interview.failed`` AND drains pending emit tasks before
+    re-raising. Without the drain, an ordinary caller's ``try/except``
+    around ``await driver.run(...)`` would observe an empty EventStore
+    on the very path where failure evidence matters most.
+    """
+
+    class _SmallSleepStore:
+        def __init__(self) -> None:
+            self.appended: list[BaseEvent] = []
+
+        async def append(self, event: BaseEvent, **_: Any) -> None:
+            await asyncio.sleep(0.01)
+            self.appended.append(event)
+
+    store = _SmallSleepStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    state = _build_state(tmp_path)
+
+    class _Boom(RuntimeError):
+        pass
+
+    with _patch_inner(side_effect=_Boom("backend offline")):
+        with pytest.raises(_Boom):
+            await driver.run(state, MagicMock(spec=SeedDraftLedger))
+
+    # No explicit ``wait_for_pending_emits`` — drain inside ``run()``
+    # must have persisted both events before the exception re-raised.
+    types = [event.type for event in store.appended]
+    assert types == ["auto.interview.opened", "auto.interview.failed"]
+
+
+@pytest.mark.asyncio
+async def test_drain_timeout_logs_warning_and_does_not_block_caller(tmp_path) -> None:
+    """The drain is bounded: a store whose ``append`` exceeds the
+    drain budget does not stall ``run()`` past
+    ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS``. The timeout is downgraded
+    to a typed ``auto.interview.event_store_drain_timed_out`` warning
+    so the operator surface still has a signal that observability
+    degraded — the interview loop itself never observes the latency.
+
+    This conjugate test guards the deadline-capped regression: a
+    pathologically slow store cannot weaken cancellation or pipeline
+    timeout contracts even when the drain runs.
+    """
+
+    class _SlowEverythingStore:
+        def __init__(self) -> None:
+            self.appended: list[BaseEvent] = []
+
+        async def append(self, event: BaseEvent, **_: Any) -> None:
+            # Sleep well past the drain budget AND the per-event
+            # fail-open bound, so the drain times out and the
+            # background task eventually times out too.
+            await asyncio.sleep(5.0)
+            self.appended.append(event)
+
+    store = _SlowEverythingStore()
+    driver = AutoInterviewDriver(backend=MagicMock(), event_store=store)
+    state = _build_state(tmp_path)
+
+    # Outer wait_for budget is 0.3 s — well below the 5 s append but
+    # above the 0.05 s drain bound, so the wrapper's drain timeout
+    # has room to fire without racing the outer cancel.
+    with _patch_inner(return_value=_result(status="ready", rounds=1)):
+        result = await asyncio.wait_for(
+            driver.run(state, MagicMock(spec=SeedDraftLedger)),
+            timeout=0.3,
+        )
+
+    assert result.status == "ready"
+    # Both background appends are still in flight under shield; they
+    # would otherwise leak past the test. Cancel and drain so the
+    # next test starts clean.
+    for task in list(driver._pending_emit_tasks):
+        task.cancel()
+    await driver.wait_for_pending_emits()
+    # The slow appends never reached the recording list — fail-open
+    # semantics preserved end-to-end.
+    assert store.appended == []
