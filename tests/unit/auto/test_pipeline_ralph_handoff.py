@@ -43,6 +43,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.job_manager import JobStatus
 
 
 def _build_seed(seed_id: str = "seed_test_001") -> Seed:
@@ -1245,12 +1246,54 @@ async def test_ralph_handoff_resume_falls_back_to_guidance_without_resumer(tmp_p
 # ---------------------------------------------------------------------------
 
 
+def _terminal_success_run_starter(job_id: str = "job_run_existing") -> Any:
+    """Build a run_starter adapter whose owned-job snapshot reports terminal success.
+
+    Mirrors the production ``HandlerRunStarter`` / ``HandlerSynchronousRunStarter``
+    shape: ``adapter.handler._job_manager.get_snapshot(job_id)`` returns a
+    snapshot whose ``is_terminal`` is True and ``result_meta`` advertises
+    ``status="completed"`` / ``success=True``. The starter callable itself
+    raises so the test proves resume does NOT redispatch the run job; the
+    only signal feeding the resume gate is the persisted run handle plus
+    the snapshot poll.
+    """
+
+    class _RunSnapshot:
+        is_terminal = True
+        status = JobStatus.COMPLETED
+        result_meta = {"status": "completed", "success": True}
+
+    class _RunJobManager:
+        async def get_snapshot(self, snapshot_job_id: str) -> _RunSnapshot:
+            assert snapshot_job_id == job_id
+            return _RunSnapshot()
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class TerminalSuccessStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not start a duplicate run")
+
+    return TerminalSuccessStarter()
+
+
 @pytest.mark.asyncio
 async def test_run_resume_with_persisted_handle_and_complete_product_dispatches_ralph(
     tmp_path,
 ) -> None:
     """RUN resume with persisted run handles MUST honor ``complete_product``
-    and continue to RALPH_HANDOFF, not short-circuit to COMPLETE."""
+    and continue to RALPH_HANDOFF, not short-circuit to COMPLETE.
+
+    The resume gate now mirrors the fresh-path contract by polling the
+    owned-job snapshot for terminal success before invoking Ralph; this
+    test wires a snapshot that reports ``status="completed"`` /
+    ``success=True`` so the handoff proceeds and proves the happy path
+    still works.
+    """
+
     state = _state_at_run_phase(tmp_path)
     state.run_start_attempted = True
     state.run_handoff_status = "started"
@@ -1272,13 +1315,10 @@ async def test_run_resume_with_persisted_handle_and_complete_product_dispatches_
             "stop_reason": "qa passed",
         }
 
-    async def run_starter(_seed: Seed, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
-        raise AssertionError("resume must not start a duplicate run")
-
     pipeline = AutoPipeline(
         _StubInterviewDriver(),
         _seed_generator_unused,
-        run_starter=run_starter,
+        run_starter=_terminal_success_run_starter("job_run_existing"),
         reviewer=_PassReviewer(),
         ralph_starter=ralph_starter,
         complete_product=True,
@@ -1290,6 +1330,349 @@ async def test_run_resume_with_persisted_handle_and_complete_product_dispatches_
     assert result.status == "complete"
     assert state.phase is AutoPhase.COMPLETE
     assert state.ralph_job_id == "job_ralph_resumed"
+
+
+@pytest.mark.asyncio
+async def test_run_resume_with_persisted_handle_blocks_when_owned_job_paused(
+    tmp_path,
+) -> None:
+    """Resume MUST NOT hand off to Ralph when the owned run job is paused.
+
+    Mirrors the fresh-path paused guard. A paused complete-product run
+    means the operator must resume the run itself before Ralph can take
+    over.
+    """
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_paused_resume"
+    state.execution_id = "execution_paused_resume"
+    state.complete_product = True
+
+    class _RunSnapshot:
+        is_terminal = True
+        status = JobStatus.COMPLETED  # status enum value irrelevant; result_meta wins
+        result_meta = {"status": "paused", "success": None}
+
+    class _RunJobManager:
+        async def get_snapshot(self, _job_id: str) -> _RunSnapshot:
+            return _RunSnapshot()
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class PausedSnapshotStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not start a duplicate run")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run while resumed execution is paused")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=PausedSnapshotStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "paused" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_with_persisted_handle_blocks_when_owned_job_still_running(
+    tmp_path,
+) -> None:
+    """Resume MUST block when the owned run job is still queued/running.
+
+    The snapshot returns ``status="running"`` to model a poll that did not
+    observe terminal completion within the per-phase budget — the fresh
+    path treats this identically and we mirror that contract.
+    """
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_pending_resume"
+    state.complete_product = True
+
+    class _RunSnapshot:
+        is_terminal = False
+        status = JobStatus.RUNNING
+        result_meta: dict[str, Any] = {}
+
+    class _RunJobManager:
+        async def get_snapshot(self, _job_id: str) -> _RunSnapshot:
+            return _RunSnapshot()
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class RunningSnapshotStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not start a duplicate run")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run while resumed execution is still pending")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=RunningSnapshotStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "did not finish" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_with_persisted_job_id_blocks_when_starter_has_no_snapshot_api(
+    tmp_path,
+) -> None:
+    """Persisted ``job_id`` without a job-manager snapshot must not satisfy the resume gate.
+
+    A persisted ``job_id`` proves the execute_seed job was dispatched,
+    not that it reached terminal success. When the configured run
+    starter does not expose ``handler._job_manager.get_snapshot``,
+    ``_wait_owned_run_job_terminal`` returns ``None`` and the resume
+    branch cannot reconcile the owned-job lifecycle. Without an
+    explicit guard the previous resume path would walk past the
+    terminal check and start Ralph on dispatch evidence alone; the new
+    contract refuses the handoff in that case, mirroring the
+    jobless-synchronous branch.
+    """
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_unpollable"
+    state.execution_id = "execution_unpollable"
+    state.run_session_id = "session_unpollable"
+    state.complete_product = True
+
+    class UnpollableStarter:
+        # No ``handler`` attribute => ``_wait_owned_run_job_terminal``
+        # returns None because ``get_snapshot`` cannot be resolved.
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not redispatch the run job")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError(
+            "ralph_starter must not run when the owned job cannot be reconciled"
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=UnpollableStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "snapshot is unavailable" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_blocks_when_snapshot_does_not_confirm_terminal_success(
+    tmp_path,
+) -> None:
+    """An ambiguous terminal snapshot (no ``success=True`` / no ``status=completed``) must NOT pass the gate.
+
+    ``_wait_owned_run_job_terminal`` may return ``result_meta`` that is
+    empty or carries an unfamiliar status (e.g. an adapter that flips
+    ``is_terminal`` but does not populate the success/status keys auto
+    consumes). Such a payload is not evidence of terminal success and
+    must be treated as unreconcilable, not silently fall through to the
+    Ralph handoff. This guards the resume gate against snapshot shapes
+    that bypass the failed/paused/queued allowlist by omission.
+    """
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_ambiguous"
+    state.complete_product = True
+
+    class _RunSnapshot:
+        is_terminal = True
+        # status enum unset and result_meta empty: ``_wait_owned_run_job_terminal``
+        # produces ``{}`` because the snapshot has nothing to ``setdefault`` from,
+        # and the resume gate sees neither ``success=True`` nor
+        # ``status="completed"``.
+        status = None
+        result_meta: dict[str, Any] = {}
+
+    class _RunJobManager:
+        async def get_snapshot(self, _job_id: str) -> _RunSnapshot:
+            return _RunSnapshot()
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class AmbiguousSnapshotStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not redispatch the run job")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError(
+            "ralph_starter must not run when the snapshot does not confirm terminal success"
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=AmbiguousSnapshotStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "did not confirm terminal success" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_with_jobless_sync_handle_blocks_complete_product_ralph(
+    tmp_path,
+) -> None:
+    """Jobless synchronous executions cannot be reconciled on resume.
+
+    ``HandlerSynchronousRunStarter`` always returns ``job_id=None`` and
+    relies on the starter's returned dict for terminal-success
+    validation. On resume that dict is gone, so persisted
+    ``execution_id``/``run_session_id`` alone are not evidence of
+    terminal success — they only prove an execution session existed.
+    Most often this branch is reached after the fresh-path paused/failed
+    guard blocked the synchronous run; ``_recoverable_phase_for_tool``
+    sends the resume back into RUN, where without an explicit guard
+    Ralph would launch against the still-pending product session.
+    Resume must block until the operator resolves the synchronous run
+    itself.
+    """
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = None
+    state.execution_id = "execution_paused_sync"
+    state.run_session_id = "session_paused_sync"
+    state.complete_product = True
+
+    class JoblessSyncStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            raise AssertionError("resume must not redispatch a synchronous run")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError(
+            "ralph_starter must not run while jobless sync execution is unreconcilable"
+        )
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=JoblessSyncStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "jobless synchronous execution" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_with_persisted_handle_blocks_when_owned_job_failed(
+    tmp_path,
+) -> None:
+    """Resume MUST surface a failed owned run job instead of starting Ralph."""
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_failed_resume"
+    state.complete_product = True
+
+    class _RunSnapshot:
+        is_terminal = True
+        status = JobStatus.FAILED
+        result_meta = {"status": "failed", "success": False}
+
+    class _RunJobManager:
+        async def get_snapshot(self, _job_id: str) -> _RunSnapshot:
+            return _RunSnapshot()
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class FailedSnapshotStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not start a duplicate run")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run after a failed resumed execution")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=FailedSnapshotStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "finished unsuccessfully" in (state.last_error or "")
+    assert state.ralph_job_id is None
 
 
 @pytest.mark.asyncio
