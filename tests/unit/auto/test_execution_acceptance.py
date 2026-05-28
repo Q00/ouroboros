@@ -61,6 +61,35 @@ def test_normalize_execution_acceptance_drops_auto_report_criteria() -> None:
     assert normalized.acceptance_criteria == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
 
 
+def test_normalize_execution_acceptance_preserves_requested_hello_auto_value() -> None:
+    seed = _seed(
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    ).model_copy(
+        update={
+            "goal": (
+                "Create hello_auto.py with hello_auto() returning exactly "
+                "'hello from ooo auto fresh'. Create tests/test_hello_auto.py "
+                "importing hello_auto and asserting that exact value. Verification "
+                "command is uv run pytest tests/test_hello_auto.py."
+            ),
+            "constraints": (
+                "hello_auto() must return exactly 'hello from ooo auto fresh'",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+        "`hello_auto() -> str` returns exactly `hello from ooo auto fresh`, "
+        "the test imports `hello_auto` and asserts that exact value, and "
+        "the exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    )
+
+
 def test_normalize_execution_acceptance_drops_observation_report_metadata() -> None:
     seed = _seed(
         "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",

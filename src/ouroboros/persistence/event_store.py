@@ -867,6 +867,7 @@ class EventStore:
         resolved_execution_id = execution_id or await self._resolve_execution_id_for_session(
             session_id,
         )
+        session_started_at = await self._resolve_session_started_at(session_id)
 
         conditions = _session_related_event_conditions(session_id, resolved_execution_id)
 
@@ -877,6 +878,8 @@ class EventStore:
                     .where(or_(*conditions))
                     .order_by(events_table.c.timestamp.desc())
                 )
+                if session_started_at is not None:
+                    query = query.where(events_table.c.timestamp >= session_started_at)
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
@@ -1047,6 +1050,27 @@ class EventStore:
                 if isinstance(execution_id, str) and execution_id:
                     return execution_id
             return None
+
+    async def _resolve_session_started_at(self, session_id: str) -> Any | None:
+        """Return the persisted start timestamp for a session, if available."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="resolve_session_started_at",
+            )
+
+        async with self._engine.begin() as conn:
+            query = (
+                select(events_table.c.timestamp)
+                .where(events_table.c.aggregate_type == "session")
+                .where(events_table.c.aggregate_id == session_id)
+                .where(events_table.c.event_type == "orchestrator.session.started")
+                .order_by(events_table.c.timestamp.asc())
+                .limit(1)
+            )
+            result = await conn.execute(query)
+            row = result.first()
+            return row[0] if row is not None else None
 
     async def get_all_lineages(self) -> list[BaseEvent]:
         """Get all lineage creation events.

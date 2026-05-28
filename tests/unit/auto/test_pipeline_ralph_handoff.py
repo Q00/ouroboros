@@ -619,6 +619,218 @@ async def test_ralph_handoff_resume_does_not_dispatch_duplicate_work(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_complete_product_synchronous_run_uses_pipeline_deadline_not_handoff_timeout(
+    tmp_path,
+) -> None:
+    """Inline complete-product execution is terminal RUN work, not quick enqueue work."""
+    state = _state_at_run_phase(tmp_path)
+    state.pipeline_timeout_seconds = 120.0
+    state.arm_deadline()
+
+    class SlowSynchronousRunStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            await asyncio.sleep(0.02)
+            return {
+                "job_id": None,
+                "session_id": "sync_session",
+                "execution_id": "sync_exec",
+                "status": "completed",
+                "success": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("successful synchronous run must not dispatch Ralph")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=SlowSynchronousRunStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        run_start_timeout_seconds=0.001,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_handoff_status == "completed"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.execution_id == "sync_exec"
+    assert state.run_handoff_status == "completed"
+    assert state.ralph_job_id is None
+    assert state.last_tool_name != "run_starter"
+
+
+def test_complete_product_synchronous_run_timeout_has_completion_grace(tmp_path) -> None:
+    """Synchronous run teardown gets a small grace beyond the strict deadline."""
+    state = _state_at_run_phase(tmp_path)
+    state.deadline_at = time.monotonic() + 5.0
+
+    class SynchronousRunStarter:
+        synchronous_execution = True
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=SynchronousRunStarter(),
+        reviewer=_PassReviewer(),
+        complete_product=True,
+        run_start_timeout_seconds=0.001,
+    )
+
+    assert pipeline._run_start_timeout(state) > 5.0
+
+
+@pytest.mark.asyncio
+async def test_complete_product_synchronous_success_after_deadline_blocks_as_timeout(
+    tmp_path,
+) -> None:
+    """Sync completion grace must not turn into extra execution budget."""
+    state = _state_at_run_phase(tmp_path)
+
+    class OverBudgetSyncStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            state.deadline_at = time.monotonic() - 1.0
+            state.deadline_at_epoch = time.time() - 1.0
+            return {
+                "job_id": None,
+                "session_id": "sync_over_budget",
+                "execution_id": "sync_over_budget_exec",
+                "status": "completed",
+                "success": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run when sync execution is over deadline")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=OverBudgetSyncStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.is_deadline_expired()
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_first_party_synchronous_success_within_grace_completes(tmp_path) -> None:
+    """First-party inline execution may return terminal metadata during teardown grace."""
+    state = _state_at_run_phase(tmp_path)
+
+    class FirstPartySyncStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            state.deadline_at = time.monotonic() - 1.0
+            state.deadline_at_epoch = time.time() - 1.0
+            return {
+                "job_id": None,
+                "session_id": "sync_grace",
+                "execution_id": "sync_grace_exec",
+                "status": "completed",
+                "success": True,
+                "_allow_deadline_completion_grace": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("successful first-party sync execution must not dispatch Ralph")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=FirstPartySyncStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_handoff_status == "completed"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.last_tool_name != PIPELINE_DEADLINE_TOOL_NAME
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_first_party_synchronous_timeout_recovers_completed_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If inline handler teardown times out, recover terminal session metadata."""
+    monkeypatch.setattr(pipeline_module, "_SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS", 0.05)
+    state = _state_at_run_phase(tmp_path)
+    state.deadline_at = time.monotonic() + 0.2
+    state.deadline_at_epoch = time.time() + 0.2
+
+    class TimeoutAfterCompletionStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+        ) -> dict[str, Any]:
+            await asyncio.sleep(1.0)
+            raise AssertionError("wait_for should time out first")
+
+        async def recover_timed_out_run(self) -> dict[str, Any]:
+            state.deadline_at = time.monotonic() - 0.01
+            state.deadline_at_epoch = time.time() - 0.01
+            return {
+                "job_id": None,
+                "session_id": "sync_recovered",
+                "execution_id": "sync_recovered_exec",
+                "status": "completed",
+                "success": True,
+                "_allow_deadline_completion_grace": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("successful recovered sync execution must not dispatch Ralph")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=TimeoutAfterCompletionStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        run_start_timeout_seconds=0.001,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.run_handoff_status == "completed"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.execution_id == "sync_recovered_exec"
+    assert state.run_session_id == "sync_recovered"
+    assert state.last_tool_name != PIPELINE_DEADLINE_TOOL_NAME
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
 async def test_insufficient_ralph_deadline_budget_blocks_as_pipeline_timeout(tmp_path) -> None:
     state = _state_at_run_phase(tmp_path)
     state.deadline_at = time.monotonic() + 0.25

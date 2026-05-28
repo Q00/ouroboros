@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 
-from ouroboros.auto.adapters import HandlerError, HandlerInterviewBackend, HandlerSeedGenerator
+from ouroboros.auto.adapters import (
+    HandlerError,
+    HandlerInterviewBackend,
+    HandlerSeedGenerator,
+    HandlerSynchronousRunStarter,
+)
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
+
+class _FakeSeed:
+    def to_dict(self) -> dict[str, object]:
+        return {"goal": "Create hello_auto.py", "acceptance_criteria": ()}
 
 
 @pytest.mark.asyncio
@@ -44,6 +55,107 @@ async def test_auto_interview_backend_ignores_seed_ready_client_gate_metadata(tm
 
     assert turn.session_id == "interview_auto"
     assert turn.seed_ready is True
+
+
+@pytest.mark.asyncio
+async def test_synchronous_run_starter_skips_execute_seed_qa(tmp_path) -> None:
+    """Auto complete-product uses exact execution evidence, not execute_seed QA teardown."""
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
+                is_error=False,
+                meta={
+                    "session_id": "orch_sync",
+                    "execution_id": "exec_sync",
+                    "status": "completed",
+                    "success": True,
+                },
+            )
+        )
+    )
+    starter = HandlerSynchronousRunStarter(handler, cwd=str(tmp_path))
+
+    result = await starter(_FakeSeed())  # type: ignore[arg-type]
+
+    arguments = handler.handle.await_args.args[0]
+    assert arguments["skip_qa"] is True
+    assert result["status"] == "completed"
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_synchronous_run_starter_returns_persisted_terminal_meta_before_teardown(
+    tmp_path,
+) -> None:
+    """Auto does not wait for execute_seed teardown after the session is terminal."""
+    handler = AsyncMock()
+
+    async def slow_handle(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(60)
+        raise AssertionError("terminal recovery should return first")
+
+    handler.handle = AsyncMock(side_effect=slow_handle)
+
+    class RecoveringStarter(HandlerSynchronousRunStarter):
+        async def recover_timed_out_run(self) -> dict[str, object] | None:
+            return {
+                "job_id": None,
+                "session_id": "orch_recovered",
+                "execution_id": "exec_recovered",
+                "status": "completed",
+                "success": True,
+                "_allow_deadline_completion_grace": True,
+            }
+
+    starter = RecoveringStarter(
+        handler,
+        cwd=str(tmp_path),
+        terminal_poll_interval_seconds=0.1,
+    )
+
+    result = await starter(_FakeSeed())  # type: ignore[arg-type]
+
+    assert result["session_id"] == "orch_recovered"
+    assert result["execution_id"] == "exec_recovered"
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_synchronous_run_starter_cancels_inner_execute_seed_on_outer_cancel(
+    tmp_path,
+) -> None:
+    """A timed-out auto pipeline must not leave inline execution running."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    handler = AsyncMock()
+
+    async def hanging_handle(*_args: object, **_kwargs: object) -> object:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    handler.handle = AsyncMock(side_effect=hanging_handle)
+    starter = HandlerSynchronousRunStarter(
+        handler,
+        cwd=str(tmp_path),
+        terminal_poll_interval_seconds=60,
+    )
+
+    call_task = asyncio.create_task(starter(_FakeSeed()))  # type: ignore[arg-type]
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    call_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call_task
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+    assert starter._latest_run_meta is not None
+    assert starter._latest_run_meta["status"] == "cancelled"
+    assert starter._latest_run_meta["success"] is False
 
 
 @pytest.mark.asyncio
