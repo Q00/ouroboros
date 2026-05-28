@@ -22,16 +22,48 @@ events, or wiring.
 
 ## 2. What current HEAD implements
 
+### 2.1 Production producers of `control.directive.emitted`
+
+The journal already has four production producers. Two distinct
+**failure stances** coexist; subscribers must not assume one stance
+covers the whole stream.
+
+| Producer | Code | Target aggregate | Append semantics |
+|---|---|---|---|
+| `AgentProcessRuntime._make_emitter` | `src/ouroboros/orchestrator/agent_process.py:994-1029` | `("agent_process", process_id)` | **Observational best-effort.** Returns `None` when no `EventStore` is configured. When wired, `event_store.append(...)` is wrapped in `asyncio.wait_for(...)` and **`except Exception` catches and logs `agent_process.directive_emit_failed`** (the #476 "journal stays out of the way" rule). Lifecycle transitions complete regardless of append outcome. |
+| `EvolutionLoop._emit_step_directive` | `src/ouroboros/evolution/loop.py:307-339` | `("lineage", lineage_id)` | **Strict, single-event append.** `await self.event_store.append(...)` is uncaught — append failure propagates and aborts the step. |
+| `EvolutionLoop._emit_watchdog_timeout_directive` | `src/ouroboros/evolution/loop.py:341-372` | `("lineage", lineage_id)` | **Strict, single-event append.** Same uncaught-`append` shape as the step directive. |
+| `GenerationProgressWatchdog.persist_decision` | `src/ouroboros/evolution/watchdog.py:236-308` | `("lineage", lineage_id)` | **Strict, atomic batch append.** Emits the watchdog decision event and its paired directive event via `event_store.append_batch([decision_event, directive_event])`, so both rows commit together or neither does. The contract carries an `idempotency_key` so the projection-level dedupe identity is exposed (`watchdog_directive_idempotency_key`). |
+
+Two implications subscribers must internalize:
+
+1. **Failure stance is per-producer, not uniform.** The
+   agent-process producer's catch-and-log behavior is the exception,
+   not the rule. Lineage producers raise on append failure.
+   Subscribers that infer "every decision the system took shows up in
+   the journal" must remember that an `agent_process` emitter may have
+   silently dropped its append; they cannot conclude the lifecycle
+   transition didn't happen just because the row is absent.
+2. **Atomicity stance is per-producer, not uniform.** Only the
+   watchdog producer uses `append_batch` to pair a decision event with
+   its directive. Single-row producers can be racing other producers
+   appending against the same `("lineage", lineage_id)` aggregate, so
+   the projection cannot assume "directive immediately follows its
+   originating decision row" — only the watchdog producer guarantees
+   that.
+
+### 2.2 Other implemented surfaces
+
 | Surface | Status | Code |
 |---|---|---|
-| Durable append of `control.directive.emitted` | **Implemented (observational-first)** | `AgentProcessRuntime._make_emitter` in `src/ouroboros/orchestrator/agent_process.py` is the only producer wired today. It only appends when an `EventStore` is configured; append failures are caught and logged ("the journal stays out of the way" per #476). |
 | `EventStore.append` durability | **Implemented** | `src/ouroboros/persistence/event_store.py:276`. SQLite WAL mode, `synchronous=NORMAL`, `busy_timeout=30000ms`. |
+| `EventStore.append_batch` atomic durability | **Implemented** | Used by the watchdog producer; commits all events in the batch in a single transaction. |
 | `ControlContract` validation | **Implemented** | `src/ouroboros/core/control_contract.py`. Rejects non-`Directive` values at construction. |
-| Aggregate-scoped replay | **Implemented** | `EventStore.get_events_after(aggregate_type, aggregate_id, last_row_id=0)` at `event_store.py:468`. SQLite implicit `rowid` provides monotone ordering *within* a single `(aggregate_type, aggregate_id)` pair. There is no global cursor. |
-| Aggregate scoping rule | **Locked** | `src/ouroboros/events/control.py:13-30` — every `control.directive.emitted` row is aggregated by `(target_type, target_id)` of the decision target, not by a neutral `"control"` bucket. Replay therefore happens per target. |
+| Aggregate-scoped replay | **Implemented** | `EventStore.get_events_after(aggregate_type, aggregate_id, last_row_id=0)` at `event_store.py:468`. The pagination filter is `rowid > last_row_id`, but the returned batch is ordered by `(timestamp, id)` (`event_store.py:503-509`). The `last_row_id` cursor is therefore a *pagination* cursor: subscribers must advance it only after committing the whole batch they handled, and must not infer global ordering from `rowid`. There is no global cross-aggregate cursor. |
+| Aggregate scoping rule | **Locked** | `src/ouroboros/events/control.py:13-30` — every `control.directive.emitted` row is aggregated by `(target_type, target_id)` of the decision target, not by a neutral `"control"` bucket. Replay therefore happens per target (currently `"agent_process"` or `"lineage"`). |
 | `ControlBus` plumbing (subscribe / publish API) | **Implemented but unused** | `src/ouroboros/orchestrator/control_bus.py`. A `ControlBus` instance is constructed in `src/ouroboros/mcp/server/adapter.py:1872`, but no production callsite invokes `ControlBus.publish(...)` yet. The bus is intentionally in place ahead of subscribers so the wiring stays stable. |
 | Projection | **Implemented** | `ControlDirectiveEmission` in `src/ouroboros/core/lineage.py`; accumulated by `OntologyLineage.with_directive_emission`. |
-| Cursor pattern in practice | **Implemented (non-control example)** | `src/ouroboros/auto/listeners.py:319` — `(events, cursor) = await event_store.get_events_after("job", job_id, last_row_id=cursor)` shows the canonical per-aggregate cursor advance. |
+| Cursor pattern in practice | **Implemented (non-control example)** | `src/ouroboros/auto/listeners.py:319` — `(events, cursor) = await event_store.get_events_after("job", job_id, last_row_id=cursor)` shows the canonical per-aggregate cursor advance against a `"job"` aggregate. The same shape applies to control aggregates `"lineage"` and `"agent_process"`. |
 
 ## 3. Decision (Option A, narrowed)
 
@@ -84,18 +116,24 @@ current HEAD enforces or that the contract locks forward.
 | 6 | How does this map to future MCP Mesh polling/result events? | Mesh transports reuse the per-aggregate cursor contract and the `effective_idempotency_key` for decision dedupe. No new contract surface is required at this layer. |
 | 7 | What happens if a subscriber raises? | The bus catches and continues (`control_bus.handler_raised`). The journal is unaffected; replay covers the missed event when the subscriber later advances its cursor. |
 
-Two implied invariants that today's producer already exhibits:
+Two implied invariants that today's producers exhibit, split by
+failure stance:
 
-- **Append-fail is observational-only.** `AgentProcessRuntime._make_emitter`
-  catches append failures (timeout or otherwise), logs
-  `agent_process.directive_emit_failed`, and lets the lifecycle
-  transition complete. This is the #476 "journal stays out of the way"
-  rule. Callers that need strict durability must wrap the producer
-  themselves; the default emitter does not raise.
+- **Append-fail behavior is producer-specific.** The agent-process
+  producer (`_make_emitter`) catches append failures and logs
+  `agent_process.directive_emit_failed`, per the #476 "journal stays
+  out of the way" rule. The lineage producers
+  (`EvolutionLoop._emit_step_directive`,
+  `EvolutionLoop._emit_watchdog_timeout_directive`) and the watchdog
+  producer (`GenerationProgressWatchdog.persist_decision` via
+  `append_batch`) **do not** catch — append failure propagates and
+  aborts the step or watchdog decision. Subscribers that need a
+  uniform durability stance must derive it per producer; the journal
+  itself does not impose one.
 - **Append-succeed, publish-fail must leave the journal authoritative.**
   When a future producer pairs append with publish, a publish failure
   must not roll back the append. The subscriber will see the event on
-  its next cursor advance.
+  its next per-aggregate cursor advance.
 
 ## 5. Idempotency contract for subscribers
 
