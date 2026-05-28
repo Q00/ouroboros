@@ -82,15 +82,16 @@ What is implemented today:
   callsite invokes `ControlBus.publish(...)` yet. The bus is in place
   ahead of subscribers so the wiring stays stable.
 
-What is locked forward (Option A): when a future decision site adds a
-`ControlBus.publish(...)` after the existing journal append, that
-publish must be best-effort and must not roll back the append, and
-late-attaching subscribers must recover by per-aggregate journal
-replay (no global cursor is provided or implied). The same
-option-A semantics are formalized in #575 / PR #1274 (see
-[`docs/agentos/control-journal.md`](./control-journal.md), which lands
-with #575's closure); this PR and #1274 are designed to land as a
-pair, after which the cross-reference resolves on `main`.
+**Scope boundary with #575.** The producer-side journal contract
+above is what #476 closes. The separate question of how a future
+`ControlBus.publish(...)` or cross-process subscriber should observe
+that journal — outbox vs best-effort delivery, replay cursor
+mechanics, idempotency keys — is tracked under #575 and is *not*
+formalized by this document. #476 closure here is independent of
+where #575 stands today; a reader who needs the subscriber-side
+decision should look at #575 directly. (The follow-up map at
+`docs/contributing/control-plane-followups.md` still tracks #575 as
+the canonical entry for that question.)
 
 ### Q4. Minimum dynamic MCP addition story
 
