@@ -187,8 +187,10 @@ Each rule has an explicit "what PR G MUST verify" clause.
    `EventStore.append` (or any of its variants). All audit emission
    flows through the dispatcher's reserved event names (§ 6).
    Verification: PR G integration tests assert that a hook attempting
-   to append a custom event is denied and an existing
-   `plugin.permission_denied` audit event is recorded.
+   to append a custom event is denied and a `plugin.hook.blocked`
+   audit event (the existing `HOOK_BLOCKED_EVENT` defined at
+   `src/ouroboros/plugin/hooks.py:166`) is recorded citing the
+   unauthorized append.
 
 3. **No tail call into another mutating hook.** A `write`-class hook
    MUST NOT trigger another artifact write or a state commit during
