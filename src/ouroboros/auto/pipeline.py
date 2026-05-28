@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Any, Protocol
 
+import structlog
+
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.blocker_attribution import record_authoring_backend
@@ -205,6 +207,25 @@ _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
 # never run without this floor — silently demoting a legitimately completed
 # Ralph loop to a false ``pipeline_timeout`` BLOCKED.
 _RALPH_RESUME_PEEK_SECONDS = 1.0
+
+# RFC #1256 §I4 — bounded composition-root drain budget for typed
+# ``auto.interview.*`` lifecycle events scheduled by
+# ``AutoInterviewDriver`` as background tasks. The drain runs OUTSIDE
+# the interview phase's ``asyncio.wait_for(interview_timeout)``
+# boundary (see ``_drain_interview_observer_events``), so a slow
+# EventStore cannot weaken phase-deadline or cancellation contracts
+# (bot review on commit ``c5549124``, req_1779938459_153, reproduced
+# the contract failure when the drain ran inside ``run()``). The
+# budget is generous enough to cover the driver's per-event
+# fail-open bound (1.0 s) plus a small slack for two-event sessions
+# while staying well below any realistic pipeline phase timeout —
+# the drain itself is bounded by ``asyncio.wait_for`` and downgrades
+# timeouts to a typed ``auto.interview.observer_drain_timed_out``
+# structlog warning.
+_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS = 1.5
+
+
+log = structlog.get_logger(__name__)
 
 
 def _runtime_probe_evidence_from_state(
@@ -604,6 +625,20 @@ class AutoPipeline:
                         timeout=interview_timeout,
                     )
                 except TimeoutError:
+                    # RFC #1256 §I4 — drain pending observer events
+                    # OUTSIDE the interview ``wait_for`` boundary even
+                    # on the timeout path: the driver may have
+                    # scheduled ``auto.interview.opened`` (and possibly
+                    # ``auto.interview.failed`` if the cancellation
+                    # surfaced inside ``_run_inner``) before the phase
+                    # deadline fired, and operators inspecting evidence
+                    # via ``ouroboros_query_events(auto_session_id)``
+                    # need those lifecycle records to reconstruct what
+                    # happened. The drain is bounded by
+                    # ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` and
+                    # cannot turn a phase timeout into a different
+                    # outcome — we are already on the BLOCKED branch.
+                    await self._drain_interview_observer_events()
                     if self._enforce_deadline(state):
                         return self._result(state, ledger, blocker=state.last_error)
                     state.mark_blocked(
@@ -613,6 +648,21 @@ class AutoPipeline:
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
+                # RFC #1256 §I4 — clean-exit composition-root drain.
+                # ``self.interview_driver.run`` schedules typed
+                # ``auto.interview.{opened,finalized}`` events as
+                # background ``asyncio.Task``s and never awaits them,
+                # so observer latency cannot turn a completed
+                # interview into a phase timeout (bot review on
+                # commit ``c5549124``, req_1779938459_153). The
+                # pipeline — the production §I4 composition root — is
+                # responsible for persisting those events OUTSIDE the
+                # ``wait_for`` boundary so the §I4 substrate contract
+                # (supply an EventStore, get queryable lifecycle
+                # evidence) is honoured for every interview that the
+                # pipeline drives. The drain is bounded and fail-open
+                # so a degraded EventStore cannot stall the pipeline.
+                await self._drain_interview_observer_events()
                 if interview.status == "blocked":
                     return self._result(state, ledger, blocker=interview.blocker)
                 state.interview_completed = True
@@ -1296,6 +1346,60 @@ class AutoPipeline:
         if remaining <= 0:
             return 0.0
         return float(min(float(phase_timeout), remaining))
+
+    async def _drain_interview_observer_events(self) -> None:
+        """Bounded composition-root drain of background interview emit tasks.
+
+        Called OUTSIDE the interview phase's
+        ``asyncio.wait_for(interview_timeout)`` boundary so the
+        EventStore appends scheduled by ``AutoInterviewDriver`` cannot
+        weaken phase-deadline or cancellation contracts (bot review
+        on commit ``c5549124``, req_1779938459_153, reproduced the
+        contract failure when the equivalent drain ran inside
+        ``driver.run()``).
+
+        Behaviour:
+
+        * ``asyncio.shield`` protects the in-flight appends from
+          outer cancellation. A top-level deadline that fires during
+          the drain cancels the await on the shield, but the inner
+          ``wait_for_pending_emits`` (and the per-event background
+          tasks it tracks) keeps running until completion or until
+          the event loop closes — observability is best-effort but
+          never the cause of a cancellation.
+        * ``asyncio.wait_for`` bounds the caller-visible wait by
+          ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` (1.5 s, large
+          enough to cover the driver's per-event 1.0 s fail-open
+          bound for a two-event session). Timeouts are downgraded to
+          a typed ``auto.interview.observer_drain_timed_out`` warning.
+        * Short-circuits when no driver is wired or its pending set
+          is empty, so the helper is safe to call unconditionally
+          after every ``await self.interview_driver.run(...)``.
+        """
+        driver = self.interview_driver
+        # ``AutoInterviewDriver`` exposes ``_pending_emit_tasks`` /
+        # ``wait_for_pending_emits``; test/stub drivers that satisfy
+        # only the ``run`` Protocol may not. Treat the missing surface
+        # as "nothing to drain" so existing pipeline tests that wire
+        # mock interview drivers (e.g. ``test_pipeline_deadline``)
+        # continue to work unchanged — the §I4 contract only applies
+        # when the production driver is in use.
+        pending_tasks = getattr(driver, "_pending_emit_tasks", None)
+        wait_for_pending_emits = getattr(driver, "wait_for_pending_emits", None)
+        if not pending_tasks or wait_for_pending_emits is None:
+            return
+        pending = len(pending_tasks)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(wait_for_pending_emits()),
+                timeout=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            log.warning(
+                "auto.interview.observer_drain_timed_out",
+                pending=pending,
+                timeout_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+            )
 
     async def _handoff_to_ralph(
         self,

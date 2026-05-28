@@ -73,41 +73,48 @@ log = structlog.get_logger(__name__)
 # grows unbounded.
 _EVENT_STORE_EMIT_TIMEOUT_SECONDS = 1.0
 
-# RFC #1256 §I4 — durability boundary for awaiting callers.
+# RFC #1256 §I4 — durability is a COMPOSITION-ROOT responsibility.
 #
-# Background dispatch (above) keeps EventStore latency off the
-# pipeline's ``asyncio.wait_for(interview_timeout)`` budget, but
-# ordinary callers that simply ``await driver.run(...)`` and then
-# close the owning event loop (e.g. ``asyncio.run(...)``) would
-# otherwise lose every event the moment the loop tears down. Bot
-# review on commit ``ef0fec17`` (req_1779891123_145) reproduced this
-# with a store whose ``append()`` sleeps 0.01 s: after
-# ``asyncio.run()`` returned, ``store.appended`` was ``[]``. The §I4
-# substrate contract — "supply an EventStore, get queryable lifecycle
-# evidence" — cannot rely on every future composition root remembering
-# to invoke the test-only ``wait_for_pending_emits()`` helper.
+# The driver intentionally does NOT drain ``_pending_emit_tasks``
+# inside ``run()``. Two prior bot blockers explain why both extremes
+# fail:
 #
-# The fix: before ``run()`` returns, drain pending emit tasks under a
-# small SHIELDED ``asyncio.wait_for`` bound. ``asyncio.shield``
-# protects the in-flight appends from outer cancellation (pipeline
-# wait_for, KeyboardInterrupt) so a cancellation racing the drain
-# still permits the persistence path to complete in the background;
-# the surrounding ``wait_for`` bound keeps the drain from consuming
-# more than ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS`` of caller time.
-# For fast EventStores (sub-50 ms appends — the common case including
-# the production SQLite store under normal lock conditions) every
-# event persists before return, so the §I4 substrate contract is now
-# honoured at the public surface, not just by an out-of-band helper.
-# For pathologically slow stores, and for deadline-capped outer
-# ``wait_for`` budgets below the drain bound, the drain times out and
-# a typed ``auto.interview.event_store_drain_timed_out`` warning
-# surfaces; the interview loop itself is never weakened.
+# * Fire-and-forget with no drain anywhere (commit ef0fec17,
+#   req_1779891123_145) silently loses every event when the owning
+#   event loop closes — the bot reproduced this with a 0.01 s append
+#   store and ``asyncio.run(driver.run(...))``.
+# * Drain inside ``run()`` (commit c5549124, req_1779938459_153)
+#   re-introduces observer latency on the pipeline-critical path:
+#   ``AutoPipeline.run`` wraps ``driver.run`` in
+#   ``asyncio.wait_for(..., timeout=interview_timeout)``, so even a
+#   50 ms drain after a 0.08 s ``_run_inner`` converts a completed
+#   interview into an interview-phase timeout at the deadline-capped
+#   budget (bot probe: ``_run_inner`` at 0.08 s + 0.2 s append +
+#   outer 0.1 s ``wait_for`` → ``TimeoutError`` at ~0.102 s).
 #
-# The drain budget is intentionally smaller than the per-event
-# fail-open bound (``_EVENT_STORE_EMIT_TIMEOUT_SECONDS``) so the
-# wrapper's worst-case caller-visible latency stays well below any
-# realistic ``phase_timeout_seconds`` policy value.
-_EVENT_STORE_DRAIN_TIMEOUT_SECONDS = 0.05
+# The stable shape: ``_emit_event`` schedules persistence as a
+# background ``asyncio.Task`` and returns immediately; ``run()``
+# never awaits the pending set. Composition roots (``AutoPipeline``
+# is the production owner today; future CLI/MCP composition roots
+# when the next wiring slice lands) are responsible for calling
+# ``await driver.wait_for_pending_emits()`` — typically under their
+# own bounded shield — OUTSIDE their critical ``wait_for`` boundary so:
+#
+#   1. The §I4 substrate contract — "supply an EventStore, get
+#      queryable lifecycle evidence" — is honoured by the post-result
+#      drain that the composition root owns.
+#   2. The interview phase's hard deadline budget is never spent by
+#      observability work; a slow EventStore cannot weaken
+#      cancellation, phase timeouts, or top-level deadline
+#      enforcement.
+#
+# ``AutoPipeline.run`` implements this contract via
+# ``_drain_interview_observer_events`` (see pipeline.py) on both the
+# clean-exit and timeout-exit paths of the interview ``wait_for``,
+# with a bounded ``asyncio.shield`` so the drain itself cannot be
+# cancelled by a top-level deadline once it begins, and a fail-open
+# timeout that downgrades pathologically slow observers to a typed
+# structlog warning.
 
 INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_incomplete"
 
@@ -355,16 +362,18 @@ class AutoInterviewDriver:
     async def wait_for_pending_emits(self) -> None:
         """Await every outstanding background emit task.
 
-        Test/operator helper: ``_emit_event`` schedules appends as
-        background tasks per the §I4 fail-open contract. ``run()``
-        already drains pending tasks under a small shielded bound
-        before returning (see :meth:`_drain_pending_emits`), so
-        production callers do not need to invoke this method. It is
-        retained as the deterministic, *unbounded* drain for tests
-        and operator tooling that need to wait past the public
-        wrapper's drain budget (for example, to assert against
-        ``store.appended`` when an artificially slow store would
-        otherwise exceed ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS``).
+        Composition-root durability boundary per the §I4 contract
+        (see module-level comment): ``_emit_event`` schedules typed
+        ``auto.interview.*`` appends as background tasks and ``run()``
+        never awaits them, so observability work cannot weaken the
+        pipeline's ``asyncio.wait_for(interview_timeout)`` budget.
+        Composition roots (``AutoPipeline`` today via
+        ``_drain_interview_observer_events``; future CLI/MCP roots
+        when their wiring slice lands) call this method OUTSIDE their
+        critical ``wait_for`` to persist scheduled lifecycle events
+        before continuing — typically under their own bounded
+        ``asyncio.shield`` so a slow observer cannot extend the
+        post-result phase indefinitely.
 
         Exceptions are not propagated — the same fail-open contract
         that downgrades errors inside the task applies here. The
@@ -375,54 +384,6 @@ class AutoInterviewDriver:
         while self._pending_emit_tasks:
             pending = list(self._pending_emit_tasks)
             await asyncio.gather(*pending, return_exceptions=True)
-
-    async def _drain_pending_emits(self) -> None:
-        """Bounded shielded drain of background emit tasks.
-
-        Called by :meth:`run` immediately before returning a result
-        (or re-raising on the Exception path) so that ordinary callers
-        — those that ``await driver.run(...)`` and then exit the
-        owning runtime without separately calling
-        :meth:`wait_for_pending_emits` — observe the §I4 substrate
-        contract: lifecycle events scheduled inside ``run()`` are
-        persisted by return time for any EventStore whose ``append``
-        completes inside ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS``.
-
-        Implementation shape (see module-level comment for full
-        rationale):
-
-        * ``asyncio.shield`` protects the in-flight appends from
-          outer cancellation. A pipeline-side ``asyncio.wait_for``
-          firing during the drain cancels the *await* on the shield,
-          but the inner ``asyncio.gather`` (and therefore the
-          ``EventStore.append`` calls it tracks) keeps running until
-          completion or until the event loop closes.
-        * ``asyncio.wait_for`` bounds the caller-visible wait, so a
-          slow observer cannot consume more than the configured drain
-          budget. ``TimeoutError`` is downgraded to a typed
-          ``auto.interview.event_store_drain_timed_out`` warning.
-        * ``asyncio.CancelledError`` from the outer awaiter is
-          re-raised verbatim so cancellation semantics propagate;
-          the shielded inner continues persisting in the background
-          until terminal.
-
-        The method is safe to call when ``self._pending_emit_tasks``
-        is empty — it short-circuits without scheduling work.
-        """
-        if not self._pending_emit_tasks:
-            return
-        pending_snapshot = list(self._pending_emit_tasks)
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(asyncio.gather(*pending_snapshot, return_exceptions=True)),
-                timeout=_EVENT_STORE_DRAIN_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            log.warning(
-                "auto.interview.event_store_drain_timed_out",
-                pending=len(pending_snapshot),
-                timeout_seconds=_EVENT_STORE_DRAIN_TIMEOUT_SECONDS,
-            )
 
     def _emit(self, state: AutoPipelineState) -> None:
         """Emit a progress snapshot for the current state via the callback.
@@ -493,17 +454,6 @@ class AutoInterviewDriver:
                 exception_type=type(exc).__name__,
                 exception_message=str(exc)[:500],
             )
-            # Drain before re-raising so ordinary callers that
-            # ``await driver.run(...)`` observe the ``failed`` event
-            # in their EventStore even if the owning runtime closes
-            # immediately on exception. The drain is bounded by
-            # ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS`` (see module-level
-            # comment) so a slow observer cannot delay the re-raise
-            # beyond the budget. ``raise`` still re-raises ``exc``;
-            # any ``TimeoutError`` from the drain is downgraded to a
-            # structlog warning inside ``_drain_pending_emits``, so it
-            # does not mask the original exception.
-            await self._drain_pending_emits()
             raise
         await self._emit_event(
             "auto.interview.finalized",
@@ -513,16 +463,17 @@ class AutoInterviewDriver:
             interview_session_id=result.session_id,
             blocker=(result.blocker or "")[:500],
         )
-        # §I4 durability boundary: drain pending background appends
-        # before returning so callers that simply ``await
-        # driver.run(...)`` and then close the owning event loop
-        # observe the lifecycle events in their EventStore. See the
-        # module-level comment on ``_EVENT_STORE_DRAIN_TIMEOUT_SECONDS``
-        # and bot review ``req_1779891123_145`` for the reproducer
-        # that motivated this drain — the previous fire-and-forget
-        # shape silently lost every event when the loop closed
-        # immediately after ``run()`` returned.
-        await self._drain_pending_emits()
+        # NOTE: deliberately no drain here. ``_emit_event`` schedules
+        # the typed lifecycle appends as background tasks; the
+        # composition root (``AutoPipeline._drain_interview_observer_events``
+        # for the production wiring path; see pipeline.py) is
+        # responsible for awaiting them OUTSIDE the pipeline-side
+        # ``asyncio.wait_for(interview_timeout)`` boundary so a slow
+        # EventStore cannot turn a completed interview into a phase
+        # timeout. Bot review on commit ``c5549124``
+        # (req_1779938459_153) reproduced the contract failure when
+        # this drain ran inside ``run()``. See the module-level
+        # comment for the full rationale.
         return result
 
     async def _run_inner(
