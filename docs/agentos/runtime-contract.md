@@ -1,4 +1,4 @@
-# Agent OS Runtime Contract — implementation snapshot
+# AgentOS Runtime Contract — implementation snapshot
 
 ## 1. Status
 
@@ -52,24 +52,53 @@ enums (e.g. `StepAction`) onto `Directive` without circular imports.
 
 ### Q3. `control.directive.emitted` — observational only or react?
 
-**Chosen: durable journal + observational projection.**
-`ControlContract` events append to `EventStore` first, and
-`ControlDirectiveEmission` provides a projected read model. Subscribers
-on `ControlBus` may react to the live publish, but the journal is the
-source of truth — recovery scans the EventStore via
-`EventStore.get_events_after` (`src/ouroboros/auto/listeners.py:319`).
-Best-effort `ControlBus` delivery is acceptable because the journal is
-guaranteed.
+**Chosen: durable journal + observational projection.** The
+journal is the source of truth for any consumer; reactive subscribers
+are forward-compatible but not yet wired.
 
-This is the same option-A semantics formalized in #575 (see
-[`docs/agentos/control-journal.md`](./control-journal.md)).
+What is implemented today:
+
+- `AgentProcessRuntime._make_emitter`
+  (`src/ouroboros/orchestrator/agent_process.py`) is the only production
+  producer of `control.directive.emitted` events. It is
+  **observational-first** by design: the emitter is `None` when no
+  `EventStore` is configured, and append failures (including timeout)
+  are caught and logged as `agent_process.directive_emit_failed` per
+  the #476 *"the journal stays out of the way"* rule. Callers that
+  require strict raise-on-failure durability must wrap the producer
+  themselves; the default emitter does not propagate append failures.
+- `ControlDirectiveEmission` (`src/ouroboros/core/lineage.py`)
+  provides the projection that lets replayers reconstruct emitted
+  directives without re-running handlers.
+- Aggregate-scoped replay uses
+  `EventStore.get_events_after(aggregate_type, aggregate_id,
+  last_row_id=...)` per `(target_type, target_id)`. The canonical
+  cursor pattern lives at `src/ouroboros/auto/listeners.py:319` (using
+  the `"job"` aggregate, but the same shape applies to control
+  aggregates).
+- `ControlBus` (`src/ouroboros/orchestrator/control_bus.py`) is
+  implemented and instantiated in
+  `src/ouroboros/mcp/server/adapter.py:1872`, but no production
+  callsite invokes `ControlBus.publish(...)` yet. The bus is in place
+  ahead of subscribers so the wiring stays stable.
+
+What is locked forward (Option A): when a future decision site adds a
+`ControlBus.publish(...)` after the existing journal append, that
+publish must be best-effort and must not roll back the append, and
+late-attaching subscribers must recover by per-aggregate journal
+replay (no global cursor is provided or implied). The same
+option-A semantics are formalized in #575 / PR #1274 (see
+[`docs/agentos/control-journal.md`](./control-journal.md), which lands
+with #575's closure); this PR and #1274 are designed to land as a
+pair, after which the cross-reference resolves on `main`.
 
 ### Q4. Minimum dynamic MCP addition story
 
 **Chosen: bridge-as-driver via `AgentRuntimeContext.mcp_bridge`.**
 Capability changes propagate through the bridge handle rather than via
-mutable global state. `bridge_mixin.inject_context_into_bridge_mixin`
-(`src/ouroboros/mcp/tools/bridge_mixin.py:75`) shows the pull-based
+mutable global state. `bridge_mixin.inject_runtime_context`
+(`src/ouroboros/mcp/tools/bridge_mixin.py:73`, called from
+`src/ouroboros/mcp/server/adapter.py:1896`) shows the pull-based
 shape: handlers pull capabilities from the context they were handed,
 not from a process-global registry.
 
