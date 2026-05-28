@@ -105,8 +105,14 @@ identify the slot they touch. They do not need a new meta issue.
 
 ## 8. Related
 
-- [#476 runtime contract](./runtime-contract.md) — the `AgentRuntimeContext.runtime_backend` field is slot 1.
-- [#575 ControlJournal](./control-journal.md) — unrelated, but cross-referenced for completeness of the AgentOS docs set.
+- [#476](https://github.com/Q00/ouroboros/issues/476) runtime contract — `AgentRuntimeContext.runtime_backend` (defined in `src/ouroboros/orchestrator/agent_runtime_context.py:42`) is slot 1; backend identifiers are stamped in each `src/ouroboros/orchestrator/*_runtime.py` (e.g. `codex_cli_runtime.py:78`, `copilot_cli_runtime.py:77`, `opencode_runtime.py:114`, `hermes_runtime.py:156`, `gemini_cli_runtime.py:71`, `goose_runtime.py:52`).
+- [#575](https://github.com/Q00/ouroboros/issues/575) ControlJournal — unrelated to this taxonomy; cross-referenced only so future readers know the two design issues do not overlap.
 - [`docs/config-reference.md`](../config-reference.md) — current YAML schema reference for `llm_profiles` / `llm_role_profiles` (slot 3).
-- [`docs/runtime-guides/codex.md`](../runtime-guides/codex.md) — Codex backend's slot 4 (`runtime_profile` scalar) usage.
+- [`docs/runtime-guides/codex.md`](../runtime-guides/codex.md) — Codex backend's slot 4 (`runtime_profile` scalar) usage (see § `Worker subprocess isolation` around line 122).
 - [#961 SSOT](https://github.com/Q00/ouroboros/issues/961) — process rules for "no new `needs-design` for AgentOS substrate" that this document satisfies.
+
+> Note: this document deliberately does **not** link to sibling
+> `docs/agentos/runtime-contract.md` or `docs/agentos/control-journal.md`
+> files. Those files do not exist on `main` yet (they are proposed in
+> adjacent open PRs #1273 / #1274), so the GitHub issue numbers above
+> are the canonical anchors until those PRs land.
