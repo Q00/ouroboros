@@ -1405,7 +1405,7 @@ async def test_run_resume_with_persisted_handle_blocks_when_owned_job_still_runn
     state.run_handoff_status = "started"
     state.job_id = "job_run_pending_resume"
     state.complete_product = True
-    state.timeout_seconds_by_phase = {AutoPhase.RUN: 0.01}
+    state.timeout_seconds_by_phase = {**state.timeout_seconds_by_phase, AutoPhase.RUN.value: 1}
 
     class _RunSnapshot:
         is_terminal = False
