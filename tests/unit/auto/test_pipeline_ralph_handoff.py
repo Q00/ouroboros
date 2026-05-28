@@ -631,7 +631,10 @@ async def test_complete_product_synchronous_run_uses_pipeline_deadline_not_hando
         synchronous_execution = True
 
         async def __call__(
-            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+            self,
+            _seed: Seed,
+            *,
+            idempotency_key: str = "",  # noqa: ARG002
         ) -> dict[str, Any]:
             await asyncio.sleep(0.02)
             return {
@@ -697,7 +700,10 @@ async def test_complete_product_synchronous_success_after_deadline_blocks_as_tim
         synchronous_execution = True
 
         async def __call__(
-            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+            self,
+            _seed: Seed,
+            *,
+            idempotency_key: str = "",  # noqa: ARG002
         ) -> dict[str, Any]:
             state.deadline_at = time.monotonic() - 1.0
             state.deadline_at_epoch = time.time() - 1.0
@@ -740,7 +746,10 @@ async def test_first_party_synchronous_success_within_grace_completes(tmp_path) 
         synchronous_execution = True
 
         async def __call__(
-            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+            self,
+            _seed: Seed,
+            *,
+            idempotency_key: str = "",  # noqa: ARG002
         ) -> dict[str, Any]:
             state.deadline_at = time.monotonic() - 1.0
             state.deadline_at_epoch = time.time() - 1.0
@@ -789,7 +798,10 @@ async def test_first_party_synchronous_timeout_recovers_completed_session(
         synchronous_execution = True
 
         async def __call__(
-            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+            self,
+            _seed: Seed,
+            *,
+            idempotency_key: str = "",  # noqa: ARG002
         ) -> dict[str, Any]:
             await asyncio.sleep(1.0)
             raise AssertionError("wait_for should time out first")
