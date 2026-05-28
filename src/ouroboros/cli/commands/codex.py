@@ -27,6 +27,9 @@ _REQUIRED_CODEX_AUTO_TOOLS = frozenset(
     {
         "ouroboros_auto",
         "ouroboros_start_auto",
+        "ouroboros_job_status",
+        "ouroboros_job_wait",
+        "ouroboros_job_result",
         "ouroboros_interview",
         "ouroboros_generate_seed",
     }
@@ -106,6 +109,7 @@ def doctor(
         "Codex ooo auto dispatch: OK\n"
         "- rule maps `ooo auto` to `ouroboros_start_auto`\n"
         "- auto skill declares MCP dispatch through `ouroboros_start_auto`\n"
+        "- live MCP auto workflow includes job status/wait/result tools when probed\n"
         "- Codex config contains an `ouroboros` MCP server entry"
         + ("\n- live stdio initialize/list_tools exposes required auto tools" if live_mcp else ""),
         title="Codex Doctor",
