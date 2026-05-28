@@ -1100,18 +1100,13 @@ class AutoPipeline:
                         return self._result(state, ledger, review=review, blocker=state.last_error)
                     # Persisted run handles prove the execute_seed job was
                     # *dispatched*, not that it reached terminal success.
-                    # The fresh-path RUN → RALPH_HANDOFF contract
-                    # (lines ~1242-1340) refuses to hand off to Ralph until
-                    # the owned run job has finished successfully — paused
-                    # and queued/running/cancel_requested both BLOCK with
-                    # ``tool_name="run_starter"``, which
-                    # ``_recoverable_phase_for_tool`` maps back to ``RUN``.
-                    # Without re-polling here, a resume after one of those
-                    # blockers would walk past the gate and start Ralph
-                    # against a still-pending product run. Mirror the
-                    # fresh-path snapshot poll + status gate so resume and
-                    # fresh dispatch share the same terminal-success
-                    # contract.
+                    # On resume, persisted handles are dispatch evidence
+                    # only. A previous run may have blocked while the owned
+                    # job was paused, queued, running, cancel-requested, or
+                    # otherwise unreconcilable. Without re-polling here,
+                    # that resume would walk past the RUN gate and start
+                    # Ralph against a still-pending product run. Require
+                    # terminal-success evidence before resuming Ralph.
                     if state.job_id:
                         terminal_run_meta = await _wait_owned_run_job_terminal(
                             self.run_starter,
