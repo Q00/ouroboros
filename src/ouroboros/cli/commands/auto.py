@@ -587,6 +587,20 @@ def _make_progress_renderer(*, quiet: bool) -> AutoProgressCallback | None:
         return None
 
     def render(event: AutoProgressEvent) -> None:
+        if event.kind == "question":
+            label = f"question round {event.round}" if event.round is not None else "question"
+            text = _rich_escape((event.question or event.message).strip())
+            console.print(rf"[dim]\[auto][/] {label} — {text}")
+            return
+        if event.kind == "answer":
+            label = f"answer round {event.round}" if event.round is not None else "answer"
+            source = rf" \[{_rich_escape(event.answer_source)}]" if event.answer_source else ""
+            question = _rich_escape((event.question or "").strip())
+            answer = _rich_escape((event.answer or event.message).strip())
+            if question:
+                console.print(rf"[dim]\[auto][/] {label}{source} Q — {question}")
+            console.print(rf"[dim]\[auto][/] {label}{source} A — {answer}")
+            return
         if event.kind == "grade":
             label = f"grade {event.grade}" if event.grade else "grade"
         elif event.kind == "repair":
@@ -621,10 +635,9 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Interview session: {state.interview_session_id}")
     console.print(f"Current interview round: {state.current_round}")
     if state.pending_question:
-        question = state.pending_question.replace("\n", " ").strip()
-        if len(question) > 160:
-            question = f"{question[:157]}..."
-        console.print(f"Pending question: {question}")
+        question = _rich_escape(state.pending_question.strip())
+        console.print("Pending question:")
+        console.print(f"  {question}")
     if state.seed_path:
         console.print(f"Seed: {state.seed_path}")
     console.print(f"Seed origin: {state.seed_origin.value}")

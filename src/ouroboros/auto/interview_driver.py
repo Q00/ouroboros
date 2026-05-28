@@ -410,6 +410,59 @@ class AutoInterviewDriver:
         except Exception:
             pass
 
+    def _emit_interview_question(
+        self,
+        state: AutoPipelineState,
+        *,
+        question: str,
+        round_number: int | None,
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        label = (
+            f"question round {round_number}/{self.max_rounds}"
+            if round_number is not None
+            else "question"
+        )
+        event = AutoProgressEvent(
+            auto_session_id=state.auto_session_id,
+            phase=state.phase.value,
+            kind="question",
+            message=label,
+            round=round_number,
+            question=question,
+        )
+        try:
+            self.progress_callback(event)
+        except Exception:
+            pass
+
+    def _emit_auto_answer(
+        self,
+        state: AutoPipelineState,
+        *,
+        round_number: int,
+        source: str,
+        question: str,
+        answer: str,
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        event = AutoProgressEvent(
+            auto_session_id=state.auto_session_id,
+            phase=state.phase.value,
+            kind="answer",
+            message=f"answered round {round_number}/{self.max_rounds} from {source}",
+            round=round_number,
+            question=question,
+            answer=answer,
+            answer_source=source,
+        )
+        try:
+            self.progress_callback(event)
+        except Exception:
+            pass
+
     async def run(self, state: AutoPipelineState, ledger: SeedDraftLedger) -> AutoInterviewResult:
         """Run bounded auto interview until Seed-ready or blocked.
 
@@ -531,6 +584,11 @@ class AutoInterviewDriver:
                 state.interview_session_id = turn.session_id
                 state.pending_question = turn.question
                 self._save(state)
+            self._emit_interview_question(
+                state,
+                question=turn.question,
+                round_number=state.current_round + 1 if not turn.completed else None,
+            )
         except TimeoutError as exc:
             self._record_evidence_based_session_id(state, exc, preassigned_id)
             if interview_tool_name == "interview.start":
@@ -779,6 +837,19 @@ class AutoInterviewDriver:
                 tool_name="auto_answerer",
             )
             self._save(state)
+            self._emit_auto_answer(
+                state,
+                round_number=round_number,
+                source=answer.source.value,
+                question=question_for_record,
+                answer=answer.text,
+            )
+            if turn.question and not turn.completed:
+                self._emit_interview_question(
+                    state,
+                    question=turn.question,
+                    round_number=round_number + 1,
+                )
 
         # max_rounds exhausted — one final ledger-primary closure check, then
         # safe-default finalization for autonomous ``ooo auto``.  The manual

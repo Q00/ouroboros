@@ -14,7 +14,7 @@ from typing import Literal
 
 from ouroboros.auto.state import utc_now_iso
 
-AutoProgressKind = Literal["phase", "grade", "repair"]
+AutoProgressKind = Literal["phase", "grade", "repair", "question", "answer"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +36,8 @@ class AutoProgressEvent:
       observation.
     - ``repair``: the repair round counter advanced since the last
       observation.
+    - ``question``: the auto interview produced or resumed a question.
+    - ``answer``: the auto answerer submitted a source-tagged answer.
     """
 
     auto_session_id: str
@@ -44,6 +46,9 @@ class AutoProgressEvent:
     message: str
     round: int | None = None
     grade: str | None = None
+    question: str | None = None
+    answer: str | None = None
+    answer_source: str | None = None
     timestamp: str = field(default_factory=utc_now_iso)
 
 

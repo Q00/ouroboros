@@ -59,6 +59,41 @@ def test_make_progress_renderer_emits_phase_grade_repair_lines(capsys) -> None:
     assert "[auto] repair round 1 — repair round 1" in output
 
 
+def test_make_progress_renderer_relays_interview_questions_and_answers(capsys) -> None:
+    render = _make_progress_renderer(quiet=False)
+    assert render is not None
+
+    render(
+        AutoProgressEvent(
+            auto_session_id="auto_x",
+            phase="interview",
+            kind="question",
+            message="question round 2/12",
+            round=2,
+            question="Which repo docs should be updated?",
+        )
+    )
+    render(
+        AutoProgressEvent(
+            auto_session_id="auto_x",
+            phase="interview",
+            kind="answer",
+            message="answered round 2/12 from repo_fact",
+            round=2,
+            question="Which repo docs should be updated?",
+            answer="Update docs/agentos/release-readiness.md and docs/README.md.",
+            answer_source="repo_fact",
+        )
+    )
+
+    output = _strip_ansi(capsys.readouterr().out)
+    assert "[auto] question round 2 — Which repo docs should be updated?" in output
+    assert "[auto] answer round 2 [repo_fact] Q — Which repo docs should be updated?" in output
+    assert "[auto] answer round 2 [repo_fact] A — Update" in output
+    assert "docs/agentos/release-readiness.md" in output
+    assert "and docs/README.md." in output
+
+
 def test_cli_auto_help_documents_quiet_flag() -> None:
     result = CliRunner().invoke(app, ["auto", "--help"])
     output = _strip_ansi(result.output)
@@ -156,6 +191,31 @@ def test_auto_interview_driver_emits_progress_via_callback() -> None:
     ]
     assert all(event.kind == "phase" for event in captured)
     assert all(event.phase == "interview" for event in captured)
+
+
+def test_auto_interview_driver_can_emit_question_and_answer_payloads() -> None:
+    from ouroboros.auto.interview_driver import AutoInterviewDriver
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+
+    captured: list[AutoProgressEvent] = []
+    driver = AutoInterviewDriver(object(), progress_callback=captured.append)  # type: ignore[arg-type]
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+
+    driver._emit_interview_question(state, question="What should it print?", round_number=1)
+    driver._emit_auto_answer(
+        state,
+        round_number=1,
+        source="conservative_default",
+        question="What should it print?",
+        answer="It should print hello.",
+    )
+
+    assert [event.kind for event in captured] == ["question", "answer"]
+    assert captured[0].question == "What should it print?"
+    assert captured[1].question == "What should it print?"
+    assert captured[1].answer == "It should print hello."
+    assert captured[1].answer_source == "conservative_default"
 
 
 def test_auto_interview_driver_swallows_callback_errors() -> None:

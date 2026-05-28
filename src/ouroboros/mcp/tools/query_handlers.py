@@ -173,6 +173,20 @@ class SessionStatusHandler:
             f"Terminal: {is_terminal}",
             f"Last progress: {state.last_progress_message}",
         ]
+        if state.pending_question:
+            lines.append("Pending question:")
+            for line in str(state.pending_question).strip().splitlines() or [""]:
+                lines.append(f"  {line}")
+        recent_auto_answers = state.auto_answer_log[-3:]
+        if recent_auto_answers:
+            lines.append(f"Recent auto answers (last {len(recent_auto_answers)}):")
+            for entry in recent_auto_answers:
+                round_value = entry.get("round", "?")
+                source = entry.get("source", "?")
+                question = str(entry.get("question", "")).strip()
+                answer = str(entry.get("answer", "")).strip()
+                lines.append(f"  round {round_value} [{source}] Q: {question}")
+                lines.append(f"    A: {answer}")
         if state.last_grade:
             lines.append(f"Seed grade: {state.last_grade}")
         if is_gap_window:
@@ -202,6 +216,10 @@ class SessionStatusHandler:
             "last_progress_message": state.last_progress_message,
             "last_progress_at": state.last_progress_at,
         }
+        if state.pending_question:
+            meta["pending_question"] = state.pending_question
+        if recent_auto_answers:
+            meta["auto_answer_log"] = recent_auto_answers
         if state.last_error:
             meta["blocker"] = state.last_error
         if is_gap_window:

@@ -537,6 +537,23 @@ def test_print_status_resume_capability_resume() -> None:
     assert "Start fresh" not in output
 
 
+def test_print_status_renders_full_pending_question_without_truncation() -> None:
+    state = _state_in_phase(AutoPhase.INTERVIEW)
+    state.pending_question = (
+        "This is a deliberately long pending question that should remain visible "
+        "because operators need to understand what the autonomous interview is "
+        "asking before the answerer responds, even when the question is longer "
+        "than the old compact one-line preview limit."
+    )
+
+    output = _capture_status(state)
+
+    assert "Pending question:" in output
+    assert "old" in output
+    assert "compact one-line preview limit." in output
+    assert "..." not in output
+
+
 def test_print_result_show_ledger_renders_assumption_sources() -> None:
     from ouroboros.auto.ledger import AssumptionRecord
 

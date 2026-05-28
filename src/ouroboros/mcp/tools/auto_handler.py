@@ -1947,6 +1947,9 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Seed grade: {result.grade}")
     if result.interview_session_id:
         lines.append(f"Interview session: {result.interview_session_id}")
+    if result.pending_question:
+        lines.append("Pending question:")
+        lines.extend(f"  {line}" for line in result.pending_question.strip().splitlines())
     if result.seed_path:
         lines.append(f"Seed: {result.seed_path}")
     lines.append(f"Seed origin: {result.seed_origin}")

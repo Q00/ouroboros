@@ -147,6 +147,42 @@ def test_happy_path_qa_passed_completes_auto(tmp_path) -> None:
     assert ralph["lineage_id"] == state.ralph_lineage_id
 
 
+def test_mcp_auto_status_surfaces_pending_question_and_recent_answers(tmp_path) -> None:
+    """MCP session status mirrors CLI interview progress context."""
+    state = _state_at_run(tmp_path)
+    state.pending_question = "Which runtime should handle this?\nAny credentials?"
+    state.auto_answer_log = [
+        {
+            "round": 1,
+            "source": "user",
+            "question": "What is the goal?",
+            "answer": "Build the CLI.",
+        },
+        {
+            "round": 2,
+            "source": "auto",
+            "question": "Which runtime should handle this?",
+            "answer": "Codex runtime.",
+        },
+    ]
+    AutoStore(tmp_path).save(state)
+
+    handler = SessionStatusHandler(auto_store=AutoStore(tmp_path))
+    result = asyncio.run(handler.handle({"session_id": state.auto_session_id}))
+
+    assert result.is_ok
+    meta = result.value.meta
+    assert meta["pending_question"] == "Which runtime should handle this?\nAny credentials?"
+    assert meta["auto_answer_log"] == state.auto_answer_log
+    text = result.value.content[0].text
+    assert "Pending question:" in text
+    assert "  Which runtime should handle this?" in text
+    assert "  Any credentials?" in text
+    assert "Recent auto answers (last 2):" in text
+    assert "  round 2 [auto] Q: Which runtime should handle this?" in text
+    assert "    A: Codex runtime." in text
+
+
 def test_listener_prefers_terminal_generations_over_iterations(tmp_path) -> None:
     """Terminal metadata must mirror lineage generation, not loop iteration count."""
     state = _state_at_ralph_handoff(tmp_path)

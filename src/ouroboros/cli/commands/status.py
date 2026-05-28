@@ -55,6 +55,20 @@ def _format_auto_status(state) -> str:
     }
     lines.append(f"Terminal: {is_terminal}")
     lines.append(f"Last progress: {state.last_progress_message}")
+    if state.pending_question:
+        lines.append("Pending question:")
+        for line in str(state.pending_question).strip().splitlines() or [""]:
+            lines.append(f"  {line}")
+    if state.auto_answer_log:
+        recent = state.auto_answer_log[-3:]
+        lines.append(f"Recent auto answers (last {len(recent)}):")
+        for entry in recent:
+            round_value = entry.get("round", "?")
+            source = entry.get("source", "?")
+            question = str(entry.get("question", "")).strip()
+            answer = str(entry.get("answer", "")).strip()
+            lines.append(f"  round {round_value} [{source}] Q: {question}")
+            lines.append(f"    A: {answer}")
 
     is_gap_window = (
         state.phase is AutoPhase.RALPH_HANDOFF
