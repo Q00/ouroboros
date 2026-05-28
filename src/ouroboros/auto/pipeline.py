@@ -34,7 +34,11 @@ from ouroboros.auto.handoff_contract import (
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
 from ouroboros.auto.ledger import AssumptionRecord, SeedDraftLedger
-from ouroboros.auto.ledger_seed import synthesize_seed_from_ledger
+from ouroboros.auto.ledger_seed import (
+    PARTIAL_SEED_GENERATION_MODE,
+    partial_seed_from_evidence,
+    synthesize_seed_from_ledger,
+)
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON, mirror_ralph_job_events
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.recovery_plan import (
@@ -651,13 +655,20 @@ class AutoPipeline:
                     except TimeoutError:
                         if self._enforce_deadline(state):
                             return self._result(state, ledger, blocker=state.last_error)
-                        state.mark_blocked(
-                            f"interview phase exceeded {interview_phase_timeout:.0f}s",
-                            tool_name="interview_driver",
-                            error_code="interview_phase_deadline",
+                        # PR-B / #1257 closure ladder: the per-phase interview
+                        # deadline is no longer a terminal BLOCKED. Instead, the
+                        # ledger evidence collected so far is converted into a
+                        # Seed (complete → ``synthesize_seed_from_ledger``,
+                        # incomplete → ``partial_seed_from_evidence``) and the
+                        # pipeline transitions into REVIEW so a partial product
+                        # can still surface. ``_enforce_deadline`` above keeps
+                        # the global pipeline-deadline contract untouched: only
+                        # the per-phase ``interview_phase_deadline`` is rerouted.
+                        return await self._handle_interview_deadline(
+                            state,
+                            ledger,
+                            timeout_seconds=interview_phase_timeout,
                         )
-                        self._save(state)
-                        return self._result(state, ledger, blocker=state.last_error)
                 finally:
                     # RFC #1256 §I4 — composition-root drain on EVERY
                     # exit path: clean completion, ``TimeoutError``
@@ -1499,6 +1510,166 @@ class AutoPipeline:
                     state.deadline_at += elapsed
                 if state.deadline_at_epoch is not None:
                     state.deadline_at_epoch += elapsed
+
+    async def _emit_runtime_deadline_interview_fired(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        timeout_seconds: float,
+        closure_route: str,
+    ) -> None:
+        """Persist a ``runtime.deadline.interview.fired`` event, fail-open.
+
+        Reuses the interview driver's ``event_store`` (the only EventStore
+        the pipeline holds a handle to today, wired in #1260) so the
+        deadline event lands in the same aggregate stream that
+        ``ouroboros_query_events(auto_session_id)`` already consumes for
+        ``auto.interview.*`` lifecycle records. The event itself is a
+        runtime-class event (``runtime.deadline.*``) so the aggregate
+        type uses ``auto_session`` rather than the interview-specific
+        ``auto_interview``; this matches the pattern used by
+        :class:`Watchdog` for ``runtime.watchdog.*`` events.
+
+        Errors and timeouts are downgraded to typed structlog warnings —
+        observability must never convert the deadline-recovery path back
+        into a terminal BLOCKED. The append is dispatched as a fire-and-
+        forget ``asyncio.create_task`` so it cannot consume the post-
+        deadline budget; the existing ``_drain_interview_observer_events``
+        ran *before* this helper, so we have no in-flight observer tasks
+        to coordinate with here.
+        """
+        event_store = getattr(self.interview_driver, "event_store", None)
+        if event_store is None:
+            return
+        from ouroboros.events.base import (
+            BaseEvent,  # local import: keeps top-level dep graph stable
+        )
+
+        payload: dict[str, Any] = {
+            "auto_session_id": state.auto_session_id,
+            "phase": AutoPhase.INTERVIEW.value,
+            "timeout_seconds": float(timeout_seconds),
+            "ledger_ready": ledger.is_seed_ready(),
+            "open_gaps": list(ledger.open_gaps()),
+            "rounds_completed": int(state.current_round or 0),
+            "closure_route": closure_route,
+        }
+
+        async def _append() -> None:
+            try:
+                await asyncio.wait_for(
+                    event_store.append(
+                        BaseEvent(
+                            type="runtime.deadline.interview.fired",
+                            aggregate_type="auto_session",
+                            aggregate_id=state.auto_session_id,
+                            data=payload,
+                        )
+                    ),
+                    timeout=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                log.warning(
+                    "runtime.deadline.interview.fired.timed_out",
+                    auto_session_id=state.auto_session_id,
+                    timeout_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001 — observer must not break the loop
+                log.warning(
+                    "runtime.deadline.interview.fired.failed",
+                    auto_session_id=state.auto_session_id,
+                    error=str(exc),
+                )
+
+        try:
+            asyncio.create_task(_append())  # noqa: RUF006 — fire-and-forget per docstring
+        except RuntimeError:
+            # No running loop (e.g. some test stubs invoke deadline
+            # routing outside an ``asyncio.run`` context). Fail-open.
+            log.warning(
+                "runtime.deadline.interview.fired.no_running_loop",
+                auto_session_id=state.auto_session_id,
+            )
+
+    async def _handle_interview_deadline(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        timeout_seconds: float,
+    ) -> AutoPipelineResult:
+        """Convert an interview-phase deadline into a Seed-generation entry.
+
+        Implements the #1257 PR-B closure ladder:
+
+        1. Emit ``runtime.deadline.interview.fired`` so post-hoc evidence
+           inspection can see *why* the recovery path was taken.
+        2. If the ledger is Seed-ready, synthesize a normal Seed via
+           :func:`synthesize_seed_from_ledger`; otherwise fall back to
+           :func:`partial_seed_from_evidence` with
+           ``reason="interview_phase_deadline"`` so unresolved sections
+           become next-step hints on the resulting degraded Seed (PR-A).
+        3. Persist the Seed via :meth:`_record_generated_seed`, mark
+           ``interview_completed = True``, and transition to ``REVIEW`` so
+           the rest of the pipeline (grading, run handoff) can still
+           surface a partial product. PR-C teaches the grade gate to
+           respect ``metadata.degraded`` so the degraded Seed is not
+           re-blocked at REVIEW solely on high-ambiguity grounds.
+
+        The global ``pipeline_timeout_seconds`` deadline is unaffected:
+        callers gate on :meth:`_enforce_deadline` *before* invoking this
+        helper, so this method only fires when the per-phase deadline
+        tripped while the top-level budget still has time.
+        """
+        ledger_ready = ledger.is_seed_ready()
+        closure_route = "ledger_seed" if ledger_ready else PARTIAL_SEED_GENERATION_MODE
+        await self._emit_runtime_deadline_interview_fired(
+            state,
+            ledger,
+            timeout_seconds=timeout_seconds,
+            closure_route=closure_route,
+        )
+
+        if ledger_ready:
+            seed = synthesize_seed_from_ledger(ledger, interview_id=state.interview_session_id)
+            progress_message = (
+                "Interview phase deadline fired; closed via complete-ledger Seed synthesis"
+            )
+        else:
+            seed = partial_seed_from_evidence(
+                ledger,
+                reason="interview_phase_deadline",
+                interview_id=state.interview_session_id,
+            )
+            progress_message = (
+                "Interview phase deadline fired; closed via partial_seed_from_evidence (degraded)"
+            )
+
+        seed = self._record_generated_seed(state, ledger, seed)
+        state.interview_completed = True
+        state.mark_progress(
+            progress_message,
+            tool_name="interview_deadline_recovery",
+        )
+        self._save(state)
+        # State machine requires INTERVIEW → SEED_GENERATION → REVIEW; the
+        # SEED_GENERATION transition is informational since the Seed is already
+        # in ``state.seed_artifact`` from ``_record_generated_seed``, mirroring
+        # the non-deadline ``synthesize_seed_from_ledger`` paths in this file
+        # (e.g. the ledger-only-no-backend branch around the
+        # ``interview_closure_mode in {ledger_only_no_backend, ...}`` block).
+        state.transition(
+            AutoPhase.SEED_GENERATION,
+            f"interview-deadline closure via {closure_route}",
+        )
+        self._save(state)
+        state.transition(
+            AutoPhase.REVIEW,
+            f"reviewing Seed after interview-deadline closure via {closure_route}",
+        )
+        self._save(state)
+        return await self.run(state)
 
     async def _handoff_to_ralph(
         self,

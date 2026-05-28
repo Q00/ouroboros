@@ -74,18 +74,25 @@ async def test_interview_max_rounds_exhausted_sets_stop_reason_code(tmp_path) ->
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — interview_phase_deadline
+# Test 2 — interview_phase_deadline no longer terminal (#1257 PR-B)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_interview_phase_deadline_sets_stop_reason_code(tmp_path) -> None:
-    """AutoPipeline result carries ``interview_phase_deadline`` when the interview
-    phase exceeds its configured per-phase timeout.
+async def test_interview_phase_deadline_routes_into_closure_ladder(tmp_path) -> None:
+    """#1257 PR-B: the per-phase interview deadline must NOT terminate as
+    ``interview_phase_deadline`` BLOCKED anymore.
+
+    Instead, the pipeline emits a degraded Seed via
+    :func:`partial_seed_from_evidence` and transitions through
+    SEED_GENERATION → REVIEW. The deadline may still surface a downstream
+    blocker (e.g. a grade-gate C result before PR-C teaches the gate to
+    respect ``metadata.degraded``), but the stop_reason_code MUST be
+    something other than ``interview_phase_deadline`` and the persisted
+    Seed MUST carry the degraded-recovery metadata.
     """
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        # Sleep longer than the phase timeout so asyncio.wait_for trips.
         await asyncio.sleep(3600)
         raise AssertionError("interview.start should have been cancelled by phase timeout")
 
@@ -93,22 +100,16 @@ async def test_interview_phase_deadline_sets_stop_reason_code(tmp_path) -> None:
         raise AssertionError("answer should never be called")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    # Set a tiny per-phase timeout for INTERVIEW so the wait_for fires quickly.
     state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = 1
-    # Arm the top-level deadline far in the future so it does NOT fire first
-    # and hijack the blocker attribution.
     import time
 
     state.deadline_at = time.monotonic() + 3600
     state.deadline_at_epoch = time.time() + 3600
-    # Put the state into INTERVIEW phase so the pipeline enters interview logic.
     state.transition(AutoPhase.INTERVIEW, "starting interview")
 
     store = AutoStore(tmp_path)
 
     class _SlowDriver:
-        """Interview driver that wraps a FunctionBackend but sleeps in run()."""
-
         progress_callback = None
 
         async def run(self, _state, _ledger):  # noqa: ARG002
@@ -119,11 +120,22 @@ async def test_interview_phase_deadline_sets_stop_reason_code(tmp_path) -> None:
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
-    assert result.stop_reason_code == "interview_phase_deadline"
-    assert state.last_error_code == "interview_phase_deadline"
-    assert result.blocker is not None
-    assert "interview phase exceeded" in result.blocker
+    # The per-phase deadline must no longer be the terminal stop reason.
+    assert result.stop_reason_code != "interview_phase_deadline"
+    assert state.last_error_code != "interview_phase_deadline"
+
+    # A degraded Seed artifact must have been persisted by the closure ladder.
+    assert state.seed_artifact is not None
+    metadata = state.seed_artifact.get("metadata", {})
+    assert metadata.get("generation_mode") == "partial_seed_from_evidence"
+    assert metadata.get("degraded") is True
+    assert metadata.get("recovery_reason") == "interview_phase_deadline"
+    # The unresolved gaps must be surfaced verbatim so PR-C / PR-D can convert
+    # them into next-step hints.
+    assert metadata.get("unresolved_slots"), (
+        "degraded seed must list unresolved ledger sections so downstream "
+        "gates can convert them into next-step hints"
+    )
 
 
 # ---------------------------------------------------------------------------
