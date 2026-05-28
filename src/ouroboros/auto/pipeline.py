@@ -217,8 +217,8 @@ _RALPH_RESUME_PEEK_SECONDS = 1.0
 # (bot review on commit ``c5549124``, req_1779938459_153, reproduced
 # the contract failure when the drain ran inside ``run()``). The
 # budget is generous enough to cover the driver's per-event
-# fail-open bound (1.0 s) plus a small slack for two-event sessions
-# while staying well below any realistic pipeline phase timeout —
+# fail-open bound (1.0 s) plus a small headroom margin for
+# two-event sessions while staying well below any realistic pipeline phase timeout —
 # the drain itself is bounded by ``asyncio.wait_for`` and downgrades
 # timeouts to a typed ``auto.interview.observer_drain_timed_out``
 # structlog warning.
