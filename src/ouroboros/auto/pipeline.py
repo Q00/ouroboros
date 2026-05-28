@@ -339,6 +339,30 @@ class AutoPipelineResult:
     # is returned, so this field is both surface evidence and a completion
     # grade input rather than a passive annotation.
     runtime_probe_evidence: tuple[RuntimeEvidence, ...] = ()
+    # #1257 PR-C — degraded-recovery terminal surface.
+    #
+    # When the interview-phase deadline rerouted into PR-A's
+    # ``partial_seed_from_evidence``, the resulting Seed carries
+    # ``metadata.degraded = True`` and a list of unresolved sections.
+    # PR-C lets that Seed survive the grade gate and short-circuit to
+    # ``AutoPhase.COMPLETE`` with these typed result fields:
+    #
+    # * ``partial_product``: True iff the terminal is a deadline-recovery
+    #   partial product (not a fully verified run).
+    # * ``partial_product_reason``: free-form provenance string mirrored
+    #   from ``seed.metadata.recovery_reason`` (e.g.
+    #   ``"interview_phase_deadline"``).
+    # * ``partial_unresolved_slots``: ledger sections still unresolved at
+    #   deadline; surfaced verbatim so MCP/CLI clients can convert them
+    #   into next-step hints. Empty for normal-path completions.
+    #
+    # ``stop_reason_code`` remains an *error-class* code (driven by
+    # ``state.last_error_code``) and stays at ``None`` for a partial
+    # product — a deadline-recovery completion is a typed alternative
+    # success, not a blocker.
+    partial_product: bool = False
+    partial_product_reason: str | None = None
+    partial_unresolved_slots: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1022,6 +1046,15 @@ class AutoPipeline:
             # Same stub-tolerant gate as cancel_event above.
             if _accepts_keyword(repairer.converge, "closure_mode"):
                 converge_kwargs["closure_mode"] = state.interview_closure_mode
+            # #1257 PR-C: propagate ``degraded`` so deadline-recovery seeds
+            # produced by ``partial_seed_from_evidence`` are not re-blocked
+            # on ``high_ambiguity_score`` / ``ledger_open_gap``. Safety
+            # blockers (``missing_goal``, ``seed_goal_mismatch``,
+            # ``high_risk_assumptions``) still terminate. Same stub-tolerant
+            # gate as ``closure_mode`` above; legacy repairer stubs without
+            # the ``degraded`` kwarg keep working.
+            if _accepts_keyword(repairer.converge, "degraded"):
+                converge_kwargs["degraded"] = bool(getattr(seed.metadata, "degraded", False))
             bounded_repair_timeout = self._deadline_capped_timeout(state, repair_timeout)
             try:
                 seed, review, repairs = await asyncio.wait_for(
@@ -1055,6 +1088,36 @@ class AutoPipeline:
                     self._save(state)
                     return self._result(state, ledger, review=review, blocker=state.last_error)
             self._save(state)
+
+            # #1257 PR-C — degraded seed reaches partial product terminal.
+            #
+            # When ``seed.metadata.degraded`` is True, the Seed was synthesized
+            # under deadline pressure by ``partial_seed_from_evidence`` (PR-A
+            # substrate, routed by PR-B). PR-C's contract:
+            #
+            # * any remaining ``review.grade_result.blockers`` are safety
+            #   blockers (``missing_goal`` / ``seed_goal_mismatch`` /
+            #   ``high_risk_assumptions``) — those still terminate the run.
+            # * with no blockers, the partial product surfaces immediately as
+            #   ``AutoPhase.COMPLETE`` via :meth:`_emit_partial_product_terminal`
+            #   regardless of grade or ``may_run``: a deadline-recovery Seed is
+            #   a typed alternative-success terminal, not a runnable Seed.
+            #
+            # Normal (non-degraded) Seeds skip this branch and fall through to
+            # the existing grade-gate / may_run checks unchanged.
+            if bool(getattr(seed.metadata, "degraded", False)):
+                if review.grade_result.blockers:
+                    blocker_codes = ", ".join(
+                        finding.code for finding in review.grade_result.blockers
+                    )
+                    blocker = (
+                        "Degraded seed retains hard safety blockers; "
+                        f"unsafe/destructive markers must be resolved before run: {blocker_codes}"
+                    )
+                    state.mark_blocked(blocker, tool_name="grade_gate")
+                    self._save(state)
+                    return self._result(state, ledger, review=review, blocker=blocker)
+                return await self._emit_partial_product_terminal(state, ledger, seed, review)
 
             if not _grade_meets_required(review.grade_result.grade.value, state.required_grade):
                 blocker = (
@@ -1137,6 +1200,11 @@ class AutoPipeline:
                 review_kwargs: dict[str, Any] = {"ledger": ledger}
                 if _accepts_keyword(reviewer.review, "closure_mode"):
                     review_kwargs["closure_mode"] = state.interview_closure_mode
+                # #1257 PR-C: same stub-tolerant degraded propagation as the
+                # REVIEW-phase converge call above. Legacy reviewer stubs
+                # without ``degraded`` are unaffected.
+                if _accepts_keyword(reviewer.review, "degraded"):
+                    review_kwargs["degraded"] = bool(getattr(seed.metadata, "degraded", False))
                 try:
                     review = await asyncio.wait_for(
                         asyncio.to_thread(reviewer.review, seed, **review_kwargs),
@@ -1539,13 +1607,6 @@ class AutoPipeline:
         ran *before* this helper, so we have no in-flight observer tasks
         to coordinate with here.
         """
-        event_store = getattr(self.interview_driver, "event_store", None)
-        if event_store is None:
-            return
-        from ouroboros.events.base import (
-            BaseEvent,  # local import: keeps top-level dep graph stable
-        )
-
         payload: dict[str, Any] = {
             "auto_session_id": state.auto_session_id,
             "phase": AutoPhase.INTERVIEW.value,
@@ -1555,42 +1616,11 @@ class AutoPipeline:
             "rounds_completed": int(state.current_round or 0),
             "closure_route": closure_route,
         }
-
-        async def _append() -> None:
-            try:
-                await asyncio.wait_for(
-                    event_store.append(
-                        BaseEvent(
-                            type="runtime.deadline.interview.fired",
-                            aggregate_type="auto_session",
-                            aggregate_id=state.auto_session_id,
-                            data=payload,
-                        )
-                    ),
-                    timeout=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                log.warning(
-                    "runtime.deadline.interview.fired.timed_out",
-                    auto_session_id=state.auto_session_id,
-                    timeout_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:  # noqa: BLE001 — observer must not break the loop
-                log.warning(
-                    "runtime.deadline.interview.fired.failed",
-                    auto_session_id=state.auto_session_id,
-                    error=str(exc),
-                )
-
-        try:
-            asyncio.create_task(_append())  # noqa: RUF006 — fire-and-forget per docstring
-        except RuntimeError:
-            # No running loop (e.g. some test stubs invoke deadline
-            # routing outside an ``asyncio.run`` context). Fail-open.
-            log.warning(
-                "runtime.deadline.interview.fired.no_running_loop",
-                auto_session_id=state.auto_session_id,
-            )
+        await self._emit_runtime_event(
+            "runtime.deadline.interview.fired",
+            state.auto_session_id,
+            payload,
+        )
 
     async def _handle_interview_deadline(
         self,
@@ -1647,6 +1677,14 @@ class AutoPipeline:
             )
 
         seed = self._record_generated_seed(state, ledger, seed)
+        # Persist the ledger so the recursive ``self.run(state)`` below
+        # rebuilds the same ledger (including any entries the interview
+        # driver added before the deadline cancelled it). Without this, the
+        # inner ``SeedDraftLedger.from_dict(state.ledger)`` fallback would
+        # use ``SeedDraftLedger.from_goal(state.goal)`` and silently drop
+        # every section the driver had collected — including safety
+        # markers the grade gate must continue to see.
+        state.ledger = ledger.to_dict()
         state.interview_completed = True
         state.mark_progress(
             progress_message,
@@ -1670,6 +1708,106 @@ class AutoPipeline:
         )
         self._save(state)
         return await self.run(state)
+
+    async def _emit_partial_product_terminal(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        review: SeedReview,
+    ) -> AutoPipelineResult:
+        """Short-circuit a degraded Seed to ``AutoPhase.COMPLETE`` (#1257 PR-C).
+
+        Mirrors the existing ``skip_run`` short-circuit but for the
+        deadline-recovery path: PR-A's ``partial_seed_from_evidence`` Seed
+        carries unresolved sections that downstream consumers should treat
+        as next-step requirements rather than runtime arguments. We
+        therefore stop *before* RUN/RALPH_HANDOFF and emit
+        ``auto.product.partial_emitted`` so post-hoc evidence inspection
+        can see the typed terminal.
+
+        The event aggregate type is ``auto_session`` (same as the PR-B
+        ``runtime.deadline.interview.fired`` event) so a single
+        ``ouroboros_query_events(auto_session_id)`` call surfaces both the
+        deadline trigger and the terminal recovery.
+        """
+        unresolved_slots = tuple(getattr(seed.metadata, "unresolved_slots", ()))
+        recovery_reason = getattr(seed.metadata, "recovery_reason", None)
+        await self._emit_runtime_event(
+            "auto.product.partial_emitted",
+            state.auto_session_id,
+            {
+                "auto_session_id": state.auto_session_id,
+                "seed_id": seed.metadata.seed_id,
+                "grade": review.grade_result.grade.value,
+                "recovery_reason": recovery_reason,
+                "unresolved_slots": list(unresolved_slots),
+            },
+        )
+        state.transition(
+            AutoPhase.COMPLETE,
+            "degraded seed emitted as partial product with unresolved next steps",
+        )
+        state.mark_progress(
+            "Partial product emitted from degraded seed; "
+            f"{len(unresolved_slots)} unresolved slot(s) carried forward as next steps",
+            tool_name="partial_product_terminal",
+        )
+        self._save(state)
+        return self._result(state, ledger, review=review)
+
+    async def _emit_runtime_event(
+        self,
+        event_type: str,
+        aggregate_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Fire-and-forget runtime event append via the interview driver's EventStore.
+
+        Shared between :meth:`_emit_runtime_deadline_interview_fired` and
+        :meth:`_emit_partial_product_terminal` so both #1257 surfaces ride
+        the same fail-open path. Mirrors the production driver's append
+        semantics: bounded by ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS``
+        and downgrades timeouts / exceptions to typed structlog warnings.
+        """
+        event_store = getattr(self.interview_driver, "event_store", None)
+        if event_store is None:
+            return
+        from ouroboros.events.base import BaseEvent
+
+        async def _append() -> None:
+            try:
+                await asyncio.wait_for(
+                    event_store.append(
+                        BaseEvent(
+                            type=event_type,
+                            aggregate_type="auto_session",
+                            aggregate_id=aggregate_id,
+                            data=dict(payload),
+                        )
+                    ),
+                    timeout=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                log.warning(
+                    f"{event_type}.timed_out",
+                    auto_session_id=aggregate_id,
+                    timeout_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001 — observer must not break the loop
+                log.warning(
+                    f"{event_type}.failed",
+                    auto_session_id=aggregate_id,
+                    error=str(exc),
+                )
+
+        try:
+            asyncio.create_task(_append())  # noqa: RUF006 — fire-and-forget by contract
+        except RuntimeError:
+            log.warning(
+                f"{event_type}.no_running_loop",
+                auto_session_id=aggregate_id,
+            )
 
     async def _handoff_to_ralph(
         self,
@@ -3303,6 +3441,24 @@ class AutoPipeline:
         ledger_provenance = {
             source: tuple(sections) for source, sections in summary.get("provenance", {}).items()
         }
+        # #1257 PR-C — surface degraded-Seed recovery metadata.
+        #
+        # Derived from ``state.seed_artifact`` so every ``_result`` callsite
+        # (terminal COMPLETE, BLOCKED with a degraded seed still on disk,
+        # mid-flight envelopes) reports consistent partial-product surface.
+        seed_artifact = state.seed_artifact or {}
+        seed_meta = seed_artifact.get("metadata", {}) if isinstance(seed_artifact, dict) else {}
+        seed_degraded = bool(seed_meta.get("degraded"))
+        partial_unresolved_slots = (
+            tuple(seed_meta.get("unresolved_slots", ())) if seed_degraded else ()
+        )
+        partial_product_reason = seed_meta.get("recovery_reason") if seed_degraded else None
+        # ``partial_product`` is True only at the typed terminal: a degraded
+        # Seed that reached :meth:`_emit_partial_product_terminal` and is now
+        # at ``AutoPhase.COMPLETE``. A degraded Seed that BLOCKED earlier
+        # (e.g. on a safety blocker) keeps ``partial_product=False`` so the
+        # field cannot be misread as "deadline recovery succeeded".
+        partial_product = seed_degraded and state.phase == AutoPhase.COMPLETE
         return AutoPipelineResult(
             status=status_override or state.phase.value,
             auto_session_id=state.auto_session_id,
@@ -3357,6 +3513,9 @@ class AutoPipeline:
             assumption_only_sections=tuple(summary.get("assumption_only_sections", ())),
             runtime_probe_evidence=self._last_probe_evidence
             or _runtime_probe_evidence_from_state(state),
+            partial_product=partial_product,
+            partial_product_reason=partial_product_reason,
+            partial_unresolved_slots=partial_unresolved_slots,
         )
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:

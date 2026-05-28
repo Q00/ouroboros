@@ -27,12 +27,27 @@ def _review_accepts_closure_mode(review_callable: Callable[..., Any]) -> bool:
     when the callable does not accept it. Mirrors
     ``pipeline._accepts_keyword``.
     """
+    return _review_accepts_kwarg(review_callable, "closure_mode")
+
+
+def _review_accepts_degraded(review_callable: Callable[..., Any]) -> bool:
+    """Return True iff ``review_callable`` declares ``degraded``.
+
+    #1257 PR-C added the kwarg; legacy test stubs and external reviewer
+    implementations may still declare the pre-#1257 signature, so the
+    converge loop must omit the kwarg when the callable does not accept
+    it. Mirrors :func:`_review_accepts_closure_mode`.
+    """
+    return _review_accepts_kwarg(review_callable, "degraded")
+
+
+def _review_accepts_kwarg(review_callable: Callable[..., Any], name: str) -> bool:
     try:
         sig = inspect.signature(review_callable)
     except (TypeError, ValueError):
         return False
     for param in sig.parameters.values():
-        if param.name == "closure_mode":
+        if param.name == name:
             return True
         if param.kind is inspect.Parameter.VAR_KEYWORD:
             return True
@@ -198,6 +213,7 @@ class SeedRepairer:
         ledger: SeedDraftLedger | None = None,
         cancel_event: threading.Event | None = None,
         closure_mode: str | None = None,
+        degraded: bool | None = None,
     ) -> tuple[Seed, SeedReview, list[RepairResult]]:
         """Review/repair until A-grade or bounded stop.
 
@@ -242,6 +258,12 @@ class SeedRepairer:
         review_kwargs: dict[str, Any] = {"ledger": ledger}
         if _review_accepts_closure_mode(self.reviewer.review):
             review_kwargs["closure_mode"] = closure_mode
+        # #1257 PR-C: same stub-tolerant degraded propagation. The default
+        # (None) lets ``GradeGate.grade_seed`` auto-detect from
+        # ``seed.metadata.degraded`` so callers that don't pass the kwarg
+        # still get the correct behavior for deadline-recovery seeds.
+        if _review_accepts_degraded(self.reviewer.review):
+            review_kwargs["degraded"] = degraded
 
         _check_cancelled()
         review = self.reviewer.review(current, **review_kwargs)

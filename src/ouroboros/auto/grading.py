@@ -150,6 +150,7 @@ class GradeGate:
         *,
         ledger: SeedDraftLedger | None = None,
         closure_mode: str | None = None,
+        degraded: bool | None = None,
     ) -> GradeResult:
         """Grade a generated Seed deterministically.
 
@@ -164,7 +165,29 @@ class GradeGate:
         open_gap / blocker count / risk) remain unchanged. When
         ``closure_mode`` is None (legacy callers, tests, non-pipeline
         usage) the strict pre-#1157 behavior is retained.
+
+        ``degraded`` carries #1257 PR-C's degraded-Seed signal. When
+        ``True`` (or when ``seed.metadata.degraded`` itself is True and
+        the caller leaves the parameter at ``None``), the deadline-
+        recovery seeds produced by :func:`partial_seed_from_evidence`
+        are treated as next-step surfaces instead of terminal blockers:
+
+        * ``high_ambiguity_score`` is suppressed (the deliberately
+          elevated ambiguity floor used to expose deadline-driven
+          uncertainty to observers must not also re-block at the gate),
+        * ``ledger_open_gap`` blockers are demoted to findings — the
+          gaps are already mirrored on ``seed.metadata.unresolved_slots``
+          and surfaced through ``constraints``, so the gate's job is to
+          *report* them, not block on them.
+
+        Other blockers — ``missing_goal``, ``seed_goal_mismatch``,
+        ``high_risk_assumptions`` — remain hard blockers. The §I6
+        contract requires that safety / destructive / goal-mismatch
+        markers continue to terminate even when the degraded path is
+        active.
         """
+        if degraded is None:
+            degraded = bool(getattr(seed.metadata, "degraded", False))
         findings: list[GradeFinding] = []
         blockers: list[GradeFinding] = []
 
@@ -188,7 +211,7 @@ class GradeGate:
         # See #1170 R2 (2026-05-27): cli-todo terminated BLOCKED at this
         # very gate with ambiguity_score=0.467 despite ledger_only closure.
         ledger_primary_closure = closure_mode in {"ledger_only", "safe_default"}
-        if not ledger_primary_closure and seed.metadata.ambiguity_score > 0.20:
+        if not ledger_primary_closure and not degraded and seed.metadata.ambiguity_score > 0.20:
             blockers.append(
                 GradeFinding(
                     "high_ambiguity_score",
@@ -244,10 +267,20 @@ class GradeGate:
         if ledger is not None:
             open_gaps = ledger.open_gaps()
             for gap in open_gaps:
-                blockers.append(
+                # #1257 PR-C: for degraded seeds the unresolved sections are
+                # already surfaced via ``seed.metadata.unresolved_slots`` and
+                # mirrored in ``constraints`` as next-step requirements. The
+                # gate's role here flips from "block execution" to "report",
+                # so we record the gap as a finding rather than a blocker.
+                # Goal-mismatch / unsafe / destructive markers continue to
+                # block — they're handled by ``missing_goal`` /
+                # ``seed_goal_mismatch`` / ``high_risk_assumptions`` above.
+                bucket = findings if degraded else blockers
+                severity = "medium" if degraded else "high"
+                bucket.append(
                     GradeFinding(
                         "ledger_open_gap",
-                        "high",
+                        severity,
                         f"Ledger required section is unresolved: {gap}",
                         gap,
                         "Resolve the ledger section before allowing auto execution.",
