@@ -199,10 +199,13 @@ Each rule has an explicit "what PR G MUST verify" clause.
 
 4. **Service interface, not raw projection.** Plugins reach the
    orchestrator's projection vocabulary only through a typed service
-   surface introduced by PR G. The current projection layer in
-   `src/ouroboros/projections/` remains read-only at the public
-   boundary. PR G's write-side service surface is the only legal
-   write path.
+   surface introduced by PR G. The current projection layer is
+   read-only at the public boundary: `ProjectionQueryHandler` in
+   `src/ouroboros/mcp/tools/projection_handlers.py` (module docstring:
+   `"Read-only MCP query surface for harness projections."`) is fed by
+   `build_projection` in `src/ouroboros/harness/projection_builder.py`
+   and exposes no write API. PR G's write-side service surface is the
+   only legal write path.
 
 5. **`fail_open` cannot promote to mutation.** A hook handler whose
    declared scope is `*:observe` MUST NOT see a write/commit decision
