@@ -178,3 +178,25 @@ Any `interview_max_rounds_exhausted` blocker on a canonical scenario
 is treated as a hard failure — it indicates either the legacy
 AND-gate is back in production or PR-β has not been deployed
 (release cut needed via PR-δ).
+
+## Interview-deadline closure ladder (PR-D / #1257)
+
+`interview_phase_deadline` BLOCKED is also a hard failure on canonical
+scenarios. PR-A/B/C/D of #1257 replace that terminal with a typed
+closure ladder:
+
+- the deadline emits `runtime.deadline.interview.fired`,
+- the pipeline synthesizes a `Seed` (complete ledger →
+  `synthesize_seed_from_ledger`, incomplete → `partial_seed_from_evidence`),
+- and the partial Seed reaches `AutoPhase.COMPLETE` with
+  `auto.product.partial_emitted` + `partial_product=True` /
+  `partial_unresolved_slots` on the result envelope.
+
+The hermetic regression for that contract lives in
+`tests/integration/auto/test_interview_deadline_partial_product_regression.py`
+and runs in plain CI alongside this hermetic harness (no
+`OUROBOROS_RUN_CANONICAL=1` needed because the deadline simulator is
+deterministic and incurs no LLM cost). The live-run path here MUST
+also surface `partial_product=True` and the deadline/partial-emitted
+event pair when the deadline branch is taken — paraphrased absence of
+those fields is treated as evidence the closure ladder has regressed.
