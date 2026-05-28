@@ -1525,9 +1525,7 @@ async def test_run_resume_with_persisted_job_id_blocks_when_starter_has_no_snaps
             raise AssertionError("resume must not redispatch the run job")
 
     async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
-        raise AssertionError(
-            "ralph_starter must not run when the owned job cannot be reconciled"
-        )
+        raise AssertionError("ralph_starter must not run when the owned job cannot be reconciled")
 
     pipeline = AutoPipeline(
         _StubInterviewDriver(),
@@ -1644,7 +1642,10 @@ async def test_run_resume_with_jobless_sync_handle_blocks_complete_product_ralph
         synchronous_execution = True
 
         async def __call__(
-            self, _seed: Seed, *, idempotency_key: str = ""  # noqa: ARG002
+            self,
+            _seed: Seed,
+            *,
+            idempotency_key: str = "",  # noqa: ARG002
         ) -> dict[str, Any]:
             raise AssertionError("resume must not redispatch a synchronous run")
 
