@@ -47,8 +47,9 @@ conversational tracking, call `ouroboros_job_wait` with a positive
 `timeout_seconds` value (for example 120) and `view="summary"`, update the cursor
 from `response.meta.cursor`, relay only meaningful changes, and continue until a
 terminal job status is reached or the user explicitly asks you to stop. If that
-MCP tool is unavailable, stop and report that `ouroboros_start_auto` is
-unavailable instead of continuing as a normal Codex task.
+MCP tool is unavailable, or if any required job polling/result MCP tool is
+unavailable, stop and report that the MCP dispatch surface is incomplete instead
+of continuing as a normal Codex task.
 
 If `ouroboros_start_auto` is invoked and returns an auto-session outcome such as
 `blocked`, `failed`, or `complete`, report that outcome as the auto session
