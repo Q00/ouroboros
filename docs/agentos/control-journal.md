@@ -33,7 +33,7 @@ covers the whole stream.
 | `AgentProcessRuntime._make_emitter` | `src/ouroboros/orchestrator/agent_process.py:994-1029` | `("agent_process", process_id)` | **Observational best-effort.** Returns `None` when no `EventStore` is configured. When wired, `event_store.append(...)` is wrapped in `asyncio.wait_for(...)` and **`except Exception` catches and logs `agent_process.directive_emit_failed`** (the #476 "journal stays out of the way" rule). Lifecycle transitions complete regardless of append outcome. |
 | `EvolutionLoop._emit_step_directive` | `src/ouroboros/evolution/loop.py:307-339` | `("lineage", lineage_id)` | **Strict, single-event append.** `await self.event_store.append(...)` is uncaught — append failure propagates and aborts the step. |
 | `EvolutionLoop._emit_watchdog_timeout_directive` | `src/ouroboros/evolution/loop.py:341-372` | `("lineage", lineage_id)` | **Strict, single-event append.** Same uncaught-`append` shape as the step directive. |
-| `GenerationProgressWatchdog.persist_decision` | `src/ouroboros/evolution/watchdog.py:236-308` | `("lineage", lineage_id)` | **Strict, atomic batch append.** Emits the watchdog decision event and its paired directive event via `event_store.append_batch([decision_event, directive_event])`, so both rows commit together or neither does. The contract carries an `idempotency_key` so the projection-level dedupe identity is exposed (`watchdog_directive_idempotency_key`). |
+| `GenerationProgressWatchdog.emit_decision` | `src/ouroboros/evolution/watchdog.py:209-307` (atomic batch at `:301`) | `("lineage", lineage_id)` | **Strict, atomic batch append.** Emits the watchdog decision event and its paired directive event via `event_store.append_batch([decision_event, directive_event])`, so both rows commit together or neither does. The contract carries an `idempotency_key` so the projection-level dedupe identity is exposed (`watchdog_directive_idempotency_key`). |
 
 Two implications subscribers must internalize:
 
@@ -77,8 +77,8 @@ Concretely, the rules that any new producer or subscriber must honor:
 
 1. **Append-before-publish.** Any future decision site that publishes
    on `ControlBus` must first append the `control.directive.emitted`
-   event via the journal-backed producer (today: `_make_emitter`). The
-   append is the commit point.
+   event via one of the journal-backed producers in §2.1 (or a new
+   producer wired the same way). The append is the commit point.
 2. **Best-effort publish.** `ControlBus.publish(...)` is in-process,
    fire-and-forget fan-out. Subscriber exceptions do not roll back the
    append. The bus implementation already catches and logs handler
@@ -125,7 +125,7 @@ failure stance:
   out of the way" rule. The lineage producers
   (`EvolutionLoop._emit_step_directive`,
   `EvolutionLoop._emit_watchdog_timeout_directive`) and the watchdog
-  producer (`GenerationProgressWatchdog.persist_decision` via
+  producer (`GenerationProgressWatchdog.emit_decision` via
   `append_batch`) **do not** catch — append failure propagates and
   aborts the step or watchdog decision. Subscribers that need a
   uniform durability stance must derive it per producer; the journal
