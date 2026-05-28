@@ -143,6 +143,21 @@ class SeedMetadata(BaseModel, frozen=True):
         created_at: When this seed was generated.
         ambiguity_score: The ambiguity score at generation time.
         interview_id: Reference to the source interview.
+        generation_mode: Provenance label for how the Seed was synthesized.
+            ``"normal"`` is the legacy ledger-complete path; degraded recovery
+            paths (e.g. ``"partial_seed_from_evidence"``) MUST set this so
+            grading/run gates can distinguish a fully-resolved Seed from one
+            built under deadline pressure (#1257).
+        degraded: ``True`` when the Seed was synthesized from an incomplete
+            ledger and carries unresolved slots. Always pairs with a non-default
+            ``generation_mode`` and at least one entry in ``unresolved_slots``.
+        unresolved_slots: Ledger sections that were still
+            MISSING/WEAK/CONFLICTING/BLOCKED at synthesis time. Empty for normal
+            seeds. Surfaced verbatim so downstream gates can transform them into
+            ``next_step`` hints instead of terminal blockers.
+        recovery_reason: Free-form description of why the degraded path was
+            taken (e.g. ``"interview_phase_deadline"``). ``None`` for normal
+            seeds.
     """
 
     seed_id: str = Field(default_factory=lambda: f"seed_{uuid4().hex[:12]}")
@@ -151,6 +166,10 @@ class SeedMetadata(BaseModel, frozen=True):
     ambiguity_score: float = Field(default=0.15, ge=0.0, le=1.0)
     interview_id: str | None = Field(default=None)
     parent_seed_id: str | None = Field(default=None)
+    generation_mode: str = Field(default="normal", min_length=1)
+    degraded: bool = Field(default=False)
+    unresolved_slots: tuple[str, ...] = Field(default_factory=tuple)
+    recovery_reason: str | None = Field(default=None)
 
 
 class Seed(BaseModel, frozen=True):
