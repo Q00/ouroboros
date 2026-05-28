@@ -129,3 +129,12 @@ identify the slot they touch. They do not need a new meta issue.
 > files. Those files do not exist on `main` yet (they are proposed in
 > adjacent open PRs #1273 / #1274), so the GitHub issue numbers above
 > are the canonical anchors until those PRs land.
+
+## 9. Review-trail
+
+Material reviewer feedback applied to this doc (most-recent first):
+
+- **2026-05-28 — ouroboros-agent[bot] REQUEST_CHANGES (`req_1779972121_193`).** The blocker called out that the original draft locked the Codex provider-profile config path as `orchestrator.runtime_profile.profile`, a key that does not exist in the runtime schema or loader. Fix applied:
+  - §3 row 4 (`provider_profile` current-code mapping) now names `orchestrator.runtime_profile.backend_profile` as the canonical object field, anchored to `RuntimeProfileConfig.backend_profile` at `src/ouroboros/config/models.py:392` and `get_runtime_profile()` at `src/ouroboros/config/loader.py:887` (which reads the same `profile.backend_profile` attribute) and to the user-facing example at `docs/runtime-guides/codex.md:128–132`.
+  - The bare scalar shorthand `runtime_profile: <name>` (PR #505 legacy) is documented as a load-time shorthand that is *coerced* into the same `runtime_profile.backend_profile` object field by the `_coerce_runtime_profile` validator at `src/ouroboros/config/models.py:490–495`, not as a separate config path. This split is mirrored in §3 implication, §4 reconciliation, §5 deferred-rename, and §8 codex-md footer so every place the prior draft said "scalar slot-4" now distinguishes object field from legacy shorthand.
+  - Non-blocking follow-ups also applied in the same fix commit: §2 row 1 lists the full shipped `runtime_backend` Literal set (`claude`, `codex`, `copilot`, `hermes`, `gemini`, `opencode`, `kiro`, `goose`) with a citation to `OrchestratorConfig.runtime_backend` `Literal[...]` at `src/ouroboros/config/models.py:485`; `docs/README.md` now links this doc under "Architecture" so future PR authors can discover the taxonomy without already knowing the file path.
