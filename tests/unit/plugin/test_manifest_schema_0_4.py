@@ -402,3 +402,144 @@ class TestV04AuditEventDefaultForLoader:
         default_events = tuple(schema["properties"]["audit"]["default"]["events"])
         loader_events = AuditSpec.standard_events_for_schema("0.4").events
         assert default_events == loader_events
+
+
+def _set_permission_required(payload: dict, scope: str, required: bool) -> None:
+    """Flip the ``required`` flag on a top-level permission entry in place."""
+    for permission in payload["permissions"]:
+        if permission["scope"] == scope:
+            permission["required"] = required
+            return
+    raise AssertionError(f"scope {scope!r} not present in manifest permissions")
+
+
+class TestV04LoaderRequiredPermissions:
+    """Loader-level trust-boundary checks the JSON Schema cannot express.
+
+    The v0.4 JSON Schema enforces *which* permission scope a hook must
+    list in ``hooks[].permissions``, but only the loader can enforce
+    that the same scope is declared ``required=true`` at the top level.
+    PR F-2's firewall dispatcher authorizes required top-level
+    permissions before invoking a hook, so a hook whose authority is
+    granted as merely optional would bypass the trust grant boundary
+    once dispatch lands. These tests lock that enforcement now, at the
+    contract-only stage, so F-2 ships against a frozen invariant.
+    """
+
+    def test_v04_lifecycle_fail_closed_requires_required_policy_permission(
+        self, tmp_path: Path
+    ) -> None:
+        # v0.3 invariant must hold for v0.4: a fail_closed lifecycle hook
+        # whose plugin:lifecycle:policy scope is optional is rejected.
+        payload = _v04_manifest()
+        payload["hooks"] = [_lifecycle_hook(name="before_invocation", failure_policy="fail_closed")]
+        _set_permission_required(payload, HOOK_LIFECYCLE_POLICY_SCOPE, False)
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+        assert exc_info.value.json_pointer == "/permissions"
+
+    def test_v04_before_tool_call_fail_closed_requires_required_intercept(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _v04_manifest()
+        payload["hooks"] = [_tool_call_hook(name="before_tool_call", failure_policy="fail_closed")]
+        _set_permission_required(payload, HOOK_TOOL_INTERCEPT_SCOPE, False)
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+        assert exc_info.value.json_pointer == "/permissions"
+
+    def test_v04_observe_tool_call_requires_required_observe(self, tmp_path: Path) -> None:
+        # An observe-only after_tool_call hook still needs its
+        # plugin:tool:observe scope to be a required top-level permission.
+        payload = _v04_manifest()
+        payload["hooks"] = [
+            _tool_call_hook(
+                name="after_tool_call",
+                failure_policy="fail_open",
+                scope=HOOK_TOOL_OBSERVE_SCOPE,
+            )
+        ]
+        _set_permission_required(payload, HOOK_TOOL_OBSERVE_SCOPE, False)
+        _set_permission_required(payload, HOOK_TOOL_INTERCEPT_SCOPE, False)
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+        assert exc_info.value.json_pointer == "/permissions"
+
+    def test_v04_tool_call_required_permission_accepted(self, tmp_path: Path) -> None:
+        # Positive control: with the intercept scope required (the
+        # _v04_manifest default), a fail_closed tool-call hook loads.
+        payload = _v04_manifest()
+        payload["hooks"] = [_tool_call_hook(name="before_tool_call", failure_policy="fail_closed")]
+        manifest = load_manifest(_write(tmp_path, payload))
+        assert manifest.hooks[0].name == HookKind.BEFORE_TOOL_CALL.value
+
+
+class TestV04ExplicitAuditEventsLoader:
+    """v0.4 explicit audit.events must stay aligned with runtime-emitted events.
+
+    Mirrors the v0.3 invariant: when a manifest narrows ``audit.events``
+    explicitly, the list becomes the runtime contract and must include
+    every event the firewall would emit for the declared hooks. v0.4
+    additionally requires the four reserved ``plugin.tool.*`` names when
+    a tool-call hook is declared.
+    """
+
+    def test_v04_lifecycle_hook_partial_audit_events_rejected(self, tmp_path: Path) -> None:
+        payload = _v04_manifest()
+        payload["hooks"] = [_lifecycle_hook(name="before_invocation", failure_policy="fail_closed")]
+        # Core events only — omits the plugin.hook.* family the firewall
+        # emits for a declared lifecycle hook.
+        payload["audit"] = {
+            "events": [
+                "plugin.invoked",
+                "plugin.permission_used",
+                "plugin.completed",
+                "plugin.failed",
+            ]
+        }
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+        assert exc_info.value.json_pointer == "/audit/events"
+
+    def test_v04_tool_call_hook_partial_audit_events_rejected(self, tmp_path: Path) -> None:
+        payload = _v04_manifest()
+        payload["hooks"] = [_tool_call_hook(name="before_tool_call", failure_policy="fail_closed")]
+        # Has the lifecycle hook events but omits the reserved
+        # plugin.tool.* names required when a tool-call hook is declared.
+        payload["audit"] = {
+            "events": [
+                "plugin.invoked",
+                "plugin.permission_used",
+                "plugin.completed",
+                "plugin.failed",
+                "plugin.hook.invoked",
+                "plugin.hook.completed",
+                "plugin.hook.blocked",
+                "plugin.hook.failed",
+            ]
+        }
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+        assert exc_info.value.json_pointer == "/audit/events"
+
+    def test_v04_tool_call_hook_complete_audit_events_accepted(self, tmp_path: Path) -> None:
+        payload = _v04_manifest()
+        payload["hooks"] = [_tool_call_hook(name="before_tool_call", failure_policy="fail_closed")]
+        payload["audit"] = {
+            "events": [
+                "plugin.invoked",
+                "plugin.permission_used",
+                "plugin.completed",
+                "plugin.failed",
+                "plugin.hook.invoked",
+                "plugin.hook.completed",
+                "plugin.hook.blocked",
+                "plugin.hook.failed",
+                HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+                HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
+                HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+                HOOK_TOOL_OBSERVE_RECORDED_EVENT,
+            ]
+        }
+        manifest = load_manifest(_write(tmp_path, payload))
+        assert HOOK_TOOL_INTERCEPT_REQUESTED_EVENT in manifest.audit.events

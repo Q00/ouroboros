@@ -40,15 +40,19 @@ from ouroboros.plugin.hooks import (
     HOOK_LIFECYCLE_POLICY_SCOPE,
     HOOK_LIFECYCLE_READ_SCOPE,
     HOOK_LIFECYCLE_SCOPES,
+    HOOK_TOOL_CALL_AUDIT_EVENTS,
+    HOOK_TOOL_CALL_SCOPES,
     HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
     HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
     HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+    HOOK_TOOL_INTERCEPT_SCOPE,
     HOOK_TOOL_OBSERVE_RECORDED_EVENT,
     TERMINAL_OBSERVABILITY_HOOK_NAMES,
     HookFailurePolicy,
     HookKind,
     is_deferred_hook_kind,
     is_excluded_hook_kind,
+    is_tool_call_hook_kind,
     is_v1_failure_policy,
     is_v1_hook_kind,
 )
@@ -650,21 +654,44 @@ def _validate_hook_lifecycle_permission(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Require v0.3 lifecycle hooks to declare a v1 lifecycle permission.
+    """Require v0.3 / v0.4 lifecycle and tool-call hooks to declare required permissions.
 
     ``plugin:lifecycle:read`` remains the permission boundary for
     observability hooks, and it must be a required top-level permission
-    before the firewall can dispatch those hooks. Hooks that can veto
-    command execution through ``fail_closed`` must declare the stronger
-    ``plugin:lifecycle:policy`` scope and that scope must also be a
-    required top-level permission, because the firewall trust gate authorizes
-    required top-level permissions before hook dispatch. Enforce this only
-    for the tightened v0.3 hook contract so supported v0.2 manifests keep
-    their compatibility behavior until that schema version is retired
-    deliberately.
+    before the firewall can dispatch those hooks. Lifecycle hooks that
+    can veto command execution through ``fail_closed`` must declare the
+    stronger ``plugin:lifecycle:policy`` scope and that scope must also
+    be a required top-level permission, because the firewall trust gate
+    authorizes required top-level permissions before hook dispatch.
+
+    v0.4 promotes the tool-call hook family (``before_tool_call`` /
+    ``after_tool_call``) into the v1 dispatch vocabulary. The same
+    "required top-level permission" rule applies: tool-call hooks must
+    declare either ``plugin:tool:intercept`` or ``plugin:tool:observe``
+    in ``hooks[].permissions`` *and* the matching scope must also be a
+    required top-level permission. ``before_tool_call`` with
+    ``fail_closed`` additionally requires ``plugin:tool:intercept``
+    specifically — observe-only scope cannot grant veto authority. The
+    schema layer already constrains the per-hook permission list, but
+    only the loader can enforce the ``required=true`` half of the
+    contract; JSON Schema cannot express that condition on a
+    cross-referenced top-level array entry.
+
+    Enforce this only for the tightened v0.3 / v0.4 hook contract so
+    supported v0.2 manifests keep their compatibility behavior until
+    that schema version is retired deliberately.
     """
 
-    if schema_version != "0.3" or not is_v1_hook_kind(raw["name"]):
+    if schema_version not in {"0.3", "0.4"} or not is_v1_hook_kind(raw["name"]):
+        return
+    if is_tool_call_hook_kind(raw["name"]):
+        _validate_tool_call_hook_permission(
+            raw,
+            declared_required_permission_scopes=declared_required_permission_scopes,
+            hook_index=hook_index,
+            manifest_path=manifest_path,
+            schema_version=schema_version,
+        )
         return
     permissions = raw.get("permissions", ())
     if raw["name"] in TERMINAL_OBSERVABILITY_HOOK_NAMES:
@@ -730,6 +757,83 @@ def _validate_hook_lifecycle_permission(
     )
 
 
+def _validate_tool_call_hook_permission(
+    raw: dict[str, Any],
+    *,
+    declared_required_permission_scopes: frozenset[str],
+    hook_index: int,
+    manifest_path: str | Path,
+    schema_version: str,
+) -> None:
+    """Enforce v0.4 tool-call hook trust-boundary permissions at load time.
+
+    The JSON Schema already enforces the per-hook permission list (a
+    ``before_tool_call`` with ``fail_closed`` must carry
+    ``plugin:tool:intercept`` in ``hooks[].permissions``); this loader
+    check is the orthogonal half that JSON Schema cannot express:
+    whichever tool-call scope the hook declares, the same scope must be
+    a top-level *required* permission. Without this, PR F-2's firewall
+    dispatcher — which only inspects required top-level permissions —
+    would invoke a tool-call hook whose authority was granted at
+    install-time as merely optional, bypassing the trust grant
+    boundary.
+
+    Fail-closed tool-call hooks specifically must hold
+    ``plugin:tool:intercept`` as a required top-level permission;
+    ``plugin:tool:observe`` cannot grant veto authority even though it
+    is sufficient for fail-open observation.
+    """
+
+    if schema_version != "0.4":
+        return
+    permissions = raw.get("permissions", ())
+    declared_tool_scopes = HOOK_TOOL_CALL_SCOPES.intersection(permissions)
+    if not declared_tool_scopes:
+        raise PluginManifestError(
+            "v0.4 tool-call hook must declare a tool-call permission",
+            path=str(manifest_path),
+            json_pointer=f"/hooks/{hook_index}/permissions",
+            expected=f"one of {sorted(HOOK_TOOL_CALL_SCOPES)!r} in hooks[].permissions",
+            got=permissions,
+        )
+    if not declared_tool_scopes.intersection(declared_required_permission_scopes):
+        raise PluginManifestError(
+            "v0.4 tool-call hook permission must be required",
+            path=str(manifest_path),
+            json_pointer="/permissions",
+            expected=(
+                "top-level tool-call permission with required=true for one of "
+                f"{sorted(declared_tool_scopes)!r}"
+            ),
+            got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
+        )
+    if raw["failure_policy"] != HookFailurePolicy.FAIL_CLOSED.value:
+        return
+    # fail_closed tool-call hooks must specifically hold
+    # plugin:tool:intercept as a required top-level permission. The
+    # schema already enforces that the per-hook permission list contains
+    # plugin:tool:intercept when fail_closed is used; this enforces the
+    # required=true half so the firewall trust grant cannot be bypassed
+    # by marking the intercept scope optional.
+    if HOOK_TOOL_INTERCEPT_SCOPE not in permissions:
+        raise PluginManifestError(
+            "v0.4 fail_closed tool-call hook must declare plugin:tool:intercept",
+            path=str(manifest_path),
+            json_pointer=f"/hooks/{hook_index}/permissions",
+            expected=f"{HOOK_TOOL_INTERCEPT_SCOPE!r} in hooks[].permissions",
+            got=permissions,
+        )
+    if HOOK_TOOL_INTERCEPT_SCOPE in declared_required_permission_scopes:
+        return
+    raise PluginManifestError(
+        "v0.4 fail_closed tool-call hook intercept permission must be required",
+        path=str(manifest_path),
+        json_pointer="/permissions",
+        expected=f"top-level {HOOK_TOOL_INTERCEPT_SCOPE!r} permission with required=true",
+        got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
+    )
+
+
 def _validate_hook_name(
     name: Any,
     *,
@@ -742,7 +846,10 @@ def _validate_hook_name(
     v0.2 remains a supported manifest schema and its JSON Schema already
     defines the accepted hook-name enum for that version. Preserve that
     compatibility boundary here: v0.2 manifests keep their schema-level
-    contract, while v0.3 gets the tightened v1-only Python guard.
+    contract, while v0.3 / v0.4 get the tightened v1-only Python guard.
+    v0.4 admits the tool-call hook family into the v1 vocabulary, so
+    ``is_v1_hook_kind`` returns True for those names; deferred and
+    excluded names still reject identically.
     """
     json_pointer = f"/hooks/{hook_index}/name"
     if not isinstance(name, str) or not name:
@@ -754,7 +861,7 @@ def _validate_hook_name(
             got=repr(name),
         )
 
-    if schema_version != "0.3" or is_v1_hook_kind(name):
+    if schema_version not in {"0.3", "0.4"} or is_v1_hook_kind(name):
         return
 
     if is_deferred_hook_kind(name):
@@ -802,8 +909,12 @@ def _validate_failure_policy(
     )
 
 
-_OBSERVATION_ONLY_V03_HOOK_NAMES: frozenset[str] = frozenset(
-    {HookKind.AFTER_INVOCATION.value, *TERMINAL_OBSERVABILITY_HOOK_NAMES}
+_OBSERVATION_ONLY_HOOK_NAMES: frozenset[str] = frozenset(
+    {
+        HookKind.AFTER_INVOCATION.value,
+        HookKind.AFTER_TOOL_CALL.value,
+        *TERMINAL_OBSERVABILITY_HOOK_NAMES,
+    }
 )
 
 
@@ -815,27 +926,31 @@ def _validate_after_invocation_policy(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Keep v0.3 observation-only hooks from acquiring veto authority.
+    """Keep v0.3 / v0.4 observation-only hooks from acquiring veto authority.
 
     v0.3 lifecycle permissions are read-only, so terminal observability
     hooks (``after_invocation`` plus the additive ``on_error`` /
     ``on_cancel`` hooks from PR #1131) may observe the completed outcome
     but must not be able to veto or rewrite it through a fail-closed
-    policy. v0.2 compatibility is left unchanged; those hooks load but
-    runtime dispatch remains disabled.
+    policy. v0.4 adds ``after_tool_call`` to the observation-only set:
+    the after-call payload describes a tool result the caller has
+    already observed, so it must be ``fail_open`` (the v0.4 JSON Schema
+    enforces this too; this loader check is defense-in-depth). v0.2
+    compatibility is left unchanged; those hooks load but runtime
+    dispatch remains disabled.
     """
 
     if (
-        schema_version != "0.3"
-        or hook_name not in _OBSERVATION_ONLY_V03_HOOK_NAMES
+        schema_version not in {"0.3", "0.4"}
+        or hook_name not in _OBSERVATION_ONLY_HOOK_NAMES
         or failure_policy != HookFailurePolicy.FAIL_CLOSED.value
     ):
         return
     raise PluginManifestError(
-        f"v0.3 {hook_name} hooks must use fail_open",
+        f"{hook_name} hooks must use fail_open",
         path=str(manifest_path),
         json_pointer=f"/hooks/{hook_index}/failure_policy",
-        expected=f"'fail_open' for v0.3 {hook_name} hooks",
+        expected=f"'fail_open' for {hook_name} hooks",
         got=failure_policy,
     )
 
@@ -860,16 +975,24 @@ def _validate_hook_audit_events(
     complete v0.3 lifecycle vocabulary.
     """
 
-    if schema_version != "0.3" or not audit_was_explicit:
+    if schema_version not in {"0.3", "0.4"} or not audit_was_explicit:
         return
     required_events = set(AuditSpec.standard_four_events().events)
     if hooks:
         required_events.update(HOOK_EVENT_TYPES)
+    # v0.4 additionally reserves the four plugin.tool.* audit event names
+    # whenever a tool-call hook is declared, mirroring
+    # AuditSpec.standard_events_for_schema("0.4"). PR F-1 only reserves
+    # the names; PR F-2 owns emission. Requiring them in an explicit
+    # audit.events block keeps the narrowed runtime contract honest once
+    # dispatch lands, exactly as the v0.3 lifecycle invariant does.
+    if schema_version == "0.4" and any(is_tool_call_hook_kind(hook.name) for hook in hooks):
+        required_events.update(HOOK_TOOL_CALL_AUDIT_EVENTS)
     missing_events = required_events.difference(audit.events)
     if not missing_events:
         return
     raise PluginManifestError(
-        "v0.3 explicit audit.events must include every runtime-emitted event",
+        "explicit audit.events must include every runtime-emitted event",
         path=str(manifest_path),
         json_pointer="/audit/events",
         expected=f"events including {sorted(required_events)!r}",
