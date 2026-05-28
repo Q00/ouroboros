@@ -620,49 +620,48 @@ class AutoPipeline:
                 interview_phase_timeout = state.phase_timeout_seconds(AutoPhase.INTERVIEW)
                 interview_timeout = self._deadline_capped_timeout(state, interview_phase_timeout)
                 try:
-                    interview = await asyncio.wait_for(
-                        self.interview_driver.run(state, ledger),
-                        timeout=interview_timeout,
-                    )
-                except TimeoutError:
-                    # RFC #1256 §I4 — drain pending observer events
-                    # OUTSIDE the interview ``wait_for`` boundary even
-                    # on the timeout path: the driver may have
-                    # scheduled ``auto.interview.opened`` (and possibly
-                    # ``auto.interview.failed`` if the cancellation
-                    # surfaced inside ``_run_inner``) before the phase
-                    # deadline fired, and operators inspecting evidence
-                    # via ``ouroboros_query_events(auto_session_id)``
-                    # need those lifecycle records to reconstruct what
-                    # happened. The drain is bounded by
-                    # ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` and
-                    # cannot turn a phase timeout into a different
-                    # outcome — we are already on the BLOCKED branch.
-                    await self._drain_interview_observer_events()
-                    if self._enforce_deadline(state):
+                    try:
+                        interview = await asyncio.wait_for(
+                            self.interview_driver.run(state, ledger),
+                            timeout=interview_timeout,
+                        )
+                    except TimeoutError:
+                        if self._enforce_deadline(state):
+                            return self._result(state, ledger, blocker=state.last_error)
+                        state.mark_blocked(
+                            f"interview phase exceeded {interview_phase_timeout:.0f}s",
+                            tool_name="interview_driver",
+                            error_code="interview_phase_deadline",
+                        )
+                        self._save(state)
                         return self._result(state, ledger, blocker=state.last_error)
-                    state.mark_blocked(
-                        f"interview phase exceeded {interview_phase_timeout:.0f}s",
-                        tool_name="interview_driver",
-                        error_code="interview_phase_deadline",
-                    )
-                    self._save(state)
-                    return self._result(state, ledger, blocker=state.last_error)
-                # RFC #1256 §I4 — clean-exit composition-root drain.
-                # ``self.interview_driver.run`` schedules typed
-                # ``auto.interview.{opened,finalized}`` events as
-                # background ``asyncio.Task``s and never awaits them,
-                # so observer latency cannot turn a completed
-                # interview into a phase timeout (bot review on
-                # commit ``c5549124``, req_1779938459_153). The
-                # pipeline — the production §I4 composition root — is
-                # responsible for persisting those events OUTSIDE the
-                # ``wait_for`` boundary so the §I4 substrate contract
-                # (supply an EventStore, get queryable lifecycle
-                # evidence) is honoured for every interview that the
-                # pipeline drives. The drain is bounded and fail-open
-                # so a degraded EventStore cannot stall the pipeline.
-                await self._drain_interview_observer_events()
+                finally:
+                    # RFC #1256 §I4 — composition-root drain on EVERY
+                    # exit path: clean completion, ``TimeoutError``
+                    # translated to BLOCKED above, AND any other
+                    # exception propagating out of
+                    # ``self.interview_driver.run``. The driver
+                    # schedules ``auto.interview.opened`` before the
+                    # inner loop and ``auto.interview.failed``
+                    # immediately before re-raising on ordinary
+                    # exceptions; without a drain on the exception
+                    # path those background tasks would die when the
+                    # composition root unwinds, silently losing the
+                    # failed lifecycle evidence (bot review on commit
+                    # ``34fd7ee8``, ``supersede-requeue-pr:1260-34fd7ee``,
+                    # reproduced this with ``_run_inner`` patched to
+                    # raise: after ``pipeline.run()`` raised,
+                    # ``store.appended == []`` and
+                    # ``driver._pending_emit_tasks`` still held both
+                    # tasks). ``finally`` runs before any return /
+                    # propagating raise inside the inner ``try``, so
+                    # the drain fires consistently for the three
+                    # documented paths. The drain is bounded by
+                    # ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` and
+                    # cannot turn a phase outcome into a different
+                    # outcome — the interview ``wait_for`` has already
+                    # returned, been translated to BLOCKED, or raised.
+                    await self._drain_interview_observer_events()
                 if interview.status == "blocked":
                     return self._result(state, ledger, blocker=interview.blocker)
                 state.interview_completed = True

@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -36,6 +36,7 @@ from ouroboros.auto.pipeline import (
     _INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
     AutoPipeline,
 )
+from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.events.base import BaseEvent
 
 
@@ -230,3 +231,60 @@ async def test_drain_shields_pending_tasks_from_outer_cancellation(tmp_path) -> 
     await driver.wait_for_pending_emits()
 
     assert [event.type for event in store.appended] == ["auto.interview.opened"]
+
+
+async def _unused_seed_generator_integration(_session_id: str):  # pragma: no cover
+    raise AssertionError("seed generator should not be reached when the interview driver raises")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_drains_observer_events_on_ordinary_exception(tmp_path) -> None:
+    """Bot-review blocker (commit ``34fd7ee8``,
+    ``supersede-requeue-pr:1260-34fd7ee``): when ``_run_inner`` raises
+    an ordinary ``Exception``, ``AutoInterviewDriver.run`` schedules
+    ``auto.interview.failed`` as a background ``asyncio.Task`` before
+    re-raising. If the pipeline drained only on the clean-exit and
+    timeout paths, that failed evidence would silently disappear the
+    moment the composition root unwinds.
+
+    The fix puts the drain in a ``try / finally`` around the interview
+    ``wait_for`` so every exit path drains: clean completion, timeout
+    translated to BLOCKED, AND any exception propagating out of the
+    driver. This test pins the contract end-to-end via
+    ``AutoPipeline.run`` with a real ``AutoInterviewDriver`` and a
+    recording EventStore.
+    """
+    store = _RecordingEventStore(sleep_seconds=0.01)
+    driver = _build_driver(store=store)
+    auto_store = AutoStore(tmp_path)
+    pipeline = AutoPipeline(driver, _unused_seed_generator_integration, store=auto_store)
+    state = AutoPipelineState(goal="exercise drain on exception", cwd=str(tmp_path))
+    auto_store.save(state)
+
+    class _Boom(RuntimeError):
+        pass
+
+    # Patch ``_run_inner`` to raise; the driver wrapper's
+    # ``except Exception`` schedules ``auto.interview.failed`` and
+    # re-raises into the pipeline.
+    with patch.object(
+        AutoInterviewDriver,
+        "_run_inner",
+        AsyncMock(side_effect=_Boom("backend crashed mid-interview")),
+    ):
+        with pytest.raises(_Boom):
+            await pipeline.run(state)
+
+    # Pipeline's ``try / finally`` ran the drain before the exception
+    # unwound past the interview phase, so both lifecycle events are
+    # durable on the recording store — exactly what
+    # ``ouroboros_query_events(auto_session_id)`` needs to reconstruct
+    # the failed interview.
+    types = [event.type for event in store.appended]
+    assert types == ["auto.interview.opened", "auto.interview.failed"]
+    failed = store.appended[-1]
+    assert failed.aggregate_id == state.auto_session_id
+    assert failed.data["exception_type"] == "_Boom"
+    assert "backend crashed" in failed.data["exception_message"]
+    # The driver's pending set is empty — drain consumed every task.
+    assert not driver._pending_emit_tasks
