@@ -759,7 +759,7 @@ class AutoPipeline:
                     if self._enforce_deadline(state):
                         record_authoring_backend(state)
                         return self._result(state, ledger, blocker=state.last_error)
-                    if ledger.is_seed_ready() and _is_authoring_backend_unavailable(exc):
+                    if ledger.is_seed_ready():
                         seed = synthesize_seed_from_ledger(
                             ledger, interview_id=state.interview_session_id
                         )
