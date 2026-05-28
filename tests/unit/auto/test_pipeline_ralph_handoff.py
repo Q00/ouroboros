@@ -1405,6 +1405,7 @@ async def test_run_resume_with_persisted_handle_blocks_when_owned_job_still_runn
     state.run_handoff_status = "started"
     state.job_id = "job_run_pending_resume"
     state.complete_product = True
+    state.timeout_seconds_by_phase = {AutoPhase.RUN: 0.01}
 
     class _RunSnapshot:
         is_terminal = False
@@ -1442,6 +1443,52 @@ async def test_run_resume_with_persisted_handle_blocks_when_owned_job_still_runn
     assert state.phase is AutoPhase.BLOCKED
     assert state.last_tool_name == "run_starter"
     assert "did not finish" in (state.last_error or "")
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_resume_with_stale_persisted_job_id_blocks_instead_of_crashing(
+    tmp_path,
+) -> None:
+    """Missing job snapshots are persistence-boundary blockers, not process crashes."""
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_stale"
+    state.execution_id = "execution_stale"
+    state.complete_product = True
+
+    class _RunJobManager:
+        async def get_snapshot(self, _job_id: str) -> object:
+            raise ValueError("Job not found: job_run_stale")
+
+    class _RunHandler:
+        _job_manager = _RunJobManager()
+
+    class StaleSnapshotStarter:
+        handler = _RunHandler()
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not start a duplicate run")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("ralph_starter must not run with a stale run job")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=StaleSnapshotStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == "run_starter"
+    assert "snapshot is unavailable" in (state.last_error or "")
     assert state.ralph_job_id is None
 
 

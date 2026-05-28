@@ -3758,7 +3758,10 @@ async def _wait_owned_run_job_terminal(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0.0, timeout_seconds)
     while True:
-        snapshot = await get_snapshot(job_id)
+        try:
+            snapshot = await get_snapshot(job_id)
+        except Exception:
+            return None
         if getattr(snapshot, "is_terminal", False):
             meta = dict(getattr(snapshot, "result_meta", None) or {})
             status = getattr(getattr(snapshot, "status", None), "value", None)
