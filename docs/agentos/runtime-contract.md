@@ -58,15 +58,23 @@ are forward-compatible but not yet wired.
 
 What is implemented today:
 
-- `AgentProcessRuntime._make_emitter`
-  (`src/ouroboros/orchestrator/agent_process.py`) is the only production
-  producer of `control.directive.emitted` events. It is
-  **observational-first** by design: the emitter is `None` when no
-  `EventStore` is configured, and append failures (including timeout)
-  are caught and logged as `agent_process.directive_emit_failed` per
-  the #476 *"the journal stays out of the way"* rule. Callers that
-  require strict raise-on-failure durability must wrap the producer
-  themselves; the default emitter does not propagate append failures.
+- The journal has four production producers of
+  `control.directive.emitted`, split across two failure stances and
+  two atomicity stances. Subscribers must not assume one stance covers
+  the whole stream:
+
+  | Producer | Code | Target aggregate | Append semantics |
+  |---|---|---|---|
+  | `AgentProcessRuntime._make_emitter` | `src/ouroboros/orchestrator/agent_process.py:994-1029` | `("agent_process", process_id)` | **Observational best-effort.** Returns `None` when no `EventStore` is configured; when wired, `event_store.append(...)` is wrapped in `asyncio.wait_for(...)` and `except Exception` catches+logs `agent_process.directive_emit_failed` (the #476 *"journal stays out of the way"* rule). Lifecycle transitions complete regardless. |
+  | `EvolutionLoop._emit_step_directive` | `src/ouroboros/evolution/loop.py:307-339` | `("lineage", lineage_id)` | **Strict single-event append.** `await self.event_store.append(...)` is uncaught — append failure propagates and aborts the step. |
+  | `EvolutionLoop._emit_watchdog_timeout_directive` | `src/ouroboros/evolution/loop.py:341-372` | `("lineage", lineage_id)` | **Strict single-event append**, same shape as the step directive. |
+  | `GenerationProgressWatchdog.persist_decision` | `src/ouroboros/evolution/watchdog.py:236-308` | `("lineage", lineage_id)` | **Strict atomic batch append** via `event_store.append_batch([decision_event, directive_event])`; both rows commit or neither does. Carries an `idempotency_key` exposing the `ControlContract.effective_idempotency_key` decision identity. |
+
+  Q3 therefore answers two things at once: (a) the journal is the
+  source of truth for any consumer, and (b) the failure/atomicity
+  stance is per-producer, not uniform — a subscriber that expects
+  every directive to be appended must remember the
+  `agent_process` emitter may have caught its append.
 - `ControlDirectiveEmission` (`src/ouroboros/core/lineage.py`)
   provides the projection that lets replayers reconstruct emitted
   directives without re-running handlers.
