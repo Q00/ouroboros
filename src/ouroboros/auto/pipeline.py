@@ -1601,11 +1601,14 @@ class AutoPipeline:
 
         Errors and timeouts are downgraded to typed structlog warnings —
         observability must never convert the deadline-recovery path back
-        into a terminal BLOCKED. The append is dispatched as a fire-and-
-        forget ``asyncio.create_task`` so it cannot consume the post-
-        deadline budget; the existing ``_drain_interview_observer_events``
-        ran *before* this helper, so we have no in-flight observer tasks
-        to coordinate with here.
+        into a terminal BLOCKED. The append is awaited inline so the
+        deadline event durably precedes the later
+        ``auto.product.partial_emitted`` append (canonical regression
+        contract); the awaited write is bounded by
+        ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` so a stuck
+        EventStore still cannot consume the post-deadline budget.
+        ``_drain_interview_observer_events`` ran *before* this helper,
+        so we have no in-flight observer tasks to coordinate with here.
         """
         payload: dict[str, Any] = {
             "auto_session_id": state.auto_session_id,
@@ -1762,51 +1765,56 @@ class AutoPipeline:
         aggregate_id: str,
         payload: dict[str, Any],
     ) -> None:
-        """Fire-and-forget runtime event append via the interview driver's EventStore.
+        """Persist a runtime event in caller order via the interview driver's EventStore.
 
         Shared between :meth:`_emit_runtime_deadline_interview_fired` and
         :meth:`_emit_partial_product_terminal` so both #1257 surfaces ride
-        the same fail-open path. Mirrors the production driver's append
-        semantics: bounded by ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS``
-        and downgrades timeouts / exceptions to typed structlog warnings.
+        the same fail-open path. The append is **awaited inline** so the
+        ordering contract pinned by the PR-D canonical regression —
+        ``runtime.deadline.interview.fired`` MUST precede
+        ``auto.product.partial_emitted`` — is durable under realistic
+        EventStore append latency / retry behavior. Fire-and-forget
+        scheduling was the previous implementation and was flagged by
+        ouroboros-agent[bot] ``supersede-requeue-pr:1272-ce273bf`` as a
+        race window: if the deadline event's append was slow while the
+        partial event's append was fast, the persisted stream could
+        contradict the lifecycle even when the result envelope said
+        ``partial_product=True``.
+
+        The append is bounded by
+        ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` and downgrades
+        timeouts / exceptions to typed structlog warnings, so a stuck
+        EventStore can never convert the deadline-recovery path back
+        into a terminal BLOCKED; observability stays fail-open.
         """
         event_store = getattr(self.interview_driver, "event_store", None)
         if event_store is None:
             return
         from ouroboros.events.base import BaseEvent
 
-        async def _append() -> None:
-            try:
-                await asyncio.wait_for(
-                    event_store.append(
-                        BaseEvent(
-                            type=event_type,
-                            aggregate_type="auto_session",
-                            aggregate_id=aggregate_id,
-                            data=dict(payload),
-                        )
-                    ),
-                    timeout=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                log.warning(
-                    f"{event_type}.timed_out",
-                    auto_session_id=aggregate_id,
-                    timeout_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:  # noqa: BLE001 — observer must not break the loop
-                log.warning(
-                    f"{event_type}.failed",
-                    auto_session_id=aggregate_id,
-                    error=str(exc),
-                )
-
         try:
-            asyncio.create_task(_append())  # noqa: RUF006 — fire-and-forget by contract
-        except RuntimeError:
+            await asyncio.wait_for(
+                event_store.append(
+                    BaseEvent(
+                        type=event_type,
+                        aggregate_type="auto_session",
+                        aggregate_id=aggregate_id,
+                        data=dict(payload),
+                    )
+                ),
+                timeout=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
             log.warning(
-                f"{event_type}.no_running_loop",
+                f"{event_type}.timed_out",
                 auto_session_id=aggregate_id,
+                timeout_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 — observer must not break the loop
+            log.warning(
+                f"{event_type}.failed",
+                auto_session_id=aggregate_id,
+                error=str(exc),
             )
 
     async def _handoff_to_ralph(
