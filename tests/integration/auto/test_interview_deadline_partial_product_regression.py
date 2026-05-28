@@ -262,3 +262,96 @@ async def test_interview_deadline_regression_without_event_store(tmp_path: Path)
     assert result.partial_unresolved_slots
     assert state.seed_artifact is not None
     assert state.seed_artifact["metadata"]["degraded"] is True
+
+
+class _SelectivelyDelayingEventStore(_RecordingEventStore):
+    """EventStore stub whose append for a chosen event type is artificially slow.
+
+    Designed to reproduce the race that ouroboros-agent[bot]
+    ``supersede-requeue-pr:1272-ce273bf`` flagged: when
+    ``runtime.deadline.interview.fired`` is slow but
+    ``auto.product.partial_emitted`` is fast, a fire-and-forget
+    implementation persists them in the wrong order even though the
+    pipeline invokes them sequentially. Awaiting the appends inline
+    (PR-C follow-up 2) eliminates that race and this test pins the
+    contract.
+    """
+
+    def __init__(self, slow_event_type: str, slow_delay_seconds: float) -> None:
+        super().__init__()
+        self._slow_event_type = slow_event_type
+        self._slow_delay_seconds = slow_delay_seconds
+
+    async def append(self, event: BaseEvent, **kw: Any) -> None:
+        if event.type == self._slow_event_type:
+            await asyncio.sleep(self._slow_delay_seconds)
+        await super().append(event, **kw)
+
+
+@pytest.mark.asyncio
+async def test_deadline_event_ordering_holds_when_first_append_is_slow(
+    tmp_path: Path,
+) -> None:
+    """Regression for ouroboros-agent[bot] ``supersede-requeue-pr:1272-ce273bf``.
+
+    The canonical evidence contract requires
+    ``runtime.deadline.interview.fired`` (PR-B) to precede
+    ``auto.product.partial_emitted`` (PR-C) in the persisted EventStore
+    stream. The prior fire-and-forget implementation in
+    ``_emit_runtime_event`` failed this under realistic append latency:
+    if the first append was slow while the second was fast, the
+    persisted stream contained ``auto.product.partial_emitted`` first,
+    contradicting the lifecycle even when the result envelope said
+    ``partial_product=True``.
+
+    This test deliberately delays the deadline event append while
+    keeping the partial-emitted append fast. With the PR-C follow-up
+    that awaits appends inline, ordering MUST still hold; with the
+    prior implementation the assertion below would fail.
+    """
+    # 250 ms is enough to be detectable but well inside the
+    # ``_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS`` bound.
+    event_store = _SelectivelyDelayingEventStore(
+        slow_event_type="runtime.deadline.interview.fired",
+        slow_delay_seconds=0.25,
+    )
+    driver = _DeadlineDriver(event_store=event_store)
+    state = AutoPipelineState(goal="Build a tiny CLI tool.", cwd=str(tmp_path))
+    _arm_interview_deadline(state)
+    pipeline = AutoPipeline(driver, _unused_seed_generator, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+    # Give any (incorrectly) outstanding fire-and-forget tasks ample time
+    # to land — if ordering is correct this is a no-op; if the prior
+    # race resurfaces, this is when the misordered tail would arrive.
+    for _ in range(8):
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.3)
+
+    # Functional surface unchanged.
+    assert result.partial_product is True
+    assert result.partial_product_reason == "interview_phase_deadline"
+    assert state.phase == AutoPhase.COMPLETE
+
+    # Ordering contract: deadline event MUST precede partial-emitted
+    # event in the persisted stream, even though its append was slower.
+    types_in_order = [event.type for event in event_store.appended]
+    deadline_indices = [
+        idx for idx, t in enumerate(types_in_order) if t == "runtime.deadline.interview.fired"
+    ]
+    partial_indices = [
+        idx for idx, t in enumerate(types_in_order) if t == "auto.product.partial_emitted"
+    ]
+    assert deadline_indices, (
+        "deadline event must land in the persisted stream even under append latency"
+    )
+    assert partial_indices, (
+        "partial-emitted event must land in the persisted stream even under append latency"
+    )
+    assert deadline_indices[0] < partial_indices[0], (
+        "runtime.deadline.interview.fired must persist BEFORE auto.product.partial_emitted "
+        "regardless of relative append latency — fire-and-forget scheduling broke this; "
+        "the PR-C follow-up awaits appends inline to preserve the canonical ordering "
+        "contract. Observed order: "
+        f"{types_in_order}"
+    )
