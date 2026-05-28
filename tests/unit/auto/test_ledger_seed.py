@@ -105,7 +105,7 @@ class TestPartialSeedFromEvidence:
         assert seed.metadata.recovery_reason == "interview_phase_deadline"
         assert seed.metadata.interview_id == "iv-partial"
 
-    def test_unresolved_slots_match_open_gaps_excluding_goal(self) -> None:
+    def test_unresolved_slots_match_open_gaps(self) -> None:
         ledger = SeedDraftLedger.from_goal("A bare goal.")
         # ``from_goal`` only resolves the goal section; every other required
         # section is MISSING and therefore an open gap.
@@ -115,6 +115,9 @@ class TestPartialSeedFromEvidence:
 
         seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
 
+        # Every open gap is surfaced verbatim — including ``goal`` when the
+        # aggregate goal status itself is unresolved (see
+        # ``test_blocked_goal_entry_surfaced_in_unresolved_slots``).
         assert set(seed.metadata.unresolved_slots) == open_gaps
         # And every unresolved slot is surfaced through constraints so the
         # executor cannot silently assume completeness.
@@ -123,6 +126,78 @@ class TestPartialSeedFromEvidence:
                 slot in constraint and "Known unresolved slot" in constraint
                 for constraint in seed.constraints
             ), f"missing unresolved-slot constraint for {slot}"
+
+    def test_blocked_goal_entry_surfaced_in_unresolved_slots(self) -> None:
+        """A CONFIRMED-then-BLOCKED goal section is degraded with goal provenance.
+
+        Regression for the #1269 review blocker: ``open_gaps()`` reports
+        ``"goal"`` whenever the aggregate goal-section status is
+        MISSING / WEAK / CONFLICTING / BLOCKED, but ``_latest_value`` still
+        returns the active CONFIRMED value. Earlier revisions filtered
+        ``goal`` out of ``unresolved_slots`` unconditionally, leaving
+        ``degraded=True`` with ``unresolved_slots=()`` and no
+        ``"Known unresolved slot (goal)"`` constraint — a silent provenance
+        loss that PR-C gates would have mistaken for a fully resolved goal.
+        """
+        ledger = SeedDraftLedger.from_goal("Original goal that survived.")
+        # A later same-section different-key BLOCKED entry tips the aggregate
+        # status to BLOCKED without invalidating the CONFIRMED active value.
+        ledger.add_entry(
+            "goal",
+            LedgerEntry(
+                key="goal.review_blocker",
+                value="Reviewer raised a blocker on the goal interpretation.",
+                source=LedgerSource.USER_GOAL,
+                confidence=0.9,
+                status=LedgerStatus.BLOCKED,
+            ),
+        )
+
+        # Active goal value is still available — the deadline can still
+        # recover into *something* — but ``goal`` is in ``open_gaps``.
+        assert "goal" in set(ledger.open_gaps())
+
+        seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+
+        assert seed.goal == "Original goal that survived."
+        assert seed.metadata.degraded is True
+        assert "goal" in seed.metadata.unresolved_slots, (
+            "BLOCKED goal aggregate must be surfaced as unresolved provenance, not silently dropped"
+        )
+        assert any(
+            "Known unresolved slot (goal)" in constraint for constraint in seed.constraints
+        ), "constraints must carry the goal-unresolved next-step hint"
+
+    def test_conflicting_goal_entry_surfaced_in_unresolved_slots(self) -> None:
+        """A CONFIRMED-plus-CONFLICTING goal section is degraded with goal provenance.
+
+        Sibling regression to the BLOCKED case: ``LedgerSection.status()``
+        returns CONFLICTING when no entry is BLOCKED but at least one is
+        CONFLICTING. ``_latest_value`` still returns the latest non-inactive
+        (CONFIRMED) goal, so the deadline has something to recover into —
+        but the aggregate goal status is contested and the recovery contract
+        must surface that.
+        """
+        ledger = SeedDraftLedger.from_goal("Primary goal still in scope.")
+        ledger.add_entry(
+            "goal",
+            LedgerEntry(
+                key="goal.alt_interpretation",
+                value="An alternate goal phrasing the interview never resolved.",
+                source=LedgerSource.USER_GOAL,
+                confidence=0.7,
+                status=LedgerStatus.CONFLICTING,
+            ),
+        )
+
+        assert "goal" in set(ledger.open_gaps())
+
+        seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+
+        assert seed.goal == "Primary goal still in scope."
+        assert seed.metadata.degraded is True
+        assert "goal" in seed.metadata.unresolved_slots
+        assert any("Known unresolved slot (goal)" in constraint for constraint in seed.constraints)
 
     def test_complete_ledger_marks_seed_non_degraded(self) -> None:
         ledger = _populate_complete_ledger()

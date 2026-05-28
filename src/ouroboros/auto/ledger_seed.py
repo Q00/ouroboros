@@ -162,10 +162,15 @@ def partial_seed_from_evidence(
     * lists the unresolved slots in ``constraints`` so executors cannot
       silently overrun the deadline-driven recovery contract.
 
-    ``goal`` remains a hard prerequisite: a missing goal is a structural
-    failure (no product can exist without one) and raises ``ValueError``. This
-    is the only divergence from "fail-soft": if even the goal is unresolved,
-    the deadline has nothing to recover into.
+    ``goal`` remains a hard prerequisite: a *missing* goal (no active value at
+    all) is a structural failure — no product can exist without one — and
+    raises ``ValueError``. This is the only divergence from "fail-soft": if
+    even the goal is unresolved, the deadline has nothing to recover into. A
+    goal that is present but only WEAK / CONFLICTING / BLOCKED at the
+    aggregate level (e.g. a confirmed goal followed by a later blocked or
+    conflicting goal entry) is NOT a structural failure — the active value is
+    used, but ``"goal"`` is surfaced in ``unresolved_slots`` and
+    ``constraints`` so downstream gates see the contested provenance.
 
     The function performs no model or external IO; it is safe to call from
     deadline handlers without re-introducing latency that was the original
@@ -198,9 +203,17 @@ def partial_seed_from_evidence(
         )
         raise ValueError(msg) from exc
 
-    open_gaps = tuple(ledger.open_gaps())
-    unresolved_slots = tuple(slot for slot in open_gaps if slot != "goal")
-    degraded = bool(unresolved_slots) or "goal" in open_gaps
+    # ``_latest_value`` above guarantees the ledger has at least one active goal
+    # value, but the aggregate goal-section status can still be WEAK /
+    # CONFLICTING / BLOCKED (e.g. a confirmed goal followed by a blocked or
+    # conflicting later entry), in which case ``open_gaps`` still includes
+    # ``"goal"``. The recovery contract requires us to surface that fact
+    # verbatim in both ``unresolved_slots`` and ``constraints`` so PR-C gates
+    # can convert it into a next-step hint instead of treating the degraded
+    # Seed as goal-resolved. We therefore preserve every open gap — including
+    # ``goal`` — in the provenance surface.
+    unresolved_slots = tuple(ledger.open_gaps())
+    degraded = bool(unresolved_slots)
 
     constraints = list(_lines_from_section(ledger, "constraints"))
     non_goals = _lines_from_section(ledger, "non_goals")
