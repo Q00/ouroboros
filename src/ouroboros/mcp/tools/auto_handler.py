@@ -1236,6 +1236,17 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["product_status"] = "not_verified_complete"
     if result.stop_reason_code is not None:
         meta["stop_reason_code"] = result.stop_reason_code
+    # #1257 PR-D follow-up (ouroboros-agent[bot] req_1779969483_175 medium): the
+    # AutoPipelineResult partial-product contract added by PR-C must be
+    # surfaced through the MCP boundary so external clients can render the
+    # next-step hints without re-parsing the persisted Seed artifact. Without
+    # these fields a partial product looked identical to a regular ``complete``
+    # status on the MCP wire — masking the deadline-recovery semantic.
+    if result.partial_product:
+        meta["partial_product"] = True
+        if result.partial_product_reason is not None:
+            meta["partial_product_reason"] = result.partial_product_reason
+        meta["partial_unresolved_slots"] = list(result.partial_unresolved_slots)
     if result.interview_closure_mode is not None:
         meta["interview_closure_mode"] = result.interview_closure_mode
     if result.execution_job_status:
@@ -2003,6 +2014,16 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.extend(f"- {item}" for item in result.non_goals)
     if result.blocker:
         lines.append(f"Blocker: {result.blocker}")
+    # #1257 PR-D follow-up: render the partial-product surface so CLI users
+    # see the deadline-recovery semantic and the next-step slots inline rather
+    # than having to open the persisted Seed artifact. Mirrors the MCP meta
+    # additions in :func:`_result_meta`.
+    if result.partial_product:
+        reason = result.partial_product_reason or "deadline_recovery"
+        lines.append(f"Partial product: yes (reason: {reason})")
+        if result.partial_unresolved_slots:
+            lines.append("  unresolved next-step slots:")
+            lines.extend(f"  - {slot}" for slot in result.partial_unresolved_slots)
     capability = result.resume_capability
     lines.extend(
         render_resume_lines(

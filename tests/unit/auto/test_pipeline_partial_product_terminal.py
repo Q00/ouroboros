@@ -115,6 +115,99 @@ class TestGradeGateDegradedFlag:
         # ...but the gap is still reported as a finding so observers see it.
         assert any(f.code == "ledger_open_gap" for f in relaxed.findings)
 
+    def test_ledger_blocked_gap_keeps_blocker_for_degraded(self) -> None:
+        """``LedgerStatus.BLOCKED`` is a human-required signal; it MUST keep
+        blocking even on the degraded recovery path (§I6 safety contract).
+
+        Regression for the ouroboros-agent[bot] blocker on
+        ``req_1779969257_174``: prior PR-C code demoted *every*
+        ``ledger.open_gaps()`` entry — including BLOCKED sections — to a
+        medium finding under degraded grading. That converted a blocked
+        human-confirmation gap into a successful partial product. This
+        test pins the corrected behavior: BLOCKED gaps stay as
+        ``ledger_blocked_gap`` blockers regardless of the degraded flag.
+        """
+        ledger = SeedDraftLedger.from_goal("Goal only.")
+        # Plant a BLOCKED entry on a required section. ``constraints`` is one
+        # of the REQUIRED_SECTIONS, so a BLOCKED entry there raises the
+        # section's aggregate status to BLOCKED via section_statuses().
+        ledger.add_entry(
+            "constraints",
+            LedgerEntry(
+                key="constraints.human_required",
+                value="Human must confirm whether the integration may rotate live credentials.",
+                source=LedgerSource.BLOCKER,
+                confidence=0.0,
+                status=LedgerStatus.BLOCKED,
+                rationale="Auto-answer attempted but escalated to human; awaiting confirmation.",
+            ),
+        )
+        seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+        assert seed.metadata.degraded is True
+        gate = GradeGate()
+
+        # Strict mode: BLOCKED gap is a blocker (legacy behavior).
+        strict = gate.grade_seed(seed, ledger=ledger, degraded=False)
+        assert any(
+            b.code in ("ledger_open_gap", "ledger_blocked_gap") and b.target == "constraints"
+            for b in strict.blockers
+        )
+
+        # Degraded mode: BLOCKED gap remains a HARD blocker, not a finding.
+        relaxed = gate.grade_seed(seed, ledger=ledger, degraded=True)
+        blocked_gap_blockers = [
+            b
+            for b in relaxed.blockers
+            if b.code == "ledger_blocked_gap" and b.target == "constraints"
+        ]
+        assert blocked_gap_blockers, (
+            "LedgerStatus.BLOCKED on a required section MUST remain a hard "
+            "blocker even on the degraded recovery path — demoting it would "
+            "convert a human-required confirmation gap into a 'successful' "
+            "partial product. (§I6 safety contract.)"
+        )
+        # The corrected code emits ``ledger_blocked_gap`` (distinct code so
+        # observers can tell BLOCKED apart from MISSING/WEAK/CONFLICTING),
+        # and the BLOCKED gap must NOT appear in the demoted findings bucket.
+        assert not any(
+            f.code == "ledger_blocked_gap" and f.target == "constraints" for f in relaxed.findings
+        )
+
+    def test_ledger_blocked_distinguished_from_missing_for_degraded(self) -> None:
+        """When the ledger has BOTH a BLOCKED section and merely MISSING ones,
+        only the BLOCKED section should keep its hard-blocker status under
+        degraded grading; MISSING/WEAK/CONFLICTING sections still demote to
+        findings so the partial-product surface continues to work."""
+        ledger = SeedDraftLedger.from_goal("Goal only.")
+        # ``constraints`` → BLOCKED (human-required)
+        ledger.add_entry(
+            "constraints",
+            LedgerEntry(
+                key="constraints.human_required",
+                value="Awaiting human confirmation on destructive action policy.",
+                source=LedgerSource.BLOCKER,
+                confidence=0.0,
+                status=LedgerStatus.BLOCKED,
+            ),
+        )
+        # Other REQUIRED_SECTIONS remain MISSING by default.
+        seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+        gate = GradeGate()
+        relaxed = gate.grade_seed(seed, ledger=ledger, degraded=True)
+
+        # BLOCKED constraints → blocker
+        assert any(
+            b.target == "constraints" and b.code == "ledger_blocked_gap" for b in relaxed.blockers
+        )
+        # MISSING sections → demoted to findings (PR-C's partial-product surface)
+        missing_findings = [
+            f for f in relaxed.findings if f.code == "ledger_open_gap" and f.target != "constraints"
+        ]
+        assert missing_findings, (
+            "MISSING/WEAK ledger gaps must still demote to findings under "
+            "degraded grading so the partial-product surface continues to work"
+        )
+
     def test_seed_goal_mismatch_still_blocks_for_degraded(self) -> None:
         """Safety blockers MUST keep terminating even for degraded seeds (§I6)."""
         ledger = SeedDraftLedger.from_goal("Build a CLI.")
@@ -257,6 +350,63 @@ async def test_degraded_seed_with_safety_blocker_still_terminates(tmp_path) -> N
         event for event in event_store.appended if event.type == "auto.product.partial_emitted"
     ]
     assert partial_events == []
+
+
+@pytest.mark.asyncio
+async def test_deadline_path_with_blocked_ledger_section_terminates_blocked(
+    tmp_path,
+) -> None:
+    """Regression for the PR-C BLOCKED-gap blocker (ouroboros-agent[bot]
+    ``req_1779969257_174``).
+
+    End-to-end: if the interview driver records a ``LedgerStatus.BLOCKED``
+    entry on a required section before the phase deadline fires, the
+    resulting degraded Seed MUST terminate BLOCKED (or otherwise NOT route
+    to the partial-product success terminal). Demoting BLOCKED to a
+    finding would convert a human-required confirmation gap into a
+    silently "successful" partial product.
+    """
+    event_store = _RecordingEventStore()
+
+    class _BlockedLedgerDriver(_DeadlineDriver):
+        async def run(self, _state, ledger: SeedDraftLedger):  # noqa: ARG002
+            ledger.add_entry(
+                "constraints",
+                LedgerEntry(
+                    key="constraints.human_required",
+                    value=(
+                        "Human must confirm whether rotation of live "
+                        "production credentials is permitted."
+                    ),
+                    source=LedgerSource.BLOCKER,
+                    confidence=0.0,
+                    status=LedgerStatus.BLOCKED,
+                    rationale=("Auto-answer escalated to human; awaiting confirmation."),
+                ),
+            )
+            await asyncio.sleep(3600)
+            raise AssertionError("must be cancelled by phase timeout")
+
+    driver = _BlockedLedgerDriver(event_store=event_store)
+    state = _build_deadline_state(tmp_path)
+    pipeline = AutoPipeline(driver, _no_seed_generator, store=AutoStore(tmp_path))
+
+    result = await pipeline.run(state)
+    await asyncio.sleep(0)
+
+    # MUST NOT route to the partial-product success terminal.
+    assert result.partial_product is False, (
+        "A degraded seed with a BLOCKED required section must NOT reach the "
+        "partial-product success terminal — BLOCKED is the ledger's explicit "
+        "human-required signal."
+    )
+    partial_events = [
+        event for event in event_store.appended if event.type == "auto.product.partial_emitted"
+    ]
+    assert partial_events == [], (
+        "auto.product.partial_emitted must not fire when a BLOCKED required "
+        "ledger section is unresolved"
+    )
 
 
 @pytest.mark.asyncio

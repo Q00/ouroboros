@@ -266,6 +266,7 @@ class GradeGate:
         non_goals = []
         if ledger is not None:
             open_gaps = ledger.open_gaps()
+            section_statuses = ledger.section_statuses()
             for gap in open_gaps:
                 # #1257 PR-C: for degraded seeds the unresolved sections are
                 # already surfaced via ``seed.metadata.unresolved_slots`` and
@@ -275,15 +276,41 @@ class GradeGate:
                 # Goal-mismatch / unsafe / destructive markers continue to
                 # block — they're handled by ``missing_goal`` /
                 # ``seed_goal_mismatch`` / ``high_risk_assumptions`` above.
-                bucket = findings if degraded else blockers
-                severity = "medium" if degraded else "high"
+                #
+                # PR-C follow-up (ouroboros-agent[bot] blocker on req_1779969257_174):
+                # ``LedgerStatus.BLOCKED`` is the ledger's explicit signal that a
+                # human-required answer is missing — it is categorically different
+                # from MISSING/WEAK/CONFLICTING (which describe under-evidenced
+                # slots). The §I6 safety contract requires BLOCKED gaps to remain
+                # hard blockers even on the degraded recovery path; demoting them
+                # would let an interview-deadline cancellation convert a blocked
+                # human-confirmation gap into a "successful" partial product.
+                gap_status = section_statuses.get(gap)
+                is_blocked_gap = gap_status is LedgerStatus.BLOCKED
+                if degraded and not is_blocked_gap:
+                    bucket = findings
+                    severity = "medium"
+                else:
+                    bucket = blockers
+                    severity = "high"
+                code = "ledger_blocked_gap" if is_blocked_gap else "ledger_open_gap"
+                message = (
+                    f"Ledger required section is BLOCKED (human input required): {gap}"
+                    if is_blocked_gap
+                    else f"Ledger required section is unresolved: {gap}"
+                )
+                repair = (
+                    "Resolve the BLOCKED section via human confirmation before allowing auto execution."
+                    if is_blocked_gap
+                    else "Resolve the ledger section before allowing auto execution."
+                )
                 bucket.append(
                     GradeFinding(
-                        "ledger_open_gap",
+                        code,
                         severity,
-                        f"Ledger required section is unresolved: {gap}",
+                        message,
                         gap,
-                        "Resolve the ledger section before allowing auto execution.",
+                        repair,
                     )
                 )
             non_goal_section = ledger.sections.get("non_goals")

@@ -232,6 +232,69 @@ def test_execution_job_completed_keeps_auto_complete(monkeypatch) -> None:
     assert "Product status: not verified complete" not in text
 
 
+def test_partial_product_surfaces_through_mcp_meta_and_text() -> None:
+    """#1257 PR-D follow-up: the AutoPipelineResult partial-product contract
+    added by PR-C must be visible on the MCP wire (``_result_meta``) and the
+    formatted text (``_format_result``).
+
+    Without this surfacing, a degraded-seed deadline-recovery terminal looks
+    identical to a regular ``complete`` status from the MCP client's
+    perspective, masking the partial-product semantic and dropping the
+    unresolved-slot next-step hints. Regression for
+    ouroboros-agent[bot] follow-up ``req_1779969483_175`` (Medium).
+    """
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_partial_1",
+        phase="complete",
+        resume_capability=AutoResumeCapability.NONE,
+        partial_product=True,
+        partial_product_reason="interview_phase_deadline",
+        partial_unresolved_slots=("constraints", "verification_plan"),
+    )
+
+    meta = _result_meta(result)
+    text = _format_result(result)
+
+    # Meta surface — keys MUST be present so MCP clients can render the
+    # partial-product semantic without re-parsing the persisted Seed.
+    assert meta["partial_product"] is True
+    assert meta["partial_product_reason"] == "interview_phase_deadline"
+    assert meta["partial_unresolved_slots"] == [
+        "constraints",
+        "verification_plan",
+    ]
+
+    # Text surface — operator-facing rendering MUST include the reason line
+    # and each unresolved slot so CLI users immediately see the next steps.
+    assert "Partial product: yes (reason: interview_phase_deadline)" in text
+    assert "  - constraints" in text
+    assert "  - verification_plan" in text
+
+
+def test_partial_product_keys_absent_on_normal_complete_result() -> None:
+    """Back-compat: a regular non-degraded ``complete`` result MUST keep the
+    legacy MCP meta shape — no new ``partial_product*`` keys, and no
+    ``Partial product`` line in the formatted text. Mirrors the same
+    byte-identical-when-default-off pattern used by the Ralph handoff
+    keys, so existing MCP clients keying off shape changes don't break.
+    """
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_normal_1",
+        phase="complete",
+        resume_capability=AutoResumeCapability.NONE,
+    )
+
+    meta = _result_meta(result)
+    text = _format_result(result)
+
+    assert "partial_product" not in meta
+    assert "partial_product_reason" not in meta
+    assert "partial_unresolved_slots" not in meta
+    assert "Partial product" not in text
+
+
 def test_execution_job_failure_rewrites_complete_auto_result(monkeypatch) -> None:
     class FakeJobManager:
         async def get_snapshot(self, job_id: str) -> JobSnapshot:
