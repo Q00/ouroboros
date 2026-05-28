@@ -28,6 +28,7 @@ replayable execution contract on your choice of runtime backend.
 - [Interview Milestone Lateral Contract](./rfc/interview-milestone-lateral-contract.md) - Proposed contract for bounded lateral review at ambiguity milestone transitions
 - [CLI Reference](./cli-reference.md) - Command-line interface flags and options
 - [Configuration Reference](./config-reference.md) - All `config.yaml` options and environment variables
+- [Agent OS Profile Taxonomy](./agentos/profile-taxonomy.md) - Locked 4-slot vocabulary (`runtime_backend`, `stage_runtime`, `llm_profile`, `provider_profile`) for the historically-overloaded "profile" concepts; tiebreaker for #573
 
 ### API Reference
 
