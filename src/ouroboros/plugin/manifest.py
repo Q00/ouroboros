@@ -40,6 +40,10 @@ from ouroboros.plugin.hooks import (
     HOOK_LIFECYCLE_POLICY_SCOPE,
     HOOK_LIFECYCLE_READ_SCOPE,
     HOOK_LIFECYCLE_SCOPES,
+    HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+    HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
+    HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+    HOOK_TOOL_OBSERVE_RECORDED_EVENT,
     TERMINAL_OBSERVABILITY_HOOK_NAMES,
     HookFailurePolicy,
     HookKind,
@@ -60,8 +64,13 @@ except ImportError as exc:  # pragma: no cover
 # Support window per Q00/ouroboros-plugins#11 lock: current MAJOR + previous MAJOR.
 # v0.1 is the archived base manifest contract; v0.2 is the local extension
 # that adds optional hook declarations; v0.3 narrows hooks[].name to the
-# v1 ``HookKind`` vocabulary at the JSON Schema layer.
-SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2", "0.3")
+# v1 ``HookKind`` vocabulary at the JSON Schema layer; v0.4 promotes the
+# tool-call hook family (``before_tool_call`` / ``after_tool_call``) into
+# the same JSON Schema enum and reserves the matching ``plugin.tool.*``
+# audit event names. Runtime dispatch of tool-call hooks is still
+# deferred to #939 PR F-2; v0.4 manifests may declare them but the
+# firewall will not invoke them until that follow-up ships.
+SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2", "0.3", "0.4")
 
 # Source types whose `path` must be a sandboxed relative slug — no absolute
 # paths and no parent-directory traversal. `local_path` resolves relative to
@@ -191,6 +200,24 @@ class AuditSpec:
                     HOOK_COMPLETED_EVENT,
                     HOOK_BLOCKED_EVENT,
                     HOOK_FAILED_EVENT,
+                )
+            )
+        if schema_version == "0.4":
+            # v0.4 keeps the v0.3 hook event family and additively
+            # reserves the four ``plugin.tool.*`` event names locked
+            # in ``docs/rfc/plugin-tool-call-hook-contract.md`` § 6.
+            # PR F-1 only reserves the names; PR F-2 owns emission.
+            return AuditSpec(
+                events=(
+                    *AuditSpec.standard_four_events().events,
+                    HOOK_INVOKED_EVENT,
+                    HOOK_COMPLETED_EVENT,
+                    HOOK_BLOCKED_EVENT,
+                    HOOK_FAILED_EVENT,
+                    HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+                    HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
+                    HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+                    HOOK_TOOL_OBSERVE_RECORDED_EVENT,
                 )
             )
         return AuditSpec.standard_four_events()

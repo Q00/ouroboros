@@ -73,6 +73,24 @@ class HookKind(StrEnum):
     #: separate ``plugin:lifecycle:cleanup`` permission to be defined.
     ON_CANCEL = "on_cancel"
 
+    #: Tool-call observation / intercept hook promoted out of
+    #: :class:`DeferredHookKind` by #939 PR F-1. Manifests at
+    #: ``schema_version >= "0.4"`` may declare it. Payload, permission
+    #: scopes, failure policy, and audit event names are locked in
+    #: ``docs/rfc/plugin-tool-call-hook-contract.md``. **Runtime
+    #: dispatch is not enabled by PR F-1**: declaring this hook in a
+    #: v0.4 manifest is currently a no-op at runtime, and the firewall
+    #: will not invoke it until PR F-2 ships the dispatch wiring.
+    BEFORE_TOOL_CALL = "before_tool_call"
+
+    #: Tool-call after-call observation hook promoted out of
+    #: :class:`DeferredHookKind` by #939 PR F-1. See
+    #: :data:`BEFORE_TOOL_CALL` for the dispatch caveat. The schema
+    #: pins this hook to ``failure_policy='fail_open'`` because the
+    #: after-call payload describes a tool result that has already
+    #: been observed by the caller.
+    AFTER_TOOL_CALL = "after_tool_call"
+
 
 class DeferredHookKind(StrEnum):
     """Hook names deferred to follow-up RFC slices.
@@ -91,8 +109,6 @@ class DeferredHookKind(StrEnum):
     diff in review.
     """
 
-    BEFORE_TOOL_CALL = "before_tool_call"
-    AFTER_TOOL_CALL = "after_tool_call"
     BEFORE_ARTIFACT_WRITE = "before_artifact_write"
     AFTER_ARTIFACT_WRITE = "after_artifact_write"
 
@@ -201,6 +217,60 @@ HOOK_LIFECYCLE_SCOPES: Final[frozenset[str]] = frozenset(
 )
 
 
+#: Frozen subset of :class:`HookKind` that observes plugin-mediated
+#: tool calls. Promoted out of :class:`DeferredHookKind` by #939 PR F-1.
+#: Manifests at ``schema_version >= "0.4"`` may declare these names.
+#: Runtime dispatch wiring is deferred to PR F-2; until that ships,
+#: declaring a tool-call hook is accepted by the schema and the
+#: manifest validator but never invoked by the firewall.
+TOOL_CALL_HOOK_KINDS: Final[frozenset[HookKind]] = frozenset(
+    {HookKind.BEFORE_TOOL_CALL, HookKind.AFTER_TOOL_CALL}
+)
+
+TOOL_CALL_HOOK_NAMES: Final[frozenset[str]] = frozenset(hook.value for hook in TOOL_CALL_HOOK_KINDS)
+"""String names for v0.4 tool-call hooks."""
+
+#: Hook permission scope required for tool-call hooks that may *block*
+#: a plugin-mediated tool invocation through ``fail_closed`` (or
+#: explicitly veto via the dispatch return value). Holders of this
+#: scope MUST also hold the tool-specific permission declared in the
+#: manifest's ``commands[].permissions`` / ``tools.allowed`` surface;
+#: that enforcement remains the firewall's responsibility and is
+#: tracked under PR F-2.
+HOOK_TOOL_INTERCEPT_SCOPE: Final[str] = "plugin:tool:intercept"
+
+#: Hook permission scope reserved for observation-only tool-call
+#: hooks. Holders may never veto a tool call; the v0.4 schema constrains
+#: them to ``failure_policy='fail_open'`` and PR F-2's dispatcher will
+#: reject any blocked return value coming from an observe-only hook.
+HOOK_TOOL_OBSERVE_SCOPE: Final[str] = "plugin:tool:observe"
+
+#: Frozen set of v0.4 tool-call permission scopes. Validators reference
+#: this set rather than the bare strings so new scopes cannot sneak
+#: past the routing path without an explicit code change here.
+HOOK_TOOL_CALL_SCOPES: Final[frozenset[str]] = frozenset(
+    {HOOK_TOOL_INTERCEPT_SCOPE, HOOK_TOOL_OBSERVE_SCOPE}
+)
+
+#: Reserved audit event names for the tool-call hook family.
+#: Locked in ``docs/rfc/plugin-tool-call-hook-contract.md`` § 6 and
+#: vendored in the v0.4 JSON Schema's ``audit.events`` enum.
+#: **PR F-1 does not emit any of these events**; emission is owned by
+#: PR F-2's firewall dispatcher.
+HOOK_TOOL_INTERCEPT_REQUESTED_EVENT: Final[str] = "plugin.tool.intercept.requested"
+HOOK_TOOL_INTERCEPT_COMPLETED_EVENT: Final[str] = "plugin.tool.intercept.completed"
+HOOK_TOOL_INTERCEPT_BLOCKED_EVENT: Final[str] = "plugin.tool.intercept.blocked"
+HOOK_TOOL_OBSERVE_RECORDED_EVENT: Final[str] = "plugin.tool.observe.recorded"
+HOOK_TOOL_CALL_AUDIT_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+        HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
+        HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+        HOOK_TOOL_OBSERVE_RECORDED_EVENT,
+    }
+)
+
+
 def is_v1_hook_kind(value: str) -> bool:
     """Return True iff ``value`` names a hook included in v1.
 
@@ -262,6 +332,27 @@ def is_hook_lifecycle_scope(value: str) -> bool:
     return value in HOOK_LIFECYCLE_SCOPES
 
 
+def is_tool_call_hook_kind(value: str) -> bool:
+    """Return True iff ``value`` names a v0.4 tool-call hook.
+
+    Use this in manifest validators and runtime dispatchers so the
+    boundary between lifecycle and tool-call hooks stays explicit. The
+    v0.4 schema accepts these names but PR F-1 does not yet wire them
+    into the firewall's dispatch path; PR F-2 will use this helper to
+    select tool-call hooks at the tool-call boundary.
+    """
+    return value in TOOL_CALL_HOOK_NAMES
+
+
+def is_hook_tool_call_scope(value: str) -> bool:
+    """Return True iff ``value`` names a v0.4 tool-call permission scope.
+
+    Mirrors :func:`is_hook_lifecycle_scope` for the
+    ``plugin:tool:intercept`` / ``plugin:tool:observe`` scope pair.
+    """
+    return value in HOOK_TOOL_CALL_SCOPES
+
+
 __all__ = [
     "HOOK_AUDIT_EVENTS",
     "HOOK_BLOCKED_EVENT",
@@ -274,16 +365,28 @@ __all__ = [
     "HOOK_LIFECYCLE_SCOPES",
     "HOOK_OUTCOME_AUDIT_EVENTS",
     "HOOK_RUNTIME_AUDIT_EVENTS",
+    "HOOK_TOOL_CALL_AUDIT_EVENTS",
+    "HOOK_TOOL_CALL_SCOPES",
+    "HOOK_TOOL_INTERCEPT_BLOCKED_EVENT",
+    "HOOK_TOOL_INTERCEPT_COMPLETED_EVENT",
+    "HOOK_TOOL_INTERCEPT_REQUESTED_EVENT",
+    "HOOK_TOOL_INTERCEPT_SCOPE",
+    "HOOK_TOOL_OBSERVE_RECORDED_EVENT",
+    "HOOK_TOOL_OBSERVE_SCOPE",
     "TERMINAL_DEFERRED_HOOK_KINDS",
     "TERMINAL_DEFERRED_HOOK_NAMES",
     "TERMINAL_OBSERVABILITY_HOOK_KINDS",
     "TERMINAL_OBSERVABILITY_HOOK_NAMES",
+    "TOOL_CALL_HOOK_KINDS",
+    "TOOL_CALL_HOOK_NAMES",
     "DeferredHookKind",
     "ExcludedHookKind",
     "HookFailurePolicy",
     "HookKind",
     "is_deferred_hook_kind",
     "is_excluded_hook_kind",
+    "is_hook_tool_call_scope",
+    "is_tool_call_hook_kind",
     "is_hook_lifecycle_scope",
     "is_terminal_deferred_hook_kind",
     "is_terminal_observability_hook_kind",

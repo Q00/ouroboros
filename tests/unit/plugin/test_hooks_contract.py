@@ -44,13 +44,18 @@ from ouroboros.plugin.hooks import (
 
 class TestHookKindEnumeration:
     def test_v1_hook_set_is_exact(self) -> None:
-        # PR #1131 promotes the terminal observability hooks into v1 so
-        # ``HookKind`` now lists exactly four "Included" hooks.
+        # PR #1131 promoted the terminal observability hooks into v1, and
+        # #939 PR F-1 additionally promoted the tool-call hook family
+        # (before_tool_call / after_tool_call) so ``HookKind`` now lists
+        # exactly six "Included" hooks for v0.4 manifests. Runtime
+        # dispatch of the tool-call hooks is still deferred to PR F-2.
         assert {kind.value for kind in HookKind} == {
             "before_invocation",
             "after_invocation",
             "on_error",
             "on_cancel",
+            "before_tool_call",
+            "after_tool_call",
         }
 
     def test_terminal_observability_hook_set_is_exact(self) -> None:
@@ -69,10 +74,11 @@ class TestHookKindEnumeration:
 
     def test_deferred_hook_set_is_exact(self) -> None:
         # ``on_error`` / ``on_cancel`` were lifted out of the deferred
-        # bucket by PR #1131; the remaining names stay deferred.
+        # bucket by PR #1131, and ``before_tool_call`` / ``after_tool_call``
+        # by #939 PR F-1. The remaining artifact-write names stay
+        # deferred under #939 PR G (gated on the write-side substrate
+        # from #946 / #956).
         assert {kind.value for kind in DeferredHookKind} == {
-            "before_tool_call",
-            "after_tool_call",
             "before_artifact_write",
             "after_artifact_write",
         }
@@ -133,8 +139,11 @@ class TestRoutingHelpers:
         # Terminal observability hooks were promoted into v1 by PR #1131.
         assert is_v1_hook_kind("on_error")
         assert is_v1_hook_kind("on_cancel")
-        assert not is_v1_hook_kind("before_tool_call")
+        # Tool-call hooks were promoted into v1 by #939 PR F-1.
+        assert is_v1_hook_kind("before_tool_call")
+        assert is_v1_hook_kind("after_tool_call")
         assert not is_v1_hook_kind("on_event")
+        assert not is_v1_hook_kind("before_artifact_write")
         assert not is_v1_hook_kind("unknown_hook")
 
     def test_terminal_deferred_hook_kind_router_is_empty(self) -> None:
@@ -154,13 +163,17 @@ class TestRoutingHelpers:
         assert not is_terminal_observability_hook_kind("unknown_hook")
 
     def test_deferred_hook_kind_router(self) -> None:
-        assert is_deferred_hook_kind("before_tool_call")
+        assert is_deferred_hook_kind("before_artifact_write")
         assert is_deferred_hook_kind("after_artifact_write")
         assert not is_deferred_hook_kind("before_invocation")
         assert not is_deferred_hook_kind("on_event")
         # on_error / on_cancel are no longer deferred.
         assert not is_deferred_hook_kind("on_error")
         assert not is_deferred_hook_kind("on_cancel")
+        # before_tool_call / after_tool_call were promoted into v1 by
+        # #939 PR F-1 and are no longer deferred.
+        assert not is_deferred_hook_kind("before_tool_call")
+        assert not is_deferred_hook_kind("after_tool_call")
 
     def test_excluded_hook_kind_router(self) -> None:
         assert is_excluded_hook_kind("before_runtime_start")
