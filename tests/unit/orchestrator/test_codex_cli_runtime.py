@@ -266,6 +266,33 @@ class TestCodexCliRuntime:
         assert command[command.index("--profile") + 1] == "ouroboros-standard"
         assert "--model" not in command
 
+    def test_build_command_matches_codex_0134_unified_profile_v2_contract(self) -> None:
+        """Codex 0.134 uses --profile to load ~/.codex/<name>.config.toml files."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "frontier": {
+                    "providers": {"codex": {"profile": "ouroboros-frontier"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "frontier"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--profile" in command
+        assert "--profile-v2" not in command
+        assert command[command.index("--profile") + 1] == "ouroboros-frontier"
+
     def test_build_command_uses_default_runtime_profile_for_resumed_roleless_handle(self) -> None:
         """Resumed role-less agent_runtime handles keep using the documented fallback role."""
         runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")

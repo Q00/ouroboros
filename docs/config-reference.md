@@ -34,7 +34,7 @@ Complete reference for `~/.ouroboros/config.yaml` and all related environment va
 For Codex-backed Ouroboros workflows:
 
 - Put persistent Ouroboros role overrides in `~/.ouroboros/config.yaml`.
-- Use `~/.codex/config.toml` only for the Codex MCP registration and Codex profile anchors written by `ouroboros setup --runtime codex`.
+- Use `~/.codex/config.toml` only for the Codex MCP registration. On current Codex CLI releases, profile anchors written by `ouroboros setup --runtime codex` live in `~/.codex/<profile>.config.toml`.
 - The Codex-aware loader does **not** hardcode a mini model when these keys are left at their shipped defaults. It resolves Codex-backed lookups to Codex's `default` sentinel unless you set an explicit model string.
 - Use `llm_profiles` and `llm_role_profiles` when you want portable task profiles that can map to Codex CLI profiles or to ordinary model settings for other providers.
 
@@ -128,23 +128,23 @@ llm_role_profiles:
 
 Resolution order is: explicit request-level model pins, role mapping, profile provider mapping for the active backend, existing `*_model` field, then backend default behavior.
 
-For Codex, setup creates flat profile anchors in `~/.codex/config.toml`:
+For Codex, setup creates flat profile-v2 anchors as `~/.codex/<profile>.config.toml` files on current Codex CLI releases:
 
 ```toml
-[profiles.ouroboros-fast]
+# ~/.codex/ouroboros-fast.config.toml
 model_reasoning_effort = "low"
 
-[profiles.ouroboros-standard]
+# ~/.codex/ouroboros-standard.config.toml
 model_reasoning_effort = "medium"
 
-[profiles.ouroboros-deep]
+# ~/.codex/ouroboros-deep.config.toml
 model_reasoning_effort = "high"
 
-[profiles.ouroboros-frontier]
+# ~/.codex/ouroboros-frontier.config.toml
 model_reasoning_effort = "xhigh"
 ```
 
-These are intentionally sparse, flat Codex profiles. Codex currently exposes a single `--profile <name>` selector; setup does not depend on unsupported profile-to-profile inheritance. Setup leaves `model` unset so the generated anchors inherit the user's local Codex default model instead of assuming account access to a specific frontier model. Add a `model = "..."` line to an anchor only when you want to pin a model that your account exposes.
+These are intentionally sparse, flat Codex profiles. Codex currently exposes a single `--profile <name>` selector; setup does not depend on unsupported profile-to-profile inheritance. Setup leaves `model` unset so the generated anchors inherit the user's local Codex default model instead of assuming account access to a specific frontier model. Add a `model = "..."` line to a profile file only when you want to pin a model that your account exposes. Older Codex CLI releases used `[profiles.ouroboros-*]` tables in `~/.codex/config.toml`; setup keeps that path only when the detected CLI still uses the legacy profile format.
 
 If `~/.codex/config.toml` already contains a URL-based Ouroboros MCP server, setup preserves it instead of replacing it with a stdio command block:
 

@@ -247,6 +247,21 @@ class TestCodexCliLLMAdapter:
         assert "ouroboros-deep" in command
         assert "--model" not in command
 
+    def test_build_command_matches_codex_0134_unified_profile_v2_contract(self) -> None:
+        """Codex 0.134 uses --profile to load ~/.codex/<name>.config.toml files."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="ouroboros-frontier",
+        )
+
+        assert "--profile" in command
+        assert "--profile-v2" not in command
+        assert command[command.index("--profile") + 1] == "ouroboros-frontier"
+
     @pytest.mark.asyncio
     async def test_complete_resolves_codex_profile_from_task_role(self) -> None:
         """Role profile resolution reaches the Codex CLI command line."""

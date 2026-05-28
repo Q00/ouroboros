@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 from unittest.mock import AsyncMock, patch
 
@@ -29,6 +30,31 @@ from ouroboros.codex import CodexArtifactInstallResult
 
 class TestCodexSetup:
     """Tests for Codex-specific setup behavior."""
+
+    def test_codex_profile_v2_detection_for_unified_profile_help(self) -> None:
+        """Codex 0.134 uses --profile itself for profile-v2 files."""
+        help_text = """
+  -p, --profile <CONFIG_PROFILE_V2>
+          Layer $CODEX_HOME/<name>.config.toml on top of the base user config
+"""
+        completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
+
+        with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
+            assert setup_cmd._codex_uses_profile_v2("/usr/local/bin/codex") is True
+
+    def test_codex_profile_v2_detection_for_legacy_split_profile_help(self) -> None:
+        """Codex 0.133 alpha keeps --profile legacy even when --profile-v2 exists."""
+        help_text = """
+  -p, --profile <CONFIG_PROFILE>
+          Configuration profile from config.toml to specify default options
+
+      --profile-v2 <CONFIG_PROFILE_V2>
+          Layer $CODEX_HOME/<name>.config.toml on top of the base user config
+"""
+        completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
+
+        with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
+            assert setup_cmd._codex_uses_profile_v2("/Applications/Codex.app/codex") is False
 
     def test_register_codex_mcp_server_writes_guidance_comment(self, tmp_path: Path) -> None:
         """The generated Codex config should explain the config file split."""
@@ -404,6 +430,77 @@ class TestCodexSetup:
         assert "[profiles.ouroboros-deep]" in contents
         assert "[profiles.ouroboros-frontier]" in contents
 
+    def test_register_codex_default_profiles_writes_profile_v2_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Current Codex CLI profile mode should write profile-v2 files."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            setup_cmd._register_codex_default_profiles(codex_path="/usr/local/bin/codex")
+
+        codex_dir = tmp_path / ".codex"
+        config_path = codex_dir / "config.toml"
+
+        assert not config_path.exists()
+        assert (codex_dir / "ouroboros-fast.config.toml").read_text(encoding="utf-8").count(
+            'model_reasoning_effort = "low"'
+        ) == 1
+        assert 'model_reasoning_effort = "medium"' in (
+            codex_dir / "ouroboros-standard.config.toml"
+        ).read_text(encoding="utf-8")
+        assert 'model_reasoning_effort = "high"' in (
+            codex_dir / "ouroboros-deep.config.toml"
+        ).read_text(encoding="utf-8")
+        assert 'model_reasoning_effort = "xhigh"' in (
+            codex_dir / "ouroboros-frontier.config.toml"
+        ).read_text(encoding="utf-8")
+
+    def test_register_codex_default_profiles_migrates_legacy_tables_to_profile_v2(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """profile-v2 setup removes legacy anchors that current Codex rejects."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[mcp_servers.ouroboros]",
+                    'command = "uvx"',
+                    'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
+                    "",
+                    "[profiles.ouroboros-fast]",
+                    'model = "custom-cheap-model"',
+                    'model_reasoning_effort = "medium"',
+                    "",
+                    "[profiles.user-profile]",
+                    'model = "custom-model"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            setup_cmd._register_codex_default_profiles(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        fast_profile = (tmp_path / ".codex" / "ouroboros-fast.config.toml").read_text(
+            encoding="utf-8"
+        )
+
+        assert "[mcp_servers.ouroboros]" in contents
+        assert "[profiles.ouroboros-fast]" not in contents
+        assert "[profiles.user-profile]" in contents
+        assert 'model = "custom-cheap-model"' in fast_profile
+        assert 'model_reasoning_effort = "medium"' in fast_profile
+
     def test_register_codex_worker_profile_writes_section(self, tmp_path: Path) -> None:
         """First-time setup creates the [profiles.ouroboros-worker] block."""
         with patch("pathlib.Path.home", return_value=tmp_path):
@@ -579,6 +676,51 @@ class TestCodexSetup:
         mock_error.assert_called_once()
         assert codex_config.read_text(encoding="utf-8") == original
 
+    def test_register_codex_worker_profile_migrates_legacy_table_to_profile_v2(
+        self, tmp_path: Path
+    ) -> None:
+        """Current Codex worker profiles live in profile-v2 files, not config.toml."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[mcp_servers.ouroboros]",
+                    'command = "uvx"',
+                    'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
+                    "",
+                    "[profiles.ouroboros-worker]",
+                    'model = "o3-mini"',
+                    "notify = []",
+                    'sandbox = "workspace-write"',
+                    "",
+                    "[profiles.ouroboros-worker.shell_environment_policy]",
+                    'inherit = "core"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        worker_profile = (tmp_path / ".codex" / "ouroboros-worker.config.toml").read_text(
+            encoding="utf-8"
+        )
+
+        assert "[mcp_servers.ouroboros]" in contents
+        assert "[profiles.ouroboros-worker]" not in contents
+        assert 'model = "o3-mini"' in worker_profile
+        assert "notify = []" in worker_profile
+        assert 'sandbox = "workspace-write"' in worker_profile
+        assert "[shell_environment_policy]" in worker_profile
+        assert 'inherit = "core"' in worker_profile
+
     def test_install_codex_artifacts_installs_rules_and_skills(self, tmp_path: Path) -> None:
         """Codex setup should install both managed rules and managed skills."""
         rules_path = tmp_path / ".codex" / "rules"
@@ -645,13 +787,13 @@ class TestCodexSetup:
         assert config_dict["llm_role_profiles"]["agent_runtime_evaluation"] == "deep"
         mock_install.assert_called_once_with()
         mock_register.assert_called_once_with(mode="auto")
-        mock_profiles.assert_called_once_with()
-        mock_worker_profile.assert_called_once_with()
+        mock_profiles.assert_called_once_with(codex_path="/usr/local/bin/codex")
+        mock_worker_profile.assert_called_once_with(codex_path="/usr/local/bin/codex")
 
         info_messages = [call.args[0] for call in mock_info.call_args_list]
         assert any("Config saved to" in message for message in info_messages)
         assert any("Configure Ouroboros runtime" in message for message in info_messages)
-        assert any("Codex profile anchors" in message for message in info_messages)
+        assert any("Codex profile-v2 anchors" in message for message in info_messages)
 
     def test_setup_codex_aborts_on_non_mapping_config(self, tmp_path: Path) -> None:
         """Malformed top-level config should not be rewritten by Codex setup."""
