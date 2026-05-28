@@ -143,14 +143,17 @@ A subscriber (on `ControlBus` today, on Mesh tomorrow) must satisfy:
    literal row redelivery. Use
    `ControlContract.effective_idempotency_key` to drop logical
    redelivery of the same decision across replay/backfill.
-2. **Monotone per-aggregate cursor.** The subscriber advances its
-   `last_row_id` for a given `(aggregate_type, aggregate_id)` only
-   after successfully handling that event. A crash mid-handle means
-   the event is replayed on the next cursor advance for that
-   aggregate.
+2. **Monotone per-aggregate batch cursor.** `get_events_after`
+   returns `(events, max_rowid)`, not a per-event rowid stream. The
+   subscriber advances its `last_row_id` for a given
+   `(aggregate_type, aggregate_id)` only after committing the batch
+   it chose to handle. A crash mid-batch means the whole batch is
+   replayed on the next cursor advance for that aggregate;
+   subscribers must therefore be idempotent at the batch granularity,
+   not the event granularity.
 3. **No side effects ahead of the cursor.** A subscriber must not
-   commit external state for events past its persisted `last_row_id`.
-   If it does, replay can double-commit.
+   commit external state for batches past its persisted
+   `last_row_id`. If it does, replay can double-commit.
 
 ## 6. Anti-actions
 
@@ -178,8 +181,10 @@ A subscriber (on `ControlBus` today, on Mesh tomorrow) must satisfy:
 - **First production publish callsite.** When any decision site adds
   `ControlBus.publish(...)` after the existing append, that PR is the
   first place this contract gets exercised end-to-end. Until then,
-  durability is provided solely by `_make_emitter` and projections
-  read directly from the journal.
+  durability is provided by the producer set inventoried in
+  §2.1 (the `agent_process` emitter, the two `EvolutionLoop`
+  directive emitters, and the `GenerationProgressWatchdog` atomic
+  batch producer) and projections read directly from the journal.
 - **MCP Mesh** (#511) will reuse the per-aggregate cursor contract
   and `effective_idempotency_key` for cross-process delivery. No
   change is required at this contract layer when Mesh lands.
