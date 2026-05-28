@@ -1095,6 +1095,8 @@ class AutoInterviewDriver:
                 active_profile=getattr(self.answerer, "active_profile", None),
             )
             if finalization is None or not finalization.completed or not ledger.is_seed_ready():
+                if finalization is not None:
+                    _revert_safe_default_entries(ledger, finalization.defaulted_sections)
                 return None
             closure_mode = "safe_default_no_backend"
 

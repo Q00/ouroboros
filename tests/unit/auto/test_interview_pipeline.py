@@ -1010,6 +1010,47 @@ async def test_interview_driver_closes_with_safe_defaults_when_start_times_out(
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_rolls_back_partial_defaults_when_start_timeout_stays_blocked(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str, *, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG001
+        await asyncio.sleep(0.05)
+        return InterviewTurn("What should we verify?", interview_id or "interview_timeout")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("answer must not run when start times out")
+
+    state = AutoPipelineState(goal="Build a small local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.contradiction",
+            value="Two recorded answers disagree on whether to allow new deps.",
+            source=LedgerSource.USER_PREFERENCE,
+            confidence=1.0,
+            status=LedgerStatus.CONFLICTING,
+        ),
+    )
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, is_session_persisted=lambda _id: False),
+        store=AutoStore(tmp_path),
+        timeout_seconds=0.001,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_closure_mode is None
+    assert not any(
+        entry.key.endswith(".safe_default_finalization")
+        for section in ledger.sections.values()
+        for entry in section.entries
+    ), "partial safe-default rollback must remove all defaulted entries"
+    assert state.ledger == {}
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_supplies_bounded_repo_facts_to_answerer(tmp_path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "\n".join(
