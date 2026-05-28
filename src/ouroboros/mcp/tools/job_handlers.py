@@ -8,12 +8,14 @@ Contains handlers for background job operations and execution cancellation:
 - CancelJobHandler: Cancel a background job
 """
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 import structlog
 
 from ouroboros.core.types import Result
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
@@ -51,6 +53,17 @@ _JOB_VIEW_ALIASES = {
     "tree": "full",
     "verbose": "full",
 }
+_JOB_STREAM_ALIASES = {
+    "default": "progress",
+    "progress": "progress",
+    "execution": "progress",
+    "linked": "linked",
+    "events": "linked",
+    "all": "linked",
+    "children": "linked",
+    "subagents": "linked",
+}
+_JOB_STREAM_EVENT_LIMIT = 10
 
 
 def _normalize_job_view(value: object) -> str:
@@ -60,6 +73,15 @@ def _normalize_job_view(value: object) -> str:
         if stripped:
             return _JOB_VIEW_ALIASES.get(stripped, _DEFAULT_JOB_VIEW)
     return _DEFAULT_JOB_VIEW
+
+
+def _normalize_job_stream(value: object) -> str:
+    """Normalize requested job wait stream scope."""
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped:
+            return _JOB_STREAM_ALIASES.get(stripped, "progress")
+    return "progress"
 
 
 async def _query_all_execution_subtask_events(
@@ -87,6 +109,95 @@ async def _query_latest_workflow_event(event_store: EventStore, execution_id: st
         limit=1,
     )
     return events[0] if events else None
+
+
+def _event_scope(event: BaseEvent) -> str:
+    return f"{event.aggregate_type}:{event.aggregate_id}"
+
+
+def _compact_event_detail(event: BaseEvent) -> str:
+    data = event.data
+    for key in (
+        "message",
+        "activity_detail",
+        "activity",
+        "title",
+        "content",
+        "phase",
+        "status",
+        "reason",
+        "tool_name",
+    ):
+        value = data.get(key)
+        if value not in (None, ""):
+            return str(value).replace("\n", " ")[:240]
+    if data:
+        pairs = []
+        for key, value in list(data.items())[:4]:
+            if value in (None, "", [], {}):
+                continue
+            pairs.append(f"{key}={str(value).replace(chr(10), ' ')[:80]}")
+        if pairs:
+            return ", ".join(pairs)[:240]
+    return ""
+
+
+def _event_stream_item(event: BaseEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "type": event.type,
+        "timestamp": event.timestamp.isoformat(),
+        "aggregate_type": event.aggregate_type,
+        "aggregate_id": event.aggregate_id,
+        "scope": _event_scope(event),
+        "detail": _compact_event_detail(event),
+    }
+
+
+async def _query_linked_stream_events(
+    event_store: EventStore,
+    snapshot: JobSnapshot,
+    cursor: int,
+) -> tuple[list[BaseEvent], int]:
+    """Fetch new events from the job's linked execution/session/lineage streams."""
+    collected: dict[str, BaseEvent] = {}
+    max_cursor = cursor
+
+    async def collect(events: list[BaseEvent], new_cursor: int) -> None:
+        nonlocal max_cursor
+        max_cursor = max(max_cursor, new_cursor)
+        for event in events:
+            collected[event.id] = event
+
+    job_events, job_cursor = await event_store.get_events_after("job", snapshot.job_id, cursor)
+    await collect(job_events, job_cursor)
+
+    if snapshot.links.execution_id:
+        execution_events, execution_cursor = await event_store.get_events_after(
+            "execution",
+            snapshot.links.execution_id,
+            cursor,
+        )
+        await collect(execution_events, execution_cursor)
+
+    if snapshot.links.session_id:
+        session_events, session_cursor = await event_store.query_session_related_events_after(
+            session_id=snapshot.links.session_id,
+            execution_id=snapshot.links.execution_id,
+            last_row_id=cursor,
+        )
+        await collect(session_events, session_cursor)
+
+    if snapshot.links.lineage_id:
+        lineage_events, lineage_cursor = await event_store.get_events_after(
+            "lineage",
+            snapshot.links.lineage_id,
+            cursor,
+        )
+        await collect(lineage_events, lineage_cursor)
+
+    events = sorted(collected.values(), key=lambda event: (event.timestamp, event.id))
+    return events, max_cursor
 
 
 @dataclass
@@ -639,6 +750,16 @@ class JobWaitHandler:
                     required=False,
                     default=_DEFAULT_JOB_VIEW,
                 ),
+                MCPToolParameter(
+                    name="stream",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "'progress' (default) watches job/execution progress; "
+                        "'linked' also streams linked session, lineage, and subagent events."
+                    ),
+                    required=False,
+                    default="progress",
+                ),
             ),
         )
 
@@ -658,18 +779,33 @@ class JobWaitHandler:
         cursor = int(arguments.get("cursor", 0))
         timeout_seconds = int(arguments.get("timeout_seconds", 30))
         view = _normalize_job_view(arguments.get("view"))
+        stream = _normalize_job_stream(arguments.get("stream"))
 
         try:
-            snapshot, changed = await self._job_manager.wait_for_change(
-                job_id,
-                cursor=cursor,
-                timeout_seconds=timeout_seconds,
-            )
+            if stream == "linked":
+                (
+                    snapshot,
+                    changed,
+                    stream_events,
+                    stream_cursor,
+                ) = await self._wait_for_linked_change(
+                    job_id,
+                    cursor=cursor,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                snapshot, changed = await self._job_manager.wait_for_change(
+                    job_id,
+                    cursor=cursor,
+                    timeout_seconds=timeout_seconds,
+                )
+                stream_events = []
+                stream_cursor = cursor
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_wait"))
 
         execution_progress_changed = False
-        response_cursor = max(snapshot.cursor, cursor)
+        response_cursor = max(snapshot.cursor, stream_cursor, cursor)
         if snapshot.links.execution_id:
             execution_events, execution_cursor = await self._event_store.get_events_after(
                 "execution",
@@ -684,6 +820,12 @@ class JobWaitHandler:
                 snapshot = replace(snapshot, cursor=response_cursor)
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
+        stream_items = [_event_stream_item(event) for event in stream_events]
+        if stream_items:
+            text += "\n\n### Stream Events"
+            for item in stream_items[-_JOB_STREAM_EVENT_LIMIT:]:
+                detail = f" -- {item['detail']}" if item["detail"] else ""
+                text += f"\n- `{item['type']}` [{item['scope']}]{detail}"
         has_live_execution_progress = snapshot.links.execution_id is not None and any(
             progress.get(key) is not None
             for key in (
@@ -694,28 +836,43 @@ class JobWaitHandler:
                 "sub_ac_total",
             )
         )
-        response_changed = changed or execution_progress_changed
+        stream_changed = bool(stream_items)
+        response_changed = changed or execution_progress_changed or stream_changed
         if not changed:
             if (
                 view in {"compact", "summary"}
                 and has_live_execution_progress
-                and execution_progress_changed
+                and (execution_progress_changed or stream_changed)
             ):
                 text = _render_compact_job_snapshot(
                     snapshot,
                     progress,
                     include_message=view == "summary",
                 )
+                if stream_items:
+                    text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
             elif view in {"compact", "summary"}:
-                text = f"unchanged cursor={snapshot.cursor}"
+                if stream_items:
+                    summaries = ", ".join(item["type"] for item in stream_items[-3:])
+                    text = (
+                        f"stream_events {len(stream_items)} cursor={snapshot.cursor}: {summaries}"
+                    )
+                else:
+                    text = f"unchanged cursor={snapshot.cursor}"
             elif execution_progress_changed:
                 text += "\n\nExecution progress updated during this wait window."
+            elif stream_changed:
+                text += "\n\nLinked stream events updated during this wait window."
             else:
                 text += "\n\nNo new job-level events during this wait window."
         elif view == "compact":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
+            if stream_items:
+                text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
         elif view == "summary":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
+            if stream_items:
+                text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
@@ -729,10 +886,43 @@ class JobWaitHandler:
                     "execution_id": snapshot.links.execution_id,
                     "lineage_id": snapshot.links.lineage_id,
                     "view": view,
+                    "stream": stream,
+                    "stream_events": stream_items,
                     **progress,
                 },
             )
         )
+
+    async def _wait_for_linked_change(
+        self,
+        job_id: str,
+        *,
+        cursor: int,
+        timeout_seconds: int,
+    ) -> tuple[JobSnapshot, bool, list[BaseEvent], int]:
+        """Long-poll job plus linked child/session event streams."""
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while True:
+            snapshot, changed = await self._job_manager.wait_for_change(
+                job_id,
+                cursor=cursor,
+                timeout_seconds=0,
+            )
+            events, stream_cursor = await _query_linked_stream_events(
+                self._event_store,
+                snapshot,
+                cursor,
+            )
+            if (
+                changed
+                or events
+                or snapshot.is_terminal
+                or asyncio.get_running_loop().time() >= deadline
+            ):
+                if stream_cursor != snapshot.cursor:
+                    snapshot = replace(snapshot, cursor=max(snapshot.cursor, stream_cursor))
+                return snapshot, changed, events, stream_cursor
+            await asyncio.sleep(0.5)
 
 
 @dataclass
