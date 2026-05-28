@@ -1119,18 +1119,11 @@ class AutoPipeline:
                             return self._result(
                                 state, ledger, review=review, blocker=state.last_error
                             )
-                        # ``_wait_owned_run_job_terminal`` returns ``None``
-                        # when the configured run starter does not expose
-                        # ``handler._job_manager.get_snapshot``. The bot
-                        # review explicitly flags this as "treats an
-                        # unverified persisted run handle as enough to
-                        # start Ralph" — a persisted ``job_id`` proves
-                        # *dispatch*, not terminal success. Without a
-                        # reconciliation channel the resume cannot prove
-                        # the run finished successfully, so refuse the
-                        # Ralph handoff just as the jobless-synchronous
-                        # branch below does for ``execution_id``-only
-                        # handles.
+                        # If no snapshot channel is available, a persisted
+                        # ``job_id`` remains dispatch evidence only. Resume
+                        # cannot prove terminal success, so refuse Ralph
+                        # handoff just as the jobless-synchronous branch
+                        # below does for ``execution_id``-only handles.
                         if terminal_run_meta is None:
                             state.mark_blocked(
                                 "Cannot resume complete-product Ralph handoff: "
