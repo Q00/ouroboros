@@ -76,6 +76,35 @@ def test_normalize_execution_acceptance_preserves_requested_hello_auto_value() -
             ),
             "constraints": (
                 "hello_auto() must return exactly 'hello from ooo auto fresh'",
+                "Only edit hello_auto.py and tests/test_hello_auto.py",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+        "`hello_auto() -> str` returns exactly `hello from ooo auto fresh`, "
+        "the test imports `hello_auto` and asserts that exact value, and "
+        "the exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    )
+
+
+def test_normalize_execution_acceptance_reads_requested_value_from_constraints() -> None:
+    seed = _seed(
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    ).model_copy(
+        update={
+            "goal": (
+                "Observation run: verify latest main Ouroboros ooo auto with "
+                "hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+            ),
+            "constraints": (
+                "hello_auto() must return exactly 'hello from ooo auto fresh'",
+                "Only edit hello_auto.py and tests/test_hello_auto.py",
             ),
         }
     )

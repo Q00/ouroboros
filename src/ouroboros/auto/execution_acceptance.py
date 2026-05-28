@@ -124,10 +124,11 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     context.
     """
     criteria = tuple(ac for ac in seed.acceptance_criteria if ac and ac.strip())
+    direction_context = "\n".join((seed.goal, *seed.constraints))
     if not criteria or not _has_auto_wrapper_context(seed.goal, criteria):
         return seed
 
-    filtered = normalize_observation_execution_criteria(criteria, context_text=seed.goal)
+    filtered = normalize_observation_execution_criteria(criteria, context_text=direction_context)
     if not filtered or filtered == criteria:
         return seed
     return seed.model_copy(update={"acceptance_criteria": filtered})
@@ -221,8 +222,8 @@ def _canonical_hello_auto_observation_ac(context_text: str, criteria: tuple[str,
 def _extract_hello_auto_return_value(text: str) -> str:
     for pattern in (
         r"hello_auto\(\)(?:\s*->\s*str)?\s+returns?\s+exactly\s+[`'\"]([^`'\"]+)[`'\"]",
-        r"returning\s+exactly\s+[`'\"]([^`'\"]+)[`'\"]",
         r"must\s+return\s+exactly\s+[`'\"]([^`'\"]+)[`'\"]",
+        r"returning\s+exactly\s+[`'\"]([^`'\"]+)[`'\"]",
     ):
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
