@@ -661,7 +661,13 @@ class AutoPipeline:
                     # cannot turn a phase outcome into a different
                     # outcome — the interview ``wait_for`` has already
                     # returned, been translated to BLOCKED, or raised.
-                    await self._drain_interview_observer_events()
+                    # ``state`` is passed so the drain can refund its
+                    # elapsed time to ``state.deadline_at`` and prevent
+                    # observability latency from converting a completed
+                    # interview into a ``pipeline_timeout`` BLOCKED at
+                    # the next ``_enforce_deadline`` gate (bot review
+                    # on commit ``769cdfeb``, req_1779940568_155).
+                    await self._drain_interview_observer_events(state)
                 if interview.status == "blocked":
                     return self._result(state, ledger, blocker=interview.blocker)
                 state.interview_completed = True
@@ -1346,7 +1352,9 @@ class AutoPipeline:
             return 0.0
         return float(min(float(phase_timeout), remaining))
 
-    async def _drain_interview_observer_events(self) -> None:
+    async def _drain_interview_observer_events(
+        self, state: AutoPipelineState | None = None
+    ) -> None:
         """Bounded composition-root drain of background interview emit tasks.
 
         Called OUTSIDE the interview phase's
@@ -1374,6 +1382,21 @@ class AutoPipeline:
         * Short-circuits when no driver is wired or its pending set
           is empty, so the helper is safe to call unconditionally
           after every ``await self.interview_driver.run(...)``.
+        * **Deadline refund (RFC #1256 §I4):** when ``state`` is
+          provided and a top-level deadline is armed, the helper
+          measures elapsed drain time and shifts ``state.deadline_at``
+          / ``state.deadline_at_epoch`` forward by the same amount.
+          Without this refund, supplied EventStore latency could
+          consume the remaining ``pipeline_timeout_seconds`` budget
+          and convert a completed interview into a ``pipeline_timeout``
+          BLOCKED at the next ``_enforce_deadline`` gate (bot review
+          on commit ``769cdfeb``, req_1779940568_155, reproduced this
+          with two 0.2 s appends + a ``deadline_at = now + 0.1`` budget:
+          without observability the pipeline advanced; with
+          observability it returned BLOCKED). Refunding the drain
+          duration makes observability's contribution to elapsed
+          wall-clock invisible to the deadline machinery — exactly the
+          fail-open semantic the §I4 contract advertises.
         """
         driver = self.interview_driver
         # ``AutoInterviewDriver`` exposes ``_pending_emit_tasks`` /
@@ -1388,6 +1411,7 @@ class AutoPipeline:
         if not pending_tasks or wait_for_pending_emits is None:
             return
         pending = len(pending_tasks)
+        started = time.monotonic()
         try:
             await asyncio.wait_for(
                 asyncio.shield(wait_for_pending_emits()),
@@ -1399,6 +1423,13 @@ class AutoPipeline:
                 pending=pending,
                 timeout_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
             )
+        finally:
+            elapsed = time.monotonic() - started
+            if state is not None and elapsed > 0.0:
+                if state.deadline_at is not None:
+                    state.deadline_at += elapsed
+                if state.deadline_at_epoch is not None:
+                    state.deadline_at_epoch += elapsed
 
     async def _handoff_to_ralph(
         self,

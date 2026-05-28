@@ -288,3 +288,126 @@ async def test_pipeline_drains_observer_events_on_ordinary_exception(tmp_path) -
     assert "backend crashed" in failed.data["exception_message"]
     # The driver's pending set is empty — drain consumed every task.
     assert not driver._pending_emit_tasks
+
+
+@pytest.mark.asyncio
+async def test_drain_refunds_elapsed_time_to_pipeline_deadline(tmp_path) -> None:
+    """Bot-review blocker (commit ``769cdfeb``, req_1779940568_155):
+    a slow but successful EventStore can change the pipeline outcome
+    post-interview by consuming the remaining top-level deadline.
+    Bot probe: ``_run_inner`` returns immediately, two appends sleep
+    0.2 s each, ``deadline_at = now + 0.1`` — without observability
+    the pipeline advances past the interview phase; with observability
+    the drain consumes the 100 ms budget and the next
+    ``_enforce_deadline`` gate translates the completed interview
+    into a ``pipeline_timeout`` BLOCKED.
+
+    The fix: the drain measures elapsed wall-clock time and refunds
+    it to ``state.deadline_at`` / ``state.deadline_at_epoch`` so the
+    deadline machinery sees observability as an invisible no-op. This
+    test pins that contract by asserting the absolute deadline shifts
+    forward by approximately the slow append latency after the drain.
+    """
+    started_epoch = time.time()
+    started_monotonic = time.monotonic()
+
+    # Slow store: each append sleeps 0.2 s. Two events (opened,
+    # finalized) → drain runs ~0.2 s for the bounded shield since
+    # ``wait_for_pending_emits`` gathers tasks concurrently and the
+    # per-event ``_append_with_fail_open`` is bounded by the 1.0 s
+    # observer timeout. The drain budget is 1.5 s so it completes.
+    store = _RecordingEventStore(sleep_seconds=0.2)
+    driver = _build_driver(store=store)
+    pipeline = _build_pipeline(driver)
+
+    # Tight remaining deadline — 0.5 s of headroom. Without a refund,
+    # 0.2 s of drain elapsed pushes the post-drain wall-clock past
+    # 0.5 s relative to the deadline pivot, but we're asserting the
+    # ABSOLUTE deadline values shifted forward by the drain elapsed.
+    deadline_horizon = 0.5
+    state = MagicMock(spec=["deadline_at", "deadline_at_epoch"])
+    state.deadline_at = started_monotonic + deadline_horizon
+    state.deadline_at_epoch = started_epoch + deadline_horizon
+    deadline_at_before = state.deadline_at
+    deadline_at_epoch_before = state.deadline_at_epoch
+
+    # Schedule two lifecycle events the way driver.run would.
+    await driver._emit_event(
+        "auto.interview.opened",
+        "auto_test_session",
+        goal="probe",
+        max_rounds=1,
+        cwd=str(tmp_path),
+        resumed=False,
+    )
+    await driver._emit_event(
+        "auto.interview.finalized",
+        "auto_test_session",
+        status="ready",
+        rounds=1,
+        interview_session_id="iv_probe",
+        blocker="",
+    )
+
+    drain_started = time.monotonic()
+    await pipeline._drain_interview_observer_events(state)
+    drain_elapsed = time.monotonic() - drain_started
+
+    # Both events persisted within the drain budget.
+    assert [event.type for event in store.appended] == [
+        "auto.interview.opened",
+        "auto.interview.finalized",
+    ]
+
+    # Refund contract: the deadline must have advanced by at least
+    # the measured drain elapsed (allowing a tiny scheduler tolerance
+    # below for the elapsed-vs-clock discrepancy).
+    deadline_shift = state.deadline_at - deadline_at_before
+    deadline_epoch_shift = state.deadline_at_epoch - deadline_at_epoch_before
+    # The refund is computed inside the helper using its own
+    # ``time.monotonic()`` window, so the helper's elapsed is bounded
+    # above by ``drain_elapsed`` measured here.
+    assert deadline_shift >= drain_elapsed * 0.9, (
+        f"deadline_at shifted by {deadline_shift:.3f}s, expected >= "
+        f"{drain_elapsed * 0.9:.3f}s (90% of measured drain elapsed)"
+    )
+    assert deadline_shift <= drain_elapsed + 0.05, (
+        f"deadline_at shifted by {deadline_shift:.3f}s, expected <= "
+        f"{drain_elapsed + 0.05:.3f}s (drain elapsed + scheduler slack)"
+    )
+    # ``deadline_at_epoch`` tracks the wall-clock companion of
+    # ``deadline_at`` for resume across processes; both must shift by
+    # the same amount so the absolute target stays consistent.
+    assert abs(deadline_shift - deadline_epoch_shift) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_drain_does_not_touch_state_when_deadline_unarmed(tmp_path) -> None:
+    """When no top-level deadline is armed (``deadline_at is None``),
+    the drain must NOT introduce any state mutation. Pre-deadline
+    sessions and feature-flagged opt-out paths rely on the deadline
+    machinery staying inert when its inputs are inert.
+    """
+    _ = tmp_path
+    store = _RecordingEventStore(sleep_seconds=0.01)
+    driver = _build_driver(store=store)
+    pipeline = _build_pipeline(driver)
+
+    state = MagicMock(spec=["deadline_at", "deadline_at_epoch"])
+    state.deadline_at = None
+    state.deadline_at_epoch = None
+
+    await driver._emit_event(
+        "auto.interview.opened",
+        "auto_test_session",
+        goal="probe",
+        max_rounds=1,
+        cwd=str(tmp_path),
+        resumed=False,
+    )
+
+    await pipeline._drain_interview_observer_events(state)
+
+    assert state.deadline_at is None
+    assert state.deadline_at_epoch is None
+    assert [event.type for event in store.appended] == ["auto.interview.opened"]
