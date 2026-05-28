@@ -1548,7 +1548,9 @@ class AutoInterviewDriver:
             tool_name="interview_driver",
         )
         self._save(state)
-        return AutoInterviewResult("seed_ready", state.interview_session_id, ledger, state.current_round)
+        return AutoInterviewResult(
+            "seed_ready", state.interview_session_id, ledger, state.current_round
+        )
 
     async def _with_timeout(
         self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str

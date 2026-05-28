@@ -3932,9 +3932,7 @@ async def test_backend_ready_low_ambiguity_closes_safe_defaultable_gaps(tmp_path
     assert result.status == "seed_ready"
     assert state.interview_closure_mode == "safe_default"
     assert ledger.is_seed_ready()
-    assert observed_last_questions == [
-        "[driver safe-default finalization: backend_ambiguity=0.16]"
-    ]
+    assert observed_last_questions == ["[driver safe-default finalization: backend_ambiguity=0.16]"]
     assert observed_answers and "[safe-default-synthesis]" in observed_answers[0]
 
 
