@@ -27,6 +27,9 @@ _REQUIRED_CODEX_AUTO_TOOLS = frozenset(
     {
         "ouroboros_auto",
         "ouroboros_start_auto",
+        "ouroboros_job_status",
+        "ouroboros_job_wait",
+        "ouroboros_job_result",
         "ouroboros_interview",
         "ouroboros_generate_seed",
     }
@@ -104,8 +107,9 @@ def doctor(
 
     print_success(
         "Codex ooo auto dispatch: OK\n"
-        "- rule maps `ooo auto` to `ouroboros_auto`\n"
+        "- rule maps `ooo auto` to `ouroboros_start_auto`\n"
         "- auto skill declares MCP dispatch through `ouroboros_auto`\n"
+        "- live MCP auto workflow includes job status/wait/result tools when probed\n"
         "- Codex config contains an `ouroboros` MCP server entry"
         + ("\n- live stdio initialize/list_tools exposes required auto tools" if live_mcp else ""),
         title="Codex Doctor",
@@ -121,8 +125,8 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
         failures.append(f"missing Codex rules file: {rules_path}")
     else:
         rules = _read_codex_text(rules_path, "Codex rules", failures)
-        if rules is not None and ("`ooo auto" not in rules or "ouroboros_auto" not in rules):
-            failures.append("Codex rules do not map `ooo auto` to `ouroboros_auto`")
+        if rules is not None and ("`ooo auto" not in rules or "ouroboros_start_auto" not in rules):
+            failures.append("Codex rules do not map `ooo auto` to `ouroboros_start_auto`")
         if rules is not None and (
             "manual" not in rules.lower() or "unavailable" not in rules.lower()
         ):

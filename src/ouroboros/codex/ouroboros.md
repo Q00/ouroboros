@@ -13,15 +13,14 @@ Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP too
 | `ooo interview "<answer>"` (follow-up) | `ouroboros_interview` with `answer` and `session_id` |
 | `ooo seed [session_id]` | `ouroboros_generate_seed` |
 | `ooo run <seed.yaml>` | `ouroboros_execute_seed` with `seed_path` |
-| `ooo auto ...` | `ouroboros_auto` with the resolved `goal` / `resume` / option arguments |
+| `ooo auto ...` | `ouroboros_start_auto` with the resolved `goal` / `resume` / option arguments |
 | `ooo status [session_id]` | `ouroboros_session_status` |
 | `ooo evaluate <session_id>` | `ouroboros_evaluate` |
 | `ooo evolve ...` | `ouroboros_evolve_step` |
 | `ooo cancel [execution_id]` | `ouroboros_cancel_execution` |
 | `ooo unstuck` / `ooo lateral` | `ouroboros_lateral_think` |
-| `ooo auto ...` | `ouroboros_auto` |
 
-If `ouroboros_auto` is unavailable, stop and report that the MCP dispatch surface is broken. Do not manually emulate `ooo auto` with ordinary shell, GitHub, or coding work.
+If `ouroboros_start_auto` is unavailable, stop and report that the MCP dispatch surface is broken. Do not manually emulate `ooo auto` with ordinary shell, GitHub, or coding work.
 
 ## Natural Language Mapping
 
@@ -38,15 +37,21 @@ For natural-language requests, map to the corresponding MCP tool:
 A-grade review/repair, and execution handoff. Do not emulate it with manual
 shell, repository, or GitHub work.
 
-If a user input starts with `ooo auto`, call `ouroboros_auto`. If that MCP tool
-is unavailable, stop and report that `ouroboros_auto` is unavailable instead of
-continuing as a normal Codex task.
+If a user input starts with `ooo auto`, call `ouroboros_start_auto`. Full auto
+runs routinely exceed interactive MCP tool-call timeouts, so the background
+starter is the supported default. It returns `job_id` and `auto_session_id`
+quickly; report both, retain the latest cursor, and monitor progress with
+`ouroboros_job_wait` / `ouroboros_job_status`. Read terminal results with
+`ouroboros_job_result`. If that MCP tool is unavailable, or if any required job
+polling/result MCP tool is unavailable, stop and report that the MCP dispatch
+surface is incomplete instead of continuing as a normal Codex task.
 
-If `ouroboros_auto` is invoked and returns an auto-session outcome such as
+If a started auto job later returns an auto-session outcome such as `detached`,
 `blocked`, `failed`, or `complete`, report that outcome as the auto session
-result. Do not call a `blocked` or `failed` auto-session result a dispatch
-failure; dispatch failure is reserved for cases where the MCP tool could not be
-invoked.
+result. `detached` is non-terminal tracked background work; surface the job or
+Ralph handles and keep polling. Do not call a `blocked` or `failed`
+auto-session result a dispatch failure; dispatch failure is reserved for cases
+where the MCP tool could not be invoked.
 
 ## Setup & Update
 

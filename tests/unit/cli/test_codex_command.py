@@ -25,6 +25,9 @@ runner = CliRunner()
 _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST = {
     "ouroboros_auto",
     "ouroboros_start_auto",
+    "ouroboros_job_status",
+    "ouroboros_job_wait",
+    "ouroboros_job_result",
     "ouroboros_interview",
     "ouroboros_generate_seed",
 }
@@ -65,7 +68,7 @@ class TestCodexDoctor:
         rules_path = codex_dir / "rules" / "ouroboros.md"
         rules_path.parent.mkdir(parents=True, exist_ok=True)
         rules_path.write_text(
-            "| `ooo auto ...` | `ouroboros_auto` |\n"
+            "| `ooo auto ...` | `ouroboros_start_auto` |\n"
             "Do not emulate it with manual work. If unavailable, stop.\n",
             encoding="utf-8",
         )
@@ -237,6 +240,9 @@ class TestCodexDoctor:
             return_value={
                 "ouroboros_auto",
                 "ouroboros_start_auto",
+                "ouroboros_job_status",
+                "ouroboros_job_wait",
+                "ouroboros_job_result",
                 "ouroboros_interview",
                 "ouroboros_generate_seed",
             }
@@ -307,6 +313,9 @@ class TestCodexDoctor:
                         "tools": [
                             {"name": "ouroboros_auto", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_start_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_status", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_wait", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_result", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_interview", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_generate_seed", "inputSchema": {"type": "object"}},
                         ]
@@ -378,6 +387,9 @@ class TestCodexDoctor:
                         "tools": [
                             {"name": "ouroboros_auto", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_start_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_status", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_wait", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_result", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_interview", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_generate_seed", "inputSchema": {"type": "object"}},
                         ]
@@ -444,6 +456,9 @@ class TestCodexDoctor:
                         "tools": [
                             {"name": "ouroboros_auto", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_start_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_status", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_wait", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_job_result", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_interview", "inputSchema": {"type": "object"}},
                             {"name": "ouroboros_generate_seed", "inputSchema": {"type": "object"}},
                         ]
@@ -573,6 +588,30 @@ class TestCodexDoctor:
         assert any("missing required auto tools" in failure for failure in failures)
         assert any("ouroboros_auto" in failure for failure in failures)
 
+    def test_check_auto_dispatch_surface_live_mcp_reports_missing_job_polling_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+
+        with patch(
+            "ouroboros.cli.commands.codex._list_stdio_mcp_tool_names",
+            AsyncMock(
+                return_value={
+                    "ouroboros_auto",
+                    "ouroboros_start_auto",
+                    "ouroboros_interview",
+                    "ouroboros_generate_seed",
+                }
+            ),
+        ):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=True)
+
+        assert any("missing required auto tools" in failure for failure in failures)
+        assert any("ouroboros_job_wait" in failure for failure in failures)
+        assert any("ouroboros_job_result" in failure for failure in failures)
+
     def test_check_auto_dispatch_surface_live_mcp_reports_handshake_failure(
         self,
         tmp_path: Path,
@@ -621,7 +660,7 @@ class TestCodexDoctor:
 
         failures = _check_auto_dispatch_surface(codex_dir)
 
-        assert "Codex rules do not map `ooo auto` to `ouroboros_auto`" in failures
+        assert "Codex rules do not map `ooo auto` to `ouroboros_start_auto`" in failures
         assert "auto skill does not declare `mcp_tool: ouroboros_auto`" in failures
         assert "Codex config does not contain [mcp_servers.ouroboros]" in failures
 

@@ -183,11 +183,12 @@ class TestInstallCodexRules:
     def test_packaged_rules_fail_closed_for_ooo_auto(self) -> None:
         """Codex rules must route ``ooo auto`` to the real MCP tool, not manual work."""
         rules = load_packaged_codex_rules()
+        compact = " ".join(rules.split())
 
-        assert "| `ooo auto ...` | `ouroboros_auto`" in rules
+        assert "| `ooo auto ...` | `ouroboros_start_auto`" in rules
         assert "Do not emulate it with manual" in rules
-        assert "If that MCP tool\nis unavailable" in rules
-        assert "Do not call a `blocked` or `failed` auto-session result a dispatch" in rules
+        assert "If that MCP tool is unavailable" in compact
+        assert "Do not call a `blocked` or `failed` auto-session result a dispatch" in compact
 
     def test_packaged_rules_include_rendered_skill_capability_guide(self) -> None:
         """Codex rules should include the generated runtime skill capability guide."""
