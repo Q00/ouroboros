@@ -987,6 +987,7 @@ class EventStore:
         resolved_execution_id = execution_id or await self._resolve_execution_id_for_session(
             session_id,
         )
+        session_started_at = await self._resolve_session_started_at(session_id)
         conditions = _session_related_event_conditions(session_id, resolved_execution_id)
 
         try:
@@ -998,6 +999,8 @@ class EventStore:
                     .where(text("rowid > :last_id").bindparams(last_id=last_row_id))
                     .order_by(events_table.c.timestamp, events_table.c.id)
                 )
+                if session_started_at is not None:
+                    query = query.where(events_table.c.timestamp >= session_started_at)
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
