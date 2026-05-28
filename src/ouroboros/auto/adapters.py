@@ -280,7 +280,6 @@ class HandlerSynchronousRunStarter:
             "session_id": session_id,
             "execution_id": execution_id,
             "status": "running",
-            "_allow_deadline_completion_grace": True,
         }
         task = asyncio.create_task(
             self.handler.handle(
@@ -320,7 +319,6 @@ class HandlerSynchronousRunStarter:
             "session_id": _optional_str(meta.get("session_id")),
             "execution_id": _optional_str(meta.get("execution_id")),
             "status": _optional_str(meta.get("status")),
-            "_allow_deadline_completion_grace": True,
         }
         if isinstance(meta.get("success"), bool):
             run_meta["success"] = meta["success"]

@@ -1469,7 +1469,7 @@ class AutoPipeline:
         ):
             remaining = self._remaining_deadline_seconds(state)
             if remaining is not None:
-                return remaining + _SYNCHRONOUS_RUN_COMPLETION_GRACE_SECONDS
+                return remaining
             return float(state.phase_timeout_seconds(AutoPhase.RUN))
         return self._deadline_capped_timeout(state, self.run_start_timeout_seconds)
 
@@ -3510,7 +3510,9 @@ def _arm_legacy_missing_deadline(state: AutoPipelineState) -> bool:
 
 
 def _allows_synchronous_completion_grace(run_meta: dict[str, Any]) -> bool:
-    return bool(run_meta.get("_allow_deadline_completion_grace"))
+    return bool(run_meta.get("_allow_deadline_completion_grace")) and bool(
+        run_meta.get("_recovered_after_timeout")
+    )
 
 
 def _within_synchronous_completion_grace(state: AutoPipelineState) -> bool:
@@ -3531,7 +3533,9 @@ async def _recover_timed_out_synchronous_run(
         recovered = await asyncio.wait_for(recover(), timeout=timeout_seconds)
     except Exception:
         return None
-    return recovered if isinstance(recovered, dict) else None
+    if not isinstance(recovered, dict):
+        return None
+    return {**recovered, "_recovered_after_timeout": True}
 
 
 def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool:

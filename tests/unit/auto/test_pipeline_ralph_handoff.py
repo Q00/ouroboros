@@ -669,8 +669,8 @@ async def test_complete_product_synchronous_run_uses_pipeline_deadline_not_hando
     assert state.last_tool_name != "run_starter"
 
 
-def test_complete_product_synchronous_run_timeout_has_completion_grace(tmp_path) -> None:
-    """Synchronous run teardown gets a small grace beyond the strict deadline."""
+def test_complete_product_synchronous_run_timeout_is_capped_by_deadline(tmp_path) -> None:
+    """Synchronous RUN work is bounded by the strict pipeline deadline."""
     state = _state_at_run_phase(tmp_path)
     state.deadline_at = time.monotonic() + 5.0
 
@@ -686,7 +686,7 @@ def test_complete_product_synchronous_run_timeout_has_completion_grace(tmp_path)
         run_start_timeout_seconds=0.001,
     )
 
-    assert pipeline._run_start_timeout(state) > 5.0
+    assert 0.0 < pipeline._run_start_timeout(state) <= 5.0
 
 
 @pytest.mark.asyncio
@@ -738,8 +738,10 @@ async def test_complete_product_synchronous_success_after_deadline_blocks_as_tim
 
 
 @pytest.mark.asyncio
-async def test_first_party_synchronous_success_within_grace_completes(tmp_path) -> None:
-    """First-party inline execution may return terminal metadata during teardown grace."""
+async def test_first_party_synchronous_success_after_deadline_blocks_even_with_grace_flag(
+    tmp_path,
+) -> None:
+    """Grace applies only to timeout recovery, not over-deadline RUN work."""
     state = _state_at_run_phase(tmp_path)
 
     class FirstPartySyncStarter:
@@ -776,10 +778,10 @@ async def test_first_party_synchronous_success_within_grace_completes(tmp_path) 
 
     result = await pipeline.run(state)
 
-    assert result.status == "complete"
-    assert result.run_handoff_status == "completed"
-    assert state.phase is AutoPhase.COMPLETE
-    assert state.last_tool_name != PIPELINE_DEADLINE_TOOL_NAME
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
     assert state.ralph_job_id is None
 
 
