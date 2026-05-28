@@ -76,6 +76,92 @@ ouroboros auto "Build a local-first habit tracker CLI"
 
 Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
 
+### Detached `auto` wait and retrieve
+
+Detached `auto` work is non-terminal tracked background work. Starting it does
+not mean the workflow has completed; the returned `job_id` is a handle for a
+tracked job whose lifecycle remains observable until it reaches a terminal
+state such as `completed`, `failed`, `cancelled`, or `expired`.
+
+CLI users wait and retrieve with the standard job surfaces:
+
+```bash
+ouroboros job status JOB_ID
+ouroboros job wait JOB_ID
+ouroboros job result JOB_ID
+```
+
+MCP clients use the matching job tools:
+
+```text
+ouroboros_job_status(job_id="JOB_ID")
+ouroboros_job_wait(job_id="JOB_ID")
+ouroboros_job_result(job_id="JOB_ID")
+```
+
+While a detached job is still running, its `running` lifecycle status is
+non-terminal tracked background work. Treat status output as progress, not as
+the final `auto` result. Retrieve the result only after the job reaches a
+terminal lifecycle status. When CLI status reports `completed`,
+`ouroboros job result JOB_ID` retrieves the stable completed `auto` result for
+that job handle. When CLI status reports `failed`, the job is terminal and
+still observable; `ouroboros job result JOB_ID` returns the stable failure
+output or error details for that job handle, not a successful `auto` result.
+When CLI status reports `cancelled`, the job is terminal and still observable;
+`ouroboros job result JOB_ID` returns stable cancellation output or error
+details for that job handle with the cancellation reason when one is available,
+not a successful `auto` result. Next steps are to inspect
+`ouroboros job status JOB_ID` and `ouroboros job result JOB_ID`, then restart
+the detached auto flow or resume from the surfaced auto session, execution, or
+lineage handle when one is present. The CLI prints the stable cancellation
+output and exits non-zero because the terminal result is an error result.
+When CLI status reports `expired`, the job is terminal tracked background work
+whose retained result is no longer available through that job handle. The stable
+observable status is `expired`, not `running` or `completed`, and
+`ouroboros job result JOB_ID` returns the stable expiration error details for
+that handle rather than a detached `auto` result. Next steps are to inspect any
+surfaced auto session, execution, or lineage handle, then resume from that
+handle or restart the detached auto flow when no recoverable handle is present.
+Next steps are to inspect `ouroboros job status JOB_ID` and
+`ouroboros job result JOB_ID`, then resume or retry from the surfaced auto
+session, execution, or lineage handle when one is present. Unknown, expired, or
+otherwise unavailable handles fail through the CLI with a non-zero status and
+through MCP with an error response.
+When CLI status cannot resolve the supplied handle, treat the detached work as
+`invalid` or unavailable rather than as running or completed. The stable
+observable status is the non-zero CLI exit plus the human-readable error for
+that handle. Next steps are to check the copied `job_id`, inspect any surfaced
+auto session, execution, or lineage handle, then restart the detached auto flow
+when no valid handle can be recovered.
+
+Example invalid CLI retrieval output:
+
+```bash
+$ ouroboros job result missing_detached_auto
+Job handle not found: missing_detached_auto. Result unavailable.
+```
+
+Example completed CLI retrieval output:
+
+```bash
+$ ouroboros job result job_auto_docs_done
+detached auto result artifact: seed.yaml
+```
+
+Example cancelled CLI retrieval output:
+
+```bash
+$ ouroboros job result job_auto_docs_cancelled
+detached auto cancelled: user requested cancellation
+```
+
+Example expired CLI retrieval output:
+
+```bash
+$ ouroboros job result job_auto_docs_expired
+Job handle expired: job_auto_docs_expired. Result unavailable.
+```
+
 > **`ooo auto` does not accept `--opencode-mode`.** OpenCode mode is
 > selected once at install time via `ouroboros setup --opencode-mode
 > <plugin|subprocess>` (recorded in `~/.ouroboros/config.yaml`); the auto

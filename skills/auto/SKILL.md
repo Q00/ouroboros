@@ -31,6 +31,13 @@ another terminal auto-session status, report that auto-session status and the
 tool's blocker. Do not label that outcome as MCP dispatch failure; dispatch
 failure means the MCP tool could not be invoked.
 
+If the active runtime routes `ooo auto` through a background starter such as
+`ouroboros_start_auto`, do not stop after returning the `job_id`. Keep ownership
+of the conversational UX: retain the returned `job_id`, `auto_session_id`, and
+cursor, then monitor the job with `ouroboros_job_wait` / `ouroboros_job_status`
+until a terminal job status is reached or the user explicitly asks you to stop.
+The user should not have to poll the job manually.
+
 ## Usage
 
 ```text
@@ -66,6 +73,36 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 4. Reviews and repairs until A-grade or blocked.
 5. Starts execution only after A-grade.
 6. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
+
+## Background monitoring UX
+
+When an auto start response includes `response.meta.job_id`:
+
+1. Briefly acknowledge that auto started and keep the handles in local state:
+   `job_id`, `auto_session_id` / `session_id`, and `cursor` from `response.meta`
+   if present.
+2. Immediately enter a low-noise monitor loop with:
+   - `ouroboros_job_wait(job_id=<job_id>, cursor=<cursor>, timeout_seconds=120, view="summary")`
+   - update `cursor = response.meta.cursor` after every wait/status response
+   - treat `response.meta` as the source of truth; use response text only as a
+     human-readable hint
+3. Relay only meaningful changes: status changes, phase changes, new
+   execution/session/lineage handles, progress counters, blocker/error text, or
+   a terminal state. If `response.meta.changed is false`, continue silently
+   unless the user asked for heartbeat updates.
+4. If the job status is non-terminal (`queued`, `running`, or another active
+   status), keep waiting. Do not tell the user to call job tools themselves.
+5. When the job reaches a terminal status, call `ouroboros_job_result(job_id)`
+   and summarize the final auto-session outcome. If the final auto result is
+   `detached`, keep tracking the surfaced downstream job/Ralph handles when
+   available instead of presenting `detached` as completion.
+6. If `response.meta.status == "delegated_to_plugin"` and
+   `response.meta.job_id is None`, report that OpenCode plugin mode delegated
+   the work to the child Task/session. Do not call job wait/result without a
+   real job id; follow the host Task widget/session lifecycle.
+
+Use short progress relays; the goal is “I am still watching this for you,” not a
+wall of logs.
 
 ### Canonical stop_reason_code taxonomy
 

@@ -380,13 +380,12 @@ class HandlerRalphStarter:
     """Callable Ralph starter backed by ``ouroboros_ralph``.
 
     Bridges :class:`AutoPipeline`'s RUN → RALPH_HANDOFF transition to the
-    runtime-owned Ralph loop introduced in Q00/ouroboros#528. Awaits the
-    background job to a terminal state in non-plugin runtimes so the auto
-    pipeline can produce a final ``COMPLETE`` / ``BLOCKED`` / ``FAILED``
-    auto phase from the same ``AutoPipeline.run()`` call. In plugin mode
-    the handler returns ``delegated_to_plugin`` immediately and the
-    pipeline records ``ralph_dispatch_mode="plugin"`` without invoking
-    job tools.
+    runtime-owned Ralph loop introduced in Q00/ouroboros#528. By default it
+    returns as soon as the background job is durably dispatched; waiting for a
+    terminal Ralph verdict is opt-in via ``return_after_dispatch=False`` so MCP
+    clients do not get pinned to long-running work. In plugin mode the handler
+    returns ``delegated_to_plugin`` immediately and the pipeline records
+    ``ralph_dispatch_mode="plugin"`` without invoking job tools.
     """
 
     def __init__(self, handler: RalphHandler, *, project_dir: str | None = None) -> None:
@@ -411,8 +410,9 @@ class HandlerRalphStarter:
         on_started: Callable[[dict[str, Any]], None] | None = None,
         reattach_terminal: bool = True,
         reuse_existing: bool = True,
+        return_after_dispatch: bool = True,
     ) -> dict[str, Any]:
-        """Dispatch the Ralph loop and wait for terminal completion.
+        """Dispatch the Ralph loop and optionally wait for terminal completion.
 
         ``on_dispatched`` is invoked with the dispatch envelope *before*
         the wait-for-terminal poll begins, so callers (notably
@@ -523,9 +523,11 @@ class HandlerRalphStarter:
             if dispatch_callback is not None:
                 dispatch_callback(envelope)
             return envelope
-        # Job mode: wait for the background job to terminate, then map the
-        # final job snapshot back into the structured terminal status the
-        # pipeline maps onto an auto phase.
+        # Job mode: return the tracking handle immediately by default. Callers
+        # that explicitly pass ``return_after_dispatch=False`` can still wait
+        # for the background job to terminate and map the final snapshot back
+        # into the structured terminal status the pipeline maps onto an auto
+        # phase.
         job_id = _optional_str(meta.get("job_id"))
         if not job_id:
             raise HandlerError("ouroboros_ralph did not return a job_id")
@@ -541,6 +543,14 @@ class HandlerRalphStarter:
                     "dispatch_mode": "job",
                 }
             )
+        if return_after_dispatch:
+            return {
+                "job_id": job_id,
+                "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
+                "dispatch_mode": "job",
+                "terminal_status": "running_async",
+                "stop_reason": "foreground_timeout_elapsed",
+            }
         if max_total_seconds is None:
             terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         else:
@@ -602,12 +612,18 @@ class HandlerRalphPoller:
     ) -> dict[str, Any]:
         job_manager = self.handler._job_manager  # noqa: SLF001
         if max_total_seconds is None:
-            terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
+            terminal_meta = await _wait_for_job_terminal(
+                job_manager,
+                job_id,
+                timeout_seconds=0,
+                detach_on_timeout=True,
+            )
         else:
             terminal_meta = await _wait_for_job_terminal_with_cancel_cleanup(
                 job_manager,
                 job_id,
                 timeout_seconds=max_total_seconds,
+                detach_on_timeout=True,
             )
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
@@ -877,6 +893,7 @@ async def _wait_for_job_terminal(
     poll_interval: float = 0.05,
     timeout_seconds: float | None = None,
     cancel_on_timeout: bool = False,
+    detach_on_timeout: bool = False,
 ) -> dict[str, Any]:
     """Poll the job manager until ``job_id`` reaches a terminal state.
 
@@ -908,6 +925,12 @@ async def _wait_for_job_terminal(
         if deadline is not None:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                if detach_on_timeout:
+                    return {
+                        "job_id": job_id,
+                        "status": "running_async",
+                        "stop_reason": "foreground_timeout_elapsed",
+                    }
                 if cancel_on_timeout:
                     await _cancel_job_after_terminal_wait_timeout(job_manager, job_id)
                 return {
@@ -925,13 +948,15 @@ async def _wait_for_job_terminal_with_cancel_cleanup(
     job_id: str,
     *,
     timeout_seconds: float,
+    detach_on_timeout: bool = False,
 ) -> dict[str, Any]:
     try:
         return await _wait_for_job_terminal(
             job_manager,
             job_id,
             timeout_seconds=timeout_seconds,
-            cancel_on_timeout=True,
+            cancel_on_timeout=not detach_on_timeout,
+            detach_on_timeout=detach_on_timeout,
         )
     except asyncio.CancelledError:
         await _cancel_job_after_terminal_wait_timeout(job_manager, job_id)

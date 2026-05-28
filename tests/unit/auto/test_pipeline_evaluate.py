@@ -728,10 +728,52 @@ async def test_handler_ralph_starter_returns_result_text() -> None:
     starter = HandlerRalphStarter(  # type: ignore[arg-type]
         _StubRalphHandler(), project_dir="/tmp/auto-project"
     )
-    result = await starter(_build_seed(), lineage_id="lineage_X")
+    result = await starter(
+        _build_seed(),
+        lineage_id="lineage_X",
+        return_after_dispatch=False,
+    )
     assert result["result_text"] == "ralph artifact text"
     assert result["terminal_status"] == "completed"
     assert captured_arguments["project_dir"] == "/tmp/auto-project"
+
+
+@pytest.mark.asyncio
+async def test_handler_ralph_starter_detaches_by_default() -> None:
+    """Production Ralph handoff must not wait for terminal job completion unless
+    a caller explicitly opts into the old blocking behavior."""
+    from ouroboros.auto.adapters import HandlerRalphStarter
+
+    class _StubJobManager:
+        async def get_snapshot(self, _job_id: str):  # pragma: no cover
+            raise AssertionError("default Ralph starter must not poll terminal status")
+
+    class _StubRalphHandler:
+        _job_manager = _StubJobManager()
+
+        async def handle(self, _arguments: dict[str, Any]):  # noqa: ANN201
+            from ouroboros.core.types import Result
+            from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="dispatched"),),
+                    is_error=False,
+                    meta={
+                        "job_id": "job_ralph_async",
+                        "lineage_id": "lineage_async",
+                        "dispatch_mode": "job",
+                        "status": "running",
+                    },
+                )
+            )
+
+    starter = HandlerRalphStarter(_StubRalphHandler())  # type: ignore[arg-type]
+    result = await starter(_build_seed(), lineage_id="lineage_async")
+
+    assert result["job_id"] == "job_ralph_async"
+    assert result["terminal_status"] == "running_async"
+    assert result["stop_reason"] == "foreground_timeout_elapsed"
 
 
 # ---------------------------------------------------------------------------
@@ -1114,7 +1156,11 @@ async def test_handler_ralph_starter_preserves_empty_result_text() -> None:
             )
 
     starter = HandlerRalphStarter(_StubRalphHandler())  # type: ignore[arg-type]
-    result = await starter(_build_seed(), lineage_id="lineage_empty")
+    result = await starter(
+        _build_seed(),
+        lineage_id="lineage_empty",
+        return_after_dispatch=False,
+    )
     # Critical: result_text must be ``""`` (a string), NOT None.
     assert result["result_text"] == ""
     assert isinstance(result["result_text"], str)

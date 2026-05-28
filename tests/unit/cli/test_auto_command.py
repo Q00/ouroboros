@@ -30,6 +30,17 @@ def test_auto_help_uses_direct_goal_command_shape() -> None:
     assert "Goal/task for ooo auto" in output
 
 
+def test_auto_help_documents_detached_wait_and_retrieve_commands() -> None:
+    result = runner.invoke(app, ["auto", "--help"])
+
+    assert result.exit_code == 0
+    output = _plain(result.output)
+    assert "Detached auto background work is non-terminal tracked work" in output
+    assert "ouroboros job wait JOB_ID" in output
+    assert "Retrieve completed results with:" in output
+    assert "ouroboros job result JOB_ID" in output
+
+
 def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     result_value = AutoPipelineResult(
         status="complete",
@@ -51,6 +62,122 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     assert run_auto.called
     assert "Auto session:" in result.output
     assert "auto_test" in result.output
+
+
+def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance() -> None:
+    def result_value() -> AutoPipelineResult:
+        return AutoPipelineResult(
+            status="detached",
+            auto_session_id="auto_detached_123",
+            phase=AutoPhase.RALPH_HANDOFF.value,
+            grade="A",
+            seed_path="/tmp/seed.yaml",
+            job_id="job_execute_123",
+            execution_id="exec_detached_123",
+            run_session_id="orch_detached_123",
+            run_handoff_status="started",
+            ralph_job_id="job_ralph_456",
+            ralph_lineage_id="lineage_ralph_789",
+            ralph_dispatch_mode="job",
+        )
+
+    def consume(coro):
+        coro.close()
+        return result_value()
+
+    with patch("ouroboros.cli.commands.auto.asyncio.run", side_effect=consume):
+        first = runner.invoke(app, ["auto", "safe detached goal", "--complete-product"])
+        second = runner.invoke(app, ["auto", "safe detached goal", "--complete-product"])
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    output = _plain(first.output)
+    assert output == _plain(second.output)
+    assert not re.search(r"\b\d{4}-\d{2}-\d{2}[T ][0-9:.+-]", output)
+    assert "Last progress at:" not in output
+    assert "Attached at:" not in output
+    assert "Run reconciled at:" not in output
+    assert output == (
+        "╭───────── Info ─────────╮\n"
+        "│ Auto pipeline detached │\n"
+        "╰────────────────────────╯\n"
+        "Auto session: auto_detached_123\n"
+        "Status: detached\n"
+        "Product status: not verified complete; background work is still running\n"
+        "Authoring backend: in-process (unspecified)\n"
+        "Run backend: unspecified\n"
+        "Seed grade: A\n"
+        "Seed: /tmp/seed.yaml\n"
+        "Seed origin: none\n"
+        "Execution started:\n"
+        "  Job ID: job_execute_123\n"
+        "  Execution ID: exec_detached_123\n"
+        "  Session ID: orch_detached_123\n"
+        "Run handoff status: started\n"
+        "Detached result handles:\n"
+        "  Auto session ID: auto_detached_123\n"
+        "  Execution job ID: job_execute_123\n"
+        "  Ralph job ID: job_ralph_456\n"
+        "  Ralph lineage ID: lineage_ralph_789\n"
+        "Wait: ooo auto --resume auto_detached_123\n"
+        "Retrieve: ooo auto --status --resume auto_detached_123\n"
+        "Wait job (CLI): ouroboros job wait job_ralph_456\n"
+        "Retrieve job (CLI): ouroboros job result job_ralph_456\n"
+        'Wait job (MCP): ouroboros_job_wait(job_id="job_ralph_456")\n'
+        'Retrieve job (MCP): ouroboros_job_result(job_id="job_ralph_456")\n'
+        "Resume: ooo auto --resume auto_detached_123\n"
+    )
+    assert "Auto pipeline detached" in output
+    assert "Status: detached" in output
+    assert "Product status: not verified complete; background work is still running" in output
+    assert "Auto pipeline completed" not in output
+    assert "Auto session: auto_detached_123" in output
+    assert "Execution started:" in output
+    assert "Job ID: job_execute_123" in output
+    assert "Execution ID: exec_detached_123" in output
+    assert "Session ID: orch_detached_123" in output
+    assert "Run handoff status: started" in output
+    assert "Detached result handles:" in output
+    assert "Auto session ID: auto_detached_123" in output
+    assert "Execution job ID: job_execute_123" in output
+    assert "Ralph job ID: job_ralph_456" in output
+    assert "Ralph lineage ID: lineage_ralph_789" in output
+    assert "Wait: ooo auto --resume auto_detached_123" in output
+    assert "Retrieve: ooo auto --status --resume auto_detached_123" in output
+    assert "Wait job (CLI): ouroboros job wait job_ralph_456" in output
+    assert "Retrieve job (CLI): ouroboros job result job_ralph_456" in output
+    assert 'Wait job (MCP): ouroboros_job_wait(job_id="job_ralph_456")' in output
+    assert 'Retrieve job (MCP): ouroboros_job_result(job_id="job_ralph_456")' in output
+
+
+def test_auto_detached_start_output_includes_pollable_cli_job_handle() -> None:
+    """Runnable CLI check for the detached auto job handle printed at start."""
+    result_value = AutoPipelineResult(
+        status="detached",
+        auto_session_id="auto_pollable_start",
+        phase=AutoPhase.RALPH_HANDOFF.value,
+        grade="A",
+        seed_path="/tmp/seed.yaml",
+        job_id="job_execute_pollable",
+        ralph_job_id="job_ralph_pollable",
+        ralph_lineage_id="lineage_pollable",
+        ralph_dispatch_mode="job",
+    )
+
+    def consume(coro):
+        coro.close()
+        return result_value
+
+    with patch("ouroboros.cli.commands.auto.asyncio.run", side_effect=consume):
+        result = runner.invoke(app, ["auto", "safe detached goal", "--complete-product"])
+
+    output = _plain(result.output)
+    assert result.exit_code == 0
+    assert "Status: detached" in output
+    assert "Detached result handles:" in output
+    assert "Ralph job ID: job_ralph_pollable" in output
+    assert "Wait job (CLI): ouroboros job wait job_ralph_pollable" in output
+    assert "Retrieve job (CLI): ouroboros job result job_ralph_pollable" in output
 
 
 def _persisted_state_with_bounds(tmp_path, *, max_interview_rounds: int, max_repair_rounds: int):

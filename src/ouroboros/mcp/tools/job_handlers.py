@@ -8,14 +8,21 @@ Contains handlers for background job operations and execution cancellation:
 - CancelJobHandler: Cancel a background job
 """
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 import structlog
 
 from ouroboros.core.types import Result
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
-from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.job_manager import (
+    JobManager,
+    JobSnapshot,
+    JobStatus,
+    is_terminal_job_expired,
+)
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
     summarize_subtask_events,
@@ -51,6 +58,17 @@ _JOB_VIEW_ALIASES = {
     "tree": "full",
     "verbose": "full",
 }
+_JOB_STREAM_ALIASES = {
+    "default": "progress",
+    "progress": "progress",
+    "execution": "progress",
+    "linked": "linked",
+    "events": "linked",
+    "all": "linked",
+    "children": "linked",
+    "subagents": "linked",
+}
+_JOB_STREAM_EVENT_LIMIT = 10
 
 
 def _normalize_job_view(value: object) -> str:
@@ -60,6 +78,72 @@ def _normalize_job_view(value: object) -> str:
         if stripped:
             return _JOB_VIEW_ALIASES.get(stripped, _DEFAULT_JOB_VIEW)
     return _DEFAULT_JOB_VIEW
+
+
+def _normalize_job_stream(value: object) -> str:
+    """Normalize requested job wait stream scope."""
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped:
+            return _JOB_STREAM_ALIASES.get(stripped, "progress")
+    return "progress"
+
+
+def _content_items_from_result_payload(
+    payload: dict[str, Any] | None,
+) -> tuple[MCPContentItem, ...]:
+    """Rebuild MCP content items from a persisted terminal result payload."""
+    if not isinstance(payload, dict):
+        return ()
+    raw_content = payload.get("content")
+    if not isinstance(raw_content, list):
+        return ()
+
+    items: list[MCPContentItem] = []
+    for raw_item in raw_content:
+        if not isinstance(raw_item, dict):
+            continue
+        raw_type = raw_item.get("type")
+        try:
+            content_type = ContentType(raw_type)
+        except ValueError:
+            continue
+        items.append(
+            MCPContentItem(
+                type=content_type,
+                text=raw_item.get("text") if isinstance(raw_item.get("text"), str) else None,
+                data=raw_item.get("data") if isinstance(raw_item.get("data"), str) else None,
+                mime_type=(
+                    raw_item.get("mime_type")
+                    if isinstance(raw_item.get("mime_type"), str)
+                    else None
+                ),
+                uri=raw_item.get("uri") if isinstance(raw_item.get("uri"), str) else None,
+            )
+        )
+    return tuple(items)
+
+
+def _parse_non_negative_int_argument(
+    arguments: dict[str, Any],
+    name: str,
+    *,
+    default: int,
+    tool_name: str,
+) -> Result[int, MCPServerError]:
+    """Parse a non-negative integer tool argument into a stable MCP error."""
+    raw = arguments.get(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return Result.err(
+            MCPToolError(f"{name} must be a non-negative integer", tool_name=tool_name)
+        )
+    if value < 0:
+        return Result.err(
+            MCPToolError(f"{name} must be a non-negative integer", tool_name=tool_name)
+        )
+    return Result.ok(value)
 
 
 async def _query_all_execution_subtask_events(
@@ -87,6 +171,95 @@ async def _query_latest_workflow_event(event_store: EventStore, execution_id: st
         limit=1,
     )
     return events[0] if events else None
+
+
+def _event_scope(event: BaseEvent) -> str:
+    return f"{event.aggregate_type}:{event.aggregate_id}"
+
+
+def _compact_event_detail(event: BaseEvent) -> str:
+    data = event.data
+    for key in (
+        "message",
+        "activity_detail",
+        "activity",
+        "title",
+        "content",
+        "phase",
+        "status",
+        "reason",
+        "tool_name",
+    ):
+        value = data.get(key)
+        if value not in (None, ""):
+            return str(value).replace("\n", " ")[:240]
+    if data:
+        pairs = []
+        for key, value in list(data.items())[:4]:
+            if value in (None, "", [], {}):
+                continue
+            pairs.append(f"{key}={str(value).replace(chr(10), ' ')[:80]}")
+        if pairs:
+            return ", ".join(pairs)[:240]
+    return ""
+
+
+def _event_stream_item(event: BaseEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "type": event.type,
+        "timestamp": event.timestamp.isoformat(),
+        "aggregate_type": event.aggregate_type,
+        "aggregate_id": event.aggregate_id,
+        "scope": _event_scope(event),
+        "detail": _compact_event_detail(event),
+    }
+
+
+async def _query_linked_stream_events(
+    event_store: EventStore,
+    snapshot: JobSnapshot,
+    cursor: int,
+) -> tuple[list[BaseEvent], int]:
+    """Fetch new events from the job's linked execution/session/lineage streams."""
+    collected: dict[str, BaseEvent] = {}
+    max_cursor = cursor
+
+    async def collect(events: list[BaseEvent], new_cursor: int) -> None:
+        nonlocal max_cursor
+        max_cursor = max(max_cursor, new_cursor)
+        for event in events:
+            collected[event.id] = event
+
+    job_events, job_cursor = await event_store.get_events_after("job", snapshot.job_id, cursor)
+    await collect(job_events, job_cursor)
+
+    if snapshot.links.execution_id:
+        execution_events, execution_cursor = await event_store.get_events_after(
+            "execution",
+            snapshot.links.execution_id,
+            cursor,
+        )
+        await collect(execution_events, execution_cursor)
+
+    if snapshot.links.session_id:
+        session_events, session_cursor = await event_store.query_session_related_events_after(
+            session_id=snapshot.links.session_id,
+            execution_id=snapshot.links.execution_id,
+            last_row_id=cursor,
+        )
+        await collect(session_events, session_cursor)
+
+    if snapshot.links.lineage_id:
+        lineage_events, lineage_cursor = await event_store.get_events_after(
+            "lineage",
+            snapshot.links.lineage_id,
+            cursor,
+        )
+        await collect(lineage_events, lineage_cursor)
+
+    events = sorted(collected.values(), key=lambda event: (event.timestamp, event.id))
+    return events[-_JOB_STREAM_EVENT_LIMIT:], max_cursor
 
 
 @dataclass
@@ -348,16 +521,24 @@ async def _render_job_snapshot_inner(
 ) -> tuple[str, dict[str, Any]]:
     """Inner render without caching.  Returns (text, progress_dict)."""
     progress = dict(_EMPTY_PROGRESS)
+    status_category = _job_status_category(snapshot)
     lines = [
         f"## Job: {snapshot.job_id}",
         "",
         f"**Type**: {snapshot.job_type}",
         f"**Status**: {snapshot.status.value}",
+        f"**Terminal**: {str(snapshot.is_terminal).lower()}",
+        f"**Status Category**: {status_category}",
         f"**Message**: {snapshot.message}",
-        f"**Created**: {snapshot.created_at.isoformat()}",
-        f"**Updated**: {snapshot.updated_at.isoformat()}",
         f"**Cursor**: {snapshot.cursor}",
     ]
+    if snapshot.job_type != "auto":
+        lines[7:7] = [
+            f"**Created**: {snapshot.created_at.isoformat()}",
+            f"**Updated**: {snapshot.updated_at.isoformat()}",
+        ]
+    if snapshot.job_type == "auto" and not snapshot.is_terminal:
+        lines.insert(6, "**Tracking**: detached auto tracked background work")
 
     link_lines = _render_job_link_lines(snapshot)
     if link_lines:
@@ -516,6 +697,55 @@ def _render_job_link_lines(snapshot: JobSnapshot) -> list[str]:
     return lines
 
 
+def _render_non_terminal_result_unavailable(snapshot: JobSnapshot) -> str:
+    """Return stable guidance when result retrieval is requested too early."""
+    lines = [
+        f"Job result not ready: {snapshot.job_id}",
+        f"status={snapshot.status.value}",
+        f"terminal={str(snapshot.is_terminal).lower()}",
+    ]
+    if snapshot.job_type == "auto":
+        lines.append("detached auto job is still tracked background work")
+    lines.extend(
+        [
+            f"wait: ouroboros job wait {snapshot.job_id}",
+            f"retrieve after terminal status: ouroboros job result {snapshot.job_id}",
+            f'mcp_wait: ouroboros_job_wait(job_id="{snapshot.job_id}")',
+            f'mcp_result: ouroboros_job_result(job_id="{snapshot.job_id}")',
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _job_status_category(snapshot: JobSnapshot) -> str:
+    """Return the stable category for status consumers."""
+    return "terminal" if snapshot.is_terminal else "non_terminal"
+
+
+def _job_snapshot_meta(snapshot: JobSnapshot) -> dict[str, Any]:
+    """Return stable structured metadata shared by job status APIs."""
+    links = {
+        "session_id": snapshot.links.session_id,
+        "execution_id": snapshot.links.execution_id,
+        "lineage_id": snapshot.links.lineage_id,
+    }
+    return {
+        "job_id": snapshot.job_id,
+        "job_type": snapshot.job_type,
+        "status": snapshot.status.value,
+        "lifecycle_status": snapshot.status.value,
+        "status_category": _job_status_category(snapshot),
+        "is_terminal": snapshot.is_terminal,
+        "result_available": snapshot.is_terminal,
+        "error": snapshot.error,
+        "cursor": snapshot.cursor,
+        "links": links,
+        "session_id": snapshot.links.session_id,
+        "execution_id": snapshot.links.execution_id,
+        "lineage_id": snapshot.links.lineage_id,
+    }
+
+
 @dataclass
 class JobStatusHandler:
     """Return a human-readable status summary for a background job."""
@@ -579,12 +809,7 @@ class JobStatusHandler:
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED},
                 meta={
-                    "job_id": snapshot.job_id,
-                    "status": snapshot.status.value,
-                    "cursor": snapshot.cursor,
-                    "session_id": snapshot.links.session_id,
-                    "execution_id": snapshot.links.execution_id,
-                    "lineage_id": snapshot.links.lineage_id,
+                    **_job_snapshot_meta(snapshot),
                     "view": view,
                     **progress,
                 },
@@ -628,9 +853,13 @@ class JobWaitHandler:
                 MCPToolParameter(
                     name="timeout_seconds",
                     type=ToolInputType.INTEGER,
-                    description="Maximum seconds to wait for a change (longer = fewer round-trips)",
+                    description=(
+                        "Maximum seconds to wait for a change. Defaults to 0 so the "
+                        "tool returns an immediate snapshot and never holds the MCP "
+                        "client open unless the caller explicitly asks for long-polling."
+                    ),
                     required=False,
-                    default=30,
+                    default=0,
                 ),
                 MCPToolParameter(
                     name="view",
@@ -638,6 +867,16 @@ class JobWaitHandler:
                     description="'full' (default), 'summary', or 'compact'.",
                     required=False,
                     default=_DEFAULT_JOB_VIEW,
+                ),
+                MCPToolParameter(
+                    name="stream",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "'progress' (default) watches job/execution progress; "
+                        "'linked' also streams linked session, lineage, and subagent events."
+                    ),
+                    required=False,
+                    default="progress",
                 ),
             ),
         )
@@ -655,21 +894,70 @@ class JobWaitHandler:
                 )
             )
 
-        cursor = int(arguments.get("cursor", 0))
-        timeout_seconds = int(arguments.get("timeout_seconds", 30))
+        cursor_result = _parse_non_negative_int_argument(
+            arguments,
+            "cursor",
+            default=0,
+            tool_name="ouroboros_job_wait",
+        )
+        if cursor_result.is_err:
+            return Result.err(cursor_result.error)
+        timeout_result = _parse_non_negative_int_argument(
+            arguments,
+            "timeout_seconds",
+            default=0,
+            tool_name="ouroboros_job_wait",
+        )
+        if timeout_result.is_err:
+            return Result.err(timeout_result.error)
+        cursor = cursor_result.value
+        timeout_seconds = timeout_result.value
         view = _normalize_job_view(arguments.get("view"))
+        stream = _normalize_job_stream(arguments.get("stream"))
 
         try:
-            snapshot, changed = await self._job_manager.wait_for_change(
-                job_id,
-                cursor=cursor,
-                timeout_seconds=timeout_seconds,
-            )
+            if stream == "linked":
+                (
+                    snapshot,
+                    changed,
+                    stream_events,
+                    stream_cursor,
+                ) = await self._wait_for_linked_change(
+                    job_id,
+                    cursor=cursor,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                snapshot, changed = await self._job_manager.wait_for_change(
+                    job_id,
+                    cursor=cursor,
+                    timeout_seconds=timeout_seconds,
+                )
+                stream_events = []
+                stream_cursor = cursor
         except ValueError as exc:
-            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_wait"))
+            return Result.err(
+                MCPToolError(
+                    (
+                        f"Job not found: {job_id}. Wait unavailable. "
+                        "Check the job handle returned by detached auto start, "
+                        f"then retry `ouroboros job wait {job_id}`."
+                    ),
+                    tool_name="ouroboros_job_wait",
+                    error_code="job_handle_not_found",
+                    details={
+                        "job_id": job_id,
+                        "lifecycle_status": "invalid",
+                        "is_terminal": False,
+                        "result_available": False,
+                        "reason": "not_found",
+                        "source_error": str(exc),
+                    },
+                )
+            )
 
         execution_progress_changed = False
-        response_cursor = max(snapshot.cursor, cursor)
+        response_cursor = max(snapshot.cursor, stream_cursor, cursor)
         if snapshot.links.execution_id:
             execution_events, execution_cursor = await self._event_store.get_events_after(
                 "execution",
@@ -684,6 +972,12 @@ class JobWaitHandler:
                 snapshot = replace(snapshot, cursor=response_cursor)
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
+        stream_items = [_event_stream_item(event) for event in stream_events]
+        if stream_items:
+            text += "\n\n### Stream Events"
+            for item in stream_items[-_JOB_STREAM_EVENT_LIMIT:]:
+                detail = f" -- {item['detail']}" if item["detail"] else ""
+                text += f"\n- `{item['type']}` [{item['scope']}]{detail}"
         has_live_execution_progress = snapshot.links.execution_id is not None and any(
             progress.get(key) is not None
             for key in (
@@ -694,45 +988,88 @@ class JobWaitHandler:
                 "sub_ac_total",
             )
         )
-        response_changed = changed or execution_progress_changed
+        stream_changed = bool(stream_items)
+        response_changed = changed or execution_progress_changed or stream_changed
         if not changed:
             if (
                 view in {"compact", "summary"}
                 and has_live_execution_progress
-                and execution_progress_changed
+                and (execution_progress_changed or stream_changed)
             ):
                 text = _render_compact_job_snapshot(
                     snapshot,
                     progress,
                     include_message=view == "summary",
                 )
+                if stream_items:
+                    text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
             elif view in {"compact", "summary"}:
-                text = f"unchanged cursor={snapshot.cursor}"
+                if stream_items:
+                    summaries = ", ".join(item["type"] for item in stream_items[-3:])
+                    text = (
+                        f"stream_events {len(stream_items)} cursor={snapshot.cursor}: {summaries}"
+                    )
+                else:
+                    text = f"unchanged cursor={snapshot.cursor}"
             elif execution_progress_changed:
                 text += "\n\nExecution progress updated during this wait window."
+            elif stream_changed:
+                text += "\n\nLinked stream events updated during this wait window."
             else:
                 text += "\n\nNo new job-level events during this wait window."
         elif view == "compact":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
+            if stream_items:
+                text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
         elif view == "summary":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
+            if stream_items:
+                text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED},
                 meta={
-                    "job_id": snapshot.job_id,
-                    "status": snapshot.status.value,
-                    "cursor": snapshot.cursor,
+                    **_job_snapshot_meta(snapshot),
                     "changed": response_changed,
-                    "session_id": snapshot.links.session_id,
-                    "execution_id": snapshot.links.execution_id,
-                    "lineage_id": snapshot.links.lineage_id,
                     "view": view,
+                    "stream": stream,
+                    "stream_events": stream_items,
                     **progress,
                 },
             )
         )
+
+    async def _wait_for_linked_change(
+        self,
+        job_id: str,
+        *,
+        cursor: int,
+        timeout_seconds: int,
+    ) -> tuple[JobSnapshot, bool, list[BaseEvent], int]:
+        """Long-poll job plus linked child/session event streams."""
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while True:
+            snapshot, changed = await self._job_manager.wait_for_change(
+                job_id,
+                cursor=cursor,
+                timeout_seconds=0,
+            )
+            events, stream_cursor = await _query_linked_stream_events(
+                self._event_store,
+                snapshot,
+                cursor,
+            )
+            if (
+                changed
+                or events
+                or snapshot.is_terminal
+                or asyncio.get_running_loop().time() >= deadline
+            ):
+                if stream_cursor != snapshot.cursor:
+                    snapshot = replace(snapshot, cursor=max(snapshot.cursor, stream_cursor))
+                return snapshot, changed, events, stream_cursor
+            await asyncio.sleep(0.5)
 
 
 @dataclass
@@ -777,27 +1114,70 @@ class JobResultHandler:
         try:
             snapshot = await self._job_manager.get_snapshot(job_id)
         except ValueError as exc:
-            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_result"))
-
-        if not snapshot.is_terminal:
             return Result.err(
                 MCPToolError(
-                    f"Job still running: {snapshot.status.value}",
+                    f"Job handle not found: {job_id}. Result unavailable.",
                     tool_name="ouroboros_job_result",
+                    error_code="job_handle_not_found",
+                    details={
+                        "job_id": job_id,
+                        "lifecycle_status": "invalid",
+                        "is_terminal": True,
+                        "result_available": False,
+                        "reason": "not_found",
+                        "source_error": str(exc),
+                    },
                 )
             )
 
+        if is_terminal_job_expired(snapshot):
+            return Result.err(
+                MCPToolError(
+                    f"Job handle expired: {snapshot.job_id}. Result unavailable.",
+                    tool_name="ouroboros_job_result",
+                    error_code="job_handle_expired",
+                    details={
+                        "job_id": snapshot.job_id,
+                        "lifecycle_status": "expired",
+                        "is_terminal": snapshot.is_terminal,
+                        "result_available": False,
+                        "reason": "expired",
+                    },
+                )
+            )
+
+        if not snapshot.is_terminal:
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=_render_non_terminal_result_unavailable(snapshot),
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        **_job_snapshot_meta(snapshot),
+                        "result_available": False,
+                    },
+                )
+            )
+
+        stored_content = _content_items_from_result_payload(snapshot.result_payload)
         result_text = snapshot.result_text or snapshot.error or snapshot.message
+        content = stored_content or (MCPContentItem(type=ContentType.TEXT, text=result_text),)
+        result_payload_meta = (
+            {"result_payload": snapshot.result_payload}
+            if snapshot.result_payload is not None
+            else {}
+        )
         return Result.ok(
             MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+                content=content,
                 is_error=snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED},
                 meta={
-                    "job_id": snapshot.job_id,
-                    "status": snapshot.status.value,
-                    "session_id": snapshot.links.session_id,
-                    "execution_id": snapshot.links.execution_id,
-                    "lineage_id": snapshot.links.lineage_id,
+                    **_job_snapshot_meta(snapshot),
+                    **result_payload_meta,
                     **snapshot.result_meta,
                 },
             )

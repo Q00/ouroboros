@@ -57,6 +57,7 @@ class JobSnapshot:
     links: JobLinks = field(default_factory=JobLinks)
     result_text: str | None = None
     result_meta: dict[str, Any] = field(default_factory=dict)
+    result_payload: dict[str, Any] | None = None
     error: str | None = None
 
     @property
@@ -80,11 +81,49 @@ def _safe_meta(value: Any) -> Any:
     return str(value)
 
 
+def _safe_result_payload(result: Any) -> dict[str, Any]:
+    """Return a JSON-safe representation of an MCP tool result."""
+    content = []
+    for item in getattr(result, "content", ()) or ():
+        content.append(
+            {
+                "type": str(getattr(item, "type", "")),
+                "text": getattr(item, "text", None),
+                "data": getattr(item, "data", None),
+                "mime_type": getattr(item, "mime_type", None),
+                "uri": getattr(item, "uri", None),
+            }
+        )
+    return {
+        "content": _safe_meta(content),
+        "is_error": bool(getattr(result, "is_error", False)),
+        "meta": _safe_meta(getattr(result, "meta", {})),
+        "text_content": getattr(result, "text_content", str(result)),
+    }
+
+
 _JOB_TTL = timedelta(hours=1)
 _COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS = 5.0
 _RECOVERED_COMPLETION_EVENT_ID_PREFIX = "mcp-job-recovered-completed-"
 _RECOVERED_FAILURE_EVENT_ID_PREFIX = "mcp-job-recovered-failed-"
 logger = logging.getLogger(__name__)
+
+
+def is_terminal_job_expired(
+    snapshot: JobSnapshot,
+    *,
+    now: datetime | None = None,
+    ttl: timedelta | None = None,
+) -> bool:
+    """Return true when a terminal job handle is past the retrieval TTL."""
+    if not snapshot.is_terminal:
+        return False
+    ttl = ttl or _JOB_TTL
+    current = now or datetime.now(UTC)
+    updated = snapshot.updated_at
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=UTC)
+    return updated < current - ttl
 
 
 def _consume_task_result(task: asyncio.Task[Any]) -> None:
@@ -182,6 +221,11 @@ def _snapshot_with_terminal_event(
         cursor=cursor,
         result_text=data.get("result_text", snapshot.result_text),
         result_meta=data.get("result_meta") if isinstance(data.get("result_meta"), dict) else {},
+        result_payload=(
+            data.get("result_payload")
+            if isinstance(data.get("result_payload"), dict)
+            else snapshot.result_payload
+        ),
         error=data.get("error"),
     )
 
@@ -381,6 +425,7 @@ class JobManager:
                     }.get(terminal_status, "Job complete"),
                     "result_text": getattr(result, "text_content", str(result))[:20_000],
                     "result_meta": _safe_meta(getattr(result, "meta", {})),
+                    "result_payload": _safe_result_payload(result),
                     "is_error": bool(getattr(result, "is_error", False)),
                 },
             )
@@ -797,6 +842,7 @@ class JobManager:
         )
         result_text: str | None = None
         result_meta: dict[str, Any] = {}
+        result_payload: dict[str, Any] | None = None
         error: str | None = None
 
         for event in events[1:]:
@@ -816,6 +862,8 @@ class JobManager:
                 result_text = data["result_text"]
             if "result_meta" in data and isinstance(data["result_meta"], dict):
                 result_meta = data["result_meta"]
+            if "result_payload" in data and isinstance(data["result_payload"], dict):
+                result_payload = data["result_payload"]
             if "error" in data:
                 error = data["error"]
 
@@ -830,6 +878,7 @@ class JobManager:
             links=links,
             result_text=result_text,
             result_meta=result_meta,
+            result_payload=result_payload,
             error=error,
         )
         return await self._recover_linked_execution_terminal_snapshot(snapshot)

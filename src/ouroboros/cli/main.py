@@ -28,6 +28,7 @@ from ouroboros.cli.commands import (
     config,
     detect,
     init,
+    job,
     mcp,
     plugin,
     pm,
@@ -79,9 +80,20 @@ app = typer.Typer(
 )
 
 # Register direct commands and command groups
-app.command(name="auto", help="Run bounded full-quality ooo auto pipeline.")(auto.auto_command)
+app.command(
+    name="auto",
+    help=(
+        "Run bounded full-quality ooo auto pipeline.\n\n"
+        "Detached auto background work is non-terminal tracked work. "
+        "Wait for completion with:\n\n"
+        "  ouroboros job wait JOB_ID\n\n"
+        "Retrieve completed results with:\n\n"
+        "  ouroboros job result JOB_ID"
+    ),
+)(auto.auto_command)
 app.add_typer(init.app, name="init")
 app.add_typer(run.app, name="run")
+app.add_typer(job.app, name="job")
 app.add_typer(config.app, name="config")
 app.add_typer(status.app, name="status")
 app.add_typer(cancel.app, name="cancel")

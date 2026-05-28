@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$PWD}\"; python3 \"$ROOT/scripts/drift-monitor.py\" || python \"$ROOT/scripts/drift-monitor.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$PWD}\"; python3 \"$ROOT/scripts/keyword-detector.py\" || python \"$ROOT/scripts/keyword-detector.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

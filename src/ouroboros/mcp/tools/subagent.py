@@ -55,6 +55,12 @@ _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS = 900
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 
+
+def _canonical_response_json(body: dict[str, Any]) -> str:
+    """Render structured MCP dispatch content with deterministic key order."""
+    return json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+
 # ---------------------------------------------------------------------------
 # SubagentPayload dataclass
 # ---------------------------------------------------------------------------
@@ -224,7 +230,7 @@ def build_subagent_result(
 
     return Result.ok(
         MCPToolResult(
-            content=(MCPContentItem(type=ContentType.TEXT, text=json.dumps(body)),),
+            content=(MCPContentItem(type=ContentType.TEXT, text=_canonical_response_json(body)),),
             is_error=False,
             meta=dict(body),
         )
@@ -1023,7 +1029,7 @@ def build_multi_subagent_result(
 
     return Result.ok(
         MCPToolResult(
-            content=(MCPContentItem(type=ContentType.TEXT, text=json.dumps(body)),),
+            content=(MCPContentItem(type=ContentType.TEXT, text=_canonical_response_json(body)),),
             is_error=False,
             meta=dict(body),
         )

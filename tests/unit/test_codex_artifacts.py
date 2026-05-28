@@ -65,6 +65,15 @@ class TestInstallCodexRules:
         assert secondary_target_path.read_text(encoding="utf-8") == "# status rules\n"
         assert not rules_dir.joinpath("team.md").exists()
 
+    def test_packaged_rules_make_auto_monitoring_agent_owned(self) -> None:
+        """Codex rules should keep background auto polling in the agent UX."""
+        rules = load_packaged_codex_rules()
+        compact = " ".join(rules.split())
+
+        assert "keep monitoring the job yourself" in compact
+        assert "Do not hand the user polling instructions as the final UX" in compact
+        assert "ouroboros_job_result(job_id)" in compact
+
     def test_refresh_does_not_prune_stale_namespaced_rules_by_default(self, tmp_path: Path) -> None:
         """Setup refresh should leave removed Ouroboros rules untouched unless update-mode prune is requested."""
         codex_dir = tmp_path / ".codex"
@@ -183,11 +192,12 @@ class TestInstallCodexRules:
     def test_packaged_rules_fail_closed_for_ooo_auto(self) -> None:
         """Codex rules must route ``ooo auto`` to the real MCP tool, not manual work."""
         rules = load_packaged_codex_rules()
+        compact = " ".join(rules.split())
 
-        assert "| `ooo auto ...` | `ouroboros_auto`" in rules
+        assert "| `ooo auto ...` | `ouroboros_start_auto`" in rules
         assert "Do not emulate it with manual" in rules
-        assert "If that MCP tool\nis unavailable" in rules
-        assert "Do not call a `blocked` or `failed` auto-session result a dispatch" in rules
+        assert "If that MCP tool is unavailable" in compact
+        assert "Do not call a `blocked` or `failed` auto-session result a dispatch" in compact
 
     def test_packaged_rules_include_rendered_skill_capability_guide(self) -> None:
         """Codex rules should include the generated runtime skill capability guide."""
@@ -255,6 +265,8 @@ class TestLoadPackagedCodexSkills:
         assert "must be executed by invoking MCP tool `ouroboros_auto`" in skill
         assert "manual fallback is not an `ooo auto` run" in skill
         assert "Do not label that outcome as MCP dispatch failure" in skill
+        assert "The user should not have to poll the job manually" in skill
+        assert "ouroboros_job_result(job_id)" in skill
 
     def test_packaged_interview_skill_uses_runtime_capability_terms(self) -> None:
         """Runtime skill instructions should not hardcode Claude-only tool surfaces."""

@@ -28,7 +28,7 @@ async def test_handler_ralph_poller_propagates_terminal_generation_metadata(
     handler = _FakeRalphHandler()
     poller = HandlerRalphPoller(handler)  # type: ignore[arg-type]
 
-    async def wait_for_terminal(_job_manager: Any, job_id: str) -> dict[str, Any]:
+    async def wait_for_terminal(_job_manager: Any, job_id: str, **_kwargs: Any) -> dict[str, Any]:
         assert job_id == "job_ralph_existing"
         return {
             "status": "completed",
@@ -60,7 +60,7 @@ async def test_handler_ralph_poller_prefers_generations_over_iterations(
     handler = _FakeRalphHandler()
     poller = HandlerRalphPoller(handler)  # type: ignore[arg-type]
 
-    async def wait_for_terminal(_job_manager: Any, job_id: str) -> dict[str, Any]:
+    async def wait_for_terminal(_job_manager: Any, job_id: str, **_kwargs: Any) -> dict[str, Any]:
         assert job_id == "job_ralph_existing"
         return {
             "status": "completed",

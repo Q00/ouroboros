@@ -35,7 +35,7 @@ from ouroboros.auto.state import (
     AutoStore,
 )
 from ouroboros.events.base import BaseEvent
-from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
+from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.query_handlers import SessionStatusHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
@@ -414,6 +414,52 @@ def test_terminal_lineage_without_job_id_is_not_gap_window(tmp_path, phase: Auto
     assert "pending" not in meta
     assert "ralph" not in meta
     assert "Pending: starting ralph" not in result.value.content[0].text
+
+
+def test_mcp_auto_status_reconciles_completed_execution_over_ralph_timeout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A completed linked execution job must not keep showing a Ralph timeout blocker."""
+    state = _state_at_ralph_handoff(tmp_path, with_job_id=True)
+    state.job_id = "job_execution_done"
+    state.execution_id = "exec_done"
+    state.run_session_id = "orch_done"
+    state.mark_blocked("iteration_timeout", tool_name="ralph_starter")
+    state.ralph_job_status = "failed"
+    state.ralph_stop_reason = "iteration_timeout"
+    AutoStore(tmp_path).save(state)
+
+    class FakeJobManager:
+        async def get_snapshot(self, job_id: str) -> JobSnapshot:
+            assert job_id == state.job_id
+            now = datetime.now(UTC)
+            return JobSnapshot(
+                job_id=job_id,
+                job_type="execute_seed",
+                status=JobStatus.COMPLETED,
+                message="Execution complete: 15/15 ACs completed",
+                created_at=now,
+                updated_at=now,
+                links=JobLinks(session_id=state.run_session_id, execution_id=state.execution_id),
+            )
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.query_handlers.JobManager",
+        lambda: FakeJobManager(),
+    )
+
+    handler = SessionStatusHandler(auto_store=AutoStore(tmp_path))
+    result = asyncio.run(handler.handle({"session_id": state.auto_session_id}))
+
+    assert result.is_ok
+    assert result.value.meta["phase"] == "complete"
+    assert result.value.meta["is_terminal"] is True
+    assert "blocker" not in result.value.meta
+    text = result.value.text_content
+    assert "Phase: complete" in text
+    assert "Blocker:" not in text
+    assert "iteration_timeout" not in text
 
 
 @pytest.mark.parametrize("phase", (AutoPhase.BLOCKED, AutoPhase.FAILED))

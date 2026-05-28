@@ -72,6 +72,13 @@ def _write_credentials(config_dir: Path, api_key: str = "sk-present") -> None:
     )
 
 
+def test_status_auto_invalid_session_id_exits_nonzero() -> None:
+    result = runner.invoke(app, ["auto", "missing"])
+
+    assert result.exit_code == 1
+    assert "auto_session_id must start with auto_" in result.output
+
+
 def test_health_reports_all_ok(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     data_dir = config_dir / "data"

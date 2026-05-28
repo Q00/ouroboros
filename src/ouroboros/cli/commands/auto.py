@@ -706,12 +706,34 @@ def _is_external_ralph_plugin_completion(result: AutoPipelineResult) -> bool:
     return result.status == "complete" and result.ralph_dispatch_mode == "plugin"
 
 
+def _print_detached_guidance(result: AutoPipelineResult) -> None:
+    """Print stable handles and wait/retrieve commands for detached auto work."""
+    console.print("Detached result handles:")
+    console.print(f"  Auto session ID: {result.auto_session_id}")
+    if result.job_id:
+        console.print(f"  Execution job ID: {result.job_id}")
+    if result.ralph_job_id:
+        console.print(f"  Ralph job ID: {result.ralph_job_id}")
+    if result.ralph_lineage_id:
+        console.print(f"  Ralph lineage ID: {result.ralph_lineage_id}")
+
+    console.print(f"Wait: ooo auto --resume {result.auto_session_id}")
+    console.print(f"Retrieve: ooo auto --status --resume {result.auto_session_id}")
+    if result.ralph_job_id:
+        console.print(f"Wait job (CLI): ouroboros job wait {result.ralph_job_id}")
+        console.print(f"Retrieve job (CLI): ouroboros job result {result.ralph_job_id}")
+        console.print(f'Wait job (MCP): ouroboros_job_wait(job_id="{result.ralph_job_id}")')
+        console.print(f'Retrieve job (MCP): ouroboros_job_result(job_id="{result.ralph_job_id}")')
+
+
 def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     handoff_only = _is_run_handoff_only_completion(result)
     completed_ralph_product = _is_completed_ralph_product(result)
     external_ralph_plugin = _is_external_ralph_plugin_completion(result)
     if handoff_only:
         print_info("Auto run handoff started")
+    elif result.status == "detached":
+        print_info("Auto pipeline detached")
     elif result.status == "complete":
         print_success("Auto pipeline completed")
     elif result.status in {"blocked", "failed"}:
@@ -724,6 +746,10 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     if handoff_only:
         console.print(
             "Product status: [yellow]not verified complete; execution is still external/pending[/]"
+        )
+    elif result.status == "detached":
+        console.print(
+            "Product status: [yellow]not verified complete; background work is still running[/]"
         )
     elif completed_ralph_product:
         console.print("Product status: [green]completed by Ralph loop[/]")
@@ -764,6 +790,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"Run reconciliation status: {result.run_reconciliation_status}")
         console.print(f"Run reconciliation source: {result.run_reconciliation_source}")
         console.print(f"Run reconciled at: {result.run_reconciled_at}")
+    if result.status == "detached":
+        _print_detached_guidance(result)
     if show_ledger:
         if result.assumptions:
             console.print("Assumptions:")

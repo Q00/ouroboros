@@ -65,7 +65,7 @@ class TestCodexDoctor:
         rules_path = codex_dir / "rules" / "ouroboros.md"
         rules_path.parent.mkdir(parents=True, exist_ok=True)
         rules_path.write_text(
-            "| `ooo auto ...` | `ouroboros_auto` |\n"
+            "| `ooo auto ...` | `ouroboros_start_auto` |\n"
             "Do not emulate it with manual work. If unavailable, stop.\n",
             encoding="utf-8",
         )
@@ -621,7 +621,7 @@ class TestCodexDoctor:
 
         failures = _check_auto_dispatch_surface(codex_dir)
 
-        assert "Codex rules do not map `ooo auto` to `ouroboros_auto`" in failures
+        assert "Codex rules do not map `ooo auto` to `ouroboros_start_auto`" in failures
         assert "auto skill does not declare `mcp_tool: ouroboros_auto`" in failures
         assert "Codex config does not contain [mcp_servers.ouroboros]" in failures
 

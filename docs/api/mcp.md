@@ -261,6 +261,126 @@ Ouroboros exposes workflow tools as ordinary MCP handlers. The MCP server does
 not parse `ooo` syntax and does not receive channel-specific identifiers for
 skill routing.
 
+### Detached `auto` Jobs
+
+`ouroboros_start_auto` starts detached `auto` work as non-terminal tracked
+background work. A successful start response returns a `job_id` immediately;
+that handle identifies tracked background work, not a completed workflow result.
+The job remains observable through its lifecycle status until it reaches a
+terminal state such as `completed`, `failed`, `cancelled`, or `expired`.
+
+MCP clients wait for and retrieve detached `auto` results with the standard job
+tools:
+
+```text
+ouroboros_job_status(job_id="JOB_ID")
+ouroboros_job_wait(job_id="JOB_ID")
+ouroboros_job_result(job_id="JOB_ID")
+```
+
+Treat `running` or other non-terminal status output as progress only. A
+`running` lifecycle status is non-terminal tracked background work, not a final
+`auto` result. Wait with `ouroboros_job_wait`, then fetch the completed result
+with `ouroboros_job_result` after the job reaches a terminal lifecycle status.
+When MCP status reports `completed`, `ouroboros_job_result(job_id="JOB_ID")`
+retrieves the stable completed `auto` result for that job handle. Unknown,
+expired, or otherwise unavailable handles return an MCP error response.
+When MCP status cannot resolve the supplied handle, treat the detached work as
+`invalid` or unavailable rather than as running or completed. The stable
+observable status is the MCP error response for that handle, not a detached
+`auto` result. Next steps are to check the copied `job_id`, inspect any
+surfaced auto session, execution, or lineage handle, then restart the detached
+auto flow when no valid handle can be recovered.
+
+The minimal stable invalid-handle error contract marks the handle as terminally
+unavailable and resultless:
+
+```text
+ouroboros_job_result(job_id="missing_detached_auto")
+
+error.message = "Job handle not found: missing_detached_auto. Result unavailable."
+error.error_code = "job_handle_not_found"
+error.details.job_id = "missing_detached_auto"
+error.details.lifecycle_status = "invalid"
+error.details.is_terminal = true
+error.details.result_available = false
+error.details.reason = "not_found"
+```
+
+A completed detached `auto` result may include text content, metadata, and an
+artifact resource reference. The minimal stable retrieval contract is the job
+handle, terminal lifecycle status, terminal marker, and returned content:
+
+```text
+ouroboros_job_result(job_id="job_auto_docs_done")
+
+content[0].text = "detached auto result artifact: seed.yaml"
+content[1].uri = "file:///tmp/detached-auto-result.json"
+meta.job_id = "job_auto_docs_done"
+meta.status = "completed"
+meta.is_terminal = true
+```
+
+When MCP status reports `failed`, the job is terminal and still observable;
+`ouroboros_job_result(job_id="JOB_ID")` returns the stable failure output or
+error details for that job handle with `is_error=true`, not a successful `auto`
+result. Next steps are to inspect `ouroboros_job_status(job_id="JOB_ID")` and
+`ouroboros_job_result(job_id="JOB_ID")`, then resume or retry from the surfaced
+auto session, execution, or lineage handle when one is present.
+
+```text
+ouroboros_job_result(job_id="job_auto_docs_failed")
+
+is_error = true
+content[0].text = "detached auto failed: seed repair budget exhausted"
+meta.job_id = "job_auto_docs_failed"
+meta.status = "failed"
+meta.is_terminal = true
+meta.error = "seed repair budget exhausted"
+```
+
+When MCP status reports `cancelled`, the job is terminal and still observable;
+`ouroboros_job_result(job_id="JOB_ID")` returns stable cancellation output or
+error details for that job handle with `is_error=true` and the cancellation
+reason when one is available, not a successful `auto` result. Next steps are to
+inspect `ouroboros_job_status(job_id="JOB_ID")` and
+`ouroboros_job_result(job_id="JOB_ID")`, then restart the detached auto flow or
+resume from the surfaced auto session, execution, or lineage handle when one is
+present.
+
+```text
+ouroboros_job_result(job_id="job_auto_docs_cancelled")
+
+is_error = true
+content[0].text = "detached auto cancelled: user requested cancellation"
+meta.job_id = "job_auto_docs_cancelled"
+meta.status = "cancelled"
+meta.lifecycle_status = "cancelled"
+meta.is_terminal = true
+meta.error = "user requested cancellation"
+```
+
+When MCP status reports `expired`, the job is terminal tracked background work
+whose retained result is no longer available through that job handle. The stable
+observable status is `expired` with `is_error=true`, not `running` or
+`completed`, and `ouroboros_job_result(job_id="JOB_ID")` returns stable
+expiration error details for that handle rather than a detached `auto` result.
+Next steps are to inspect any surfaced auto session, execution, or lineage
+handle, then resume from that handle or restart the detached auto flow when no
+recoverable handle is present.
+
+```text
+ouroboros_job_result(job_id="job_auto_docs_expired")
+
+error.message = "Job handle expired: job_auto_docs_expired. Result unavailable."
+error.error_code = "job_handle_expired"
+error.details.job_id = "job_auto_docs_expired"
+error.details.lifecycle_status = "expired"
+error.details.is_terminal = true
+error.details.result_available = false
+error.details.reason = "expired"
+```
+
 ### `ouroboros_brownfield` Scan Boundaries
 
 The brownfield MCP tool registers existing codebases for PM/interview context.

@@ -205,6 +205,7 @@ _RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
 # recovery decisions and surfaces can detect "deadline-expired" vs ordinary
 # per-tool blockers without scanning the error message.
 PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
+DETACHED_STATUS = "detached"
 _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 # Mirrors RalphHandler.MIN_MAX_TOTAL_SECONDS. The auto layer checks this before
 # dispatch so an insufficient top-level pipeline budget remains a pipeline
@@ -3391,6 +3392,13 @@ class AutoPipeline:
                 ralph_result_text=_artifact_text(ralph_meta.get("result_text")),
                 resumed=True,
             )
+        if terminal_status == "running_async":
+            state.mark_progress(
+                "background Ralph job is still tracked",
+                tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, status_override=DETACHED_STATUS)
         # Q00/ouroboros#782 review-10 BLOCKING #2: ``terminal_status ==
         # "cancelled"`` must map to BLOCKED with the pinned
         # ``RALPH_CANCEL_BLOCKER_REASON`` — same as the live ``_handoff_to_ralph``

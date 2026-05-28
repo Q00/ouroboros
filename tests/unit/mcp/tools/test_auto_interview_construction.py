@@ -209,17 +209,20 @@ def test_execution_job_completed_keeps_auto_complete(monkeypatch) -> None:
         lambda: FakeJobManager(),
     )
     result = AutoPipelineResult(
-        status="running",
+        status="blocked",
         auto_session_id="auto_1",
-        phase="complete",
+        phase="blocked",
         job_id="job_done",
         run_handoff_status="started",
+        blocker="iteration_timeout",
         resume_capability=AutoResumeCapability.RESUME,
     )
 
     reconciled = asyncio.run(_reconcile_execution_job_snapshot(result))
 
     assert reconciled.status == "complete"
+    assert reconciled.phase == "complete"
+    assert reconciled.blocker is None
     assert reconciled.execution_job_status == "completed"
     assert reconciled.resume_capability is AutoResumeCapability.NONE
     meta = _result_meta(reconciled)
@@ -228,6 +231,9 @@ def test_execution_job_completed_keeps_auto_complete(monkeypatch) -> None:
     assert "presentation_status" not in meta
     assert "product_status" not in meta
     assert "Status: complete" in text
+    assert "Phase: complete" in text
+    assert "Blocker:" not in text
+    assert "iteration_timeout" not in text
     assert "Status: run_handoff_started" not in text
     assert "Product status: not verified complete" not in text
 

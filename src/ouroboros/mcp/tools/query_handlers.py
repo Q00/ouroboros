@@ -14,6 +14,7 @@ import structlog
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
     summarize_subtask_events,
@@ -124,7 +125,23 @@ class SessionStatusHandler:
             }
         return None
 
-    def _handle_auto_session(
+    async def _reconcile_auto_state_from_execution_job(self, state: Any) -> None:
+        """Project a completed linked execution job onto auto status displays."""
+        if not state.job_id:
+            return
+        try:
+            snapshot = await JobManager().get_snapshot(state.job_id)
+        except Exception:
+            return
+        if snapshot.status is JobStatus.COMPLETED:
+            state.phase = AutoPhase.COMPLETE
+            state.last_error = None
+            state.last_error_code = None
+            state.last_progress_message = "execution job completed"
+            state.ralph_job_status = "completed"
+            state.ralph_stop_reason = None
+
+    async def _handle_auto_session(
         self,
         session_id: str,
     ) -> Result[MCPToolResult, MCPServerError]:
@@ -144,6 +161,7 @@ class SessionStatusHandler:
                     tool_name="ouroboros_session_status",
                 )
             )
+        await self._reconcile_auto_state_from_execution_job(state)
 
         # Gap window per the issue contract: between RUN's run_handoff_status
         # transitioning to "started" and the RALPH_HANDOFF entry persisting a
@@ -248,7 +266,7 @@ class SessionStatusHandler:
         # linked or is being prepared.
         if isinstance(session_id, str) and session_id.startswith("auto_"):
             try:
-                return self._handle_auto_session(session_id)
+                return await self._handle_auto_session(session_id)
             except Exception as e:  # pragma: no cover - defensive
                 log.error("mcp.tool.session_status.auto_error", error=str(e))
                 return Result.err(

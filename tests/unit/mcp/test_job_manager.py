@@ -12,6 +12,7 @@ from ouroboros.events.lineage import lineage_generation_watchdog_decision
 from ouroboros.mcp import job_manager as job_manager_module
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.job_handlers import (
+    JobResultHandler,
     JobStatusHandler,
     JobWaitHandler,
     _render_compact_job_snapshot,
@@ -1707,6 +1708,58 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_job_result_handler_returns_persisted_success_payload(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(0.01)
+                return MCPToolResult(
+                    content=(
+                        MCPContentItem(type=ContentType.TEXT, text="auto result summary"),
+                        MCPContentItem(
+                            type=ContentType.RESOURCE,
+                            uri="file:///tmp/detached-auto-result.json",
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "auto_session_id": "auto_payload_success",
+                        "result": {"artifact": "detached-auto-result.json", "ok": True},
+                    },
+                )
+
+            started = await manager.start_job(
+                job_type="auto",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="auto_payload_success"),
+            )
+            await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
+
+            result = await JobResultHandler(event_store=store).handle({"job_id": started.job_id})
+
+            assert result.is_ok
+            assert result.value.content == (
+                MCPContentItem(type=ContentType.TEXT, text="auto result summary"),
+                MCPContentItem(
+                    type=ContentType.RESOURCE,
+                    uri="file:///tmp/detached-auto-result.json",
+                ),
+            )
+            assert result.value.meta["auto_session_id"] == "auto_payload_success"
+            assert result.value.meta["result"] == {
+                "artifact": "detached-auto-result.json",
+                "ok": True,
+            }
+            assert result.value.meta["result_payload"]["content"][1]["uri"] == (
+                "file:///tmp/detached-auto-result.json"
+            )
+        finally:
+            await store.close()
+
     async def test_start_job_default_allocates_job_id(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
@@ -2993,6 +3046,303 @@ class TestJobManager:
         assert "No new job-level events during this wait window." in result.value.text_content
         assert result.value.text_content != "unchanged cursor=12"
 
+    async def test_job_wait_omitted_timeout_returns_immediate_snapshot(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_default_timeout",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=5,
+            links=JobLinks(),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 5
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle({"job_id": "job_wait_default_timeout", "cursor": 5})
+
+        assert result.is_ok
+        assert result.value.meta["changed"] is False
+        assert result.value.meta["cursor"] == 5
+
+    async def test_job_wait_rejects_invalid_cursor_argument(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        handler = JobWaitHandler(event_store=store)
+
+        result = await handler.handle({"job_id": "job_wait_bad_cursor", "cursor": "later"})
+
+        assert result.is_err
+        assert "cursor must be a non-negative integer" in str(result.error)
+
+    async def test_job_wait_rejects_negative_timeout_argument(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        handler = JobWaitHandler(event_store=store)
+
+        result = await handler.handle({"job_id": "job_wait_bad_timeout", "timeout_seconds": -1})
+
+        assert result.is_err
+        assert "timeout_seconds must be a non-negative integer" in str(result.error)
+
+    async def test_job_result_invalid_handle_returns_mcp_error(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        try:
+            handler = JobResultHandler(event_store=store)
+            result = await handler.handle({"job_id": "job_missing_detached_auto"})
+        finally:
+            await store.close()
+
+        assert result.is_err
+        assert "not found" in str(result.error).lower()
+
+    async def test_detached_auto_status_retrieval_tracks_running_then_terminal_result(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        auto_session_id = "auto_detached_status"
+        stop = asyncio.Event()
+
+        async def _runner() -> MCPToolResult:
+            await stop.wait()
+            return MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text="detached auto completed artifact",
+                    ),
+                    MCPContentItem(
+                        type=ContentType.RESOURCE,
+                        uri="file:///tmp/auto-detached-status-result.json",
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "auto_session_id": auto_session_id,
+                    "status": "completed",
+                    "result": {
+                        "artifact": "auto-detached-status-result.json",
+                        "ok": True,
+                    },
+                },
+            )
+
+        try:
+            started = await manager.start_job(
+                job_type="auto",
+                initial_message="Queued detached auto",
+                runner=_runner(),
+                links=JobLinks(session_id=auto_session_id),
+            )
+            await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
+
+            status_handler = JobStatusHandler(event_store=store, job_manager=manager)
+            running_status = await status_handler.handle({"job_id": started.job_id, "view": "full"})
+
+            assert running_status.is_ok
+            running_text = running_status.value.content[0].text
+            assert f"## Job: {started.job_id}" in running_text
+            assert "**Type**: auto" in running_text
+            assert "**Status**: running" in running_text
+            assert "**Terminal**: false" in running_text
+            assert "**Status Category**: non_terminal" in running_text
+            assert f"**Session ID**: {auto_session_id}" in running_text
+            assert running_status.value.meta["job_id"] == started.job_id
+            assert running_status.value.meta["job_type"] == "auto"
+            assert running_status.value.meta["status"] == "running"
+            assert running_status.value.meta["lifecycle_status"] == "running"
+            assert running_status.value.meta["status_category"] == "non_terminal"
+            assert running_status.value.meta["is_terminal"] is False
+            assert running_status.value.meta["result_available"] is False
+            assert running_status.value.meta["error"] is None
+            assert running_status.value.meta["status"] not in {
+                "completed",
+                "failed",
+                "cancelled",
+            }
+            assert running_status.value.is_error is False
+            assert running_status.value.meta["session_id"] == auto_session_id
+            assert running_status.value.meta["links"] == {
+                "session_id": auto_session_id,
+                "execution_id": None,
+                "lineage_id": None,
+            }
+            assert {
+                "job_id",
+                "job_type",
+                "status",
+                "lifecycle_status",
+                "status_category",
+                "is_terminal",
+                "result_available",
+                "error",
+                "cursor",
+                "links",
+                "session_id",
+                "execution_id",
+                "lineage_id",
+                "view",
+            }.issubset(running_status.value.meta)
+
+            wait_handler = JobWaitHandler(event_store=store, job_manager=manager)
+            running_wait = await wait_handler.handle(
+                {"job_id": started.job_id, "cursor": 0, "timeout_seconds": 0, "view": "summary"}
+            )
+            assert running_wait.is_ok
+            assert started.job_id in running_wait.value.content[0].text
+            assert "running" in running_wait.value.content[0].text
+            assert running_wait.value.meta["job_id"] == started.job_id
+            assert running_wait.value.meta["job_type"] == "auto"
+            assert running_wait.value.meta["status"] == "running"
+            assert running_wait.value.meta["lifecycle_status"] == "running"
+            assert running_wait.value.meta["status_category"] == "non_terminal"
+            assert running_wait.value.meta["is_terminal"] is False
+            assert running_wait.value.meta["result_available"] is False
+            assert running_wait.value.meta["error"] is None
+            assert running_wait.value.meta["session_id"] == auto_session_id
+            assert running_wait.value.meta["links"] == {
+                "session_id": auto_session_id,
+                "execution_id": None,
+                "lineage_id": None,
+            }
+
+            result_handler = JobResultHandler(event_store=store, job_manager=manager)
+            premature_result = await result_handler.handle({"job_id": started.job_id})
+            assert premature_result.is_ok
+            assert premature_result.value.is_error is False
+            premature_text = premature_result.value.content[0].text
+            assert f"Job result not ready: {started.job_id}" in premature_text
+            assert "status=running" in premature_text
+            assert "terminal=false" in premature_text
+            assert "detached auto job is still tracked background work" in premature_text
+            assert f"wait: ouroboros job wait {started.job_id}" in premature_text
+            assert (
+                f"retrieve after terminal status: ouroboros job result {started.job_id}"
+                in premature_text
+            )
+            assert premature_result.value.meta["job_id"] == started.job_id
+            assert premature_result.value.meta["status"] == "running"
+            assert premature_result.value.meta["is_terminal"] is False
+            assert premature_result.value.meta["result_available"] is False
+            assert premature_result.value.meta["session_id"] == auto_session_id
+
+            still_running = await manager.get_snapshot(started.job_id)
+            assert still_running.status is JobStatus.RUNNING
+            assert still_running.is_terminal is False
+
+            stop.set()
+            await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
+
+            terminal_status = await status_handler.handle(
+                {"job_id": started.job_id, "view": "summary"}
+            )
+            assert terminal_status.is_ok
+            assert started.job_id in terminal_status.value.content[0].text
+            assert "completed" in terminal_status.value.content[0].text
+            assert terminal_status.value.meta["status"] == "completed"
+            assert terminal_status.value.meta["is_terminal"] is True
+            assert terminal_status.value.meta["session_id"] == auto_session_id
+
+            final_result = await result_handler.handle({"job_id": started.job_id})
+            assert final_result.is_ok
+            assert final_result.value.content == (
+                MCPContentItem(
+                    type=ContentType.TEXT,
+                    text="detached auto completed artifact",
+                ),
+                MCPContentItem(
+                    type=ContentType.RESOURCE,
+                    uri="file:///tmp/auto-detached-status-result.json",
+                ),
+            )
+            assert final_result.value.meta["status"] == "completed"
+            assert final_result.value.meta["lifecycle_status"] == "completed"
+            assert final_result.value.meta["is_terminal"] is True
+            assert final_result.value.meta["result_available"] is True
+            assert final_result.value.meta["session_id"] == auto_session_id
+            assert final_result.value.meta["auto_session_id"] == auto_session_id
+            assert final_result.value.meta["result"] == {
+                "artifact": "auto-detached-status-result.json",
+                "ok": True,
+            }
+            assert final_result.value.meta["result_payload"]["is_error"] is False
+            assert final_result.value.meta["result_payload"]["content"][0]["text"] == (
+                "detached auto completed artifact"
+            )
+            assert final_result.value.meta["result_payload"]["content"][1]["uri"] == (
+                "file:///tmp/auto-detached-status-result.json"
+            )
+        finally:
+            stop.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_job_wait_completed_detached_auto_returns_success_status(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        auto_session_id = "auto_wait_completed"
+
+        async def _runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text="detached auto completed through wait",
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "auto_session_id": auto_session_id,
+                    "status": "completed",
+                },
+            )
+
+        try:
+            started = await manager.start_job(
+                job_type="auto",
+                initial_message="Queued detached auto",
+                runner=_runner(),
+                links=JobLinks(session_id=auto_session_id),
+            )
+            await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
+
+            handler = JobWaitHandler(event_store=store, job_manager=manager)
+            result = await handler.handle(
+                {
+                    "job_id": started.job_id,
+                    "cursor": 0,
+                    "timeout_seconds": 0,
+                    "view": "summary",
+                }
+            )
+
+            assert result.is_ok
+            assert result.value.is_error is False
+            assert result.value.meta["job_id"] == started.job_id
+            assert result.value.meta["status"] == "completed"
+            assert result.value.meta["is_terminal"] is True
+            assert result.value.meta["changed"] is True
+            assert result.value.meta["session_id"] == auto_session_id
+            assert started.job_id in result.value.text_content
+            assert "completed" in result.value.text_content
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_job_wait_meta_includes_polling_links_for_clients(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         snapshot = JobSnapshot(
@@ -3356,6 +3706,46 @@ class TestJobManager:
             assert terminal_recovered is not None
             assert terminal_recovered.job_id == started.job_id
             assert terminal_recovered.status == JobStatus.COMPLETED
+        finally:
+            gate.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_detached_auto_status_output_includes_stable_status_category(
+        self, tmp_path
+    ) -> None:
+        """Runnable API check for stable detached status category output."""
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        gate: asyncio.Event = asyncio.Event()
+
+        try:
+
+            async def _slow_runner() -> MCPToolResult:
+                await gate.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="auto done"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="auto",
+                initial_message="queued",
+                runner=_slow_runner(),
+                links=JobLinks(session_id="auto_status_category"),
+            )
+            await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
+
+            status_handler = JobStatusHandler(event_store=store, job_manager=manager)
+            status = await status_handler.handle({"job_id": started.job_id, "view": "full"})
+
+            assert status.is_ok
+            assert "**Status Category**: non_terminal" in status.value.text_content
+            assert status.value.meta["status"] == "running"
+            assert status.value.meta["lifecycle_status"] == "running"
+            assert status.value.meta["status_category"] == "non_terminal"
+            assert status.value.meta["is_terminal"] is False
         finally:
             gate.set()
             await _cancel_manager_tasks(manager)
