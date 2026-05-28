@@ -277,7 +277,7 @@ PR G MUST:
 ## 11. Related
 
 - [`plugin-tool-call-hook-contract.md`](./plugin-tool-call-hook-contract.md) — sister contract for `before_tool_call` / `after_tool_call`.
-- [`userlevel-plugins.md`](./userlevel-plugins.md) — v1 hook vocabulary; artifact/state names live in its "Deferred" section.
+- [`userlevel-plugins.md`](./userlevel-plugins.md) — v1 hook vocabulary. `before_artifact_write` / `after_artifact_write` are listed in its Deferred hook table (line 332–333); `before_state_commit` / `after_state_commit` are currently classified as "intentionally not v1" (matching `ExcludedHookKind` at `src/ouroboros/plugin/hooks.py:140–141`, and the rationale at `userlevel-plugins.md:352–354`). **This RFC supersedes that earlier state-hook classification**: state hooks move from "intentionally not v1" into "contract frozen, runtime deferred to PR G" under the same double-gate as artifact hooks. The `ExcludedHookKind` enum and the `userlevel-plugins.md` state-hook bullet are expected to be updated in PR G (or a narrow follow-up) once the v0.5 schema lands; this RFC does not touch either surface.
 - [#939](https://github.com/Q00/ouroboros/issues/939) — plugin lifecycle / permissions / audit umbrella.
 - [#946](https://github.com/Q00/ouroboros/issues/946) / [#956](https://github.com/Q00/ouroboros/issues/956) — Run / Step / Artifact projection and Workflow IR vocabulary that PR G's write-side surface extends.
 - [#961 SSOT](https://github.com/Q00/ouroboros/issues/961) — process rules invoked by this RFC.
