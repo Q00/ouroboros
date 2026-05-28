@@ -4544,6 +4544,42 @@ async def test_interview_driver_closes_with_safe_defaults_when_start_backend_una
 
 
 @pytest.mark.asyncio
+async def test_pipeline_resumes_no_backend_completed_interview_without_session_id(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("no-backend completed resume should not restart interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("no-backend completed resume should not answer interview")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("complete no-backend ledger should synthesize without handler")
+
+    state = AutoPipelineState(goal="Build a small local CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview closed after backend start failure")
+    state.interview_completed = True
+    state.interview_closure_mode = "safe_default_no_backend"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    store = AutoStore(tmp_path)
+    store.save(state)
+    reloaded = store.load(state.auto_session_id)
+    assert reloaded is not None
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=store)
+    pipeline = AutoPipeline(driver, generate_seed, store=store, skip_run=True)
+
+    result = await pipeline.run(reloaded)
+
+    assert result.status == "complete"
+    assert result.seed_origin == "auto_pipeline"
+    assert result.interview_session_id is None
+    assert reloaded.seed_artifact is not None
+    assert reloaded.phase == AutoPhase.COMPLETE
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_persists_partial_session_id_on_start_failure(tmp_path) -> None:
     """A handler-level partial-success error keeps the pre-allocated id on state."""
 

@@ -586,14 +586,19 @@ class AutoPipeline:
                 state.arm_deadline()
                 self._save(state)
             if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
-                if not state.interview_session_id:
+                no_backend_closure = state.interview_closure_mode in {
+                    "ledger_only_no_backend",
+                    "safe_default_no_backend",
+                }
+                ledger_ready = ledger.is_seed_ready()
+                if not state.interview_session_id and not (no_backend_closure and ledger_ready):
                     state.mark_blocked(
                         "Completed interview is missing interview_session_id",
                         tool_name="auto_pipeline",
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
-                if not ledger.is_seed_ready():
+                if not ledger_ready:
                     gaps = ", ".join(ledger.open_gaps())
                     state.mark_blocked(
                         f"Completed interview has unresolved ledger gaps: {gaps}",
