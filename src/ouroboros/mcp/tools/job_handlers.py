@@ -259,7 +259,7 @@ async def _query_linked_stream_events(
         await collect(lineage_events, lineage_cursor)
 
     events = sorted(collected.values(), key=lambda event: (event.timestamp, event.id))
-    return events[-_JOB_STREAM_EVENT_LIMIT:], max_cursor
+    return events, max_cursor
 
 
 @dataclass

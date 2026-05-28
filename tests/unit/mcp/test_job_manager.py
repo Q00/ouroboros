@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
@@ -3387,6 +3388,191 @@ class TestJobManager:
         assert result.value.meta["session_id"] == "orch_wait_links"
         assert result.value.meta["execution_id"] == "exec_wait_links"
         assert result.value.meta["lineage_id"] == "lin_wait_links"
+
+    async def test_job_wait_linked_stream_surfaces_subagent_events(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        await store.append(
+            BaseEvent(
+                type="subagent.dispatched",
+                aggregate_type="subagent",
+                aggregate_id="orch_stream_links",
+                data={
+                    "session_id": "orch_stream_links",
+                    "tool_name": "ouroboros_qa",
+                    "title": "QA Review",
+                },
+            )
+        )
+        snapshot = JobSnapshot(
+            job_id="job_wait_linked_stream",
+            job_type="auto",
+            status=JobStatus.RUNNING,
+            message="Running auto",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(session_id="orch_stream_links"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 0
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_linked_stream",
+                    "cursor": 0,
+                    "timeout_seconds": 0,
+                    "stream": "linked",
+                }
+            )
+        finally:
+            await store.close()
+
+        assert result.is_ok
+        assert result.value.meta["changed"] is True
+        assert result.value.meta["stream"] == "linked"
+        assert result.value.meta["cursor"] > 0
+        assert result.value.meta["stream_events"][0]["type"] == "subagent.dispatched"
+        assert result.value.meta["stream_events"][0]["scope"] == "subagent:orch_stream_links"
+        assert "### Stream Events" in result.value.text_content
+        assert "`subagent.dispatched` [subagent:orch_stream_links] -- QA Review" in (
+            result.value.text_content
+        )
+
+    async def test_job_wait_linked_stream_does_not_advance_past_omitted_events(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        for index in range(12):
+            await store.append(
+                BaseEvent(
+                    type="subagent.output",
+                    aggregate_type="subagent",
+                    aggregate_id=f"orch_stream_burst_{index}",
+                    data={
+                        "session_id": "orch_stream_burst",
+                        "message": f"burst {index}",
+                    },
+                )
+            )
+        snapshot = JobSnapshot(
+            job_id="job_wait_linked_burst",
+            job_type="auto",
+            status=JobStatus.RUNNING,
+            message="Running auto",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(session_id="orch_stream_burst"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert timeout_seconds == 0
+                return replace(snapshot, cursor=cursor), False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_linked_burst",
+                    "cursor": 0,
+                    "timeout_seconds": 0,
+                    "stream": "linked",
+                }
+            )
+            assert result.is_ok
+            first_cursor = result.value.meta["cursor"]
+            assert len(result.value.meta["stream_events"]) == 12
+            assert [item["detail"] for item in result.value.meta["stream_events"]] == [
+                f"burst {index}" for index in range(12)
+            ]
+
+            unchanged = await handler.handle(
+                {
+                    "job_id": "job_wait_linked_burst",
+                    "cursor": first_cursor,
+                    "timeout_seconds": 0,
+                    "stream": "linked",
+                }
+            )
+        finally:
+            await store.close()
+
+        assert unchanged.is_ok
+        assert unchanged.value.meta["stream_events"] == []
+        assert unchanged.value.meta["cursor"] == first_cursor
+        assert "No new job-level events during this wait window." in unchanged.value.text_content
+
+    async def test_job_wait_default_stream_does_not_surface_subagent_events(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        await store.append(
+            BaseEvent(
+                type="subagent.dispatched",
+                aggregate_type="subagent",
+                aggregate_id="orch_default_stream",
+                data={"session_id": "orch_default_stream", "title": "Hidden unless opted in"},
+            )
+        )
+        snapshot = JobSnapshot(
+            job_id="job_wait_default_stream",
+            job_type="auto",
+            status=JobStatus.RUNNING,
+            message="Running auto",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(session_id="orch_default_stream"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 0
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            result = await handler.handle(
+                {"job_id": "job_wait_default_stream", "cursor": 0, "timeout_seconds": 0}
+            )
+        finally:
+            await store.close()
+
+        assert result.is_ok
+        assert result.value.meta["changed"] is False
+        assert result.value.meta["stream"] == "progress"
+        assert result.value.meta["stream_events"] == []
+        assert "Hidden unless opted in" not in result.value.text_content
 
     async def test_job_wait_summary_view_returns_compact_unchanged_line(self, tmp_path) -> None:
         store = _build_store(tmp_path)
