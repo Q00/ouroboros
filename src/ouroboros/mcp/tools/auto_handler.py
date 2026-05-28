@@ -30,6 +30,7 @@ from ouroboros.auto.answerer import (
     AutoAnswerContext,
     risky_user_preference_blocker_for,
 )
+from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import (
     has_auto_wrapper_context,
     is_auto_reporting_acceptance_criterion,
@@ -45,6 +46,7 @@ from ouroboros.auto.ledger import (
     SeedDraftLedger,
 )
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.policies import apply_domain_policy_defaults
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.seed_repairer import SeedRepairer
@@ -53,11 +55,14 @@ from ouroboros.auto.state import (
     MAX_PIPELINE_TIMEOUT_SECONDS,
     MIN_PIPELINE_TIMEOUT_SECONDS,
     TERMINAL_PHASES,
+    AutoCommitPolicy,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
     AutoStore,
+    AutoWorktreePolicy,
 )
+from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
@@ -222,6 +227,24 @@ class AutoHandler:
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    "domain",
+                    ToolInputType.STRING,
+                    "Optional domain profile name (for example, coding)",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    "commit_policy",
+                    ToolInputType.STRING,
+                    "Checkpoint commit policy: ac_checkpoint, final_only, or none",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    "worktree_policy",
+                    ToolInputType.STRING,
+                    "Worktree isolation policy: auto, always, current, or none",
+                    required=False,
+                ),
             ),
         )
 
@@ -245,6 +268,10 @@ class AutoHandler:
         elif auto_session_id is not None:
             try:
                 state = store.load(auto_session_id)
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_auto"))
+            try:
+                _apply_requested_domain_and_policies(state, arguments, detect_profile=False)
             except ValueError as exc:
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_auto"))
             start_lease_token, lease_error = _reserve_start_lease(
@@ -313,6 +340,7 @@ class AutoHandler:
         supplied_user_preferences: dict[str, str | None] = {}
         if isinstance(resume, str) and resume:
             state = store.load(resume)
+            _apply_requested_domain_and_policies(state, arguments, detect_profile=False)
             cwd = state.cwd
             runtime_backend = state.runtime_backend or self.agent_runtime_backend
             if runtime_backend is None and state.opencode_mode is not None:
@@ -368,6 +396,7 @@ class AutoHandler:
             skip_run = requested_skip_run
             goal_text = goal.strip()
             state = AutoPipelineState(goal=goal_text, cwd=cwd)
+            _apply_requested_domain_and_policies(state, arguments)
             state.user_preferences = _merge_goal_user_preferences(
                 goal_text, supplied_user_preferences
             )
@@ -388,6 +417,8 @@ class AutoHandler:
         if opencode_mode is not None:
             state.ralph_opencode_mode = state.ralph_opencode_mode or opencode_mode
         state.skip_run = skip_run
+
+        auto_workspace = ensure_auto_worktree(state)
 
         authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
         interview_handler = _authoring_interview_handler(
@@ -430,7 +461,7 @@ class AutoHandler:
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
         driver = AutoInterviewDriver(
-            HandlerInterviewBackend(interview_handler, cwd=cwd),
+            HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
             max_rounds=max_interview_rounds,
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
@@ -455,7 +486,11 @@ class AutoHandler:
                     opencode_mode=ralph_opencode_mode,
                 )
             )
-        ralph_starter = HandlerRalphStarter(ralph_handler) if ralph_handler is not None else None
+        ralph_starter = (
+            HandlerRalphStarter(ralph_handler, project_dir=state.cwd)
+            if ralph_handler is not None
+            else None
+        )
         # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
         # same ``RalphHandler`` so MCP-side resumes of an interrupted
         # ``RALPH_HANDOFF`` checkpoint actually reconcile the persisted job
@@ -502,7 +537,11 @@ class AutoHandler:
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
-            run_starter=HandlerRunStarter(start_execute, cwd=cwd),
+            run_starter=HandlerRunStarter(
+                start_execute,
+                cwd=state.cwd,
+                use_worktree=auto_workspace is None,
+            ),
             store=store,
             repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
             seed_saver=save_seed,
@@ -525,6 +564,7 @@ class AutoHandler:
         try:
             return await pipeline.run(state)
         finally:
+            release_auto_worktree(auto_workspace)
             if self.event_store is None:
                 await watchdog_event_store.close()
 
@@ -813,6 +853,7 @@ class StartAutoHandler:
         """Persist a new auto session before the background job starts."""
         cwd = str(_resolve_cwd(arguments.get("cwd")))
         state = AutoPipelineState(goal=goal, cwd=cwd)
+        _apply_requested_domain_and_policies(state, arguments)
         state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 12)
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
@@ -950,6 +991,34 @@ class StartAutoHandler:
             ),
             False,
         )
+
+
+def _apply_requested_domain_and_policies(
+    state: AutoPipelineState,
+    arguments: dict[str, Any],
+    *,
+    detect_profile: bool = True,
+) -> None:
+    """Apply fresh/resume domain and execution-policy arguments to state."""
+    domain = _optional_text_arg(arguments, "domain")
+    if domain is not None:
+        profile = DEFAULT_REGISTRY.get(domain)
+        if profile is None:
+            raise ValueError(f"Unknown domain profile: {domain!r}")
+        state.active_domain_profile_name = profile.name
+        apply_domain_policy_defaults(state)
+    elif detect_profile and state.active_domain_profile_name is None:
+        profile = DEFAULT_REGISTRY.detect_best(Path(state.cwd))
+        state.active_domain_profile_name = profile.name if profile else None
+        apply_domain_policy_defaults(state)
+
+    commit_policy = _optional_text_arg(arguments, "commit_policy")
+    if commit_policy is not None:
+        state.commit_policy = AutoCommitPolicy(commit_policy)
+
+    worktree_policy = _optional_text_arg(arguments, "worktree_policy")
+    if worktree_policy is not None:
+        state.worktree_policy = AutoWorktreePolicy(worktree_policy)
 
 
 def _build_auto_subagent(
@@ -1294,6 +1363,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["ralph_lineage_id"] = result.ralph_lineage_id
     if result.ralph_dispatch_mode:
         meta["ralph_dispatch_mode"] = result.ralph_dispatch_mode
+    if result.checkpoint_commits:
+        meta["checkpoint_commits"] = [dict(item) for item in result.checkpoint_commits]
     if (
         result.status == "complete"
         and result.ralph_dispatch_mode == "plugin"
@@ -2006,6 +2077,10 @@ def _format_result(result: AutoPipelineResult) -> str:
             lines.append(f"  job_id: {result.ralph_job_id}")
         if result.ralph_lineage_id:
             lines.append(f"  lineage_id: {result.ralph_lineage_id}")
+    if result.checkpoint_commits:
+        lines.append("Checkpoint commits:")
+        for entry in result.checkpoint_commits:
+            lines.append(f"- {entry.get('ac_id')}: {entry.get('commit')}")
     # RFC #809 Phase 2.1 — render the EVALUATE verdict when present so resume
     # surfaces tell the user whether the session converged on AC verification
     # or stalled with QA findings the operator must act on.

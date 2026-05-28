@@ -17,6 +17,7 @@ import structlog
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.blocker_attribution import record_authoring_backend
+from ouroboros.auto.checkpoint_commits import checkpoint_final_auto
 from ouroboros.auto.domain_inference import derive_domain_from_ledger
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
@@ -52,6 +53,7 @@ from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
     MAX_EVALUATE_ROUNDS,
+    AutoCommitPolicy,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
@@ -341,6 +343,7 @@ class AutoPipelineResult:
     # is returned, so this field is both surface evidence and a completion
     # grade input rather than a passive annotation.
     runtime_probe_evidence: tuple[RuntimeEvidence, ...] = ()
+    checkpoint_commits: tuple[dict[str, Any], ...] = ()
     # #1257 PR-C — degraded-recovery terminal surface.
     #
     # When the interview-phase deadline rerouted into PR-A's
@@ -2179,6 +2182,16 @@ class AutoPipeline:
             starter_kwargs["reattach_terminal"] = reattach_terminal
         if _accepts_keyword(self.ralph_starter, "reuse_existing"):
             starter_kwargs["reuse_existing"] = reuse_existing
+        if _accepts_keyword(self.ralph_starter, "commit_policy"):
+            starter_kwargs["commit_policy"] = state.commit_policy.value
+        if _accepts_keyword(self.ralph_starter, "auto_session_id"):
+            starter_kwargs["auto_session_id"] = state.auto_session_id
+        if _accepts_keyword(self.ralph_starter, "execution_id"):
+            starter_kwargs["execution_id"] = state.execution_id
+        if _accepts_keyword(self.ralph_starter, "checkpoint_commits"):
+            starter_kwargs["checkpoint_commits"] = state.checkpoint_commits
+        if _accepts_keyword(self.ralph_starter, "checkpoint_attempted_ac_ids"):
+            starter_kwargs["checkpoint_attempted_ac_ids"] = state.checkpoint_attempted_ac_ids
         try:
             ralph_call = self.ralph_starter(seed, **starter_kwargs)
             if state.deadline_at is None:
@@ -2225,6 +2238,16 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
         state.ralph_job_id = _optional_str(ralph_meta.get("job_id"))
+        ralph_checkpoint_commits = ralph_meta.get("checkpoint_commits")
+        if isinstance(ralph_checkpoint_commits, list):
+            state.checkpoint_commits = [
+                item for item in ralph_checkpoint_commits if isinstance(item, dict)
+            ]
+        ralph_checkpoint_attempts = ralph_meta.get("checkpoint_attempted_ac_ids")
+        if isinstance(ralph_checkpoint_attempts, list):
+            state.checkpoint_attempted_ac_ids = [
+                item for item in ralph_checkpoint_attempts if isinstance(item, str)
+            ]
         state.ralph_dispatch_mode = _optional_str(ralph_meta.get("dispatch_mode"))
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
@@ -3683,6 +3706,8 @@ class AutoPipeline:
         run_subagent: dict[str, Any] | None = None,
         status_override: str | None = None,
     ) -> AutoPipelineResult:
+        if state.phase == AutoPhase.COMPLETE:
+            self._checkpoint_final_commit(state)
         summary = ledger.summary()
         ledger_provenance = {
             source: tuple(sections) for source, sections in summary.get("provenance", {}).items()
@@ -3759,10 +3784,33 @@ class AutoPipeline:
             assumption_only_sections=tuple(summary.get("assumption_only_sections", ())),
             runtime_probe_evidence=self._last_probe_evidence
             or _runtime_probe_evidence_from_state(state),
+            checkpoint_commits=tuple(state.checkpoint_commits),
             partial_product=partial_product,
             partial_product_reason=partial_product_reason,
             partial_unresolved_slots=partial_unresolved_slots,
         )
+
+    def _checkpoint_final_commit(self, state: AutoPipelineState) -> None:
+        """Attempt the one-shot final-only checkpoint at product completion."""
+        if state.commit_policy is not AutoCommitPolicy.FINAL_ONLY:
+            return
+        if state.final_checkpoint_attempted:
+            return
+        try:
+            checkpoint_final_auto(
+                state,
+                repo_cwd=state.cwd,
+                summary=state.last_progress_message or "final verified auto result",
+            )
+        except RuntimeError as exc:
+            log.warning(
+                "auto_final_checkpoint_commit_failed",
+                auto_session_id=state.auto_session_id,
+                cwd=state.cwd,
+                error=str(exc),
+            )
+            state.final_checkpoint_attempted = True
+        self._save(state)
 
     def _attach_run_if_requested(self, state: AutoPipelineState) -> bool | None:
         handle = _first_nonempty(

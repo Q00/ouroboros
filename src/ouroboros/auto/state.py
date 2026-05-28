@@ -62,6 +62,23 @@ class AutoPolicy(StrEnum):
     BALANCED = "balanced"
 
 
+class AutoCommitPolicy(StrEnum):
+    """When auto-mode should create git checkpoint commits."""
+
+    AC_CHECKPOINT = "ac_checkpoint"
+    FINAL_ONLY = "final_only"
+    NONE = "none"
+
+
+class AutoWorktreePolicy(StrEnum):
+    """How auto-mode should isolate mutating coding work."""
+
+    AUTO = "auto"
+    ALWAYS = "always"
+    CURRENT = "current"
+    NONE = "none"
+
+
 class SeedOrigin(StrEnum):
     """Provenance of the persisted Seed for an auto session.
 
@@ -470,6 +487,18 @@ class AutoPipelineState:
     # fallback. None means no profile was activated, so legacy state files load
     # unchanged.
     active_domain_profile_name: str | None = None
+    # Coding-domain isolation defaults. ``commit_policy`` controls whether
+    # verified acceptance boundaries become git checkpoint commits.
+    # ``worktree_policy`` controls whether mutating execution should happen
+    # in an isolated managed worktree rather than the caller's checkout.
+    # Defaults are conservative for legacy/non-coding sessions; coding profile
+    # activation raises these to AC checkpoint commits + automatic worktrees.
+    commit_policy: AutoCommitPolicy = AutoCommitPolicy.FINAL_ONLY
+    worktree_policy: AutoWorktreePolicy = AutoWorktreePolicy.CURRENT
+    managed_worktree: dict[str, Any] | None = None
+    checkpoint_commits: list[dict[str, Any]] = field(default_factory=list)
+    checkpoint_attempted_ac_ids: list[str] = field(default_factory=list)
+    final_checkpoint_attempted: bool = False
     # L1-d / #1171: active TaskClass (cli / webhook / game_2d / …) derived
     # from the standardized ledger after seed generation. Distinct from
     # ``active_domain_profile_name`` (which is a meta-domain concept —
@@ -842,6 +871,8 @@ class AutoPipelineState:
         data["phase"] = self.phase.value
         data["policy"] = self.policy.value
         data["seed_origin"] = self.seed_origin.value
+        data["commit_policy"] = self.commit_policy.value
+        data["worktree_policy"] = self.worktree_policy.value
         # ``deadline_at`` is a *monotonic*-clock value scoped to the writing
         # process; it is meaningless to a future loader. Persist only the
         # epoch companion and recompute ``deadline_at`` from it on load. The
@@ -897,6 +928,12 @@ class AutoPipelineState:
         payload.setdefault("last_lateral_text", None)
         payload.setdefault("lateral_input_hash", None)
         payload.setdefault("active_domain_profile_name", None)
+        payload.setdefault("commit_policy", AutoCommitPolicy.FINAL_ONLY.value)
+        payload.setdefault("worktree_policy", AutoWorktreePolicy.CURRENT.value)
+        payload.setdefault("managed_worktree", None)
+        payload.setdefault("checkpoint_commits", [])
+        payload.setdefault("checkpoint_attempted_ac_ids", [])
+        payload.setdefault("final_checkpoint_attempted", False)
         payload.setdefault("active_task_class", None)
         payload.setdefault("last_error_code", None)
         payload.setdefault("interview_closure_mode", None)
@@ -936,6 +973,16 @@ class AutoPipelineState:
             raise ValueError(msg)
         payload["phase"] = AutoPhase(payload["phase"])
         payload["policy"] = AutoPolicy(payload["policy"])
+        try:
+            payload["commit_policy"] = AutoCommitPolicy(payload["commit_policy"])
+        except ValueError as exc:
+            msg = f"commit_policy must be one of {[item.value for item in AutoCommitPolicy]}"
+            raise ValueError(msg) from exc
+        try:
+            payload["worktree_policy"] = AutoWorktreePolicy(payload["worktree_policy"])
+        except ValueError as exc:
+            msg = f"worktree_policy must be one of {[item.value for item in AutoWorktreePolicy]}"
+            raise ValueError(msg) from exc
         try:
             payload["seed_origin"] = SeedOrigin(payload["seed_origin"])
         except ValueError as exc:
@@ -1072,6 +1119,22 @@ class AutoPipelineState:
             raise ValueError(msg)
         if not isinstance(self.user_preferences, dict):
             msg = "user_preferences must be an object"
+            raise ValueError(msg)
+        if self.managed_worktree is not None and not isinstance(self.managed_worktree, dict):
+            msg = "managed_worktree must be an object or null"
+            raise ValueError(msg)
+        if not isinstance(self.checkpoint_commits, list) or any(
+            not isinstance(item, dict) for item in self.checkpoint_commits
+        ):
+            msg = "checkpoint_commits must be a list of objects"
+            raise ValueError(msg)
+        if not isinstance(self.checkpoint_attempted_ac_ids, list) or any(
+            not isinstance(item, str) for item in self.checkpoint_attempted_ac_ids
+        ):
+            msg = "checkpoint_attempted_ac_ids must be a list of strings"
+            raise ValueError(msg)
+        if not isinstance(self.final_checkpoint_attempted, bool):
+            msg = "final_checkpoint_attempted must be a boolean"
             raise ValueError(msg)
         for pref_key, pref_value in self.user_preferences.items():
             if not isinstance(pref_key, str) or not pref_key.strip():

@@ -15,6 +15,10 @@ from types import MappingProxyType
 from typing import Any
 
 from ouroboros.auto.domain_profile import DomainProfile
+from ouroboros.auto.state import AutoCommitPolicy, AutoWorktreePolicy
+
+DEFAULT_COMMIT_POLICY = AutoCommitPolicy.AC_CHECKPOINT
+DEFAULT_WORKTREE_POLICY = AutoWorktreePolicy.AUTO
 
 # Keep these lightweight constants local so importing/registering the built-in
 # coding profile does not import ``ouroboros.auto.grading`` and its pydantic

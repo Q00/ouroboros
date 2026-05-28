@@ -495,7 +495,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             console = Console(stderr=True)
             session_repo = SessionRepository(event_store)
             workspace: TaskWorkspace | None = None
+            tracker = None
             launched = False
+            use_worktree = bool(arguments.get("use_worktree", True))
 
             try:
                 if is_resume and session_id:
@@ -522,22 +524,25 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 tool_name="ouroboros_execute_seed",
                             )
                         )
-                    persisted = TaskWorkspace.from_progress_dict(tracker.progress.get("workspace"))
-                    try:
-                        workspace = maybe_restore_task_workspace(
-                            session_id,
-                            persisted,
-                            fallback_source_cwd=resolved_cwd,
-                            allow_dirty=inherited_runtime_handle is not None,
+                    if use_worktree:
+                        persisted = TaskWorkspace.from_progress_dict(
+                            tracker.progress.get("workspace")
                         )
-                    except WorktreeError as e:
-                        return Result.err(
-                            MCPToolError(
-                                f"Task workspace error: {e.message}",
-                                tool_name="ouroboros_execute_seed",
+                        try:
+                            workspace = maybe_restore_task_workspace(
+                                session_id,
+                                persisted,
+                                fallback_source_cwd=resolved_cwd,
+                                allow_dirty=inherited_runtime_handle is not None,
                             )
-                        )
-                else:
+                        except WorktreeError as e:
+                            return Result.err(
+                                MCPToolError(
+                                    f"Task workspace error: {e.message}",
+                                    tool_name="ouroboros_execute_seed",
+                                )
+                            )
+                elif use_worktree:
                     try:
                         workspace = maybe_prepare_task_workspace(
                             resolved_cwd,

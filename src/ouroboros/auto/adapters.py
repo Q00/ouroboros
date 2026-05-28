@@ -221,15 +221,26 @@ class HandlerSeedGenerator:
 class HandlerRunStarter:
     """Callable run starter backed by ``ouroboros_start_execute_seed``."""
 
-    def __init__(self, handler: StartExecuteSeedHandler, *, cwd: str) -> None:
+    def __init__(
+        self,
+        handler: StartExecuteSeedHandler,
+        *,
+        cwd: str,
+        use_worktree: bool = True,
+    ) -> None:
         self.handler = handler
         self.cwd = cwd
+        self.use_worktree = use_worktree
 
     async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )
-        arguments: dict[str, object] = {"seed_content": seed_yaml, "cwd": self.cwd}
+        arguments: dict[str, object] = {
+            "seed_content": seed_yaml,
+            "cwd": self.cwd,
+            "use_worktree": self.use_worktree,
+        }
         if idempotency_key:
             arguments["idempotency_key"] = idempotency_key
         result = _unwrap(
@@ -411,6 +422,11 @@ class HandlerRalphStarter:
         reattach_terminal: bool = True,
         reuse_existing: bool = True,
         return_after_dispatch: bool = True,
+        commit_policy: str | None = None,
+        auto_session_id: str | None = None,
+        execution_id: str | None = None,
+        checkpoint_commits: list[dict[str, Any]] | None = None,
+        checkpoint_attempted_ac_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Dispatch the Ralph loop and optionally wait for terminal completion.
 
@@ -468,6 +484,16 @@ class HandlerRalphStarter:
         }
         if self.project_dir is not None:
             arguments["project_dir"] = self.project_dir
+        if commit_policy is not None:
+            arguments["commit_policy"] = commit_policy
+        if auto_session_id is not None:
+            arguments["auto_session_id"] = auto_session_id
+        if execution_id is not None:
+            arguments["execution_id"] = execution_id
+        if checkpoint_commits is not None:
+            arguments["checkpoint_commits"] = checkpoint_commits
+        if checkpoint_attempted_ac_ids is not None:
+            arguments["checkpoint_attempted_ac_ids"] = checkpoint_attempted_ac_ids
         if max_total_seconds is not None:
             arguments["max_total_seconds"] = max_total_seconds
         if per_iteration_timeout_seconds is not None:

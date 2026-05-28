@@ -55,6 +55,11 @@ class RalphLoopConfig:
     max_total_seconds: float | None = None
     oscillation_window: int = DEFAULT_OSCILLATION_WINDOW
     grade_regression_window: int = DEFAULT_GRADE_REGRESSION_WINDOW
+    commit_policy: str | None = None
+    auto_session_id: str | None = None
+    execution_id: str | None = None
+    checkpoint_commits: tuple[dict[str, Any], ...] = ()
+    checkpoint_attempted_ac_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +144,8 @@ class RalphLoopRunner:
         stop_reason = "max_generations reached"
         status = "completed"
         loop_start_monotonic = time.monotonic()
+        checkpoint_commits = list(config.checkpoint_commits)
+        checkpoint_attempted_ac_ids = list(config.checkpoint_attempted_ac_ids)
 
         for iteration_index in range(1, config.max_generations + 1):
             if (
@@ -182,6 +189,16 @@ class RalphLoopRunner:
                 arguments["seed_content"] = seed_content
             if config.project_dir:
                 arguments["project_dir"] = config.project_dir
+            if config.commit_policy:
+                arguments["commit_policy"] = config.commit_policy
+            if config.auto_session_id:
+                arguments["auto_session_id"] = config.auto_session_id
+            if config.execution_id:
+                arguments["execution_id"] = config.execution_id
+            if checkpoint_commits:
+                arguments["checkpoint_commits"] = checkpoint_commits
+            if checkpoint_attempted_ac_ids:
+                arguments["checkpoint_attempted_ac_ids"] = checkpoint_attempted_ac_ids
 
             iteration_timed_out = False
             try:
@@ -239,6 +256,16 @@ class RalphLoopRunner:
                 raise RuntimeError(str(result.error))
 
             final_result = result.value
+            result_checkpoint_commits = final_result.meta.get("checkpoint_commits")
+            if isinstance(result_checkpoint_commits, list):
+                checkpoint_commits = [
+                    item for item in result_checkpoint_commits if isinstance(item, dict)
+                ]
+            result_checkpoint_attempts = final_result.meta.get("checkpoint_attempted_ac_ids")
+            if isinstance(result_checkpoint_attempts, list):
+                checkpoint_attempted_ac_ids = [
+                    item for item in result_checkpoint_attempts if isinstance(item, str)
+                ]
             action = str(final_result.meta.get("action", "unknown"))
             generation = _coerce_int(final_result.meta.get("generation"))
             qa_verdict = _extract_qa_verdict(final_result.meta)

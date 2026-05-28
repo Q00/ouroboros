@@ -128,6 +128,36 @@ class RalphHandler:
                     required=False,
                 ),
                 MCPToolParameter(
+                    name="commit_policy",
+                    type=ToolInputType.STRING,
+                    description="Optional checkpoint commit policy forwarded to evolve_step.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="auto_session_id",
+                    type=ToolInputType.STRING,
+                    description="Optional auto session id used for checkpoint commit metadata.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="execution_id",
+                    type=ToolInputType.STRING,
+                    description="Optional execution id used for checkpoint commit metadata.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="checkpoint_commits",
+                    type=ToolInputType.ARRAY,
+                    description="Existing checkpoint commit records forwarded to evolve_step.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="checkpoint_attempted_ac_ids",
+                    type=ToolInputType.ARRAY,
+                    description="Acceptance criteria already considered for checkpoint commits.",
+                    required=False,
+                ),
+                MCPToolParameter(
                     name="max_generations",
                     type=ToolInputType.INTEGER,
                     description="Maximum generations to run before stopping. Default: 10. Range: 1-10.",
@@ -368,6 +398,19 @@ class RalphHandler:
             max_total_seconds=max_total_seconds,
             oscillation_window=oscillation_window,
             grade_regression_window=grade_regression_window,
+            commit_policy=arguments.get("commit_policy"),
+            auto_session_id=arguments.get("auto_session_id"),
+            execution_id=arguments.get("execution_id"),
+            checkpoint_commits=tuple(
+                item
+                for item in arguments.get("checkpoint_commits", [])
+                if isinstance(item, dict)
+            ),
+            checkpoint_attempted_ac_ids=tuple(
+                item
+                for item in arguments.get("checkpoint_attempted_ac_ids", [])
+                if isinstance(item, str)
+            ),
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):

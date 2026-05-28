@@ -21,7 +21,12 @@ import pytest
 
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipelineResult
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import (
+    AutoCommitPolicy,
+    AutoPipelineState,
+    AutoStore,
+    AutoWorktreePolicy,
+)
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.auto_handler import (
@@ -1022,6 +1027,67 @@ class TestBackgroundJobPath:
         assert "failure_modes" in state.user_preferences
         assert SeedDraftLedger.from_dict(state.ledger).open_gaps() == []
         fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_new_coding_goal_preallocates_coding_policy_defaults(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+        job_manager = MagicMock()
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_coding_defaults"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path / "store")
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI", "cwd": str(tmp_path)})
+
+        assert result.is_ok
+        state = store.load(result.value.meta["auto_session_id"])
+        assert state.active_domain_profile_name == "coding"
+        assert state.commit_policy is AutoCommitPolicy.AC_CHECKPOINT
+        assert state.worktree_policy is AutoWorktreePolicy.AUTO
+
+    @pytest.mark.asyncio
+    async def test_new_auto_policy_args_override_profile_defaults(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+        job_manager = MagicMock()
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy_override"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path / "store")
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle(
+            {
+                "goal": "build a CLI",
+                "cwd": str(tmp_path),
+                "commit_policy": "none",
+                "worktree_policy": "current",
+            }
+        )
+
+        assert result.is_ok
+        state = store.load(result.value.meta["auto_session_id"])
+        assert state.active_domain_profile_name == "coding"
+        assert state.commit_policy is AutoCommitPolicy.NONE
+        assert state.worktree_policy is AutoWorktreePolicy.CURRENT
 
     @pytest.mark.asyncio
     async def test_fresh_structured_goal_runner_resumes_without_preference_override(

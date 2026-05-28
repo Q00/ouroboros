@@ -26,6 +26,7 @@ from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.policies import apply_domain_policy_defaults
 
 # Import the built-in profile package once so CLI domain activation sees
 # production registrations, not just profiles manually loaded by tests.
@@ -38,10 +39,13 @@ from ouroboros.auto.state import (
     DEFAULT_PIPELINE_TIMEOUT_SECONDS,
     MAX_PIPELINE_TIMEOUT_SECONDS,
     MIN_PIPELINE_TIMEOUT_SECONDS,
+    AutoCommitPolicy,
     AutoPhase,
     AutoPipelineState,
     AutoStore,
+    AutoWorktreePolicy,
 )
+from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
@@ -225,6 +229,22 @@ def auto_command(
             ),
         ),
     ] = None,
+    commit_policy: Annotated[
+        str | None,
+        typer.Option(
+            "--commit-policy",
+            hidden=True,
+            help="Checkpoint policy: ac_checkpoint, final_only, or none.",
+        ),
+    ] = None,
+    worktree_policy: Annotated[
+        str | None,
+        typer.Option(
+            "--worktree-policy",
+            hidden=True,
+            help="Worktree isolation policy: auto, always, current, or none.",
+        ),
+    ] = None,
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
@@ -271,6 +291,8 @@ def auto_command(
                 pipeline_timeout_seconds=timeout,
                 complete_product=complete_product,
                 domain=domain,
+                commit_policy=commit_policy,
+                worktree_policy=worktree_policy,
                 progress_callback=_make_progress_renderer(quiet=quiet),
             )
         )
@@ -317,6 +339,8 @@ async def _run_auto(
     pipeline_timeout_seconds: float | None = None,
     complete_product: bool = False,
     domain: str | None = None,
+    commit_policy: str | None = None,
+    worktree_policy: str | None = None,
     progress_callback: AutoProgressCallback | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
@@ -413,13 +437,19 @@ async def _run_auto(
             )
             raise typer.Exit(1)
         state.active_domain_profile_name = active_profile.name
+        apply_domain_policy_defaults(state)
     elif not resume:
         active_profile = DEFAULT_REGISTRY.detect_best(Path(state.cwd))
         state.active_domain_profile_name = active_profile.name if active_profile else None
+        apply_domain_policy_defaults(state)
     else:
         # Resume preserves the session-start profile unless the operator
         # explicitly passes --domain to intentionally retarget it.
         pass
+    if commit_policy is not None:
+        state.commit_policy = AutoCommitPolicy(commit_policy)
+    if worktree_policy is not None:
+        state.worktree_policy = AutoWorktreePolicy(worktree_policy)
 
     if runtime == "opencode":
         # Q00/ouroboros#782 review-7 BLOCKING #3 + review-8 BLOCKING #1: keep
@@ -461,6 +491,8 @@ async def _run_auto(
             )
             raise ValueError(msg)
         state.provenance = incoming_provenance
+
+    auto_workspace = ensure_auto_worktree(state)
 
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     interview = InterviewHandler(
@@ -515,7 +547,11 @@ async def _run_auto(
         run_starter=(
             HandlerSynchronousRunStarter(execute_seed, cwd=state.cwd)
             if complete_product
-            else HandlerRunStarter(start_execute, cwd=state.cwd)
+            else HandlerRunStarter(
+                start_execute,
+                cwd=state.cwd,
+                use_worktree=auto_workspace is None,
+            )
         ),
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
@@ -538,6 +574,7 @@ async def _run_auto(
     try:
         result = await pipeline.run(state)
     finally:
+        release_auto_worktree(auto_workspace)
         await watchdog_event_store.close()
     return result
 
@@ -805,6 +842,10 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"Run reconciled at: {result.run_reconciled_at}")
     if result.status == "detached":
         _print_detached_guidance(result)
+    if result.checkpoint_commits:
+        console.print("Checkpoint commits:")
+        for entry in result.checkpoint_commits:
+            console.print(f"  {entry.get('ac_id')}: {entry.get('commit')}")
     if show_ledger:
         if result.assumptions:
             console.print("Assumptions:")

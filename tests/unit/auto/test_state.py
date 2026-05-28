@@ -6,10 +6,12 @@ import pytest
 
 from ouroboros.auto.state import (
     DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
+    AutoCommitPolicy,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
     AutoStore,
+    AutoWorktreePolicy,
 )
 
 
@@ -46,6 +48,47 @@ def test_store_roundtrip_and_corrupt_state(tmp_path) -> None:
     path.write_text("not json", encoding="utf-8")
     with pytest.raises(ValueError, match="corrupt"):
         store.load(state.auto_session_id)
+
+
+def test_commit_and_worktree_policy_roundtrip() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.commit_policy = AutoCommitPolicy.AC_CHECKPOINT
+    state.worktree_policy = AutoWorktreePolicy.AUTO
+    state.managed_worktree = {"worktree_path": "/tmp/wt", "branch": "codex/ooo-auto-abc"}
+    state.checkpoint_commits = [{"ac_id": "AC-1", "commit": "abc123"}]
+    state.checkpoint_attempted_ac_ids = ["AC-1", "AC-2"]
+    state.final_checkpoint_attempted = True
+
+    payload = state.to_dict()
+    restored = AutoPipelineState.from_dict(payload)
+
+    assert payload["commit_policy"] == "ac_checkpoint"
+    assert payload["worktree_policy"] == "auto"
+    assert restored.commit_policy is AutoCommitPolicy.AC_CHECKPOINT
+    assert restored.worktree_policy is AutoWorktreePolicy.AUTO
+    assert restored.managed_worktree == state.managed_worktree
+    assert restored.checkpoint_commits == state.checkpoint_commits
+    assert restored.checkpoint_attempted_ac_ids == state.checkpoint_attempted_ac_ids
+    assert restored.final_checkpoint_attempted is True
+
+
+def test_legacy_state_defaults_to_non_coding_policy() -> None:
+    payload = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project").to_dict()
+    payload.pop("commit_policy")
+    payload.pop("worktree_policy")
+    payload.pop("managed_worktree")
+    payload.pop("checkpoint_commits")
+    payload.pop("checkpoint_attempted_ac_ids")
+    payload.pop("final_checkpoint_attempted")
+
+    restored = AutoPipelineState.from_dict(payload)
+
+    assert restored.commit_policy is AutoCommitPolicy.FINAL_ONLY
+    assert restored.worktree_policy is AutoWorktreePolicy.CURRENT
+    assert restored.managed_worktree is None
+    assert restored.checkpoint_commits == []
+    assert restored.checkpoint_attempted_ac_ids == []
+    assert restored.final_checkpoint_attempted is False
 
 
 def test_terminal_state_is_not_stale() -> None:

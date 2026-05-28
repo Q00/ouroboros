@@ -16,6 +16,8 @@ from uuid import uuid4
 import structlog
 import yaml
 
+from ouroboros.auto.checkpoint_commits import checkpoint_passed_ac
+from ouroboros.auto.state import AutoCommitPolicy, AutoPipelineState
 from ouroboros.config import get_runtime_controls_config
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import Seed
@@ -217,6 +219,36 @@ class EvolveStepHandler(BridgeAwareMixin):
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="commit_policy",
+                    type=ToolInputType.STRING,
+                    description="Optional checkpoint commit policy for passed ACs.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="auto_session_id",
+                    type=ToolInputType.STRING,
+                    description="Optional auto session id for checkpoint commit metadata.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="execution_id",
+                    type=ToolInputType.STRING,
+                    description="Optional execution id for checkpoint commit metadata.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="checkpoint_commits",
+                    type=ToolInputType.ARRAY,
+                    description="Existing checkpoint commit records for idempotency.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="checkpoint_attempted_ac_ids",
+                    type=ToolInputType.ARRAY,
+                    description="Acceptance criteria already considered for checkpoint commits.",
+                    required=False,
+                ),
             ),
         )
 
@@ -398,6 +430,17 @@ class EvolveStepHandler(BridgeAwareMixin):
                     status = "PASS" if ac.passed else "FAIL"
                     text_lines.append(f"- AC {ac.ac_index + 1}: [{status}] {ac.ac_content[:80]}")
 
+        checkpoint_commits, checkpoint_attempted_ac_ids = _checkpoint_passed_generation_acs(
+            arguments,
+            gen.evaluation_summary,
+            resolved_verification_working_dir,
+        )
+        if checkpoint_commits:
+            text_lines.append("")
+            text_lines.append("### Checkpoint commits")
+            for entry in checkpoint_commits:
+                text_lines.append(f"- {entry.get('ac_id')}: {entry.get('commit')}")
+
         if gen.wonder_output:
             text_lines.append("")
             text_lines.append("### Wonder questions")
@@ -472,6 +515,8 @@ class EvolveStepHandler(BridgeAwareMixin):
             "next_generation": step.next_generation,
             "executed": execute,
             "has_execution_output": gen.execution_output is not None,
+            "checkpoint_commits": checkpoint_commits,
+            "checkpoint_attempted_ac_ids": checkpoint_attempted_ac_ids,
         }
         if workspace is not None:
             meta["worktree_path"] = workspace.worktree_path
@@ -486,6 +531,52 @@ class EvolveStepHandler(BridgeAwareMixin):
                 meta=meta,
             )
         )
+
+
+def _checkpoint_passed_generation_acs(
+    arguments: dict[str, Any],
+    evaluation_summary: Any,
+    repo_cwd: Path,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Create checkpoint commits for passed ACs when requested."""
+    existing = [
+        item for item in arguments.get("checkpoint_commits", []) if isinstance(item, dict)
+    ]
+    attempted = [
+        item for item in arguments.get("checkpoint_attempted_ac_ids", []) if isinstance(item, str)
+    ]
+    if evaluation_summary is None or not getattr(evaluation_summary, "ac_results", None):
+        return existing, attempted
+    raw_policy = arguments.get("commit_policy")
+    if not isinstance(raw_policy, str) or not raw_policy.strip():
+        return existing, attempted
+    auto_session_id = arguments.get("auto_session_id")
+    if not isinstance(auto_session_id, str) or not auto_session_id.strip():
+        return existing, attempted
+
+    try:
+        commit_policy = AutoCommitPolicy(raw_policy)
+    except ValueError:
+        return existing, attempted
+
+    state = AutoPipelineState(goal="Ralph checkpoint", cwd=str(repo_cwd))
+    state.auto_session_id = auto_session_id
+    execution_id = arguments.get("execution_id")
+    if isinstance(execution_id, str) and execution_id.strip():
+        state.execution_id = execution_id
+    state.commit_policy = commit_policy
+    state.checkpoint_commits = list(existing)
+    state.checkpoint_attempted_ac_ids = list(attempted)
+    for ac in evaluation_summary.ac_results:
+        if not getattr(ac, "passed", False):
+            continue
+        ac_id = f"AC-{int(getattr(ac, 'ac_index', 0)) + 1}"
+        ac_text = str(getattr(ac, "ac_content", ac_id))
+        try:
+            checkpoint_passed_ac(state, repo_cwd=repo_cwd, ac_id=ac_id, ac_text=ac_text)
+        except RuntimeError as exc:
+            log.warning("mcp.tool.evolve_step.checkpoint_commit_failed", error=str(exc))
+    return state.checkpoint_commits, state.checkpoint_attempted_ac_ids
 
 
 @dataclass
