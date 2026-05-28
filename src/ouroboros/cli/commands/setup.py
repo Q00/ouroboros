@@ -862,6 +862,11 @@ def _write_codex_profile_v2_files(
     return added_profiles
 
 
+def _codex_profile_v2_file_exists(codex_dir: Path, profile_name: str) -> bool:
+    """Return whether a Codex profile-v2 file already exists for a profile."""
+    return (codex_dir / f"{profile_name}.config.toml").exists()
+
+
 def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
@@ -871,9 +876,15 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     raw = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
 
     if _codex_uses_profile_v2(codex_path):
+        existing_v2_profiles = {
+            name
+            for name in _CODEX_DEFAULT_PROFILE_SECTIONS
+            if _codex_profile_v2_file_exists(codex_config.parent, name)
+        }
+        removable_profiles = set(_CODEX_DEFAULT_PROFILE_SECTIONS) - existing_v2_profiles
         try:
             updated_raw, migrated_profiles = _remove_codex_legacy_profile_sections(
-                raw, set(_CODEX_DEFAULT_PROFILE_SECTIONS)
+                raw, removable_profiles
             )
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             print_error(f"Could not parse {codex_config} - skipping Codex profile registration.")
@@ -933,9 +944,15 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
         raw = ""
 
     if _codex_uses_profile_v2(codex_path):
+        profile_path = codex_config.parent / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml"
+        removable_profiles = (
+            set()
+            if _codex_profile_v2_file_exists(codex_config.parent, _CODEX_WORKER_PROFILE_NAME)
+            else {_CODEX_WORKER_PROFILE_NAME}
+        )
         try:
             updated_raw, migrated_profiles = _remove_codex_legacy_profile_sections(
-                raw, {_CODEX_WORKER_PROFILE_NAME}
+                raw, removable_profiles
             )
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             print_error(f"Could not parse {codex_config} — skipping worker-profile registration.")
@@ -943,7 +960,6 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
             return
 
         settings = migrated_profiles.get(_CODEX_WORKER_PROFILE_NAME, {})
-        profile_path = codex_config.parent / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml"
         created_profile = False
         if not profile_path.exists():
             profile_path.write_text(

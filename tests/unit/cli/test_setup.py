@@ -501,6 +501,43 @@ class TestCodexSetup:
         assert 'model = "custom-cheap-model"' in fast_profile
         assert 'model_reasoning_effort = "medium"' in fast_profile
 
+    def test_register_codex_default_profiles_keeps_legacy_table_when_v2_file_exists(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Ambiguous legacy+v2 state should preserve the legacy copy of user settings."""
+        codex_dir = tmp_path / ".codex"
+        codex_config = codex_dir / "config.toml"
+        codex_dir.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[profiles.ouroboros-fast]",
+                    'model = "custom-cheap-model"',
+                    'model_reasoning_effort = "medium"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (codex_dir / "ouroboros-fast.config.toml").write_text(
+            'model_reasoning_effort = "low"\n',
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            setup_cmd._register_codex_default_profiles(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        fast_profile = (codex_dir / "ouroboros-fast.config.toml").read_text(encoding="utf-8")
+
+        assert "[profiles.ouroboros-fast]" in contents
+        assert 'model = "custom-cheap-model"' in contents
+        assert 'model_reasoning_effort = "low"' in fast_profile
+
     def test_register_codex_worker_profile_writes_section(self, tmp_path: Path) -> None:
         """First-time setup creates the [profiles.ouroboros-worker] block."""
         with patch("pathlib.Path.home", return_value=tmp_path):
@@ -720,6 +757,42 @@ class TestCodexSetup:
         assert 'sandbox = "workspace-write"' in worker_profile
         assert "[shell_environment_policy]" in worker_profile
         assert 'inherit = "core"' in worker_profile
+
+    def test_register_codex_worker_profile_keeps_legacy_table_when_v2_file_exists(
+        self, tmp_path: Path
+    ) -> None:
+        """Worker migration should not delete legacy overrides when v2 already exists."""
+        codex_dir = tmp_path / ".codex"
+        codex_config = codex_dir / "config.toml"
+        codex_dir.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[profiles.ouroboros-worker]",
+                    'model = "o3-mini"',
+                    'sandbox = "workspace-write"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (codex_dir / "ouroboros-worker.config.toml").write_text(
+            'sandbox = "read-only"\n',
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        worker_profile = (codex_dir / "ouroboros-worker.config.toml").read_text(encoding="utf-8")
+
+        assert "[profiles.ouroboros-worker]" in contents
+        assert 'model = "o3-mini"' in contents
+        assert 'sandbox = "read-only"' in worker_profile
 
     def test_install_codex_artifacts_installs_rules_and_skills(self, tmp_path: Path) -> None:
         """Codex setup should install both managed rules and managed skills."""
