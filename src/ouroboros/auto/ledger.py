@@ -119,8 +119,9 @@ class AssumptionRecord:
 
     ``source`` is the string form of one of the assumption-class
     :class:`LedgerSource` values — ``assumption`` (auto-answerer
-    fallback), ``inference`` (model reasoning), or
-    ``conservative_default`` (safe-default policy). These three are
+    fallback), ``inference`` (model reasoning), ``conservative_default``
+    (safe-default policy), or ``auto_fill_inference`` (RFC #1256 §I3
+    aggressive auto-fill for a non-converging interview). These are
     precisely the sources that, per :data:`_EVIDENCE_BACKED_SOURCES`,
     are not evidence-backed and therefore contribute to
     ``assumption_only_sections`` in :meth:`SeedDraftLedger.summary`.
