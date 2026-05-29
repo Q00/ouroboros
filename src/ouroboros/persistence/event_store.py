@@ -472,6 +472,7 @@ class EventStore:
         last_row_id: int = 0,
         *,
         limit: int | None = None,
+        max_row_id: int | None = None,
     ) -> tuple[list[BaseEvent], int]:
         """Get events for an aggregate after a given row ID.
 
@@ -484,10 +485,14 @@ class EventStore:
             last_row_id: The SQLite rowid of the last event processed.
                          Pass 0 to get all events from the beginning.
             limit: Optional maximum number of events to materialize. When set,
-                   only the first ``limit`` events after the cursor are loaded
-                   (bounded fetch) and the returned cursor advances to the last
-                   row in that page, so a follow-up poll resumes the remainder
-                   without skipping events. ``None`` keeps the unbounded fetch.
+                   the page is ordered by ``rowid`` (the cursor dimension) and
+                   capped, so the returned ``max(rowid)`` is a true boundary and
+                   a follow-up poll resumes the remainder without skipping rows
+                   appended out of timestamp order. ``None`` keeps the unbounded
+                   timestamp-ordered fetch other callers rely on.
+            max_row_id: Optional inclusive upper bound on rowid. Lets a caller
+                   that has already chosen a global page boundary re-read exactly
+                   the rows at or before that boundary (``rowid <= max_row_id``).
 
         Returns:
             Tuple of (list of new events, max rowid seen).
@@ -512,10 +517,16 @@ class EventStore:
                     .where(events_table.c.aggregate_type == aggregate_type)
                     .where(events_table.c.aggregate_id == aggregate_id)
                     .where(text("rowid > :last_id").bindparams(last_id=last_row_id))
-                    .order_by(events_table.c.timestamp, events_table.c.id)
                 )
+                if max_row_id is not None:
+                    query = query.where(text("rowid <= :max_id").bindparams(max_id=max_row_id))
                 if limit is not None:
-                    query = query.limit(limit)
+                    # Page by rowid so max(rowid) is a contiguous boundary; ordering
+                    # a limited page by timestamp could advance the cursor past a
+                    # lower-rowid row appended out of order, skipping it forever.
+                    query = query.order_by(rowid_col).limit(limit)
+                else:
+                    query = query.order_by(events_table.c.timestamp, events_table.c.id)
                 result = await conn.execute(query)
                 rows = result.mappings().all()
                 if not rows:
@@ -983,6 +994,7 @@ class EventStore:
         last_row_id: int = 0,
         *,
         limit: int | None = None,
+        max_row_id: int | None = None,
     ) -> tuple[list[BaseEvent], int]:
         """Incrementally query events across a session and related execution scopes.
 
@@ -990,11 +1002,13 @@ class EventStore:
         the same exact session/execution payload predicates as
         ``query_session_related_events`` while advancing a single rowid cursor.
 
-        When ``limit`` is set, only the first ``limit`` events after the cursor
-        are materialized and the returned cursor advances to the last row in
-        that page, so a stale or first-time poll over a long-running session
-        cannot load an unbounded result set; a follow-up poll resumes the
-        remainder without skipping events. ``None`` keeps the unbounded fetch.
+        When ``limit`` is set the page is ordered by ``rowid`` and capped, so a
+        stale or first-time poll over a long-running session cannot load an
+        unbounded result set and the returned ``max(rowid)`` is a true boundary
+        a follow-up poll resumes from without skipping rows appended out of
+        timestamp order. ``max_row_id`` bounds the read to ``rowid <= max_row_id``
+        for callers that have already chosen a global page boundary. ``None``
+        for both keeps the unbounded timestamp-ordered fetch.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -1015,8 +1029,9 @@ class EventStore:
                     select(events_table, rowid_col)
                     .where(or_(*conditions))
                     .where(text("rowid > :last_id").bindparams(last_id=last_row_id))
-                    .order_by(events_table.c.timestamp, events_table.c.id)
                 )
+                if max_row_id is not None:
+                    query = query.where(text("rowid <= :max_id").bindparams(max_id=max_row_id))
                 if session_started_at is not None:
                     query = query.where(events_table.c.timestamp >= session_started_at)
 
@@ -1024,7 +1039,11 @@ class EventStore:
                     query = query.where(events_table.c.event_type == event_type)
 
                 if limit is not None:
-                    query = query.limit(limit)
+                    # Page by rowid (see get_events_after) so the cursor boundary
+                    # is skip-safe even when timestamp order diverges from rowid.
+                    query = query.order_by(rowid_col).limit(limit)
+                else:
+                    query = query.order_by(events_table.c.timestamp, events_table.c.id)
 
                 result = await conn.execute(query)
                 rows = result.mappings().all()

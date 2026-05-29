@@ -3635,6 +3635,94 @@ class TestJobManager:
         # Single session stream → contiguous delivery with no duplicates or gaps.
         assert delivered == [f"event {index:02d}" for index in range(total_events)]
 
+    async def test_job_wait_linked_stream_mixed_streams_no_duplicate_delivery(
+        self, tmp_path
+    ) -> None:
+        """A saturated stream must not drag higher-rowid sibling events into a page.
+
+        Regression for cross-stream duplicate delivery: with a full job page and
+        one higher-rowid session event, the page boundary is clamped to the job
+        stream's cursor, so the session event is held back rather than returned
+        above the cursor (which would re-deliver it on the next poll). It must
+        surface exactly once, on the following poll.
+        """
+        store = _build_store(tmp_path)
+        await store.initialize()
+        for index in range(10):
+            await store.append(
+                BaseEvent(
+                    type="job.progress",
+                    aggregate_type="job",
+                    aggregate_id="job_mixed_streams",
+                    data={"message": f"job {index}"},
+                )
+            )
+        # Appended last, so this carries the highest rowid of the linked set.
+        await store.append(
+            BaseEvent(
+                type="subagent.dispatched",
+                aggregate_type="subagent",
+                aggregate_id="orch_mixed",
+                data={"session_id": "orch_mixed", "title": "late subagent"},
+            )
+        )
+        snapshot = JobSnapshot(
+            job_id="job_mixed_streams",
+            job_type="auto",
+            status=JobStatus.RUNNING,
+            message="Running auto",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(session_id="orch_mixed"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert timeout_seconds == 0
+                return replace(snapshot, cursor=cursor), False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            first = await handler.handle(
+                {
+                    "job_id": "job_mixed_streams",
+                    "cursor": 0,
+                    "timeout_seconds": 0,
+                    "stream": "linked",
+                }
+            )
+            assert first.is_ok
+            first_types = [item["type"] for item in first.value.meta["stream_events"]]
+            # The session event (higher rowid) is held back behind the boundary.
+            assert first_types == ["job.progress"] * 10
+            assert "subagent.dispatched" not in first_types
+            assert first.value.meta["stream_has_more"] is True
+            first_cursor = first.value.meta["cursor"]
+
+            second = await handler.handle(
+                {
+                    "job_id": "job_mixed_streams",
+                    "cursor": first_cursor,
+                    "timeout_seconds": 0,
+                    "stream": "linked",
+                }
+            )
+            assert second.is_ok
+            second_types = [item["type"] for item in second.value.meta["stream_events"]]
+            # Delivered now, exactly once, with no job events repeated.
+            assert second_types == ["subagent.dispatched"]
+            assert second.value.meta["cursor"] > first_cursor
+        finally:
+            await store.close()
+
     async def test_job_wait_default_stream_does_not_surface_subagent_events(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         await store.initialize()

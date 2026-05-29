@@ -492,6 +492,54 @@ class TestEventStoreGetEventsAfter:
         assert all(e.data["batch"] == 2 for e in new_events)
         assert new_row_id > last_row_id
 
+    async def test_get_events_after_limit_does_not_skip_out_of_order_timestamps(
+        self, event_store: EventStore
+    ) -> None:
+        """A limited page must page by rowid, not timestamp, to stay skip-safe.
+
+        Regression: if a row is appended with an earlier timestamp than an
+        existing row, a limited page ordered by timestamp would return the
+        higher rowid first and advance the cursor past the lower-rowid row,
+        skipping it forever. Paging by rowid keeps every row reachable.
+        """
+        from datetime import UTC, datetime
+
+        # rowid 1 carries the LATER timestamp; rowid 2 the earlier one.
+        await event_store.append(
+            BaseEvent(
+                type="test.event.created",
+                aggregate_type="execution",
+                aggregate_id="exec-ooo",
+                timestamp=datetime(2026, 4, 22, 0, 0, 10, tzinfo=UTC),
+                data={"label": "rowid1-late-ts"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="test.event.created",
+                aggregate_type="execution",
+                aggregate_id="exec-ooo",
+                timestamp=datetime(2026, 4, 22, 0, 0, 0, tzinfo=UTC),
+                data={"label": "rowid2-early-ts"},
+            )
+        )
+
+        seen: list[str] = []
+        cursor = 0
+        for _ in range(4):  # bounded; must converge in 2 real pages + 1 empty
+            page, next_cursor = await event_store.get_events_after(
+                "execution", "exec-ooo", cursor, limit=1
+            )
+            if not page:
+                break
+            assert len(page) == 1
+            assert next_cursor > cursor  # cursor strictly advances, no stall
+            cursor = next_cursor
+            seen.append(page[0].data["label"])
+
+        # Both rows delivered exactly once, lowest rowid first, none skipped.
+        assert seen == ["rowid1-late-ts", "rowid2-early-ts"]
+
     async def test_get_events_after_returns_empty_when_no_new_events(
         self, event_store: EventStore
     ) -> None:

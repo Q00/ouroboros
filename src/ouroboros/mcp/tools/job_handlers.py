@@ -246,73 +246,87 @@ async def _query_linked_stream_events(
 ) -> tuple[list[BaseEvent], int, bool]:
     """Fetch a bounded page of new events from the job's linked streams.
 
-    Each linked stream (job/execution/session/lineage) is read with a per-stream
-    ``limit`` so that a stale or first ``stream="linked"`` poll over a
-    long-running auto/session cannot materialize an unbounded event-store query
-    or MCP response. The returned cursor advances only as far as every saturated
-    stream was actually drained — i.e. to the lowest "more may remain" boundary —
-    so the follow-up poll resumes the remainder without skipping events.
-    ``has_more`` is True when at least one stream still has events past this page.
+    Linked streams (job/execution/session/lineage) share one rowid cursor, so
+    the page is delivered as a single global rowid window ``(cursor, boundary]``:
 
-    The materialized page is therefore bounded by ``links × limit`` events
-    regardless of how far behind the caller cursor is.
+    1. Peek each stream with a rowid-ordered ``limit`` (bounded reads, so a stale
+       or first ``stream="linked"`` poll over a long-running auto/session cannot
+       materialize an unbounded query/response). A stream that returns a full
+       page may have more rows past it.
+    2. Clamp ``boundary`` to the lowest saturated stream cursor — the highest
+       rowid below which *every* stream's knowledge is complete — then re-read
+       each stream only up to ``boundary``.
+
+    Because rowid order is the cursor dimension, ``boundary`` is skip-safe even
+    when timestamp order diverges from insertion order, and no event past
+    ``boundary`` is returned, so the follow-up poll (cursor=boundary) never
+    re-delivers or skips an event. ``has_more`` is True when a stream still has
+    rows beyond ``boundary``. The page is bounded by ``links × limit`` events.
     """
-    collected: dict[str, BaseEvent] = {}
-    # Streams that returned a full page may have more rows past their cursor;
-    # streams that returned fewer are fully drained up to their cursor.
-    saturated_cursors: list[int] = []
-    drained_cursors: list[int] = []
 
-    def collect(events: list[BaseEvent], new_cursor: int) -> None:
-        for event in events:
-            collected[event.id] = event
-        if len(events) >= limit:
-            saturated_cursors.append(new_cursor)
-        else:
-            drained_cursors.append(new_cursor)
+    async def gather(
+        page_limit: int | None, max_row_id: int | None
+    ) -> list[tuple[list[BaseEvent], int]]:
+        """Read every linked stream with a shared (limit, max_row_id) contract."""
+        results: list[tuple[list[BaseEvent], int]] = [
+            await event_store.get_events_after(
+                "job", snapshot.job_id, cursor, limit=page_limit, max_row_id=max_row_id
+            )
+        ]
+        if snapshot.links.execution_id:
+            results.append(
+                await event_store.get_events_after(
+                    "execution",
+                    snapshot.links.execution_id,
+                    cursor,
+                    limit=page_limit,
+                    max_row_id=max_row_id,
+                )
+            )
+        if snapshot.links.session_id:
+            results.append(
+                await event_store.query_session_related_events_after(
+                    session_id=snapshot.links.session_id,
+                    execution_id=snapshot.links.execution_id,
+                    last_row_id=cursor,
+                    limit=page_limit,
+                    max_row_id=max_row_id,
+                )
+            )
+        if snapshot.links.lineage_id:
+            results.append(
+                await event_store.get_events_after(
+                    "lineage",
+                    snapshot.links.lineage_id,
+                    cursor,
+                    limit=page_limit,
+                    max_row_id=max_row_id,
+                )
+            )
+        return results
 
-    job_events, job_cursor = await event_store.get_events_after(
-        "job", snapshot.job_id, cursor, limit=limit
-    )
-    collect(job_events, job_cursor)
+    def merge(results: list[tuple[list[BaseEvent], int]]) -> list[BaseEvent]:
+        collected: dict[str, BaseEvent] = {}
+        for events, _new_cursor in results:
+            for event in events:
+                collected[event.id] = event
+        return sorted(collected.values(), key=lambda event: (event.timestamp, event.id))
 
-    if snapshot.links.execution_id:
-        execution_events, execution_cursor = await event_store.get_events_after(
-            "execution",
-            snapshot.links.execution_id,
-            cursor,
-            limit=limit,
-        )
-        collect(execution_events, execution_cursor)
+    # Pass 1: bounded rowid-ordered peek to discover the global page boundary.
+    peeked = await gather(limit, None)
+    saturated = [new_cursor for events, new_cursor in peeked if len(events) >= limit]
 
-    if snapshot.links.session_id:
-        session_events, session_cursor = await event_store.query_session_related_events_after(
-            session_id=snapshot.links.session_id,
-            execution_id=snapshot.links.execution_id,
-            last_row_id=cursor,
-            limit=limit,
-        )
-        collect(session_events, session_cursor)
+    if not saturated:
+        # Every stream is fully drained to the global head; the peek is complete.
+        next_cursor = max([cursor, *(new_cursor for _events, new_cursor in peeked)])
+        return merge(peeked), next_cursor, False
 
-    if snapshot.links.lineage_id:
-        lineage_events, lineage_cursor = await event_store.get_events_after(
-            "lineage",
-            snapshot.links.lineage_id,
-            cursor,
-            limit=limit,
-        )
-        collect(lineage_events, lineage_cursor)
-
-    events = sorted(collected.values(), key=lambda event: (event.timestamp, event.id))
-
-    has_more = bool(saturated_cursors)
-    if has_more:
-        # Clamp to the lowest saturated boundary so no saturated stream is
-        # advanced past its returned page; the next poll re-reads from there.
-        next_cursor = min(saturated_cursors)
-    else:
-        next_cursor = max([cursor, *drained_cursors])
-    return events, next_cursor, has_more
+    # Pass 2: clamp to the lowest saturated boundary and re-read each stream only
+    # up to it, yielding a contiguous rowid window with no skips and no rows past
+    # the cursor handed back. boundary > cursor (page rowids are all > cursor), so
+    # the next poll strictly advances.
+    boundary = min(saturated)
+    return merge(await gather(None, boundary)), boundary, True
 
 
 @dataclass
