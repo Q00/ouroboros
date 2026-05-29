@@ -1572,6 +1572,21 @@ class AutoPipeline:
                                 )
                         state.run_handoff_status = "completed"
                         state.run_handoff_guidance = None
+                        # RFC #1256 §I4 (#1254): emit the typed
+                        # ``auto.product.emitted`` terminal for the synchronous
+                        # complete-product success path — the branch
+                        # ``cli/commands/auto.py`` wires via
+                        # ``HandlerSynchronousRunStarter``, which completes
+                        # inline at RUN without RALPH_HANDOFF/EVALUATE. Without
+                        # this, a successful synchronous CLI run left no
+                        # queryable terminal event (ouroboros-agent[bot]
+                        # req_1780072861_321 blocker). There is no ralph/QA
+                        # stop_reason on this path, so ``stop_reason=None``.
+                        await self._emit_product_emitted_terminal(
+                            state,
+                            review=review,
+                            stop_reason=None,
+                        )
                         state.transition(
                             AutoPhase.COMPLETE,
                             "synchronous execution completed for complete-product run",
@@ -1992,21 +2007,32 @@ class AutoPipeline:
 
         RFC #1256 §I4 (#1254). Symmetric to
         :meth:`_emit_partial_product_terminal`'s ``auto.product.partial_emitted``
-        on the degraded path. Shared by *both* complete-product success
-        terminals so a successful run always leaves at least one queryable
-        terminal event under ``ouroboros_query_events(auto_session_id)``
+        on the degraded path. Shared by *every* in-process complete-product
+        success terminal so a successful run always leaves at least one
+        queryable terminal event under ``ouroboros_query_events(auto_session_id)``
         instead of the auto session aggregate being empty on success:
 
         * the direct ralph-completed path in :meth:`_evaluate_or_complete`
-          (no evaluator wired, or plugin mode), and
+          (no evaluator wired),
         * the evaluator-pass path in :meth:`_finalize_evaluate` — the branch
-          MCP wires for normal non-plugin complete-product runs, which
-          previously transitioned to COMPLETE with no terminal event.
+          MCP wires for normal non-plugin complete-product runs,
+        * the synchronous CLI run-success path (``HandlerSynchronousRunStarter``,
+          which completes inline at RUN), and
+        * the ralph re-attach success path in :meth:`_reattach_ralph_job`.
+
+        These terminals are mutually exclusive for a single run, so a
+        complete-product success emits **exactly one** ``auto.product.emitted``.
+
+        Deliberately *not* emitted on the OpenCode **plugin-delegation**
+        terminals ("ralph loop delegated…" / "resumed … plugin Ralph delegation
+        checkpoint"): in plugin mode the loop and its product are owned by the
+        spawned child session, so this process has not produced a product to
+        announce — emitting here would be a false terminal.
 
         Awaited inline via the same fail-open :meth:`_emit_runtime_event`, so a
         slow/absent EventStore never converts a successful COMPLETE into a
-        BLOCKED. The two terminals are mutually exclusive for a single run, so
-        a complete-product success emits exactly one ``auto.product.emitted``.
+        BLOCKED. ``review`` may be ``None`` (re-attach observer has no
+        in-scope grade), in which case ``grade`` resolves to ``None``.
         """
         await self._emit_runtime_event(
             "auto.product.emitted",
@@ -3628,6 +3654,19 @@ class AutoPipeline:
         if current_generation is not None:
             state.ralph_current_generation = current_generation
         if terminal_status == "completed":
+            # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted``
+            # terminal for the ralph re-attach success path — resume after a
+            # crash between persisting ``ralph_job_id`` and the original wait
+            # finishing. This observes an already-dispatched job's terminal and
+            # transitions straight to COMPLETE (no ``_evaluate_or_complete``),
+            # so without this a re-attached successful run left no queryable
+            # terminal event. ``review`` is not in scope on the re-attach
+            # observer, so ``grade`` resolves to ``None``.
+            await self._emit_product_emitted_terminal(
+                state,
+                review=None,
+                stop_reason=stop_reason,
+            )
             state.transition(
                 AutoPhase.COMPLETE,
                 f"ralph loop completed on re-attach ({stop_reason or 'qa passed'})",
