@@ -1351,6 +1351,13 @@ async def _reconcile_execution_job_snapshot(result: AutoPipelineResult) -> AutoP
     """Project the linked execution job lifecycle onto the auto resume result."""
     if not result.job_id:
         return result
+    if (
+        result.status == "detached"
+        or result.phase == AutoPhase.RALPH_HANDOFF.value
+        or result.ralph_job_id
+        or result.ralph_lineage_id
+    ):
+        return result
     try:
         snapshot = await JobManager().get_snapshot(result.job_id)
     except Exception:

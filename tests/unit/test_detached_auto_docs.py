@@ -56,7 +56,8 @@ def test_mcp_docs_describe_detached_auto_as_tracked_non_terminal_background_work
     assert (
         "that handle identifies tracked background work, not a completed workflow result" in compact
     )
-    assert "terminal state such as `completed`, `failed`, `cancelled`, or `expired`" in compact
+    assert "terminal state such as `completed`, `failed`, or `cancelled`" in compact
+    assert "Expired retention is reported by `ouroboros_job_result`" in compact
 
     for mcp_tool in (
         'ouroboros_job_status(job_id="JOB_ID")',
@@ -750,33 +751,19 @@ def test_docs_verify_expired_state_has_stable_status_semantics_and_next_steps() 
     cli_compact = " ".join(cli_docs.split())
     mcp_compact = " ".join(mcp_docs.split())
 
-    assert (
-        "When CLI status reports `expired`, the job is terminal tracked background work"
-        in cli_compact
-    )
+    assert "When `ouroboros job result JOB_ID` reports `expired`" in cli_compact
     assert "retained result is no longer available through that job handle" in cli_compact
-    assert "stable observable status is `expired`, not `running` or `completed`" in cli_compact
-    assert (
-        "`ouroboros job result JOB_ID` returns the stable expiration error details" in cli_compact
-    )
+    assert "`ouroboros job status JOB_ID` still reports the stored terminal" in cli_compact
+    assert "result retrieval returns stable expiration error details" in cli_compact
     assert "rather than a detached `auto` result" in cli_compact
     assert "Next steps are to inspect any surfaced auto session" in cli_compact
     assert "resume from that handle or restart the detached auto flow" in cli_compact
     assert "when no recoverable handle is present" in cli_compact
 
-    assert (
-        "When MCP status reports `expired`, the job is terminal tracked background work"
-        in mcp_compact
-    )
+    assert 'When `ouroboros_job_result(job_id="JOB_ID")` reports `expired`' in mcp_compact
     assert "retained result is no longer available through that job handle" in mcp_compact
-    assert (
-        "stable observable status is `expired` with `is_error=true`, not `running` or "
-        "`completed`" in mcp_compact
-    )
-    assert (
-        '`ouroboros_job_result(job_id="JOB_ID")` returns stable expiration error details'
-        in mcp_compact
-    )
+    assert "`ouroboros_job_status` still reports the stored terminal" in mcp_compact
+    assert "result retrieval returns stable expiration error details" in mcp_compact
     assert "rather than a detached `auto` result" in mcp_compact
     assert "Next steps are to inspect any surfaced auto session" in mcp_compact
     assert "resume from that handle or restart the detached auto flow" in mcp_compact

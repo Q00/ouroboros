@@ -267,7 +267,9 @@ skill routing.
 background work. A successful start response returns a `job_id` immediately;
 that handle identifies tracked background work, not a completed workflow result.
 The job remains observable through its lifecycle status until it reaches a
-terminal state such as `completed`, `failed`, `cancelled`, or `expired`.
+terminal state such as `completed`, `failed`, or `cancelled`. Expired retention
+is reported by `ouroboros_job_result` when the stored terminal result is no
+longer available.
 
 MCP clients wait for and retrieve detached `auto` results with the standard job
 tools:
@@ -360,14 +362,13 @@ meta.is_terminal = true
 meta.error = "user requested cancellation"
 ```
 
-When MCP status reports `expired`, the job is terminal tracked background work
-whose retained result is no longer available through that job handle. The stable
-observable status is `expired` with `is_error=true`, not `running` or
-`completed`, and `ouroboros_job_result(job_id="JOB_ID")` returns stable
-expiration error details for that handle rather than a detached `auto` result.
-Next steps are to inspect any surfaced auto session, execution, or lineage
-handle, then resume from that handle or restart the detached auto flow when no
-recoverable handle is present.
+When `ouroboros_job_result(job_id="JOB_ID")` reports `expired`, the job is
+terminal tracked background work whose retained result is no longer available
+through that job handle. `ouroboros_job_status` still reports the stored
+terminal lifecycle status, while result retrieval returns stable expiration
+error details rather than a detached `auto` result. Next steps are to inspect
+any surfaced auto session, execution, or lineage handle, then resume from that
+handle or restart the detached auto flow when no recoverable handle is present.
 
 ```text
 ouroboros_job_result(job_id="job_auto_docs_expired")

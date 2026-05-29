@@ -2296,6 +2296,19 @@ class AutoPipeline:
             return self._result(
                 state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
             )
+        if terminal_status == "running_async":
+            state.mark_progress(
+                "background Ralph job is still tracked",
+                tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+            )
+            self._save(state)
+            return self._result(
+                state,
+                ledger,
+                review=review,
+                run_subagent=run_subagent,
+                status_override=DETACHED_STATUS,
+            )
         # Any other failure (terminal failure action, exception bubbled up,
         # or an unrecognized status) is a hard FAILED.
         message = (

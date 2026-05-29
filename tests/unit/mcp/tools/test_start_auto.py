@@ -24,7 +24,11 @@ from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobManager, JobStatus
-from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
+from ouroboros.mcp.tools.auto_handler import (
+    AutoHandler,
+    StartAutoHandler,
+    _reconcile_execution_job_snapshot,
+)
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
@@ -126,6 +130,41 @@ def _assert_detached_start_text_has_guidance_without_handles(
     assert auto_session_id not in text
     assert not _AUTO_ID_RE.search(text)
     assert not _UUID_HEX_RE.search(text)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_execution_job_does_not_complete_detached_ralph_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Execution completion must not override active Ralph detached evidence."""
+
+    class FakeJobManager:
+        async def get_snapshot(self, job_id: str):  # pragma: no cover
+            raise AssertionError(f"should not inspect execution job for {job_id}")
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.JobManager",
+        lambda: FakeJobManager(),
+    )
+    result = AutoPipelineResult(
+        status="detached",
+        auto_session_id="auto_detached",
+        phase="ralph_handoff",
+        job_id="job_execution_done",
+        execution_id="exec_done",
+        run_session_id="orch_done",
+        ralph_job_id="job_ralph_running",
+        ralph_lineage_id="lin_ralph_running",
+        ralph_dispatch_mode="job",
+        execution_job_status=JobStatus.COMPLETED.value,
+    )
+
+    reconciled = await _reconcile_execution_job_snapshot(result)
+
+    assert reconciled is result
+    assert reconciled.status == "detached"
+    assert reconciled.phase == "ralph_handoff"
+    assert reconciled.ralph_job_id == "job_ralph_running"
 
 
 @pytest.fixture

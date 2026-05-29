@@ -81,7 +81,9 @@ Auto mode starts execution only after the generated Seed reaches A-grade. If a p
 Detached `auto` work is non-terminal tracked background work. Starting it does
 not mean the workflow has completed; the returned `job_id` is a handle for a
 tracked job whose lifecycle remains observable until it reaches a terminal
-state such as `completed`, `failed`, `cancelled`, or `expired`.
+state such as `completed`, `failed`, or `cancelled`. Expired retention is
+reported by `ouroboros job result` when the stored terminal result is no longer
+available.
 
 CLI users wait and retrieve with the standard job surfaces:
 
@@ -107,6 +109,9 @@ terminal lifecycle status. When CLI status reports `completed`,
 that job handle. When CLI status reports `failed`, the job is terminal and
 still observable; `ouroboros job result JOB_ID` returns the stable failure
 output or error details for that job handle, not a successful `auto` result.
+Next steps are to inspect `ouroboros job status JOB_ID` and
+`ouroboros job result JOB_ID`, then resume or retry from the surfaced auto
+session, execution, or lineage handle when one is present.
 When CLI status reports `cancelled`, the job is terminal and still observable;
 `ouroboros job result JOB_ID` returns stable cancellation output or error
 details for that job handle with the cancellation reason when one is available,
@@ -115,18 +120,15 @@ not a successful `auto` result. Next steps are to inspect
 the detached auto flow or resume from the surfaced auto session, execution, or
 lineage handle when one is present. The CLI prints the stable cancellation
 output and exits non-zero because the terminal result is an error result.
-When CLI status reports `expired`, the job is terminal tracked background work
-whose retained result is no longer available through that job handle. The stable
-observable status is `expired`, not `running` or `completed`, and
-`ouroboros job result JOB_ID` returns the stable expiration error details for
-that handle rather than a detached `auto` result. Next steps are to inspect any
+When `ouroboros job result JOB_ID` reports `expired`, the job is terminal
+tracked background work whose retained result is no longer available through
+that job handle. `ouroboros job status JOB_ID` still reports the stored terminal
+lifecycle status, while result retrieval returns stable expiration error
+details rather than a detached `auto` result. Next steps are to inspect any
 surfaced auto session, execution, or lineage handle, then resume from that
 handle or restart the detached auto flow when no recoverable handle is present.
-Next steps are to inspect `ouroboros job status JOB_ID` and
-`ouroboros job result JOB_ID`, then resume or retry from the surfaced auto
-session, execution, or lineage handle when one is present. Unknown, expired, or
-otherwise unavailable handles fail through the CLI with a non-zero status and
-through MCP with an error response.
+Unknown, expired, or otherwise unavailable handles fail through the CLI with a
+non-zero status and through MCP with an error response.
 When CLI status cannot resolve the supplied handle, treat the detached work as
 `invalid` or unavailable rather than as running or completed. The stable
 observable status is the non-zero CLI exit plus the human-readable error for

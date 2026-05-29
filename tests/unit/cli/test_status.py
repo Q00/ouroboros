@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 import yaml
 
 from ouroboros.cli.commands.status import app
+from ouroboros.cli.formatters import console
 
 runner = CliRunner(env={"COLUMNS": "240"})
 
@@ -30,6 +32,20 @@ API_ENV_KEYS = [
     "OUROBOROS_OPENCODE_CLI_PATH",
     "CODEX_HOME",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _wide_rich_console() -> None:
+    """Keep Rich health tables from truncating asserted status details."""
+    previous_width = console._width  # noqa: SLF001
+    previous_height = console._height  # noqa: SLF001
+    console._width = 240  # noqa: SLF001
+    console._height = 80  # noqa: SLF001
+    try:
+        yield
+    finally:
+        console._width = previous_width  # noqa: SLF001
+        console._height = previous_height  # noqa: SLF001
 
 
 def _clear_auth_env(monkeypatch) -> None:

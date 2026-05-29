@@ -1015,6 +1015,39 @@ async def test_ralph_handoff_uses_default_per_iteration_with_ample_budget(tmp_pa
     assert forwarded["per_iteration_timeout_seconds"] == 1800.0
 
 
+@pytest.mark.asyncio
+async def test_fresh_ralph_handoff_running_async_returns_detached(tmp_path) -> None:
+    """Fresh production Ralph dispatch may return a tracked non-terminal job."""
+    state = _state_at_run_phase(tmp_path)
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "job_id": "job_ralph_async",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "running_async",
+            "stop_reason": "foreground_timeout_elapsed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "detached"
+    assert state.phase is AutoPhase.RALPH_HANDOFF
+    assert state.ralph_job_id == "job_ralph_async"
+    assert state.ralph_job_status == "running_async"
+    assert state.ralph_stop_reason == "foreground_timeout_elapsed"
+    assert state.last_error is None
+
+
 # ---------------------------------------------------------------------------
 # Persisted complete_product intent (review-3 finding 2).
 # ---------------------------------------------------------------------------

@@ -126,8 +126,14 @@ class SessionStatusHandler:
         return None
 
     async def _reconcile_auto_state_from_execution_job(self, state: Any) -> None:
-        """Project a completed linked execution job onto auto status displays."""
+        """Project a completed run job onto non-complete-product status displays."""
         if not state.job_id:
+            return
+        if (
+            state.phase is AutoPhase.RALPH_HANDOFF
+            or state.ralph_job_id is not None
+            or state.ralph_lineage_id is not None
+        ):
             return
         try:
             snapshot = await JobManager().get_snapshot(state.job_id)
@@ -208,6 +214,8 @@ class SessionStatusHandler:
             ):
                 if key in ralph_block:
                     lines.append(f"  {key}: {ralph_block[key]}")
+        if state.last_error:
+            lines.append(f"Blocker: {state.last_error}")
         status_text = "\n".join(lines) + "\n"
 
         meta: dict[str, Any] = {
