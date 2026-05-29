@@ -2143,9 +2143,51 @@ def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | No
     return None
 
 
+def _is_safe_implementation_choice_question(lowered: str) -> bool:
+    """True for questions about implementation substrate or project placement.
+
+    Choosing a programming language / runtime / framework, or deciding between a
+    greenfield project and an existing repository (where the code should "live"),
+    are safe-defaultable engineering decisions — never external-authority actions
+    — so they must not trip the deployment / credential blocker patterns.
+
+    Motivating false positive (#1170 canonical cli-todo R3): the question
+    "What programming language and runtime should this CLI be built in ... and is
+    there an existing project or repository this tool should live inside, or will
+    it be a standalone greenfield project?" matched the deployment pattern because
+    the verb "live" ("where should it live") collided with the deployment-sense
+    "live" token and "project" matched the deployment-target noun group. The
+    session terminated as BLOCKED("deployment target requires human authority")
+    instead of safe-defaulting to greenfield, breaking the product-or-die path.
+    """
+    # Genuine external-authority signals → defer to normal classification so a
+    # real deployment / credential / payment question is still blocked.
+    if re.search(
+        r"\b(deploy|deployment|release|publish|production|hosting|"
+        r"credential|secret|api key|access token|password|payment|billing)\b",
+        lowered,
+    ):
+        return False
+    return _matches_any(
+        lowered,
+        (
+            r"\b(which|what)\b.+\b(programming language|language|runtime|"
+            r"framework|frameworks|libraries|library|tech stack|stack)\b",
+            r"\b(greenfield|standalone)\b.+\bproject\b",
+            r"\b(existing|new)\b.+\b(project|repo|repository|codebase)\b.+"
+            r"\b(live|reside|inside|within|build|built|placed|located)\b",
+            r"\bwhere\b.+\b(should|will|does|to)\b.+\b(live|reside|placed|located)\b",
+        ),
+    )
+
+
 def _blocker_for(question: str) -> AutoBlocker | None:
     lowered = question.lower()
-    if _is_safe_product_branch_question(lowered) or _is_safe_product_sensitive_question(lowered):
+    if (
+        _is_safe_product_branch_question(lowered)
+        or _is_safe_product_sensitive_question(lowered)
+        or _is_safe_implementation_choice_question(lowered)
+    ):
         return None
 
     external_action_patterns = (

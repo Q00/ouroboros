@@ -564,6 +564,51 @@ def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
         assert answer.source == AutoAnswerSource.BLOCKER
 
 
+def test_auto_answerer_allows_implementation_choice_questions() -> None:
+    """Language / runtime / framework choice and greenfield-vs-existing-repo
+    placement are safe-defaultable engineering decisions and must not block.
+
+    Regression for #1170 canonical cli-todo R3: the auto interview terminated as
+    BLOCKED("deployment target requires human authority") because the verb "live"
+    in "...this tool should live inside..." collided with the deployment-sense
+    "live" token (and "project" matched the deployment-target noun group),
+    halting the product-or-die path instead of safe-defaulting to greenfield.
+    """
+    answerer = AutoAnswerer()
+    safe_questions = (
+        # The exact R3 question, verbatim (em dashes included).
+        (
+            "What programming language and runtime should this CLI be built in — "
+            "for example, Python with the standard library, Node.js, or something "
+            "else — and is there an existing project or repository this tool should "
+            "live inside, or will it be a standalone greenfield project?"
+        ),
+        "What programming language should this tool be built in?",
+        "Which framework and runtime should we use?",
+        "Should this be a standalone greenfield project or live inside an existing repo?",
+        "Where should the new module live in the codebase?",
+    )
+    for question in safe_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a habit-tracker CLI"))
+        assert answer.blocker is None, f"unexpected blocker for: {question!r}"
+        assert answer.source != AutoAnswerSource.BLOCKER
+
+
+def test_implementation_choice_guard_does_not_weaken_deployment_blocking() -> None:
+    """The implementation-choice guard must keep genuine deployment / production
+    authority questions blocked (the verb-"live" fix is deliberately narrow)."""
+    answerer = AutoAnswerer()
+    blocking_questions = (
+        "Which production environment should we deploy the CLI to?",
+        "Which production cluster and region should we deploy to?",
+        "Should we deploy to production or live?",
+    )
+    for question in blocking_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
+        assert answer.blocker is not None, f"expected blocker for: {question!r}"
+        assert answer.source == AutoAnswerSource.BLOCKER
+
+
 def test_blank_goal_remains_open_gap() -> None:
     ledger = SeedDraftLedger.from_goal("   ")
     _fill_minimal_ready_ledger(ledger)
