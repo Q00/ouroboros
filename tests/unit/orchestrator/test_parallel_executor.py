@@ -34,6 +34,7 @@ from ouroboros.orchestrator.parallel_executor import (
     _effective_evidence_schema_for_ac,
     _message_contains_test_success,
     _runtime_messages_support_command_claim,
+    _runtime_messages_support_masked_test_command_claim,
     _runtime_messages_support_test_claim,
     render_parallel_completion_message,
     render_parallel_verification_report,
@@ -1162,6 +1163,215 @@ def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> 
         messages=(command_message, result_message),
         task_cwd=None,
     )
+
+
+def test_gradle_tail_pipe_can_be_backed_by_junit_xml_report(tmp_path) -> None:
+    """Structured JUnit XML can prove a masked Gradle test command.
+
+    #1208 still prevents the unprotected ``| tail`` pipeline from proving a
+    clean command by itself. #1234's remaining false positive is the case where
+    the transcript also reads the JUnit XML report that proves the same test
+    target had zero failures/errors.
+    """
+    report = (
+        tmp_path / "build" / "test-results" / "test" / "TEST-com.example.app.unit.SomeNewTest.xml"
+    )
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<testsuite name="com.example.app.unit.SomeNewTest" tests="3" '
+        'skipped="0" failures="0" errors="0">\n'
+        '  <testcase classname="com.example.app.unit.SomeNewTest" name="one"/>\n'
+        '  <testcase classname="com.example.app.unit.SomeNewTest" name="two"/>\n'
+        '  <testcase classname="com.example.app.unit.SomeNewTest" name="three"/>\n'
+        "</testsuite>\n",
+        encoding="utf-8",
+    )
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    './gradlew test --tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100'
+                )
+            }
+        },
+    )
+    command_result = AgentMessage(
+        type="tool_result",
+        content="> Task :test\nBUILD SUCCESSFUL in 8s",
+        tool_name=None,
+        data={"subtype": "tool_result", "output": "> Task :test\nBUILD SUCCESSFUL in 8s"},
+    )
+    xml_read_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": f"cat {report}"}},
+    )
+    xml_result = AgentMessage(
+        type="tool_result",
+        content=report.read_text(encoding="utf-8"),
+        tool_name=None,
+        data={"subtype": "tool_result", "output": report.read_text(encoding="utf-8")},
+    )
+    messages = (command_message, command_result, xml_read_message, xml_result)
+
+    assert not _runtime_messages_support_command_claim(
+        "./gradlew test --tests com.example.app.unit.SomeNewTest -i",
+        messages,
+    )
+    assert _runtime_messages_support_masked_test_command_claim(
+        "./gradlew test --tests com.example.app.unit.SomeNewTest -i",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+    assert _runtime_messages_support_test_claim(
+        value="com.example.app.unit.SomeNewTest",
+        backed_commands=("./gradlew test --tests com.example.app.unit.SomeNewTest -i",),
+        messages=messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_gradle_tail_pipe_junit_xml_rejects_failures(tmp_path) -> None:
+    """Failing JUnit XML must not rescue a masked test command."""
+    report = (
+        tmp_path / "build" / "test-results" / "test" / "TEST-com.example.app.unit.SomeNewTest.xml"
+    )
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        '<testsuite name="com.example.app.unit.SomeNewTest" tests="3" '
+        'failures="1" errors="0"><testcase classname="com.example.app.unit.SomeNewTest" '
+        'name="one"><failure>boom</failure></testcase></testsuite>',
+        encoding="utf-8",
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Bash command started",
+            tool_name="Bash",
+            data={
+                "tool_input": {
+                    "command": (
+                        './gradlew test --tests "com.example.app.unit.SomeNewTest" '
+                        "-i 2>&1 | tail -100"
+                    )
+                }
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="BUILD SUCCESSFUL in 8s",
+            tool_name=None,
+            data={"subtype": "tool_result", "output": "BUILD SUCCESSFUL in 8s"},
+        ),
+        AgentMessage(
+            type="tool",
+            content="Bash command started",
+            tool_name="Bash",
+            data={"tool_input": {"command": f"cat {report}"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content=report.read_text(encoding="utf-8"),
+            tool_name=None,
+            data={"subtype": "tool_result", "output": report.read_text(encoding="utf-8")},
+        ),
+    )
+
+    assert not _runtime_messages_support_masked_test_command_claim(
+        "./gradlew test --tests com.example.app.unit.SomeNewTest -i",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+    assert not _runtime_messages_support_test_claim(
+        value="com.example.app.unit.SomeNewTest",
+        backed_commands=("./gradlew test --tests com.example.app.unit.SomeNewTest -i",),
+        messages=messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_atomic_verifier_accepts_masked_gradle_with_junit_xml(tmp_path) -> None:
+    """End-to-end verifier regression for #1234's remaining false positive."""
+    source = tmp_path / "src" / "Condition.java"
+    source.parent.mkdir(parents=True)
+    source.write_text("class Condition {}\n", encoding="utf-8")
+    report = (
+        tmp_path / "build" / "test-results" / "test" / "TEST-com.example.app.unit.SomeNewTest.xml"
+    )
+    report.parent.mkdir(parents=True)
+    xml = (
+        '<testsuite name="com.example.app.unit.SomeNewTest" tests="3" '
+        'skipped="0" failures="0" errors="0">'
+        '<testcase classname="com.example.app.unit.SomeNewTest" name="one"/>'
+        "</testsuite>"
+    )
+    report.write_text(xml, encoding="utf-8")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Edit src/Condition.java",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": str(source)}},
+        ),
+        AgentMessage(
+            type="tool",
+            content="Bash command started",
+            tool_name="Bash",
+            data={
+                "tool_input": {
+                    "command": (
+                        './gradlew test --tests "com.example.app.unit.SomeNewTest" '
+                        "-i 2>&1 | tail -100"
+                    )
+                }
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="> Task :test\nBUILD SUCCESSFUL in 8s",
+            tool_name=None,
+            data={"subtype": "tool_result", "output": "> Task :test\nBUILD SUCCESSFUL in 8s"},
+        ),
+        AgentMessage(
+            type="tool",
+            content="Bash command started",
+            tool_name="Bash",
+            data={"tool_input": {"command": f"cat {report}"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content=xml,
+            tool_name=None,
+            data={"subtype": "tool_result", "output": xml},
+        ),
+    )
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory=str(tmp_path)),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["src/Condition.java"],
+                "commands_run": ["./gradlew test --tests com.example.app.unit.SomeNewTest -i"],
+                "tests_passed": ["com.example.app.unit.SomeNewTest"],
+            }
+        ),
+        ac_content="Implement Condition and verify SomeNewTest.",
+    )
+
+    assert verdict.passed is True
 
 
 @pytest.mark.parametrize(
