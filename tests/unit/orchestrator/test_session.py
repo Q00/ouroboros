@@ -1836,3 +1836,38 @@ class TestStaleRuntimeMetadataCleansing:
         assert tracker.progress.get("runtime_status") == "running"
         assert "pause_kind" not in tracker.progress
         assert "resume_after" not in tracker.progress
+
+
+class TestEventStreamMerging:
+    """Tests for merging event streams in SessionRepository."""
+
+    def test_merge_event_streams_handles_mixed_timezone_naive_and_aware_events(self) -> None:
+        """Verify _merge_event_streams sorts correctly when naive and aware datetimes are mixed."""
+        from ouroboros.events.base import BaseEvent
+
+        naive_time = datetime(2026, 5, 29, 10, 0, 0)
+        aware_time = datetime(2026, 5, 29, 10, 15, 0, tzinfo=UTC)
+
+        event_naive = BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="sess-1",
+            timestamp=naive_time,
+        )
+        event_aware = BaseEvent(
+            type="orchestrator.progress.updated",
+            aggregate_type="session",
+            aggregate_id="sess-1",
+            timestamp=aware_time,
+        )
+
+        # Merge them
+        merged = SessionRepository._merge_event_streams(
+            [event_aware],
+            [event_naive],
+        )
+
+        assert len(merged) == 2
+        # Naive time is 10:00 (parsed as UTC), aware is 10:15 UTC. Naive should be first.
+        assert merged[0].id == event_naive.id
+        assert merged[1].id == event_aware.id

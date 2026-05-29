@@ -514,9 +514,17 @@ class SessionRepository:
             seen_ids.add(event.id)
             merged.append(event)
 
+        def _get_aware_timestamp(event: BaseEvent) -> datetime:
+            ts = event.timestamp
+            if ts is None:
+                return datetime.min.replace(tzinfo=UTC)
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=UTC)
+            return ts
+
         merged.sort(
             key=lambda event: (
-                event.timestamp or datetime.min.replace(tzinfo=UTC),
+                _get_aware_timestamp(event),
                 event.id,
             ),
         )
