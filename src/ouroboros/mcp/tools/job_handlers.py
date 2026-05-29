@@ -216,6 +216,17 @@ def _event_stream_item(event: BaseEvent) -> dict[str, Any]:
     }
 
 
+def _compact_stream_suffix(stream_items: list[dict[str, Any]], cursor: int) -> str:
+    """One-line linked-stream summary appended to compact/summary job views.
+
+    Empty when no linked events were streamed, so callers can unconditionally
+    concatenate the result without re-checking ``stream_items``.
+    """
+    if not stream_items:
+        return ""
+    return f"\nstream_events {len(stream_items)} cursor={cursor}"
+
+
 async def _query_linked_stream_events(
     event_store: EventStore,
     snapshot: JobSnapshot,
@@ -1016,8 +1027,7 @@ class JobWaitHandler:
                     progress,
                     include_message=view == "summary",
                 )
-                if stream_items:
-                    text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
+                text += _compact_stream_suffix(stream_items, snapshot.cursor)
             elif view in {"compact", "summary"}:
                 if stream_items:
                     summaries = ", ".join(item["type"] for item in stream_items[-3:])
@@ -1034,12 +1044,10 @@ class JobWaitHandler:
                 text += "\n\nNo new job-level events during this wait window."
         elif view == "compact":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
-            if stream_items:
-                text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
+            text += _compact_stream_suffix(stream_items, snapshot.cursor)
         elif view == "summary":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
-            if stream_items:
-                text += f"\nstream_events {len(stream_items)} cursor={snapshot.cursor}"
+            text += _compact_stream_suffix(stream_items, snapshot.cursor)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
