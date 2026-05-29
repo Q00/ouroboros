@@ -602,6 +602,12 @@ def test_implementation_choice_guard_does_not_weaken_deployment_blocking() -> No
         "Which production environment should we deploy the CLI to?",
         "Which production cluster and region should we deploy to?",
         "Should we deploy to production or live?",
+        # The deployment-sense negative check must stay load-bearing: a genuine
+        # deployment question that *also* names a language/runtime (so it matches a
+        # positive implementation-choice pattern) must still block — otherwise the
+        # guard would suppress the deployment authority gate.
+        "Which language should we use, and which production cluster should we deploy to?",
+        "What runtime and which production environment should we deploy to?",
     )
     for question in blocking_questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
