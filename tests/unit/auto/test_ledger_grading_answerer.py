@@ -609,6 +609,34 @@ def test_implementation_choice_guard_does_not_weaken_deployment_blocking() -> No
         assert answer.source == AutoAnswerSource.BLOCKER
 
 
+def test_implementation_choice_guard_defers_to_other_authority_blockers() -> None:
+    """The implementation-choice guard must not short-circuit *any* genuine
+    external-authority blocker when the prompt merely also carries
+    language/runtime/framework wording.
+
+    Regression for the #1295 review blocker: the guard's negative-signal check
+    originally excluded only deployment/credential/payment terms, so a destructive
+    operation phrased as an implementation choice — e.g. "what language should the
+    cleanup script use to remove the database?" — bypassed the destructive-operation
+    blocker and returned a conservative default with no blocker. The guard now
+    defers whenever any external-action signal (destructive / credential / payment /
+    legal / medical) is present, so these still block."""
+    answerer = AutoAnswerer()
+    blocking_questions = (
+        # Destructive operation wrapped in a language/runtime/framework choice.
+        "What language should the cleanup script use to remove the database?",
+        "What runtime should the tool use to delete the prod branch?",
+        "Which framework should we use to wipe the production database?",
+        "Which programming language should the migration use to drop the db?",
+        # Other authority categories that share the same allowlist short-circuit.
+        "Which language should we use to enter the production api key value?",
+    )
+    for question in blocking_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        assert answer.blocker is not None, f"expected blocker for: {question!r}"
+        assert answer.source == AutoAnswerSource.BLOCKER
+
+
 def test_blank_goal_remains_open_gap() -> None:
     ledger = SeedDraftLedger.from_goal("   ")
     _fill_minimal_ready_ledger(ledger)

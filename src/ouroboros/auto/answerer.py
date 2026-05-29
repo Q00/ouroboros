@@ -2160,11 +2160,25 @@ def _is_safe_implementation_choice_question(lowered: str) -> bool:
     session terminated as BLOCKED("deployment target requires human authority")
     instead of safe-defaulting to greenfield, breaking the product-or-die path.
     """
-    # Genuine external-authority signals → defer to normal classification so a
-    # real deployment / credential / payment question is still blocked.
+    # Genuine external-authority signals → defer to normal classification so any
+    # real external action is still inspected by `_blocker_for`. Deferring is
+    # safe-by-construction: it only re-runs normal classification, which blocks
+    # *iff* a genuine `external_action_patterns` entry matches — it never blocks a
+    # benign substrate/placement question. The vocabulary below therefore mirrors
+    # every external-action category (deployment, credential, payment, legal,
+    # medical, and destructive operations) so an implementation-choice phrasing can
+    # never short-circuit an unrelated authority blocker. (#1295 review: the prior
+    # negative check excluded only deployment/credential/payment, so a destructive
+    # prompt such as "what language should the cleanup script use to remove the
+    # database?" bypassed the destructive-operation blocker.)
     if re.search(
-        r"\b(deploy|deployment|release|publish|production|hosting|"
-        r"credential|secret|api key|access token|password|payment|billing)\b",
+        r"\b(deploy|deployment|release|publish|production|prod|hosting|host|"
+        r"credential|credentials|secret|api key|access token|auth token|"
+        r"private key|password|payment|billing|paid service|credit card|"
+        r"bank account|invoice|charge|purchase|subscribe|"
+        r"legal|compliance|license|contract|"
+        r"medical|clinical|diagnosis|treatment|health|"
+        r"delete|drop|erase|wipe|remove|destroy|truncate)\b",
         lowered,
     ):
         return False
