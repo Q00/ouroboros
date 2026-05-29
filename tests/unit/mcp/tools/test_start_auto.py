@@ -692,15 +692,20 @@ class TestBackgroundJobPath:
         result_handler = JobResultHandler(event_store=event_store, job_manager=job_manager)
 
         terminal_wait = None
-        for _ in range(50):
+        cursor = 0
+        # Advance the cursor and use a blocking per-wait timeout under a generous
+        # wall-clock deadline so the background runner reaches terminal even on a
+        # slow/loaded CI runner. A fixed tiny busy-poll budget races the dispatch.
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while asyncio.get_running_loop().time() < deadline:
             wait_result = await wait_handler.handle(
-                {"job_id": job_id, "cursor": 0, "timeout_seconds": 0, "view": "summary"}
+                {"job_id": job_id, "cursor": cursor, "timeout_seconds": 2, "view": "summary"}
             )
             assert wait_result.is_ok
+            cursor = wait_result.value.meta["cursor"]
             if wait_result.value.meta["is_terminal"]:
                 terminal_wait = wait_result.value
                 break
-            await asyncio.sleep(0.01)
 
         assert terminal_wait is not None
         assert terminal_wait.meta["status"] == "completed"
@@ -810,15 +815,20 @@ class TestBackgroundJobPath:
         result_handler = JobResultHandler(event_store=event_store, job_manager=job_manager)
 
         terminal_wait = None
-        for _ in range(50):
+        cursor = 0
+        # Advance the cursor and use a blocking per-wait timeout under a generous
+        # wall-clock deadline so the background runner reaches terminal even on a
+        # slow/loaded CI runner. A fixed tiny busy-poll budget races the dispatch.
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while asyncio.get_running_loop().time() < deadline:
             wait_result = await wait_handler.handle(
-                {"job_id": job_id, "cursor": 0, "timeout_seconds": 0, "view": "summary"}
+                {"job_id": job_id, "cursor": cursor, "timeout_seconds": 2, "view": "summary"}
             )
             assert wait_result.is_ok
+            cursor = wait_result.value.meta["cursor"]
             if wait_result.value.meta["is_terminal"]:
                 terminal_wait = wait_result.value
                 break
-            await asyncio.sleep(0.01)
 
         assert terminal_wait is not None
         assert terminal_wait.is_error is True
