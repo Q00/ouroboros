@@ -17,8 +17,10 @@ from typing import Any
 import pytest
 
 from ouroboros.auto import pipeline as pipeline_module
+from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
+from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import (
     _RALPH_BLOCKED_STOP_REASONS,
     PIPELINE_DEADLINE_TOOL_NAME,
@@ -380,6 +382,185 @@ async def test_ralph_qa_passed_completes_auto(tmp_path) -> None:
     assert state.ralph_lineage_id is not None
     assert state.ralph_lineage_id.startswith(f"ralph-{_build_seed().metadata.seed_id}-")
     assert captured["kwargs"]["lineage_id"] == state.ralph_lineage_id
+
+
+class _RecordingEventStore:
+    """Minimal EventStore stub capturing appended events for assertions."""
+
+    def __init__(self) -> None:
+        self.appended: list[BaseEvent] = []
+
+    async def append(self, event: BaseEvent, **_: Any) -> None:
+        self.appended.append(event)
+
+
+@pytest.mark.asyncio
+async def test_ralph_completed_emits_auto_product_emitted_event(tmp_path) -> None:
+    """A successful ralph completion emits a typed ``auto.product.emitted`` event
+    keyed to the auto session (RFC #1256 §I4 / #1254, first success-terminal slice).
+
+    Symmetric to the existing ``auto.product.partial_emitted`` on the degraded
+    path: a successful complete-product run must leave at least one queryable
+    terminal event under ``ouroboros_query_events(auto_session_id)`` instead of
+    the auto session aggregate being empty on success.
+    """
+    state = _state_at_run_phase(tmp_path)
+    event_store = _RecordingEventStore()
+    driver = _StubInterviewDriver()
+    # The pipeline reads the EventStore off the interview driver
+    # (``getattr(self.interview_driver, "event_store", None)``).
+    driver.event_store = event_store
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "job_id": "job_ralph_emit",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        driver,
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    emitted = [event for event in event_store.appended if event.type == "auto.product.emitted"]
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event.aggregate_type == "auto_session"
+    assert event.aggregate_id == state.auto_session_id
+    assert event.data["auto_session_id"] == state.auto_session_id
+    assert event.data["seed_id"] == state.seed_id
+
+
+@pytest.mark.asyncio
+async def test_evaluator_pass_emits_auto_product_emitted_event(tmp_path) -> None:
+    """The evaluator-pass success terminal also emits ``auto.product.emitted``
+    (RFC #1256 §I4 / #1254; ouroboros-agent[bot] req_1780070213_316 blocker).
+
+    MCP wires ``HandlerEvaluator`` for normal non-plugin complete-product runs,
+    so Ralph's ``result_text`` routes ``_evaluate_or_complete`` through
+    ``_run_evaluate`` → ``_finalize_evaluate`` rather than the direct
+    ralph-completed terminal. This production success branch previously
+    transitioned to COMPLETE with no queryable terminal event, leaving the auto
+    session aggregate empty on success — the exact gap this PR closes. Both
+    success terminals share ``_emit_product_emitted_terminal`` and are mutually
+    exclusive, so a complete-product success emits exactly one event.
+    """
+    state = _state_at_run_phase(tmp_path)
+    event_store = _RecordingEventStore()
+    driver = _StubInterviewDriver()
+    driver.event_store = event_store
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "job_id": "job_ralph_eval_emit",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+            # result_text present → routes through the evaluator path, not the
+            # direct ralph-completed terminal.
+            "result_text": "stdout: ok\nexit_code: 0",
+        }
+
+    async def evaluator(_seed: Seed, _artifact: str) -> EvaluateResult:
+        return EvaluateResult(passed=True, score=0.95, verdict="pass")
+
+    pipeline = AutoPipeline(
+        driver,
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    emitted = [event for event in event_store.appended if event.type == "auto.product.emitted"]
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event.aggregate_type == "auto_session"
+    assert event.aggregate_id == state.auto_session_id
+    assert event.data["auto_session_id"] == state.auto_session_id
+    assert event.data["seed_id"] == state.seed_id
+
+
+@pytest.mark.asyncio
+async def test_synchronous_complete_product_success_emits_auto_product_emitted_event(
+    tmp_path,
+) -> None:
+    """The synchronous CLI complete-product success terminal also emits
+    ``auto.product.emitted`` (RFC #1256 §I4 / #1254; ouroboros-agent[bot]
+    req_1780072861_321 blocker).
+
+    ``cli/commands/auto.py`` wires ``HandlerSynchronousRunStarter``
+    (``synchronous_execution = True``) for complete-product runs, so a
+    ``run_success is True`` completes inline at RUN and transitions straight to
+    COMPLETE without RALPH_HANDOFF or EVALUATE. This third success terminal
+    previously left the auto session aggregate empty on success. All three
+    complete-product success terminals now share
+    ``_emit_product_emitted_terminal`` and are mutually exclusive, so a
+    successful run emits exactly one event.
+    """
+    state = _state_at_run_phase(tmp_path)
+    event_store = _RecordingEventStore()
+    driver = _StubInterviewDriver()
+    driver.event_store = event_store
+
+    class SynchronousRunStarter:
+        synchronous_execution = True
+
+        async def __call__(
+            self,
+            _seed: Seed,
+            *,
+            idempotency_key: str = "",  # noqa: ARG002
+        ) -> dict[str, Any]:
+            return {
+                "job_id": None,
+                "session_id": "sync_session",
+                "execution_id": "sync_exec",
+                "status": "completed",
+                "success": True,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("successful synchronous run must not dispatch Ralph")
+
+    pipeline = AutoPipeline(
+        driver,
+        _seed_generator_unused,
+        run_starter=SynchronousRunStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.run_handoff_status == "completed"
+    emitted = [event for event in event_store.appended if event.type == "auto.product.emitted"]
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event.aggregate_type == "auto_session"
+    assert event.aggregate_id == state.auto_session_id
+    assert event.data["auto_session_id"] == state.auto_session_id
+    assert event.data["seed_id"] == state.seed_id
 
 
 @pytest.mark.asyncio
@@ -1250,6 +1431,56 @@ def _state_in_ralph_handoff(tmp_path) -> AutoPipelineState:
     state.ralph_dispatch_mode = "job"
     state.transition(AutoPhase.RALPH_HANDOFF, "persisted ralph checkpoint")
     return state
+
+
+@pytest.mark.asyncio
+async def test_ralph_reattach_success_emits_auto_product_emitted_event(tmp_path) -> None:
+    """The ralph re-attach success terminal also emits ``auto.product.emitted``
+    (RFC #1256 §I4 / #1254).
+
+    ``_reattach_ralph_job`` resumes after a crash between persisting
+    ``ralph_job_id`` and the original wait finishing: it observes the
+    already-dispatched job's terminal and transitions straight to COMPLETE
+    without ``_evaluate_or_complete``. Without an emit on this branch a
+    re-attached successful complete-product run left the auto session aggregate
+    empty. ``review`` is not in scope on the re-attach observer, so ``grade``
+    resolves to ``None`` while the event still keys to the auto session.
+    """
+    state = _state_in_ralph_handoff(tmp_path)
+    event_store = _RecordingEventStore()
+    driver = _StubInterviewDriver()
+    driver.event_store = event_store
+
+    async def ralph_starter(_seed: Seed | None, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs.get("attach_job_id") == state.ralph_job_id
+        return {
+            "job_id": kwargs["attach_job_id"],
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        driver,
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline._reattach_ralph_job(state, ledger=SeedDraftLedger.from_goal(state.goal))
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    emitted = [event for event in event_store.appended if event.type == "auto.product.emitted"]
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event.aggregate_type == "auto_session"
+    assert event.aggregate_id == state.auto_session_id
+    assert event.data["auto_session_id"] == state.auto_session_id
+    assert event.data["grade"] is None
 
 
 @pytest.mark.asyncio
