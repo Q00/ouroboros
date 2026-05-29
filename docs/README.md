@@ -55,6 +55,7 @@ replayable execution contract on your choice of runtime backend.
 - [Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md) - Locked vocabulary for `AgentRuntimeContext`, `ControlPlane`, `ControlContract`, `Directive`, `ControlBus`, and `IOJournal`
 - [ControlContract](./contributing/control-contract.md) - Control-plane schema, terminality, replay, and idempotency invariants
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
+- [Verifier Evidence Policy](./contributing/verifier-evidence-policy.md) - Core verifier boundary: avoid runner-specific parsers, classify evidence-form mismatches, and preserve anti-fabrication semantics
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
 - [Issue Quality Policy](./contributing/issue-quality-policy.md) - Quality bar for actionable issues and PRD-lite feature requests
