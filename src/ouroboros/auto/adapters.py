@@ -467,13 +467,15 @@ class HandlerRalphStarter:
             )
             terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
             stop_reason = _optional_str(terminal_meta.get("stop_reason"))
-            return {
+            reattach_result: dict[str, Any] = {
                 "job_id": existing_job_id,
                 "lineage_id": lineage_id,
                 "dispatch_mode": "job",
                 "terminal_status": terminal_status,
                 "stop_reason": stop_reason,
             }
+            _forward_checkpoint_meta(reattach_result, terminal_meta)
+            return reattach_result
 
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
@@ -606,6 +608,7 @@ class HandlerRalphStarter:
             # ``_optional_str`` would collapse the empty string to None and
             # silently skip EVALUATE.
             terminal_result["result_text"] = artifact_text
+        _forward_checkpoint_meta(terminal_result, terminal_meta)
         return terminal_result
 
 
@@ -670,6 +673,7 @@ class HandlerRalphPoller:
             # VALID graded artifact, so use ``_artifact_text`` rather than
             # ``_optional_str``.
             result["result_text"] = artifact_text
+        _forward_checkpoint_meta(result, terminal_meta)
         return result
 
 
@@ -1163,6 +1167,34 @@ def _current_generation_from_meta(meta: dict[str, Any]) -> int | None:
     if generations_generation is not None:
         return generations_generation
     return _optional_int(meta.get("iterations"))
+
+
+def _forward_checkpoint_meta(target: dict[str, Any], terminal_meta: dict[str, Any]) -> None:
+    """Copy AC checkpoint metadata from a terminal Ralph job snapshot.
+
+    ``RalphLoopResult.to_tool_result`` surfaces ``checkpoint_commits`` /
+    ``checkpoint_attempted_ac_ids`` in the job ``result_meta`` that
+    :func:`_wait_for_job_terminal` returns. The job-mode adapters rebuild a
+    *structured* terminal dict (rather than passing ``terminal_meta`` through
+    verbatim) and so must explicitly preserve these two lists, otherwise
+    :meth:`AutoPipeline._handoff_to_ralph` — which reads them off the returned
+    ``ralph_meta`` — never persists the durable commit list or the
+    retry-idempotency attempt set onto ``AutoPipelineState``. Dropping them
+    diverges the auto state from git side effects already performed inside the
+    managed worktree and makes a later resume re-attempt already-committed ACs
+    (Q00/ouroboros#1281 review ``req_1780029496_276``).
+
+    Only forwards a key when the snapshot actually carries a list for it, so
+    callers whose terminal metadata has no checkpoint fields keep their exact
+    prior shape. Entries are type-filtered to mirror the ``AutoPipelineState``
+    invariants (commits are objects, attempted AC ids are strings).
+    """
+    commits = terminal_meta.get("checkpoint_commits")
+    if isinstance(commits, list):
+        target["checkpoint_commits"] = [item for item in commits if isinstance(item, dict)]
+    attempts = terminal_meta.get("checkpoint_attempted_ac_ids")
+    if isinstance(attempts, list):
+        target["checkpoint_attempted_ac_ids"] = [item for item in attempts if isinstance(item, str)]
 
 
 def _artifact_text(value: object) -> str | None:
