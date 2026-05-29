@@ -15,21 +15,6 @@ from ouroboros.persistence.event_store import EventStore
 runner = CliRunner()
 
 
-def _recent_event_timestamp(minutes_ago: int = 5) -> datetime:
-    """Anchor persisted job event timestamps within ``_JOB_TTL`` (1 hour).
-
-    ``is_terminal_job_expired`` compares a job's terminal event timestamp
-    against ``datetime.now(UTC)``, so a hardcoded calendar date is a silent
-    time-bomb: once wall-clock drifts past ``timestamp + _JOB_TTL`` the job is
-    reported as expired and these result-retrieval docs/API checks flake (they
-    pass only on the same day they were authored). Deriving the anchor from
-    ``now`` keeps the "freshly terminal" fixtures stable regardless of when CI
-    runs. The dedicated expiry test (below) keeps using an explicit
-    ``now - 2h`` anchor to assert the expired path.
-    """
-    return datetime.now(UTC) - timedelta(minutes=minutes_ago)
-
-
 def test_cli_docs_describe_detached_auto_as_tracked_non_terminal_background_work() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
     compact = " ".join(docs.split())
@@ -145,7 +130,11 @@ def test_cli_docs_api_check_verifies_completed_detached_auto_result_output(
     job_id = "job_auto_docs_done"
     auto_session_id = "auto_docs_done"
     result_text = "detached auto result artifact: seed.yaml"
-    timestamp = _recent_event_timestamp()
+    # Anchor the persisted job within the 1h terminal-retention TTL relative to
+    # "now" rather than a fixed calendar date: a hardcoded timestamp silently
+    # crosses the TTL once the wall clock advances past it + ``_JOB_TTL``,
+    # turning a fresh completed handle into a spurious "Job handle expired".
+    timestamp = datetime.now(UTC) - timedelta(minutes=1)
 
     async def _persist_completed_auto_job() -> None:
         store = EventStore(db_url)
@@ -253,7 +242,9 @@ def test_mcp_docs_api_check_verifies_completed_detached_auto_result_response(
     auto_session_id = "auto_docs_done"
     result_text = "detached auto result artifact: seed.yaml"
     artifact_uri = "file:///tmp/detached-auto-result.json"
-    timestamp = _recent_event_timestamp()
+    # Relative to "now" so the handle stays inside the 1h retention TTL on any
+    # run date (see the completed-CLI variant above).
+    timestamp = datetime.now(UTC) - timedelta(minutes=1)
 
     async def _persist_completed_auto_job_and_fetch_result():
         store = EventStore(db_url)
@@ -490,7 +481,9 @@ def test_mcp_docs_api_check_verifies_failed_detached_auto_result_response(
     failure_text = "detached auto failed: seed repair budget exhausted"
     success_text = "detached auto result artifact: seed.yaml"
     source_error = "seed repair budget exhausted"
-    timestamp = _recent_event_timestamp()
+    # Relative to "now" so the failed handle stays inside the 1h retention TTL
+    # on any run date (a fixed date silently expires once now > date + _JOB_TTL).
+    timestamp = datetime.now(UTC) - timedelta(minutes=1)
 
     async def _persist_failed_auto_job_and_fetch_result():
         store = EventStore(db_url)
@@ -653,7 +646,9 @@ def test_mcp_docs_api_check_verifies_cancelled_detached_auto_result_response(
     cancellation_text = "detached auto cancelled: user requested cancellation"
     success_text = "detached auto result artifact: seed.yaml"
     source_error = "user requested cancellation"
-    timestamp = _recent_event_timestamp()
+    # Relative to "now" so the cancelled handle stays inside the 1h retention
+    # TTL on any run date (a fixed date silently expires once now > date + TTL).
+    timestamp = datetime.now(UTC) - timedelta(minutes=1)
 
     async def _persist_cancelled_auto_job_and_fetch_result():
         store = EventStore(db_url)

@@ -564,6 +564,71 @@ async def test_synchronous_complete_product_success_emits_auto_product_emitted_e
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("remaining_budget", "expected_per_iteration"),
+    [
+        # Budget far above the standalone 1800s default must NOT be capped at
+        # 1800 — this is the cli-todo live R2 regression: gen-1 ran
+        # implementation + evolve verification in one ``evolve_step`` and was
+        # cancelled at 1800s with ~5400s of pipeline budget still left.
+        (6000.0, 6000.0),
+        # Budget above the Ralph-supported maximum is ceilinged at the max.
+        (9000.0, 7200.0),
+        # Budget below the standalone default tracks the budget unchanged
+        # (the original lower-bound behaviour the cap was introduced for).
+        (600.0, 600.0),
+    ],
+)
+async def test_ralph_per_iteration_timeout_tracks_pipeline_budget(
+    tmp_path, remaining_budget: float, expected_per_iteration: float
+) -> None:
+    """``complete_product`` Ralph handoff sizes ``per_iteration_timeout_seconds``
+    to the remaining pipeline budget (capped at the Ralph max, floored at the
+    Ralph min), not the standalone 1800s default. ``max_total_seconds`` still
+    bounds the whole loop, so a single long gen-1 iteration is no longer killed
+    while pipeline budget remains.
+    """
+    state = _state_at_run_phase(tmp_path)
+    # Override the armed deadline so ``remaining`` is deterministic. ``deadline_at``
+    # is a monotonic-clock value (see ``AutoPipelineState.arm_deadline``).
+    state.deadline_at = time.monotonic() + remaining_budget
+
+    captured: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        captured["kwargs"] = kwargs
+        return {
+            "job_id": "job_ralph_budget",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    per_iteration = captured["kwargs"]["per_iteration_timeout_seconds"]
+    max_total = captured["kwargs"]["max_total_seconds"]
+    # A few milliseconds elapse between arming the deadline above and the
+    # pipeline reading ``remaining``, so allow a small tolerance.
+    assert per_iteration == pytest.approx(expected_per_iteration, abs=5.0)
+    # Never above the Ralph-supported maximum, and never above the whole-loop
+    # budget that ``max_total_seconds`` enforces.
+    assert per_iteration <= pipeline_module._MAX_RALPH_PER_ITERATION_SECONDS
+    assert per_iteration <= max_total + 5.0
+
+
+@pytest.mark.asyncio
 async def test_ralph_job_id_persisted_while_starter_waits_for_terminal(tmp_path) -> None:
     state = _state_at_run_phase(tmp_path)
     store = AutoStore(tmp_path)
@@ -1153,17 +1218,21 @@ async def test_ralph_handoff_caps_per_iteration_at_remaining_budget(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_ralph_handoff_uses_default_per_iteration_with_ample_budget(tmp_path) -> None:
-    """When remaining budget exceeds the Ralph default, no tighter cap is forwarded.
+async def test_ralph_handoff_per_iteration_tracks_budget_with_ample_budget(tmp_path) -> None:
+    """With ample budget the per-iteration timeout tracks the budget, NOT the 1800s default.
 
-    Pinning the upper bound prevents accidental over-tightening for the
-    common case (2h default deadline, RUN reached early with hours of
-    budget left): the bot's contract is to honor the deadline, not to
-    aggressively shrink the per-iteration budget below the established
-    1800s default.
+    Historical note: an earlier revision pinned this at the standalone 1800s
+    default (``== 1800.0``) on the theory that the per-iteration budget should
+    not exceed the established default. The cli-todo live R2 run disproved that
+    for the ``complete_product`` path — gen-1 runs implementation + evolve
+    verification in a single ``evolve_step`` and was cancelled at 1800s with
+    ~5400s of pipeline budget still remaining (``failed/iteration_timeout``
+    despite a working product on disk). The corrected contract: size
+    per-iteration to the remaining budget, ceilinged at the Ralph-supported
+    maximum (7200s), with ``max_total_seconds`` bounding the whole loop.
     """
     state = _state_at_run_phase(tmp_path)
-    # Two hours remaining — well above the 1800s default.
+    # Two hours remaining — well above the 1800s standalone default.
     state.deadline_at = time.monotonic() + 7200.0
     state.deadline_at_epoch = time.time() + 7200.0
 
@@ -1191,9 +1260,15 @@ async def test_ralph_handoff_uses_default_per_iteration_with_ample_budget(tmp_pa
     await pipeline.run(state)
 
     forwarded = captured["kwargs"]
-    # Remaining is much greater than 1800s, so the cap saturates at the
-    # Ralph default — never above it.
-    assert forwarded["per_iteration_timeout_seconds"] == 1800.0
+    # The fix: the per-iteration budget is NOT shrunk to the standalone 1800s
+    # default; it tracks the remaining budget (≈7200s here), ceilinged at the
+    # Ralph-supported maximum.
+    assert forwarded["per_iteration_timeout_seconds"] > 1800.0
+    assert forwarded["per_iteration_timeout_seconds"] == pytest.approx(7200.0, abs=5.0)
+    assert (
+        forwarded["per_iteration_timeout_seconds"]
+        <= pipeline_module._MAX_RALPH_PER_ITERATION_SECONDS
+    )
 
 
 @pytest.mark.asyncio
