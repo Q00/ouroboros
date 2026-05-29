@@ -722,6 +722,56 @@ def _runtime_messages_have_masked_test_command_form(
     return False
 
 
+def _runtime_messages_have_masked_test_command_for_test_claim(
+    *,
+    value: str,
+    messages: tuple[AgentMessage, ...],
+    task_cwd: str | None,
+) -> bool:
+    """Return True when a rejected test claim depends on masked test output.
+
+    This is diagnostic only. It lets the verifier classify a dependent
+    ``tests_passed`` failure with the same evidence-form mismatch as the
+    rejected ``commands_run`` claim, while still refusing to accept the masked
+    command as proof.
+    """
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash":
+            continue
+        masked_invocations: list[str] = []
+        for runtime_command in _runtime_message_command_values(message):
+            if not _has_trailing_output_filter_pipeline(runtime_command):
+                continue
+            runtime_invocation = _test_command_invocation_allowing_output_plumbing(runtime_command)
+            if runtime_invocation is not None:
+                masked_invocations.append(runtime_invocation)
+        if not masked_invocations:
+            continue
+
+        chunk = [message]
+        for following in messages[index + 1 :]:
+            if following.tool_name and not _is_tool_result_message(following):
+                break
+            chunk.append(following)
+        if not any(_message_contains_test_success(item) for item in chunk):
+            continue
+        chunk_text = "\n".join(_runtime_message_search_text(item) for item in chunk)
+        chunk_test_proof_text = "\n".join(_runtime_message_test_proof_text(item) for item in chunk)
+        if any(
+            _test_command_targets_claim(
+                command=command,
+                claim=value,
+                chunk_text=chunk_text,
+                chunk_test_proof_text=chunk_test_proof_text,
+                messages=messages,
+                task_cwd=task_cwd,
+            )
+            for command in masked_invocations
+        ):
+            return True
+    return False
+
+
 def _runtime_messages_support_file_claim(
     value: str,
     messages: tuple[AgentMessage, ...],
@@ -5910,6 +5960,14 @@ Files present:
                         messages=support_messages,
                         task_cwd=self._task_cwd or self._adapter.working_directory,
                     ):
+                        continue
+                    if _runtime_messages_have_masked_test_command_for_test_claim(
+                        value=value,
+                        messages=support_messages,
+                        task_cwd=self._task_cwd or self._adapter.working_directory,
+                    ):
+                        evidence_form_mismatches.append(f"{field_name}: {value}")
+                        unsupported.append(f"{field_name}: {value}")
                         continue
                     unsupported.append(f"{field_name}: {value}")
                     continue

@@ -1231,6 +1231,70 @@ def test_atomic_verifier_classifies_masked_test_command_as_form_mismatch() -> No
     assert "unprotected output-filter pipeline" in " ".join(verdict.reasons)
 
 
+def test_atomic_verifier_classifies_dependent_masked_test_evidence_as_form_mismatch(
+    tmp_path,
+) -> None:
+    """Full code evidence with masked test output is one evidence-form mismatch."""
+    source_file = tmp_path / "src" / "app.py"
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory=str(tmp_path)),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="Edit src/app.py",
+                tool_name="Edit",
+                data={"tool_input": {"file_path": str(source_file)}},
+            ),
+            AgentMessage(
+                type="tool",
+                content="Bash command started",
+                tool_name="Bash",
+                data={
+                    "tool_input": {
+                        "command": (
+                            './gradlew test --tests "com.example.app.unit.SomeNewTest" '
+                            "-i 2>&1 | tail -100"
+                        )
+                    }
+                },
+            ),
+            AgentMessage(
+                type="tool_result",
+                content="> Task :test\nBUILD SUCCESSFUL in 8s",
+                tool_name=None,
+                data={
+                    "subtype": "tool_result",
+                    "output": "> Task :test\nBUILD SUCCESSFUL in 8s",
+                },
+            ),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["src/app.py"],
+                "commands_run": ["./gradlew test --tests com.example.app.unit.SomeNewTest -i"],
+                "tests_passed": ["com.example.app.unit.SomeNewTest"],
+            }
+        ),
+        ac_content="Update app.py and run SomeNewTest.",
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "EVIDENCE_FORM_MISMATCH"
+    assert (
+        "commands_run: ./gradlew test --tests com.example.app.unit.SomeNewTest -i"
+        in (verdict.reasons[0])
+    )
+    assert "tests_passed: com.example.app.unit.SomeNewTest" in verdict.reasons[0]
+
+
 @pytest.mark.parametrize(
     ("runtime_command", "claimed_command"),
     (
