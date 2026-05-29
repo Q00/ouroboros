@@ -2143,6 +2143,52 @@ def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | No
     return None
 
 
+_DEPLOYMENT_AUTHORITY_REASON = "deployment target requires human authority"
+
+
+def _is_safe_implementation_choice_question(lowered: str) -> bool:
+    """True for questions about implementation substrate or project placement.
+
+    Choosing a programming language / runtime / framework, or deciding between a
+    greenfield project and an existing repository (where the code should "live"),
+    are safe-defaultable engineering decisions — never external-authority actions.
+
+    Motivating false positive (#1170 canonical cli-todo R3): the question
+    "What programming language and runtime should this CLI be built in ... and is
+    there an existing project or repository this tool should live inside, or will
+    it be a standalone greenfield project?" matched the deployment pattern because
+    the verb "live" ("where should it live") collided with the deployment-sense
+    "live" token and "project" matched the deployment-target noun group. The
+    session terminated as BLOCKED("deployment target requires human authority")
+    instead of safe-defaulting to greenfield, breaking the product-or-die path.
+
+    This predicate intentionally governs **only** suppression of the deployment
+    false positive (see `_blocker_for`): it can never shadow credential, payment,
+    legal, medical, or destructive blockers, so it does not need to mirror their
+    vocabularies. The single negative check below keeps a *genuine* deployment
+    question (which also names a language/runtime) blocked.
+    """
+    # A genuine deployment-sense signal means this is a real deployment-target
+    # question, not the benign "where should the code live" collision → do not
+    # suppress the deployment blocker.
+    if re.search(
+        r"\b(deploy|deployment|release|publish|production|prod|hosting|host)\b",
+        lowered,
+    ):
+        return False
+    return _matches_any(
+        lowered,
+        (
+            r"\b(which|what)\b.+\b(programming language|language|runtime|"
+            r"framework|frameworks|libraries|library|tech stack|stack)\b",
+            r"\b(greenfield|standalone)\b.+\bproject\b",
+            r"\b(existing|new)\b.+\b(project|repo|repository|codebase)\b.+"
+            r"\b(live|reside|inside|within|build|built|placed|located)\b",
+            r"\bwhere\b.+\b(should|will|does|to)\b.+\b(live|reside|placed|located)\b",
+        ),
+    )
+
+
 def _blocker_for(question: str) -> AutoBlocker | None:
     lowered = question.lower()
     if _is_safe_product_branch_question(lowered) or _is_safe_product_sensitive_question(lowered):
@@ -2199,15 +2245,15 @@ def _blocker_for(question: str) -> AutoBlocker | None:
         ),
         (
             r"\b(should|can|may|will|do we|should we)\b.+\b(deploy|release|publish)\b.+\b(to|against|on)\s+\b(production|prod|live|external)\b",
-            "deployment target requires human authority",
+            _DEPLOYMENT_AUTHORITY_REASON,
         ),
         (
             r"\b(which|what|choose|select|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(environment|target|account|project|cluster|region)\b",
-            "deployment target requires human authority",
+            _DEPLOYMENT_AUTHORITY_REASON,
         ),
         (
             r"\b(which|what|choose|select|use|configure|set)\b.+\b(environment|target|account|project|cluster|region)\b.+\b(deploy|release|publish)\b.+\b(production|prod|live|external)\b",
-            "deployment target requires human authority",
+            _DEPLOYMENT_AUTHORITY_REASON,
         ),
         (
             r"\b(provide|enter|paste|supply|use|configure|set)\b.+\b(production|prod|live|external)\b.+\b(credential|secret|api key)\b",
@@ -2226,7 +2272,16 @@ def _blocker_for(question: str) -> AutoBlocker | None:
             "credential or secret value required",
         ),
     )
+    safe_implementation_choice = _is_safe_implementation_choice_question(lowered)
     for pattern, reason in external_action_patterns:
         if re.search(pattern, lowered):
+            # The implementation-choice guard may suppress ONLY the deployment
+            # false positive (the verb-"live" / "project" collision, #1170 R3).
+            # It is structurally incapable of shadowing credential, payment,
+            # legal, medical, or destructive blockers, so it never needs to mirror
+            # their vocabularies (#1295 review: a parallel negative list was
+            # brittle and missed plural credential forms).
+            if safe_implementation_choice and reason == _DEPLOYMENT_AUTHORITY_REASON:
+                continue
             return AutoBlocker(reason=reason, question=question)
     return None

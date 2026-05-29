@@ -564,6 +564,89 @@ def test_auto_answerer_blocks_contextual_human_authority_questions() -> None:
         assert answer.source == AutoAnswerSource.BLOCKER
 
 
+def test_auto_answerer_allows_implementation_choice_questions() -> None:
+    """Language / runtime / framework choice and greenfield-vs-existing-repo
+    placement are safe-defaultable engineering decisions and must not block.
+
+    Regression for #1170 canonical cli-todo R3: the auto interview terminated as
+    BLOCKED("deployment target requires human authority") because the verb "live"
+    in "...this tool should live inside..." collided with the deployment-sense
+    "live" token (and "project" matched the deployment-target noun group),
+    halting the product-or-die path instead of safe-defaulting to greenfield.
+    """
+    answerer = AutoAnswerer()
+    safe_questions = (
+        # The exact R3 question, verbatim (em dashes included).
+        (
+            "What programming language and runtime should this CLI be built in — "
+            "for example, Python with the standard library, Node.js, or something "
+            "else — and is there an existing project or repository this tool should "
+            "live inside, or will it be a standalone greenfield project?"
+        ),
+        "What programming language should this tool be built in?",
+        "Which framework and runtime should we use?",
+        "Should this be a standalone greenfield project or live inside an existing repo?",
+        "Where should the new module live in the codebase?",
+    )
+    for question in safe_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a habit-tracker CLI"))
+        assert answer.blocker is None, f"unexpected blocker for: {question!r}"
+        assert answer.source != AutoAnswerSource.BLOCKER
+
+
+def test_implementation_choice_guard_does_not_weaken_deployment_blocking() -> None:
+    """The implementation-choice guard must keep genuine deployment / production
+    authority questions blocked (the verb-"live" fix is deliberately narrow)."""
+    answerer = AutoAnswerer()
+    blocking_questions = (
+        "Which production environment should we deploy the CLI to?",
+        "Which production cluster and region should we deploy to?",
+        "Should we deploy to production or live?",
+        # The deployment-sense negative check must stay load-bearing: a genuine
+        # deployment question that *also* names a language/runtime (so it matches a
+        # positive implementation-choice pattern) must still block — otherwise the
+        # guard would suppress the deployment authority gate.
+        "Which language should we use, and which production cluster should we deploy to?",
+        "What runtime and which production environment should we deploy to?",
+    )
+    for question in blocking_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
+        assert answer.blocker is not None, f"expected blocker for: {question!r}"
+        assert answer.source == AutoAnswerSource.BLOCKER
+
+
+def test_implementation_choice_guard_defers_to_other_authority_blockers() -> None:
+    """The implementation-choice guard must not short-circuit *any* genuine
+    external-authority blocker when the prompt merely also carries
+    language/runtime/framework wording.
+
+    Regression for the #1295 review blocker: the guard's negative-signal check
+    originally excluded only deployment/credential/payment terms, so a destructive
+    operation phrased as an implementation choice — e.g. "what language should the
+    cleanup script use to remove the database?" — bypassed the destructive-operation
+    blocker and returned a conservative default with no blocker. The guard now
+    defers whenever any external-action signal (destructive / credential / payment /
+    legal / medical) is present, so these still block."""
+    answerer = AutoAnswerer()
+    blocking_questions = (
+        # Destructive operation wrapped in a language/runtime/framework choice.
+        "What language should the cleanup script use to remove the database?",
+        "What runtime should the tool use to delete the prod branch?",
+        "Which framework should we use to wipe the production database?",
+        "Which programming language should the migration use to drop the db?",
+        # Credential authority — singular and plural forms, with CI/workflow/env
+        # context — must all stay blocked even when phrased as a language choice.
+        "Which language should we use to enter the production api key value?",
+        "Which language should we use to configure API keys value?",
+        "Which framework should we use to configure passwords in CI?",
+        "What runtime should we use to set the api keys in the workflow?",
+    )
+    for question in blocking_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        assert answer.blocker is not None, f"expected blocker for: {question!r}"
+        assert answer.source == AutoAnswerSource.BLOCKER
+
+
 def test_blank_goal_remains_open_gap() -> None:
     ledger = SeedDraftLedger.from_goal("   ")
     _fill_minimal_ready_ledger(ledger)
