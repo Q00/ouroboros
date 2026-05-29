@@ -1980,6 +1980,46 @@ class AutoPipeline:
         self._save(state)
         return self._result(state, ledger, review=review)
 
+    async def _emit_product_emitted_terminal(
+        self,
+        state: AutoPipelineState,
+        *,
+        review: SeedReview | None,
+        stop_reason: str | None,
+        resumed: bool = False,
+    ) -> None:
+        """Emit a typed ``auto.product.emitted`` at a complete-product success terminal.
+
+        RFC #1256 §I4 (#1254). Symmetric to
+        :meth:`_emit_partial_product_terminal`'s ``auto.product.partial_emitted``
+        on the degraded path. Shared by *both* complete-product success
+        terminals so a successful run always leaves at least one queryable
+        terminal event under ``ouroboros_query_events(auto_session_id)``
+        instead of the auto session aggregate being empty on success:
+
+        * the direct ralph-completed path in :meth:`_evaluate_or_complete`
+          (no evaluator wired, or plugin mode), and
+        * the evaluator-pass path in :meth:`_finalize_evaluate` — the branch
+          MCP wires for normal non-plugin complete-product runs, which
+          previously transitioned to COMPLETE with no terminal event.
+
+        Awaited inline via the same fail-open :meth:`_emit_runtime_event`, so a
+        slow/absent EventStore never converts a successful COMPLETE into a
+        BLOCKED. The two terminals are mutually exclusive for a single run, so
+        a complete-product success emits exactly one ``auto.product.emitted``.
+        """
+        await self._emit_runtime_event(
+            "auto.product.emitted",
+            state.auto_session_id,
+            {
+                "auto_session_id": state.auto_session_id,
+                "seed_id": state.seed_id,
+                "grade": (review.grade_result.grade.value if review is not None else None),
+                "stop_reason": stop_reason,
+                "resumed": resumed,
+            },
+        )
+
     async def _emit_runtime_event(
         self,
         event_type: str,
@@ -2388,24 +2428,16 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
             )
         message_prefix = "resumed ralph loop completed" if resumed else "ralph loop completed"
-        # RFC #1256 §I4 (#1254, first success-terminal slice): emit a typed
-        # ``auto.product.emitted`` keyed to the auto session — symmetric to the
-        # existing ``auto.product.partial_emitted`` on the degraded path — so a
-        # successful complete-product run leaves at least one queryable terminal
-        # event under ``ouroboros_query_events(auto_session_id)`` instead of the
-        # auto session aggregate being empty on success. Awaited inline via the
-        # same fail-open path, so a slow/absent EventStore never converts a
-        # successful COMPLETE into a BLOCKED.
-        await self._emit_runtime_event(
-            "auto.product.emitted",
-            state.auto_session_id,
-            {
-                "auto_session_id": state.auto_session_id,
-                "seed_id": seed.metadata.seed_id,
-                "grade": (review.grade_result.grade.value if review is not None else None),
-                "stop_reason": stop_reason,
-                "resumed": resumed,
-            },
+        # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted`` terminal
+        # for the direct ralph-completed success path (no evaluator wired, or
+        # plugin mode). The evaluator-pass path emits the same event from
+        # :meth:`_finalize_evaluate`; both share
+        # :meth:`_emit_product_emitted_terminal`.
+        await self._emit_product_emitted_terminal(
+            state,
+            review=review,
+            stop_reason=stop_reason,
+            resumed=resumed,
         )
         state.transition(
             AutoPhase.COMPLETE,
@@ -2807,6 +2839,16 @@ class AutoPipeline:
                 return self._result(
                     state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
                 )
+            # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted``
+            # terminal for the evaluator-pass success path — the branch MCP
+            # wires for normal non-plugin complete-product runs. Without this,
+            # the production path transitioned to COMPLETE with no queryable
+            # terminal event (ouroboros-agent[bot] req_1780070213_316 blocker).
+            await self._emit_product_emitted_terminal(
+                state,
+                review=review,
+                stop_reason=stop_reason,
+            )
             state.transition(
                 AutoPhase.COMPLETE,
                 f"evaluator passed: {verdict} (score {score:.2f}){cache_suffix}"

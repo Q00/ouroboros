@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from ouroboros.auto import pipeline as pipeline_module
+from ouroboros.auto.adapters import EvaluateResult
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import (
@@ -430,6 +431,63 @@ async def test_ralph_completed_emits_auto_product_emitted_event(tmp_path) -> Non
     result = await pipeline.run(state)
 
     assert result.status == "complete"
+    emitted = [event for event in event_store.appended if event.type == "auto.product.emitted"]
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event.aggregate_type == "auto_session"
+    assert event.aggregate_id == state.auto_session_id
+    assert event.data["auto_session_id"] == state.auto_session_id
+    assert event.data["seed_id"] == state.seed_id
+
+
+@pytest.mark.asyncio
+async def test_evaluator_pass_emits_auto_product_emitted_event(tmp_path) -> None:
+    """The evaluator-pass success terminal also emits ``auto.product.emitted``
+    (RFC #1256 §I4 / #1254; ouroboros-agent[bot] req_1780070213_316 blocker).
+
+    MCP wires ``HandlerEvaluator`` for normal non-plugin complete-product runs,
+    so Ralph's ``result_text`` routes ``_evaluate_or_complete`` through
+    ``_run_evaluate`` → ``_finalize_evaluate`` rather than the direct
+    ralph-completed terminal. This production success branch previously
+    transitioned to COMPLETE with no queryable terminal event, leaving the auto
+    session aggregate empty on success — the exact gap this PR closes. Both
+    success terminals share ``_emit_product_emitted_terminal`` and are mutually
+    exclusive, so a complete-product success emits exactly one event.
+    """
+    state = _state_at_run_phase(tmp_path)
+    event_store = _RecordingEventStore()
+    driver = _StubInterviewDriver()
+    driver.event_store = event_store
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "job_id": "job_ralph_eval_emit",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+            # result_text present → routes through the evaluator path, not the
+            # direct ralph-completed terminal.
+            "result_text": "stdout: ok\nexit_code: 0",
+        }
+
+    async def evaluator(_seed: Seed, _artifact: str) -> EvaluateResult:
+        return EvaluateResult(passed=True, score=0.95, verdict="pass")
+
+    pipeline = AutoPipeline(
+        driver,
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+        evaluator=evaluator,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
     emitted = [event for event in event_store.appended if event.type == "auto.product.emitted"]
     assert len(emitted) == 1
     event = emitted[0]
