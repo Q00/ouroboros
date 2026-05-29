@@ -213,15 +213,28 @@ _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 # dispatch so an insufficient top-level pipeline budget remains a pipeline
 # timeout, not a Ralph argument-validation failure.
 _MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
-# Mirrors RalphHandler.MIN_PER_ITERATION_TIMEOUT_SECONDS / DEFAULT_PER_ITERATION_TIMEOUT_SECONDS.
-# When the remaining pipeline budget is shorter than the Ralph default
-# per-iteration timeout, the auto layer caps ``per_iteration_timeout_seconds``
-# so a single ``evolve_step`` cannot block past ``deadline_at``. RalphLoopRunner
-# only checks ``max_total_seconds`` at iteration boundaries, so without this cap
-# the first iteration could still run for the full default 1800s — violating
-# the top-level pipeline deadline contract pinned by Q00/ouroboros#779.
+# Mirrors RalphHandler per-iteration bounds
+# (MIN_/MAX_PER_ITERATION_TIMEOUT_SECONDS). The auto layer sizes
+# ``per_iteration_timeout_seconds`` to the *remaining pipeline budget* so a
+# single ``evolve_step`` cannot block past ``deadline_at`` (Q00/ouroboros#779)
+# — RalphLoopRunner only checks ``max_total_seconds`` at iteration boundaries,
+# so without an upper bound the iteration could overshoot the deadline.
+#
+# It must NOT, however, cap below that budget. A ``complete_product`` gen-1
+# iteration legitimately runs both the implementation pass and the evolve
+# verification pass in one ``evolve_step``; the standalone Ralph default
+# (1800s) is far too small for that and was observed killing a
+# still-progressing iteration with ~5400s of pipeline budget left (cli-todo
+# live R2: 14/14 ACs complete, then cancelled at 1800s -> failed/iteration_timeout
+# despite the working product on disk). The ceiling is therefore the
+# Ralph-supported maximum, not the standalone default; ``max_total_seconds``
+# still bounds the whole loop.
 _MIN_RALPH_PER_ITERATION_SECONDS = 30.0
+# Standalone Ralph default — kept for parity with RalphHandler, but NOT used as
+# the auto-path per-iteration ceiling (see ``_MAX_RALPH_PER_ITERATION_SECONDS``).
 _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
+# Mirrors RalphHandler.MAX_PER_ITERATION_TIMEOUT_SECONDS.
+_MAX_RALPH_PER_ITERATION_SECONDS = 7200.0
 
 # Q00/ouroboros#782 review-12 BLOCKING #1: when the top-level deadline has
 # already expired but a persisted Ralph job awaits reconciliation, give the
@@ -2108,21 +2121,25 @@ class AutoPipeline:
                     run_subagent=run_subagent,
                 )
             max_total_seconds = remaining
-            # Cap per-iteration so a single ``evolve_step`` cannot block past
-            # the remaining deadline. ``RalphLoopRunner`` checks
-            # ``max_total_seconds`` only at the top of each iteration, so
-            # without this cap the first iteration could still run for the
-            # full default 1800s after the deadline expired. Floored at the
+            # Size per-iteration to the remaining pipeline budget so a single
+            # ``evolve_step`` cannot block past ``deadline_at`` while ALSO not
+            # being capped below that budget. ``RalphLoopRunner`` checks
+            # ``max_total_seconds`` only at iteration boundaries, so the upper
+            # bound here is what stops a single iteration from overshooting the
+            # deadline. The ceiling is the Ralph-supported maximum (7200s), NOT
+            # the standalone default (1800s): a ``complete_product`` gen-1
+            # iteration does implementation + evolve verification in one step
+            # and the 1800s default was killing it mid-verification with
+            # pipeline budget still remaining (cli-todo live R2). Floored at the
             # Ralph minimum (30s) — when the remaining budget is itself below
-            # that floor we still cap at 30s rather than rejecting at the
-            # auto layer, since the pre-dispatch ``MIN_RALPH_MAX_TOTAL_SECONDS``
-            # check already protects against a sub-second budget. The
-            # ``max_total_seconds`` cap then aborts the loop before any
-            # follow-up iteration starts, so the worst-case overshoot is one
-            # iteration of up to 30 seconds.
+            # that floor we still cap at 30s rather than rejecting at the auto
+            # layer, since the pre-dispatch ``MIN_RALPH_MAX_TOTAL_SECONDS`` check
+            # already protects against a sub-second budget; ``max_total_seconds``
+            # then aborts the loop before any follow-up iteration starts, so the
+            # worst-case overshoot is one iteration of up to 30 seconds.
             per_iteration_timeout_seconds = max(
                 _MIN_RALPH_PER_ITERATION_SECONDS,
-                min(_DEFAULT_RALPH_PER_ITERATION_SECONDS, remaining),
+                min(_MAX_RALPH_PER_ITERATION_SECONDS, remaining),
             )
 
         ralph_mirror_task: asyncio.Task[None] | None = None
