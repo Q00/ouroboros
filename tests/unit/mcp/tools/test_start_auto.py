@@ -891,6 +891,83 @@ class TestBackgroundJobPath:
         inner.handle.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_mcp_detached_auto_interrupted_result_surfaces_as_error(
+        self, event_store, tmp_path
+    ) -> None:
+        """Interrupted is terminal-and-error; result/status must not report success."""
+        job_manager = JobManager(event_store)
+        store = AutoStore(tmp_path)
+        inner = MagicMock(spec=AutoHandler)
+        inner.handle = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="detached auto interrupted: budget exhausted mid-run",
+                        ),
+                    ),
+                    is_error=True,
+                    meta={
+                        "auto_session_id": "auto_interrupted_result",
+                        "status": "interrupted",
+                        "error": {
+                            "code": "wall_clock_exhausted",
+                            "message": "Interrupted before terminal verdict",
+                        },
+                    },
+                )
+            )
+        )
+        handler = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+        )
+        handler._inner_auto = inner
+
+        started = await handler.handle({"goal": "surface detached auto interruption"})
+
+        assert started.is_ok
+        job_id = started.value.meta["job_id"]
+        wait_handler = JobWaitHandler(event_store=event_store, job_manager=job_manager)
+        status_handler = JobStatusHandler(event_store=event_store, job_manager=job_manager)
+        result_handler = JobResultHandler(event_store=event_store, job_manager=job_manager)
+
+        terminal_wait = None
+        cursor = 0
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while asyncio.get_running_loop().time() < deadline:
+            wait_result = await wait_handler.handle(
+                {"job_id": job_id, "cursor": cursor, "timeout_seconds": 2, "view": "summary"}
+            )
+            assert wait_result.is_ok
+            cursor = wait_result.value.meta["cursor"]
+            if wait_result.value.meta["is_terminal"]:
+                terminal_wait = wait_result.value
+                break
+
+        assert terminal_wait is not None
+        # The regression: an interrupted terminal job must not be reported as success.
+        assert terminal_wait.is_error is True
+        assert terminal_wait.meta["status"] == "interrupted"
+        assert terminal_wait.meta["lifecycle_status"] == "interrupted"
+        assert terminal_wait.meta["status_category"] == "terminal"
+
+        status = await status_handler.handle({"job_id": job_id})
+        assert status.is_ok
+        assert status.value.is_error is True
+        assert status.value.meta["status"] == "interrupted"
+
+        result = await result_handler.handle({"job_id": job_id})
+        assert result.is_ok
+        assert result.value.is_error is True
+        assert result.value.meta["status"] == "interrupted"
+        assert result.value.meta["is_terminal"] is True
+        assert result.value.meta["result_payload"]["is_error"] is True
+        inner.handle.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_mcp_detached_auto_result_invalid_handle_returns_stable_failure(
         self, event_store
     ) -> None:

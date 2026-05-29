@@ -722,6 +722,21 @@ def _job_status_category(snapshot: JobSnapshot) -> str:
     return "terminal" if snapshot.is_terminal else "non_terminal"
 
 
+# Terminal job statuses whose outcome must surface as an error. INTERRUPTED is
+# terminal (see ``JobSnapshot.is_terminal``) and is persisted when a child tool
+# returns ``meta.status="interrupted"`` with ``is_error=True``, so result/status
+# surfaces must treat it as a failed outcome rather than a successful result.
+_TERMINAL_ERROR_STATUSES = frozenset({JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED})
+
+
+def _job_is_error(snapshot: JobSnapshot) -> bool:
+    """Return true when a job's terminal outcome must be presented as an error."""
+    if snapshot.status in _TERMINAL_ERROR_STATUSES:
+        return True
+    payload = snapshot.result_payload
+    return bool(payload.get("is_error")) if isinstance(payload, dict) else False
+
+
 def _job_snapshot_meta(snapshot: JobSnapshot) -> dict[str, Any]:
     """Return stable structured metadata shared by job status APIs."""
     links = {
@@ -807,7 +822,7 @@ class JobStatusHandler:
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
-                is_error=snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED},
+                is_error=_job_is_error(snapshot),
                 meta={
                     **_job_snapshot_meta(snapshot),
                     "view": view,
@@ -1028,7 +1043,7 @@ class JobWaitHandler:
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
-                is_error=snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED},
+                is_error=_job_is_error(snapshot),
                 meta={
                     **_job_snapshot_meta(snapshot),
                     "changed": response_changed,
@@ -1174,7 +1189,7 @@ class JobResultHandler:
         return Result.ok(
             MCPToolResult(
                 content=content,
-                is_error=snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED},
+                is_error=_job_is_error(snapshot),
                 meta={
                     **_job_snapshot_meta(snapshot),
                     **result_payload_meta,
