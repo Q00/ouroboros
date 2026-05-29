@@ -39,7 +39,6 @@ import shlex
 import subprocess
 import time
 from typing import TYPE_CHECKING, Any
-import xml.etree.ElementTree as ET
 
 import anyio
 from rich.console import Console
@@ -693,48 +692,6 @@ def _runtime_messages_support_command_claim(
     return any(_runtime_message_supports_command_claim(value, message) for message in messages)
 
 
-def _runtime_messages_support_masked_test_command_claim(
-    value: str,
-    messages: tuple[AgentMessage, ...],
-    *,
-    task_cwd: str | None,
-) -> bool:
-    """Return True when a masked test command is backed by structured results.
-
-    #1208 intentionally prevents ``./gradlew test ... | tail`` from proving a
-    clean command claim by itself because a right-hand pipeline stage can mask
-    the test process status.  #1234 still needs a way to accept real Gradle /
-    JUnit runs where the transcript later reads a structured result XML.  This
-    helper keeps both constraints: the piped command must be present in Bash
-    input, and a runtime-read JUnit XML result must prove the same target passed.
-    """
-    claim_invocation = _test_command_invocation(value)
-    claim_target = _test_target_from_command(value)
-    if claim_invocation is None or claim_target is None:
-        return False
-    for message in messages:
-        if message.tool_name != "Bash":
-            continue
-        for runtime_command in _runtime_message_command_values(message):
-            if not _has_trailing_output_filter_pipeline(runtime_command):
-                continue
-            runtime_invocation = _test_command_invocation_allowing_output_plumbing(runtime_command)
-            if runtime_invocation is None:
-                continue
-            if not (
-                runtime_invocation == claim_invocation
-                or runtime_invocation.startswith(claim_invocation + " ")
-            ):
-                continue
-            if _runtime_messages_support_structured_test_result(
-                value=claim_target,
-                messages=messages,
-                task_cwd=task_cwd,
-            ):
-                return True
-    return False
-
-
 def _runtime_messages_support_file_claim(
     value: str,
     messages: tuple[AgentMessage, ...],
@@ -979,30 +936,6 @@ def _test_command_invocation(command: str) -> str | None:
     return _test_invocation_from_shell_body(body)
 
 
-def _test_command_invocation_allowing_output_plumbing(command: str) -> str | None:
-    """Return a test invocation after stripping output plumbing unconditionally.
-
-    This is intentionally narrower in usage than :func:`_test_command_invocation`.
-    It is used only after a separate structured result file proves success, so
-    the unprotected pipeline is not itself treated as status proof.
-    """
-    normalized = command.strip().lower()
-    if not normalized:
-        return None
-    direct = _test_invocation_from_prefix(_strip_command_output_plumbing(normalized))
-    if direct is not None:
-        return direct
-    body = _shell_command_body(normalized)
-    if body is None:
-        return None
-    for segment, _pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body):
-        invocation = _test_invocation_from_prefix(_strip_command_output_plumbing(segment))
-        if invocation is not None:
-            return invocation
-        return None
-    return None
-
-
 def _shell_command_body(command: str) -> str | None:
     """Return the ``-c`` body when the command starts with a shell wrapper."""
     try:
@@ -1214,44 +1147,6 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     ):
         return _normalized_evidence_text(" ".join(parts))
     return None
-
-
-def _test_target_from_command(command: str) -> str | None:
-    """Return a named test target embedded in a common test command."""
-    invocation = _test_command_invocation_allowing_output_plumbing(command)
-    candidate = invocation or _normalized_evidence_text(command)
-    try:
-        parts = shlex.split(candidate)
-    except ValueError:
-        parts = candidate.replace('"', "").replace("'", "").split()
-    if not parts:
-        return None
-    for index, part in enumerate(parts):
-        if part == "--tests" and index + 1 < len(parts):
-            return parts[index + 1].strip()
-        if part.startswith("--tests="):
-            return part.split("=", 1)[1].strip()
-        lower = part.lower()
-        if lower.startswith("-dtest=") or lower.startswith("-dtestcase="):
-            return part.split("=", 1)[1].strip()
-        if lower in {"-dtest", "-dtestcase"} and index + 1 < len(parts):
-            return parts[index + 1].strip()
-        if "::" in part and not part.startswith("-"):
-            return part.strip()
-    if len(parts) >= 2 and parts[0] in {"pytest", "py.test"}:
-        for part in parts[1:]:
-            if not part.startswith("-"):
-                return part.strip()
-    if len(parts) >= 4 and parts[:3] == ["uv", "run", "pytest"]:
-        for part in parts[3:]:
-            if not part.startswith("-"):
-                return part.strip()
-    if len(parts) >= 4 and parts[:3] == ["python", "-m", "pytest"]:
-        for part in parts[3:]:
-            if not part.startswith("-"):
-                return part.strip()
-    stripped = command.strip()
-    return stripped if stripped and not any(char.isspace() for char in stripped) else None
 
 
 def _unittest_command_invocation(command: str) -> str | None:
@@ -1528,159 +1423,6 @@ def _runtime_message_test_proof_text(message: AgentMessage) -> str:
     return "\n".join(parts)
 
 
-def _runtime_messages_support_structured_test_result(
-    *,
-    value: str,
-    messages: tuple[AgentMessage, ...],
-    task_cwd: str | None,
-) -> bool:
-    """Return True when a runtime-read JUnit XML report proves a test claim."""
-    target = _test_target_from_command(value) or value.strip()
-    if not target:
-        return False
-    for index, message in enumerate(messages):
-        if message.tool_name != "Bash":
-            continue
-        if not any(
-            _bash_command_reads_test_report(command, task_cwd=task_cwd)
-            for command in _runtime_message_command_values(message)
-        ):
-            continue
-        chunk: list[AgentMessage] = []
-        for following in messages[index + 1 :]:
-            if following.tool_name and not _is_tool_result_message(following):
-                break
-            chunk.append(following)
-        xml_text = "\n".join(_runtime_message_test_proof_text(item) for item in chunk)
-        if _junit_xml_supports_test_target(xml_text, target):
-            return True
-    return False
-
-
-def _bash_command_reads_test_report(command: str, *, task_cwd: str | None) -> bool:
-    """Return True for read-only shell commands over structured test XML."""
-    body = _shell_command_body(command) or command
-    for segment in _segments_after_safe_shell_preamble(body):
-        try:
-            parts = shlex.split(segment)
-        except ValueError:
-            parts = segment.split()
-        if not parts:
-            continue
-        executable = Path(parts[0]).name
-        if executable not in {"cat", "sed", "head", "tail"}:
-            continue
-        for part in parts[1:]:
-            if part.startswith("-"):
-                continue
-            if _path_looks_like_test_report_xml(part, task_cwd=task_cwd):
-                return True
-    return False
-
-
-def _path_looks_like_test_report_xml(path_text: str, *, task_cwd: str | None) -> bool:
-    path_text = path_text.strip()
-    if not path_text.lower().endswith(".xml"):
-        return False
-    candidate = Path(path_text)
-    if candidate.is_absolute() and task_cwd is not None:
-        base = Path(task_cwd).resolve()
-        try:
-            candidate.resolve().relative_to(base)
-        except (OSError, ValueError):
-            return False
-    normalized = candidate.as_posix().lower()
-    return (
-        "/test-results/" in normalized
-        or "/surefire-reports/" in normalized
-        or "/failsafe-reports/" in normalized
-        or Path(normalized).name.startswith("test-")
-    )
-
-
-def _junit_xml_supports_test_target(xml_text: str, target: str) -> bool:
-    """Return True when JUnit XML reports target tests with zero failures."""
-    root = _parse_junit_xml(xml_text)
-    if root is None:
-        return False
-    normalized_target = _normalize_test_target(target)
-    if not normalized_target:
-        return False
-    suites = [
-        element
-        for element in root.iter()
-        if _xml_local_name(element.tag) in {"testsuite", "testsuites"}
-    ]
-    for suite in suites:
-        if _xml_local_name(suite.tag) != "testsuite":
-            continue
-        if not _junit_suite_passed(suite):
-            continue
-        suite_name = _normalize_test_target(suite.attrib.get("name", ""))
-        suite_file = _normalize_test_target(suite.attrib.get("file", ""))
-        if normalized_target in {suite_name, suite_file}:
-            return True
-        for testcase in suite.iter():
-            if _xml_local_name(testcase.tag) != "testcase":
-                continue
-            classname = _normalize_test_target(testcase.attrib.get("classname", ""))
-            name = _normalize_test_target(testcase.attrib.get("name", ""))
-            node_id = _normalize_test_target(
-                f"{testcase.attrib.get('classname', '')}.{testcase.attrib.get('name', '')}"
-            )
-            if normalized_target in {classname, name, node_id}:
-                return True
-    return False
-
-
-def _parse_junit_xml(text: str) -> ET.Element | None:
-    start = min(
-        (index for marker in ("<testsuites", "<testsuite") if (index := text.find(marker)) >= 0),
-        default=-1,
-    )
-    if start < 0:
-        return None
-    snippet = text[start:]
-    suites_end = snippet.find("</testsuites>")
-    suite_end = snippet.find("</testsuite>")
-    candidates = [
-        (index, closing)
-        for index, closing in (
-            (suites_end, "</testsuites>"),
-            (suite_end, "</testsuite>"),
-        )
-        if index >= 0
-    ]
-    if candidates:
-        end, closing = min(candidates, key=lambda item: item[0])
-        snippet = snippet[: end + len(closing)]
-    try:
-        return ET.fromstring(snippet)
-    except ET.ParseError:
-        return None
-
-
-def _junit_suite_passed(suite: ET.Element) -> bool:
-    def int_attr(name: str) -> int:
-        try:
-            return int(float(suite.attrib.get(name, "0")))
-        except ValueError:
-            return 0
-
-    tests = int_attr("tests")
-    failures = int_attr("failures")
-    errors = int_attr("errors")
-    return tests > 0 and failures == 0 and errors == 0
-
-
-def _xml_local_name(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1].lower()
-
-
-def _normalize_test_target(value: str) -> str:
-    return _normalized_evidence_text(value).replace("#", ".").replace("::", ".")
-
-
 def _is_tool_result_message(message: AgentMessage) -> bool:
     """Return True for runtime tool-result messages, including named-tool variants."""
     return message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
@@ -1800,12 +1542,6 @@ def _runtime_messages_support_test_claim(
     needle = value.strip().lower()
     if not needle:
         return False
-    if _runtime_messages_support_structured_test_result(
-        value=value,
-        messages=messages,
-        task_cwd=task_cwd,
-    ):
-        return True
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
@@ -6072,18 +5808,12 @@ Files present:
             )
 
         unsupported: list[str] = []
-        task_cwd = self._task_cwd or self._adapter.working_directory
         backed_commands = tuple(
             command
             for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
             if _runtime_messages_support_command_claim(
                 command,
                 _runtime_support_messages_for_field("commands_run", support_messages),
-            )
-            or _runtime_messages_support_masked_test_command_claim(
-                command,
-                support_messages,
-                task_cwd=task_cwd,
             )
         )
         effective_schema = _effective_evidence_schema_for_ac(self._execution_profile, ac_content)
@@ -6099,14 +5829,7 @@ Files present:
             field_messages = _runtime_support_messages_for_field(field_name, support_messages)
             for value in values:
                 if field_name == "commands_run":
-                    if _runtime_messages_support_command_claim(
-                        value,
-                        field_messages,
-                    ) or _runtime_messages_support_masked_test_command_claim(
-                        value,
-                        support_messages,
-                        task_cwd=task_cwd,
-                    ):
+                    if _runtime_messages_support_command_claim(value, field_messages):
                         continue
                     unsupported.append(f"{field_name}: {value}")
                     continue
@@ -6114,7 +5837,7 @@ Files present:
                     if _runtime_messages_support_file_claim(
                         value,
                         field_messages,
-                        task_cwd=task_cwd,
+                        task_cwd=self._task_cwd or self._adapter.working_directory,
                     ):
                         continue
                     unsupported.append(f"{field_name}: {value}")
@@ -6124,7 +5847,7 @@ Files present:
                         value=value,
                         backed_commands=backed_commands,
                         messages=support_messages,
-                        task_cwd=task_cwd,
+                        task_cwd=self._task_cwd or self._adapter.working_directory,
                     ):
                         continue
                     unsupported.append(f"{field_name}: {value}")
