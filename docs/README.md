@@ -30,6 +30,7 @@ replayable execution contract on your choice of runtime backend.
 - [Configuration Reference](./config-reference.md) - All `config.yaml` options and environment variables
 - [Agent OS Profile Taxonomy](./agentos/profile-taxonomy.md) - Locked 4-slot vocabulary (`runtime_backend`, `stage_runtime`, `llm_profile`, `provider_profile`) for the historically-overloaded "profile" concepts; tiebreaker for #573
 - [AgentOS Release Readiness](./agentos/release-readiness.md) - #961-aligned release gate, verification pack, and open issue triage
+- [AgentOS Issue Sequencing Graph](./agentos/issue-sequencing-graph.md) - Non-normative, dated #961/#1256 snapshot of track sequencing, merged-PR evidence, and recommended work order
 
 ### API Reference
 
