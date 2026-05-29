@@ -2363,11 +2363,11 @@ def test_auto_answerer_allows_qualified_compliance_policy_features() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_assumption_sources_returns_records_for_all_three_assumption_class_sources() -> None:
+def test_assumption_sources_returns_records_for_all_assumption_class_sources() -> None:
     """``assumption_sources()`` must surface ``ASSUMPTION``, ``INFERENCE``,
-    and ``CONSERVATIVE_DEFAULT`` entries with their source tag intact.
-    ``assumptions()`` continues to return only the ``ASSUMPTION`` subset
-    (backwards-compatibility guard)."""
+    ``CONSERVATIVE_DEFAULT``, and ``AUTO_FILL_INFERENCE`` entries with their
+    source tag intact. ``assumptions()`` continues to return only the
+    ``ASSUMPTION`` subset (backwards-compatibility guard)."""
     from ouroboros.auto.ledger import AssumptionRecord
 
     ledger = SeedDraftLedger.from_goal("Build a tiny local CLI")
@@ -2401,6 +2401,16 @@ def test_assumption_sources_returns_records_for_all_three_assumption_class_sourc
             status=LedgerStatus.DEFAULTED,
         ),
     )
+    ledger.add_entry(
+        "inputs",
+        LedgerEntry(
+            key="inputs.auto_fill_inference",
+            value="Inputs are positional command arguments",
+            source=LedgerSource.AUTO_FILL_INFERENCE,
+            confidence=0.5,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
 
     records = ledger.assumption_sources()
     assert all(isinstance(rec, AssumptionRecord) for rec in records)
@@ -2409,11 +2419,13 @@ def test_assumption_sources_returns_records_for_all_three_assumption_class_sourc
     assert by_text["Primary actor is a single local developer"].source == "assumption"
     assert by_text["Outputs are stdout-only"].source == "inference"
     assert by_text["Use existing project patterns"].source == "conservative_default"
+    assert by_text["Inputs are positional command arguments"].source == "auto_fill_inference"
 
     # confidence is preserved verbatim per entry.
     assert by_text["Primary actor is a single local developer"].confidence == 0.7
     assert by_text["Outputs are stdout-only"].confidence == 0.6
     assert by_text["Use existing project patterns"].confidence == 0.85
+    assert by_text["Inputs are positional command arguments"].confidence == 0.5
 
     # Backwards-compat guard: ``assumptions()`` is unchanged in scope —
     # only the ASSUMPTION-source entry appears there.

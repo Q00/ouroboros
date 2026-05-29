@@ -1403,7 +1403,9 @@ async def test_pipeline_result_surfaces_assumption_sources_with_provenance(tmp_p
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
-    # Add one entry from each of the three assumption-class sources. The
+    # Add explicit ASSUMPTION and INFERENCE entries (conservative-default
+    # entries already come from ``_fill_ready``); each assumption-class source
+    # must surface through ``assumption_sources`` with its tag intact. The
     # ASSUMPTION entry has unique text so the legacy ``assumptions`` field
     # still surfaces it.
     ledger.add_entry(
