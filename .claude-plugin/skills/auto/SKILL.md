@@ -1,7 +1,7 @@
 ---
 name: auto
 description: "Automatically converge from goal to A-grade Seed and execute it"
-mcp_tool: ouroboros_auto
+mcp_tool: ouroboros_start_auto
 mcp_args:
   goal: "$goal"
   resume: "$resume"
@@ -19,14 +19,14 @@ Run the full-quality auto pipeline from a single task description.
 
 ## Dispatch requirement
 
-This skill must be executed by invoking MCP tool `ouroboros_auto`. Do not
+This skill must be executed by invoking MCP tool `ouroboros_start_auto`. Do not
 manually inspect repositories, run shell commands, query GitHub, edit files, or
 otherwise emulate the auto pipeline as a substitute.
 
-If `ouroboros_auto` is unavailable, stop and report that the required MCP tool
+If `ouroboros_start_auto` is unavailable, stop and report that the required MCP tool
 is unavailable. A manual fallback is not an `ooo auto` run.
 
-If `ouroboros_auto` is invoked successfully but returns `blocked`, `failed`, or
+If `ouroboros_start_auto` is invoked successfully but returns `blocked`, `failed`, or
 another terminal auto-session status, report that auto-session status and the
 tool's blocker. Do not label that outcome as MCP dispatch failure; dispatch
 failure means the MCP tool could not be invoked.
@@ -43,7 +43,7 @@ ooo auto "Build a local-first habit tracker CLI" --complete-product
 
 ## CLI flag → MCP arg translation
 
-When the user types `ooo auto` with CLI-style flags inside chat, translate to MCP arguments before invoking `ouroboros_auto`:
+When the user types `ooo auto` with CLI-style flags inside chat, translate to MCP arguments before invoking `ouroboros_start_auto`:
 
 | CLI flag | MCP arg | Type |
 |----------|---------|------|

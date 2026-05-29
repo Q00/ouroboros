@@ -105,7 +105,7 @@ def doctor(
     print_success(
         "Codex ooo auto dispatch: OK\n"
         "- rule maps `ooo auto` to `ouroboros_start_auto`\n"
-        "- auto skill declares MCP dispatch through `ouroboros_auto`\n"
+        "- auto skill declares MCP dispatch through `ouroboros_start_auto`\n"
         "- Codex config contains an `ouroboros` MCP server entry"
         + ("\n- live stdio initialize/list_tools exposes required auto tools" if live_mcp else ""),
         title="Codex Doctor",
@@ -133,8 +133,8 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
         failures.append(f"missing auto skill file: {skill_path}")
     else:
         skill = _read_codex_text(skill_path, "auto skill", failures)
-        if skill is not None and "mcp_tool: ouroboros_auto" not in skill:
-            failures.append("auto skill does not declare `mcp_tool: ouroboros_auto`")
+        if skill is not None and "mcp_tool: ouroboros_start_auto" not in skill:
+            failures.append("auto skill does not declare `mcp_tool: ouroboros_start_auto`")
         if skill is not None and (
             "manual" not in skill.lower() or "unavailable" not in skill.lower()
         ):

@@ -262,7 +262,7 @@ class TestLoadPackagedCodexSkills:
         """The auto skill body must not allow silent manual emulation."""
         skill = load_packaged_codex_skill("auto")
 
-        assert "must be executed by invoking MCP tool `ouroboros_auto`" in skill
+        assert "must be executed by invoking MCP tool `ouroboros_start_auto`" in skill
         assert "manual fallback is not an `ooo auto` run" in skill
         assert "Do not label that outcome as MCP dispatch failure" in skill
         assert "The user should not have to poll the job manually" in skill

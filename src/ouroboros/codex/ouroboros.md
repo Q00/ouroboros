@@ -50,7 +50,7 @@ terminal job status is reached or the user explicitly asks you to stop. If that
 MCP tool is unavailable, stop and report that `ouroboros_start_auto` is
 unavailable instead of continuing as a normal Codex task.
 
-If `ouroboros_auto` is invoked and returns an auto-session outcome such as
+If `ouroboros_start_auto` is invoked and returns an auto-session outcome such as
 `blocked`, `failed`, or `complete`, report that outcome as the auto session
 result. `detached` is non-terminal tracked background work; surface the job or
 Ralph handles and keep polling without blocking the foreground tool call. After
