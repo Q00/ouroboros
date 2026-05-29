@@ -204,6 +204,7 @@ async def test_handler_ralph_starter_forwards_checkpoint_meta_via_real_job_manag
             lineage_id="lineage-ckpt",
             reuse_existing=False,
             max_total_seconds=5.0,
+            return_after_dispatch=False,
         )
 
         assert result["terminal_status"] == "completed"
