@@ -491,9 +491,13 @@ class AutoPipelineState:
     # verified acceptance boundaries become git checkpoint commits.
     # ``worktree_policy`` controls whether mutating execution should happen
     # in an isolated managed worktree rather than the caller's checkout.
-    # Defaults are conservative for legacy/non-coding sessions; coding profile
-    # activation raises these to AC checkpoint commits + automatic worktrees.
-    commit_policy: AutoCommitPolicy = AutoCommitPolicy.FINAL_ONLY
+    # Defaults are conservative for legacy/non-coding sessions: NO git commits
+    # and the caller's current checkout, so a non-coding/research/skip_run flow
+    # (or a legacy resumed session) never mutates the operator's working tree by
+    # default. Coding profile activation raises these to AC checkpoint commits +
+    # automatic worktrees; final-only commits on the current checkout remain an
+    # explicit operator opt-in (``--commit-policy final_only``).
+    commit_policy: AutoCommitPolicy = AutoCommitPolicy.NONE
     worktree_policy: AutoWorktreePolicy = AutoWorktreePolicy.CURRENT
     managed_worktree: dict[str, Any] | None = None
     checkpoint_commits: list[dict[str, Any]] = field(default_factory=list)
@@ -928,7 +932,7 @@ class AutoPipelineState:
         payload.setdefault("last_lateral_text", None)
         payload.setdefault("lateral_input_hash", None)
         payload.setdefault("active_domain_profile_name", None)
-        payload.setdefault("commit_policy", AutoCommitPolicy.FINAL_ONLY.value)
+        payload.setdefault("commit_policy", AutoCommitPolicy.NONE.value)
         payload.setdefault("worktree_policy", AutoWorktreePolicy.CURRENT.value)
         payload.setdefault("managed_worktree", None)
         payload.setdefault("checkpoint_commits", [])

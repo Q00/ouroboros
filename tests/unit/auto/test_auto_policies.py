@@ -23,5 +23,7 @@ def test_non_coding_profile_defaults_to_conservative_policies() -> None:
 
     apply_domain_policy_defaults(state)
 
-    assert state.commit_policy is AutoCommitPolicy.FINAL_ONLY
+    # Non-coding domains must not auto-commit the caller's checkout by default;
+    # final-only commits stay an explicit operator opt-in.
+    assert state.commit_policy is AutoCommitPolicy.NONE
     assert state.worktree_policy is AutoWorktreePolicy.CURRENT

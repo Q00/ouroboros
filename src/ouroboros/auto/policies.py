@@ -22,5 +22,9 @@ def apply_domain_policy_defaults(state: AutoPipelineState) -> None:
         state.worktree_policy = DEFAULT_WORKTREE_POLICY
         return
 
-    state.commit_policy = AutoCommitPolicy.FINAL_ONLY
+    # Non-coding / unknown domains never auto-commit or relocate the caller's
+    # checkout by default. Final-only commits on the current checkout are an
+    # explicit operator opt-in (``--commit-policy final_only``) rather than a
+    # silent side effect of completing a research/documentation/skip_run flow.
+    state.commit_policy = AutoCommitPolicy.NONE
     state.worktree_policy = AutoWorktreePolicy.CURRENT

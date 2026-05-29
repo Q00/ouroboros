@@ -254,3 +254,38 @@ def test_pipeline_result_attempts_final_only_commit_on_complete(tmp_path) -> Non
     assert replay.checkpoint_commits == result.checkpoint_commits
     assert state.final_checkpoint_attempted is True
     assert _git(repo, "rev-list", "--count", "HEAD") == "2"
+
+
+def test_pipeline_result_does_not_commit_dirty_current_checkout_by_default(tmp_path) -> None:
+    """#1281 review blocker: a default (non-coding / legacy) session must never
+    commit the caller's pre-existing dirty checkout when it completes.
+
+    Regression for ouroboros-agent[bot] ``req_1780010936_238``. The prior default
+    of ``FINAL_ONLY`` + ``CURRENT`` turned every ``COMPLETE`` result into a git
+    commit of the operator's working tree, even for research/documentation/
+    ``skip_run`` flows that performed no managed coding work. The conservative
+    default is now ``NONE``; final-only commits on the current checkout require
+    an explicit operator opt-in.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    # Operator's own uncommitted edits, unrelated to the auto session.
+    (repo / "operator_wip.py").write_text("print('local wip')\n", encoding="utf-8")
+    state = AutoPipelineState(goal="Summarize research papers", cwd=str(repo))
+    # No explicit policy is set: the conservative defaults must apply.
+    assert state.commit_policy is AutoCommitPolicy.NONE
+    state.phase = AutoPhase.COMPLETE
+    state.last_progress_message = "research summary complete"
+    pipeline = AutoPipeline(
+        interview_driver=None,  # type: ignore[arg-type]
+        seed_generator=None,  # type: ignore[arg-type]
+    )
+
+    result = pipeline._result(state, SeedDraftLedger.from_goal(state.goal))
+
+    assert result.status == "complete"
+    assert result.checkpoint_commits == ()
+    assert state.final_checkpoint_attempted is False
+    # No commit was created and the operator's WIP stays uncommitted.
+    assert _git(repo, "rev-list", "--count", "HEAD") == "1"
+    assert "operator_wip.py" in _git(repo, "status", "--porcelain")

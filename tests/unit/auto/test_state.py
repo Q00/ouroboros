@@ -83,7 +83,9 @@ def test_legacy_state_defaults_to_non_coding_policy() -> None:
 
     restored = AutoPipelineState.from_dict(payload)
 
-    assert restored.commit_policy is AutoCommitPolicy.FINAL_ONLY
+    # Legacy state files predate the commit/worktree policy keys; they must
+    # resume with NO auto-commit so an existing dirty checkout is never mutated.
+    assert restored.commit_policy is AutoCommitPolicy.NONE
     assert restored.worktree_policy is AutoWorktreePolicy.CURRENT
     assert restored.managed_worktree is None
     assert restored.checkpoint_commits == []
