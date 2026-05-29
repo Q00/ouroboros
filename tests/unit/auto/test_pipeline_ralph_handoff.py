@@ -382,6 +382,63 @@ async def test_ralph_qa_passed_completes_auto(tmp_path) -> None:
     assert captured["kwargs"]["lineage_id"] == state.ralph_lineage_id
 
 
+class _RecordingEventStore:
+    """Minimal EventStore stub capturing appended events for assertions."""
+
+    def __init__(self) -> None:
+        self.appended: list[BaseEvent] = []
+
+    async def append(self, event: BaseEvent, **_: Any) -> None:
+        self.appended.append(event)
+
+
+@pytest.mark.asyncio
+async def test_ralph_completed_emits_auto_product_emitted_event(tmp_path) -> None:
+    """A successful ralph completion emits a typed ``auto.product.emitted`` event
+    keyed to the auto session (RFC #1256 §I4 / #1254, first success-terminal slice).
+
+    Symmetric to the existing ``auto.product.partial_emitted`` on the degraded
+    path: a successful complete-product run must leave at least one queryable
+    terminal event under ``ouroboros_query_events(auto_session_id)`` instead of
+    the auto session aggregate being empty on success.
+    """
+    state = _state_at_run_phase(tmp_path)
+    event_store = _RecordingEventStore()
+    driver = _StubInterviewDriver()
+    # The pipeline reads the EventStore off the interview driver
+    # (``getattr(self.interview_driver, "event_store", None)``).
+    driver.event_store = event_store
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "job_id": "job_ralph_emit",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        driver,
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    emitted = [event for event in event_store.appended if event.type == "auto.product.emitted"]
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event.aggregate_type == "auto_session"
+    assert event.aggregate_id == state.auto_session_id
+    assert event.data["auto_session_id"] == state.auto_session_id
+    assert event.data["seed_id"] == state.seed_id
+
+
 @pytest.mark.asyncio
 async def test_ralph_job_id_persisted_while_starter_waits_for_terminal(tmp_path) -> None:
     state = _state_at_run_phase(tmp_path)

@@ -2388,6 +2388,25 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
             )
         message_prefix = "resumed ralph loop completed" if resumed else "ralph loop completed"
+        # RFC #1256 §I4 (#1254, first success-terminal slice): emit a typed
+        # ``auto.product.emitted`` keyed to the auto session — symmetric to the
+        # existing ``auto.product.partial_emitted`` on the degraded path — so a
+        # successful complete-product run leaves at least one queryable terminal
+        # event under ``ouroboros_query_events(auto_session_id)`` instead of the
+        # auto session aggregate being empty on success. Awaited inline via the
+        # same fail-open path, so a slow/absent EventStore never converts a
+        # successful COMPLETE into a BLOCKED.
+        await self._emit_runtime_event(
+            "auto.product.emitted",
+            state.auto_session_id,
+            {
+                "auto_session_id": state.auto_session_id,
+                "seed_id": seed.metadata.seed_id,
+                "grade": (review.grade_result.grade.value if review is not None else None),
+                "stop_reason": stop_reason,
+                "resumed": resumed,
+            },
+        )
         state.transition(
             AutoPhase.COMPLETE,
             f"{message_prefix} ({stop_reason or 'qa passed'})",
