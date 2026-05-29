@@ -1,7 +1,7 @@
 """End-to-end ``ooo auto`` dispatch regression tests.
 
 Closes the last open acceptance bullet of issue #637: prove that ``ooo auto ...``
-reaches the ``ouroboros_auto`` MCP pipeline and produces a Seed (or fails closed
+reaches the ``ouroboros_start_auto`` MCP pipeline and produces a Seed (or fails closed
 with the documented unavailable-tool contract). The tests stay laser-focused on
 this acceptance bullet — they do not exercise progress UI, answer grounding, or
 CLI help text. All side-effects are confined to ``tmp_path``: no network, no
@@ -20,7 +20,7 @@ Cases:
    boundary) — it covers the ledger-hydration + seed-generator wiring landed in
    PR #652. Case 1 already covers the dispatch boundary itself.
 3. The deterministic ``ooo auto`` dispatch surface fails closed with the
-   user-visible "ouroboros_auto is unavailable" contract message and does not
+   user-visible "ouroboros_start_auto is unavailable" contract message and does not
    create any persisted auto session state when the MCP tool is unregistered.
 """
 
@@ -423,7 +423,7 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert intercepts, "skill_dispatcher must be awaited for ooo auto"
     intercept = intercepts[0]
     assert intercept.skill_name == "auto"
-    assert intercept.mcp_tool == "ouroboros_auto"
+    assert intercept.mcp_tool == "ouroboros_start_auto"
     assert intercept.command_prefix == "ooo auto"
 
     # The runtime contract requires documented packaged auto placeholders to be
@@ -464,7 +464,7 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     final = messages[0]
     assert final.is_final
     assert not final.is_error, f"dispatch should succeed, got {final!r}"
-    assert final.data.get("tool_name") == "ouroboros_auto"
+    assert final.data.get("tool_name") == "ouroboros_start_auto"
     assert final.data.get("seed_path") == str(seed_path)
     assert final.data.get("status") == "complete"
     assert final.data.get("grade") == "A"
@@ -706,8 +706,8 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: Path) -> None:
-    """``ooo auto`` must fail closed when the ``ouroboros_auto`` MCP tool is unregistered.
+async def test_dispatch_fails_closed_when_ouroboros_start_auto_unregistered(tmp_path: Path) -> None:
+    """``ooo auto`` must fail closed when the ``ouroboros_start_auto`` MCP tool is unregistered.
 
     The dispatch surface returns a fail-closed ``AgentMessage``; no
     ``AutoHandler`` or ``AutoStore`` is constructed downstream because the
@@ -731,7 +731,7 @@ async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: 
     cwd.mkdir()
 
     dispatcher = AsyncMock(
-        side_effect=LookupError("No local handler registered for tool: ouroboros_auto")
+        side_effect=LookupError("No local handler registered for tool: ouroboros_start_auto")
     )
     runtime = CodexCliRuntime(
         cli_path="codex",
@@ -757,12 +757,12 @@ async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: 
     failure = messages[0]
     assert failure.is_error is True
 
-    # The Issue #637 acceptance phrase is "ouroboros_auto MCP tool is unavailable;
+    # The Issue #637 acceptance phrase is "ouroboros_start_auto MCP tool is unavailable;
     # cannot run ooo auto". The actual codebase contract phrasing combines both
     # halves into a single sentence — assert each half is present so the contract
     # cannot silently regress in either direction.
     assert "Cannot run ooo auto" in failure.content
-    assert "`ouroboros_auto` is unavailable" in failure.content
+    assert "`ouroboros_start_auto` is unavailable" in failure.content
     assert failure.data["error_type"] == "SkillDispatchUnavailable"
-    assert failure.data["tool_name"] == "ouroboros_auto"
+    assert failure.data["tool_name"] == "ouroboros_start_auto"
     assert failure.data["command_prefix"] == "ooo auto"

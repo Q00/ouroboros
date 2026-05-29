@@ -532,7 +532,7 @@ def test_packaged_auto_resolves_documented_chat_dispatch_flags(tmp_path: Path) -
 
     assert isinstance(result, Resolved)
     assert result.skill_name == "auto"
-    assert result.mcp_tool == "ouroboros_auto"
+    assert result.mcp_tool == "ouroboros_start_auto"
     assert result.mcp_args["goal"] == "Build a hello CLI"
     assert result.mcp_args["cwd"] == str(runtime_cwd)
     assert result.mcp_args["complete_product"] is True

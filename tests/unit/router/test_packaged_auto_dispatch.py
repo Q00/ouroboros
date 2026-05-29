@@ -5,7 +5,7 @@ from pathlib import Path
 from ouroboros.router import Resolved, resolve_skill_dispatch
 
 
-def test_packaged_auto_skill_dispatches_to_ouroboros_auto(tmp_path: Path) -> None:
+def test_packaged_auto_skill_dispatches_to_ouroboros_start_auto(tmp_path: Path) -> None:
     """Lock the packaged ``ooo auto`` dispatch metadata used by Codex runtimes."""
     prompt = 'ooo auto "Audit the open PRs" --skip-run'
 
@@ -13,7 +13,7 @@ def test_packaged_auto_skill_dispatches_to_ouroboros_auto(tmp_path: Path) -> Non
 
     assert isinstance(result, Resolved)
     assert result.command_prefix == "ooo auto"
-    assert result.mcp_tool == "ouroboros_auto"
+    assert result.mcp_tool == "ouroboros_start_auto"
     assert result.mcp_args == {
         "goal": "Audit the open PRs",
         "resume": "",
