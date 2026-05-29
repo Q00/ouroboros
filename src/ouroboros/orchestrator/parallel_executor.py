@@ -692,6 +692,36 @@ def _runtime_messages_support_command_claim(
     return any(_runtime_message_supports_command_claim(value, message) for message in messages)
 
 
+def _runtime_messages_have_masked_test_command_form(
+    value: str,
+    messages: tuple[AgentMessage, ...],
+) -> bool:
+    """Return True when a test command claim matches only after unsafe plumbing.
+
+    This deliberately does NOT prove the command claim. It distinguishes a real
+    transcript shape that failed the evidence contract (for example a test run
+    piped through ``tail`` without ``set -o pipefail``) from a fabrication where
+    no related test command appears at all.
+    """
+    claim_invocation = _test_command_invocation(value)
+    if claim_invocation is None:
+        return False
+    for message in messages:
+        if message.tool_name != "Bash":
+            continue
+        for runtime_command in _runtime_message_command_values(message):
+            if not _has_trailing_output_filter_pipeline(runtime_command):
+                continue
+            runtime_invocation = _test_command_invocation_allowing_output_plumbing(runtime_command)
+            if runtime_invocation is None:
+                continue
+            if runtime_invocation == claim_invocation or runtime_invocation.startswith(
+                claim_invocation + " "
+            ):
+                return True
+    return False
+
+
 def _runtime_messages_support_file_claim(
     value: str,
     messages: tuple[AgentMessage, ...],
@@ -934,6 +964,29 @@ def _test_command_invocation(command: str) -> str | None:
     if body is None:
         return None
     return _test_invocation_from_shell_body(body)
+
+
+def _test_command_invocation_allowing_output_plumbing(command: str) -> str | None:
+    """Return a test invocation after stripping output plumbing unconditionally.
+
+    This must not be used as command proof. It exists only to classify rejected
+    evidence forms for diagnostics while preserving the #1208 masking guard.
+    """
+    normalized = command.strip().lower()
+    if not normalized:
+        return None
+    direct = _test_invocation_from_prefix(_strip_command_output_plumbing(normalized))
+    if direct is not None:
+        return direct
+    body = _shell_command_body(normalized)
+    if body is None:
+        return None
+    for segment, _pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body):
+        invocation = _test_invocation_from_prefix(_strip_command_output_plumbing(segment))
+        if invocation is not None:
+            return invocation
+        return None
+    return None
 
 
 def _shell_command_body(command: str) -> str | None:
@@ -5808,6 +5861,7 @@ Files present:
             )
 
         unsupported: list[str] = []
+        evidence_form_mismatches: list[str] = []
         backed_commands = tuple(
             command
             for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
@@ -5830,6 +5884,13 @@ Files present:
             for value in values:
                 if field_name == "commands_run":
                     if _runtime_messages_support_command_claim(value, field_messages):
+                        continue
+                    if _runtime_messages_have_masked_test_command_form(
+                        value,
+                        field_messages,
+                    ):
+                        evidence_form_mismatches.append(f"{field_name}: {value}")
+                        unsupported.append(f"{field_name}: {value}")
                         continue
                     unsupported.append(f"{field_name}: {value}")
                     continue
@@ -5856,10 +5917,21 @@ Files present:
                     unsupported.append(f"{field_name}: {value}")
 
         if unsupported:
+            failure_class = (
+                "EVIDENCE_FORM_MISMATCH"
+                if evidence_form_mismatches and len(evidence_form_mismatches) == len(unsupported)
+                else "FABRICATION_SUSPECTED"
+            )
+            reason_prefix = (
+                "evidence form mismatch; unprotected output-filter pipeline "
+                "cannot prove a clean command claim"
+                if failure_class == "EVIDENCE_FORM_MISMATCH"
+                else "unsupported evidence claims"
+            )
             return VerifierVerdict(
                 passed=False,
-                reasons=("unsupported evidence claims: " + "; ".join(unsupported),),
-                failure_class="FABRICATION_SUSPECTED",
+                reasons=(reason_prefix + ": " + "; ".join(unsupported),),
+                failure_class=failure_class,
             )
 
         return VerifierVerdict(passed=True)

@@ -28,6 +28,9 @@ class FailureClass(StrEnum):
     Members:
         EVIDENCE_MISSING: Leaf could not emit a parseable / validated
             evidence record (covers both parse errors and H2 rejections).
+        EVIDENCE_FORM_MISMATCH: Leaf executed related work, but the evidence
+            shape cannot prove it under the contract (for example an
+            unprotected output-filter pipeline for a test command).
         FABRICATION_SUSPECTED: Verifier flagged claims about files,
             symbols, or sources that do not exist. Verifier sets this
             via VerifierVerdict.failure_class.
@@ -43,6 +46,7 @@ class FailureClass(StrEnum):
     """
 
     EVIDENCE_MISSING = "EVIDENCE_MISSING"
+    EVIDENCE_FORM_MISMATCH = "EVIDENCE_FORM_MISMATCH"
     FABRICATION_SUSPECTED = "FABRICATION_SUSPECTED"
     SCOPE_CREEP = "SCOPE_CREEP"
     STALL = "STALL"
@@ -72,6 +76,14 @@ _POLICY_TABLE: dict[FailureClass, RecoveryPolicy] = {
         rationale=(
             "Leaf failed to emit a parseable evidence record; the "
             "verifier feedback already names the missing/rejected fields."
+        ),
+    ),
+    FailureClass.EVIDENCE_FORM_MISMATCH: RecoveryPolicy(
+        action=RecoveryAction.RETRY,
+        rationale=(
+            "Leaf ran related work, but its evidence shape cannot prove the "
+            "claim; retry with contract-compliant evidence such as pipefail "
+            "for output-filtered test commands."
         ),
     ),
     FailureClass.FABRICATION_SUSPECTED: RecoveryPolicy(

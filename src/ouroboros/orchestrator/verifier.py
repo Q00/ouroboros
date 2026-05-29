@@ -85,6 +85,7 @@ class VerifierContractError(ValueError):
 _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
     {
         "EVIDENCE_MISSING",
+        "EVIDENCE_FORM_MISMATCH",
         "FABRICATION_SUSPECTED",
         "SCOPE_CREEP",
         "STALL",
@@ -105,8 +106,9 @@ class VerifierVerdict:
             to the executor — a bare FAIL with no reasons is opaque
             and indistinguishable from the first attempt).
         failure_class: Optional hint for H7 (failure taxonomy). One of
-            "EVIDENCE_MISSING", "FABRICATION_SUSPECTED", "SCOPE_CREEP",
-            "STALL", "BLOCKED", or None for an unclassified failure.
+            "EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH",
+            "FABRICATION_SUSPECTED", "SCOPE_CREEP", "STALL",
+            "BLOCKED", or None for an unclassified failure.
     """
 
     passed: bool

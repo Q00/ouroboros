@@ -110,6 +110,7 @@ class TestVerifierVerdict:
         "klass",
         [
             "EVIDENCE_MISSING",
+            "EVIDENCE_FORM_MISMATCH",
             "FABRICATION_SUSPECTED",
             "SCOPE_CREEP",
             "STALL",

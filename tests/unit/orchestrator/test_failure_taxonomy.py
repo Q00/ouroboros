@@ -133,6 +133,9 @@ class TestPolicyTable:
     def test_evidence_missing_retries(self) -> None:
         assert policy_for(FailureClass.EVIDENCE_MISSING).action == RecoveryAction.RETRY
 
+    def test_evidence_form_mismatch_retries(self) -> None:
+        assert policy_for(FailureClass.EVIDENCE_FORM_MISMATCH).action == RecoveryAction.RETRY
+
     def test_fabrication_escalates_model(self) -> None:
         assert (
             policy_for(FailureClass.FABRICATION_SUSPECTED).action == RecoveryAction.ESCALATE_MODEL

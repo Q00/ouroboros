@@ -33,6 +33,7 @@ from ouroboros.orchestrator.parallel_executor import (
     _criterion_satisfied_by_evidence,
     _effective_evidence_schema_for_ac,
     _message_contains_test_success,
+    _runtime_messages_have_masked_test_command_form,
     _runtime_messages_support_command_claim,
     _runtime_messages_support_test_claim,
     render_parallel_completion_message,
@@ -1162,6 +1163,72 @@ def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> 
         messages=(command_message, result_message),
         task_cwd=None,
     )
+
+
+def test_unprotected_tail_pipe_is_form_mismatch_not_command_proof() -> None:
+    """A bare output-filter pipe is visible but still not trusted as proof."""
+    message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    './gradlew test --tests "com.example.app.unit.SomeNewTest" -i 2>&1 | tail -100'
+                )
+            }
+        },
+    )
+
+    assert not _runtime_messages_support_command_claim(
+        "./gradlew test --tests com.example.app.unit.SomeNewTest -i",
+        (message,),
+    )
+    assert _runtime_messages_have_masked_test_command_form(
+        "./gradlew test --tests com.example.app.unit.SomeNewTest -i",
+        (message,),
+    )
+
+
+def test_atomic_verifier_classifies_masked_test_command_as_form_mismatch() -> None:
+    """Masked test commands are contract mismatches, not fabricated work."""
+    profile = load_profile("code").model_copy(
+        update={"evidence_schema": EvidenceSchema(required=("commands_run",))}
+    )
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/workspace"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=profile,
+        fat_harness_mode=True,
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="Bash command started",
+                tool_name="Bash",
+                data={
+                    "tool_input": {
+                        "command": (
+                            './gradlew test --tests "com.example.app.unit.SomeNewTest" '
+                            "-i 2>&1 | tail -100"
+                        )
+                    }
+                },
+            ),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={"commands_run": ["./gradlew test --tests com.example.app.unit.SomeNewTest -i"]}
+        ),
+        ac_content="Run SomeNewTest.",
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "EVIDENCE_FORM_MISMATCH"
+    assert "unprotected output-filter pipeline" in " ".join(verdict.reasons)
 
 
 @pytest.mark.parametrize(
