@@ -130,7 +130,10 @@ def test_cli_docs_api_check_verifies_completed_detached_auto_result_output(
     job_id = "job_auto_docs_done"
     auto_session_id = "auto_docs_done"
     result_text = "detached auto result artifact: seed.yaml"
-    timestamp = datetime(2026, 5, 29, 12, 0, tzinfo=UTC)
+    # Relative to now so the terminal handle stays inside the 1h retrieval TTL
+    # (see is_terminal_job_expired / _JOB_TTL); an absolute past date would make
+    # this a time-bomb once wall-clock passes the TTL.
+    timestamp = datetime.now(UTC) - timedelta(minutes=5)
 
     async def _persist_completed_auto_job() -> None:
         store = EventStore(db_url)
@@ -238,7 +241,8 @@ def test_mcp_docs_api_check_verifies_completed_detached_auto_result_response(
     auto_session_id = "auto_docs_done"
     result_text = "detached auto result artifact: seed.yaml"
     artifact_uri = "file:///tmp/detached-auto-result.json"
-    timestamp = datetime(2026, 5, 29, 12, 0, tzinfo=UTC)
+    # now-relative so the terminal handle stays within the 1h retrieval TTL.
+    timestamp = datetime.now(UTC) - timedelta(minutes=5)
 
     async def _persist_completed_auto_job_and_fetch_result():
         store = EventStore(db_url)
@@ -475,7 +479,8 @@ def test_mcp_docs_api_check_verifies_failed_detached_auto_result_response(
     failure_text = "detached auto failed: seed repair budget exhausted"
     success_text = "detached auto result artifact: seed.yaml"
     source_error = "seed repair budget exhausted"
-    timestamp = datetime(2026, 5, 29, 12, 30, tzinfo=UTC)
+    # now-relative so the terminal handle stays within the 1h retrieval TTL.
+    timestamp = datetime.now(UTC) - timedelta(minutes=5)
 
     async def _persist_failed_auto_job_and_fetch_result():
         store = EventStore(db_url)
@@ -638,7 +643,8 @@ def test_mcp_docs_api_check_verifies_cancelled_detached_auto_result_response(
     cancellation_text = "detached auto cancelled: user requested cancellation"
     success_text = "detached auto result artifact: seed.yaml"
     source_error = "user requested cancellation"
-    timestamp = datetime(2026, 5, 29, 13, 0, tzinfo=UTC)
+    # now-relative so the terminal handle stays within the 1h retrieval TTL.
+    timestamp = datetime.now(UTC) - timedelta(minutes=5)
 
     async def _persist_cancelled_auto_job_and_fetch_result():
         store = EventStore(db_url)
