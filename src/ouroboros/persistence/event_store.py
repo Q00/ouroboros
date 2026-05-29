@@ -470,6 +470,8 @@ class EventStore:
         aggregate_type: str,
         aggregate_id: str,
         last_row_id: int = 0,
+        *,
+        limit: int | None = None,
     ) -> tuple[list[BaseEvent], int]:
         """Get events for an aggregate after a given row ID.
 
@@ -481,6 +483,11 @@ class EventStore:
             aggregate_id: The unique identifier of the aggregate.
             last_row_id: The SQLite rowid of the last event processed.
                          Pass 0 to get all events from the beginning.
+            limit: Optional maximum number of events to materialize. When set,
+                   only the first ``limit`` events after the cursor are loaded
+                   (bounded fetch) and the returned cursor advances to the last
+                   row in that page, so a follow-up poll resumes the remainder
+                   without skipping events. ``None`` keeps the unbounded fetch.
 
         Returns:
             Tuple of (list of new events, max rowid seen).
@@ -500,13 +507,16 @@ class EventStore:
                 # Use SQLite's implicit rowid for efficient cursor-based pagination.
                 # This avoids deserializing all prior events just to slice the tail.
                 rowid_col = text("rowid")
-                result = await conn.execute(
+                query = (
                     select(events_table, rowid_col)
                     .where(events_table.c.aggregate_type == aggregate_type)
                     .where(events_table.c.aggregate_id == aggregate_id)
                     .where(text("rowid > :last_id").bindparams(last_id=last_row_id))
                     .order_by(events_table.c.timestamp, events_table.c.id)
                 )
+                if limit is not None:
+                    query = query.limit(limit)
+                result = await conn.execute(query)
                 rows = result.mappings().all()
                 if not rows:
                     return [], last_row_id
@@ -971,12 +981,20 @@ class EventStore:
         execution_id: str | None = None,
         event_type: str | None = None,
         last_row_id: int = 0,
+        *,
+        limit: int | None = None,
     ) -> tuple[list[BaseEvent], int]:
         """Incrementally query events across a session and related execution scopes.
 
         This is the multi-aggregate equivalent of ``get_events_after``. It uses
         the same exact session/execution payload predicates as
         ``query_session_related_events`` while advancing a single rowid cursor.
+
+        When ``limit`` is set, only the first ``limit`` events after the cursor
+        are materialized and the returned cursor advances to the last row in
+        that page, so a stale or first-time poll over a long-running session
+        cannot load an unbounded result set; a follow-up poll resumes the
+        remainder without skipping events. ``None`` keeps the unbounded fetch.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -1004,6 +1022,9 @@ class EventStore:
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
+
+                if limit is not None:
+                    query = query.limit(limit)
 
                 result = await conn.execute(query)
                 rows = result.mappings().all()
