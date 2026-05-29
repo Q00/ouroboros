@@ -262,11 +262,12 @@ class TestLoadPackagedCodexSkills:
         """The auto skill body must not allow silent manual emulation."""
         skill = load_packaged_codex_skill("auto")
 
-        assert "must be executed by invoking MCP tool `ouroboros_start_auto`" in skill
-        assert "manual fallback is not an `ooo auto` run" in skill
-        assert "Do not label that outcome as MCP dispatch failure" in skill
-        assert "The user should not have to poll the job manually" in skill
-        assert "ouroboros_job_result(job_id)" in skill
+        compact = " ".join(skill.split())
+        assert "must be executed by invoking MCP tool `ouroboros_start_auto`" in compact
+        assert "manual fallback is not an `ooo auto` run" in compact
+        assert "Do not label a `blocked` or `failed` outcome as MCP dispatch failure" in compact
+        assert "The user should not have to poll the job manually" in compact
+        assert "ouroboros_job_result" in compact
 
     def test_packaged_interview_skill_uses_runtime_capability_terms(self) -> None:
         """Runtime skill instructions should not hardcode Claude-only tool surfaces."""

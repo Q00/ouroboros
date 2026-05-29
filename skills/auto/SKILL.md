@@ -21,15 +21,21 @@ Run the full-quality auto pipeline from a single task description.
 
 This skill must be executed by invoking MCP tool `ouroboros_start_auto`. Do not
 manually inspect repositories, run shell commands, query GitHub, edit files, or
-otherwise emulate the auto pipeline as a substitute.
+otherwise emulate the auto pipeline as a substitute. Full auto runs routinely
+exceed interactive MCP tool-call timeouts, so the background starter is the
+supported default: it returns `job_id` and `auto_session_id` quickly. Retain
+both, poll progress with `ouroboros_job_wait` / `ouroboros_job_status`, and read
+terminal results with `ouroboros_job_result`.
 
-If `ouroboros_start_auto` is unavailable, stop and report that the required MCP tool
-is unavailable. A manual fallback is not an `ooo auto` run.
+If `ouroboros_start_auto` is unavailable, or if any required job polling/result
+MCP tool is unavailable, stop and report that the required MCP tool is
+unavailable. A manual fallback is not an `ooo auto` run.
 
-If `ouroboros_start_auto` is invoked successfully but returns `blocked`, `failed`, or
-another terminal auto-session status, report that auto-session status and the
-tool's blocker. Do not label that outcome as MCP dispatch failure; dispatch
-failure means the MCP tool could not be invoked.
+If a started auto job later returns `detached`, `blocked`, `failed`, or another
+auto-session status, report that auto-session status and the tool's blocker.
+`detached` is non-terminal tracked background work; surface the job/Ralph
+handles and keep polling. Do not label a `blocked` or `failed` outcome as MCP
+dispatch failure; dispatch failure means the MCP tool could not be invoked.
 
 If the active runtime routes `ooo auto` through a background starter such as
 `ouroboros_start_auto`, do not stop after returning the `job_id`. Keep ownership
