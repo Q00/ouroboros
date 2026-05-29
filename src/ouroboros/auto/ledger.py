@@ -19,6 +19,10 @@ class LedgerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     INFERENCE = "inference"
+    # Aggressive LLM auto-fill for a non-converging interview (RFC #1256 §I3,
+    # #1263). Assumption-class, not evidence-backed: a model best-guess emitted
+    # only when the interview cannot otherwise close a required section.
+    AUTO_FILL_INFERENCE = "auto_fill_inference"
     BLOCKER = "blocker"
 
 
@@ -43,6 +47,7 @@ SOURCE_PRIORITY: tuple[LedgerSource, ...] = (
     LedgerSource.CONSERVATIVE_DEFAULT,
     LedgerSource.INFERENCE,
     LedgerSource.ASSUMPTION,
+    LedgerSource.AUTO_FILL_INFERENCE,
     LedgerSource.BLOCKER,
 )
 """Deterministic conflict priority for same-key ledger contradictions.
@@ -455,6 +460,7 @@ class SeedDraftLedger:
             LedgerSource.ASSUMPTION,
             LedgerSource.INFERENCE,
             LedgerSource.CONSERVATIVE_DEFAULT,
+            LedgerSource.AUTO_FILL_INFERENCE,
         }
         resolved: dict[tuple[str, str], AssumptionRecord] = {}
         for section in self.sections.values():
