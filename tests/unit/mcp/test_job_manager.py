@@ -3723,6 +3723,104 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_job_wait_linked_stream_execution_scan_does_not_skip_held_events(
+        self, tmp_path
+    ) -> None:
+        """The published cursor must not advance past held-back linked events.
+
+        Regression: the handler separately scans execution events and folds their
+        cursor into the response. With a saturated job page, a held session event,
+        and a later execution progress event, that scan could publish a cursor
+        above the held session event's rowid, skipping it forever. The linked
+        cursor must stay pinned to the bounded page boundary so the held event
+        surfaces on the next poll.
+        """
+        store = _build_store(tmp_path)
+        await store.initialize()
+        for index in range(10):
+            await store.append(
+                BaseEvent(
+                    type="job.progress",
+                    aggregate_type="job",
+                    aggregate_id="job_skip",
+                    data={"message": f"job {index}"},
+                )
+            )
+        await store.append(
+            BaseEvent(
+                type="subagent.dispatched",
+                aggregate_type="subagent",
+                aggregate_id="orch_skip",
+                data={"session_id": "orch_skip", "title": "held subagent"},
+            )
+        )
+        # Highest rowid: a later execution progress event whose cursor must not
+        # be allowed to leapfrog the held subagent event above.
+        await store.append(
+            BaseEvent(
+                type="execution.node.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_skip",
+                data={"execution_id": "exec_skip", "node": "n1"},
+            )
+        )
+        snapshot = JobSnapshot(
+            job_id="job_skip",
+            job_type="auto",
+            status=JobStatus.RUNNING,
+            message="Running auto",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(session_id="orch_skip", execution_id="exec_skip"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert timeout_seconds == 0
+                return replace(snapshot, cursor=cursor), False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            first = await handler.handle(
+                {
+                    "job_id": "job_skip",
+                    "cursor": 0,
+                    "timeout_seconds": 0,
+                    "stream": "linked",
+                }
+            )
+            assert first.is_ok
+            first_types = [item["type"] for item in first.value.meta["stream_events"]]
+            assert first_types == ["job.progress"] * 10
+            assert first.value.meta["stream_has_more"] is True
+            first_cursor = first.value.meta["cursor"]
+
+            second = await handler.handle(
+                {
+                    "job_id": "job_skip",
+                    "cursor": first_cursor,
+                    "timeout_seconds": 0,
+                    "stream": "linked",
+                }
+            )
+            assert second.is_ok
+            second_types = [item["type"] for item in second.value.meta["stream_events"]]
+            # The held subagent event is NOT skipped by the execution cursor; it
+            # surfaces alongside the execution event on the next poll.
+            assert "subagent.dispatched" in second_types
+            assert "execution.node.updated" in second_types
+            assert second.value.meta["cursor"] > first_cursor
+        finally:
+            await store.close()
+
     async def test_job_wait_default_stream_does_not_surface_subagent_events(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         await store.initialize()

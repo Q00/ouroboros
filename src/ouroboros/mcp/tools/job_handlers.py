@@ -1041,8 +1041,18 @@ class JobWaitHandler:
             )
 
         execution_progress_changed = False
-        response_cursor = max(snapshot.cursor, stream_cursor, cursor)
-        if snapshot.links.execution_id:
+        if stream == "linked":
+            # Execution events are already part of the bounded linked page, and
+            # `_wait_for_linked_change` pinned the cursor to that page boundary.
+            # Derive the progress signal from the page itself and never advance
+            # the public cursor past the boundary here: a separate execution scan
+            # could otherwise publish a rowid above a held-back lower-rowid stream
+            # event, skipping it on the next poll.
+            execution_progress_changed = any(
+                event.type in _JOB_PROGRESS_EVENT_TYPES for event in stream_events
+            )
+        elif snapshot.links.execution_id:
+            response_cursor = max(snapshot.cursor, stream_cursor, cursor)
             execution_events, execution_cursor = await self._event_store.get_events_after(
                 "execution",
                 snapshot.links.execution_id,
@@ -1154,8 +1164,12 @@ class JobWaitHandler:
                 or snapshot.is_terminal
                 or asyncio.get_running_loop().time() >= deadline
             ):
-                if stream_cursor != snapshot.cursor:
-                    snapshot = replace(snapshot, cursor=max(snapshot.cursor, stream_cursor))
+                # Pin the public cursor to the linked page boundary (not max with
+                # the job-manager cursor): the boundary uniformly bounds every
+                # linked stream including job, so a higher job cursor would skip
+                # held-back lower-rowid events from a clamped sibling stream.
+                if snapshot.cursor != stream_cursor:
+                    snapshot = replace(snapshot, cursor=stream_cursor)
                 return snapshot, changed, events, stream_cursor, has_more
             await asyncio.sleep(0.5)
 
