@@ -539,9 +539,7 @@ def _checkpoint_passed_generation_acs(
     repo_cwd: Path,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Create checkpoint commits for passed ACs when requested."""
-    existing = [
-        item for item in arguments.get("checkpoint_commits", []) if isinstance(item, dict)
-    ]
+    existing = [item for item in arguments.get("checkpoint_commits", []) if isinstance(item, dict)]
     attempted = [
         item for item in arguments.get("checkpoint_attempted_ac_ids", []) if isinstance(item, str)
     ]

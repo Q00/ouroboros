@@ -76,9 +76,7 @@ def test_evolve_checkpoint_does_not_retry_attempted_pass_without_diff(tmp_path) 
     summary = EvaluationSummary(
         final_approved=True,
         highest_stage_passed=3,
-        ac_results=(
-            ACResult(ac_index=0, ac_content="Command prints stable output", passed=True),
-        ),
+        ac_results=(ACResult(ac_index=0, ac_content="Command prints stable output", passed=True),),
     )
 
     commits, attempts = _checkpoint_passed_generation_acs(
