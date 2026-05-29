@@ -1296,6 +1296,34 @@ def test_grade_gate_ignores_inactive_high_risk_assumptions() -> None:
     assert not any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
 
 
+def test_grade_gate_blocks_high_risk_auto_fill_inference() -> None:
+    # RFC #1256 §I3 safety boundary: an AUTO_FILL_INFERENCE entry can close a
+    # required section with no user signal, so risky inferred content must trip
+    # the same high-risk gate as a risky ASSUMPTION — otherwise §I3 auto-fill
+    # would be a path to smuggle unreviewed production/credential content into a
+    # runnable seed.
+    ledger = SeedDraftLedger.from_goal("Build a local task app")
+    _fill_minimal_ready_ledger(ledger)
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.auto_fill_inference",
+            value="Use production credential for deployment",
+            source=LedgerSource.AUTO_FILL_INFERENCE,
+            confidence=0.5,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    result = GradeGate().grade_seed(
+        _seed(ac=("`task list` prints stable stdout",), goal="Build a local task app"),
+        ledger=ledger,
+    )
+
+    assert any(blocker.code == "high_risk_assumptions" for blocker in result.blockers)
+    assert not result.may_run
+
+
 def test_grade_gate_blocks_high_ambiguity_seed() -> None:
     ledger = SeedDraftLedger.from_goal("Build a CLI")
     _fill_minimal_ready_ledger(ledger)

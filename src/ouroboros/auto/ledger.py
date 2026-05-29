@@ -444,9 +444,10 @@ class SeedDraftLedger:
         PR-C2 / #1157: auditable companion to :meth:`assumptions` (which
         returns plain ``list[str]`` for backwards-compatible callers). The
         returned records cover every active entry whose source is one of
-        the three assumption-class :class:`LedgerSource` values —
-        ``ASSUMPTION``, ``INFERENCE``, ``CONSERVATIVE_DEFAULT`` — i.e. the
-        sources that produce ``assumption_only_sections`` in
+        the four assumption-class :class:`LedgerSource` values —
+        ``ASSUMPTION``, ``INFERENCE``, ``CONSERVATIVE_DEFAULT``, and
+        ``AUTO_FILL_INFERENCE`` — i.e. the sources that produce
+        ``assumption_only_sections`` in
         :meth:`summary`. Entries whose status is in
         :data:`_INACTIVE_STATUSES` (WEAK / CONFLICTING / BLOCKED) are
         excluded, matching the active-set semantics used by
