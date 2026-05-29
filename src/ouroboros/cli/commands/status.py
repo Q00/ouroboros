@@ -10,6 +10,8 @@ from pathlib import Path
 import shutil
 from typing import Annotated, Any
 
+from rich.table import Table
+from rich.text import Text
 import typer
 import yaml
 
@@ -317,8 +319,45 @@ _CLI_PATH_ENV_BY_BACKEND = {
 
 
 def _health_row(name: str, status: str, detail: str | None = None) -> dict[str, str]:
-    label = name if not detail else f"{name} — {detail}"
-    return {"name": label, "status": status}
+    return {"name": name, "status": status, "detail": detail or ""}
+
+
+def _health_status_text(status: str) -> Text:
+    style_by_status = {
+        "ok": "success",
+        "warning": "warning",
+        "error": "error",
+    }
+    return Text(status, style=style_by_status.get(status, ""))
+
+
+def _health_table(checks: list[dict[str, str]]) -> Table:
+    table = Table(title="System Health", border_style="blue", header_style="bold cyan")
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("Status", justify="center", no_wrap=True)
+    table.add_column("Detail", overflow="fold")
+
+    for check in checks:
+        table.add_row(
+            check["name"],
+            _health_status_text(check["status"]),
+            check.get("detail", ""),
+        )
+
+    return table
+
+
+def _print_health_details(checks: list[dict[str, str]]) -> None:
+    """Emit copyable health details after the Rich table.
+
+    The table is for scanning, but long CLI paths and config-file paths can be
+    truncated by terminal width. These plain lines are the diagnostic source a
+    user can copy into an issue or use to fix their local setup.
+    """
+    for check in checks:
+        detail = check.get("detail", "")
+        if detail:
+            typer.echo(f"{check['name']}: {check['status']} - {detail}")
 
 
 def _database_file_path(data: dict, config_path: Path) -> Path:
@@ -543,8 +582,8 @@ def health() -> None:
         checks.append(_check_runtime_backend(data))
         checks.append(_check_credentials(data, config_path))
 
-    table = create_status_table(checks, "System Health")
-    print_table(table)
+    print_table(_health_table(checks))
+    _print_health_details(checks)
     if any(check["status"] == "error" for check in checks):
         raise typer.Exit(1)
 

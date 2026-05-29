@@ -152,6 +152,32 @@ def test_health_exits_nonzero_when_runtime_cli_missing(monkeypatch, tmp_path: Pa
     assert str(missing_cli) in result.output
 
 
+def test_health_emits_copyable_full_detail_lines_for_long_diagnostics(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_auth_env(monkeypatch)
+    narrow_runner = CliRunner(env={"COLUMNS": "80"})
+    config_dir = tmp_path / ("config-" + "c" * 120)
+    (config_dir / "data").mkdir(parents=True)
+    missing_cli = tmp_path / ("very-long-runtime-path-" + "x" * 180) / "claude"
+    _write_config(config_dir, cli_path=missing_cli)
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    result = narrow_runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    expected_config = config_dir / "config.yaml"
+    expected_database = config_dir / "data" / "ouroboros.db"
+    assert f"Configuration: ok - {expected_config}" in result.output
+    assert (
+        "Database: warning - missing; will be created on first run: "
+        f"data/ouroboros.db ({expected_database})"
+    ) in result.output
+    assert f"Runtime backend: error - claude CLI not found: {missing_cli}" in result.output
+
+
 def test_health_exits_nonzero_when_credentials_file_missing(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     (config_dir / "data").mkdir(parents=True)

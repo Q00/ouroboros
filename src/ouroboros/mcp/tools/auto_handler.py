@@ -1242,6 +1242,8 @@ def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
     start_time = lease.get("owner_start_time")
     if start_time is not None and not isinstance(start_time, int | float):
         start_time = None
+    if isinstance(start_time, int | float) and start_time <= 0:
+        return False
     return is_process_identity_alive(pid, float(start_time) if start_time is not None else None)
 
 
@@ -1307,6 +1309,9 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     }
     if handoff_only:
         meta["presentation_status"] = _presentation_status(result)
+        meta["product_status"] = "not_verified_complete"
+    if result.status == "detached":
+        meta["presentation_status"] = "detached"
         meta["product_status"] = "not_verified_complete"
     if result.stop_reason_code is not None:
         meta["stop_reason_code"] = result.stop_reason_code
@@ -2028,6 +2033,8 @@ def _format_result(result: AutoPipelineResult) -> str:
     ]
     if handoff_only:
         lines.append("Product status: not verified complete; execution is still external/pending")
+    elif result.status == "detached":
+        lines.append("Product status: not verified complete; background work is still running")
     if result.grade:
         lines.append(f"Seed grade: {result.grade}")
     if result.interview_session_id:
