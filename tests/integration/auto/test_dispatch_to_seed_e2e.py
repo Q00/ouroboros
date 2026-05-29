@@ -1,8 +1,12 @@
 """End-to-end ``ooo auto`` dispatch regression tests.
 
 Closes the last open acceptance bullet of issue #637: prove that ``ooo auto ...``
-reaches the ``ouroboros_start_auto`` MCP pipeline and produces a Seed (or fails closed
-with the documented unavailable-tool contract). The tests stay laser-focused on
+reaches the auto MCP pipeline and produces a Seed (or fails closed with the
+documented unavailable-tool contract). Per #1283 the deterministic dispatch
+surface now routes typed ``ooo auto`` to the async background starter
+``ouroboros_start_auto`` (parity with the Codex rules/doctor), so the tool name
+asserted on the dispatch boundary is ``ouroboros_start_auto``. The tests stay
+laser-focused on
 this acceptance bullet — they do not exercise progress UI, answer grounding, or
 CLI help text. All side-effects are confined to ``tmp_path``: no network, no
 real LLM, no real home directory.
@@ -20,8 +24,8 @@ Cases:
    boundary) — it covers the ledger-hydration + seed-generator wiring landed in
    PR #652. Case 1 already covers the dispatch boundary itself.
 3. The deterministic ``ooo auto`` dispatch surface fails closed with the
-   user-visible "ouroboros_start_auto is unavailable" contract message and does not
-   create any persisted auto session state when the MCP tool is unregistered.
+   user-visible "ouroboros_start_auto is unavailable" contract message and does
+   not create any persisted auto session state when the MCP tool is unregistered.
 """
 
 from __future__ import annotations
