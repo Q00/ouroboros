@@ -19,6 +19,10 @@ class LedgerSource(StrEnum):
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
     INFERENCE = "inference"
+    # Aggressive LLM auto-fill for a non-converging interview (RFC #1256 §I3,
+    # #1263). Assumption-class, not evidence-backed: a model best-guess emitted
+    # only when the interview cannot otherwise close a required section.
+    AUTO_FILL_INFERENCE = "auto_fill_inference"
     BLOCKER = "blocker"
 
 
@@ -43,6 +47,7 @@ SOURCE_PRIORITY: tuple[LedgerSource, ...] = (
     LedgerSource.CONSERVATIVE_DEFAULT,
     LedgerSource.INFERENCE,
     LedgerSource.ASSUMPTION,
+    LedgerSource.AUTO_FILL_INFERENCE,
     LedgerSource.BLOCKER,
 )
 """Deterministic conflict priority for same-key ledger contradictions.
@@ -114,8 +119,9 @@ class AssumptionRecord:
 
     ``source`` is the string form of one of the assumption-class
     :class:`LedgerSource` values — ``assumption`` (auto-answerer
-    fallback), ``inference`` (model reasoning), or
-    ``conservative_default`` (safe-default policy). These three are
+    fallback), ``inference`` (model reasoning), ``conservative_default``
+    (safe-default policy), or ``auto_fill_inference`` (RFC #1256 §I3
+    aggressive auto-fill for a non-converging interview). These are
     precisely the sources that, per :data:`_EVIDENCE_BACKED_SOURCES`,
     are not evidence-backed and therefore contribute to
     ``assumption_only_sections`` in :meth:`SeedDraftLedger.summary`.
@@ -439,9 +445,10 @@ class SeedDraftLedger:
         PR-C2 / #1157: auditable companion to :meth:`assumptions` (which
         returns plain ``list[str]`` for backwards-compatible callers). The
         returned records cover every active entry whose source is one of
-        the three assumption-class :class:`LedgerSource` values —
-        ``ASSUMPTION``, ``INFERENCE``, ``CONSERVATIVE_DEFAULT`` — i.e. the
-        sources that produce ``assumption_only_sections`` in
+        the four assumption-class :class:`LedgerSource` values —
+        ``ASSUMPTION``, ``INFERENCE``, ``CONSERVATIVE_DEFAULT``, and
+        ``AUTO_FILL_INFERENCE`` — i.e. the sources that produce
+        ``assumption_only_sections`` in
         :meth:`summary`. Entries whose status is in
         :data:`_INACTIVE_STATUSES` (WEAK / CONFLICTING / BLOCKED) are
         excluded, matching the active-set semantics used by
@@ -455,6 +462,7 @@ class SeedDraftLedger:
             LedgerSource.ASSUMPTION,
             LedgerSource.INFERENCE,
             LedgerSource.CONSERVATIVE_DEFAULT,
+            LedgerSource.AUTO_FILL_INFERENCE,
         }
         resolved: dict[tuple[str, str], AssumptionRecord] = {}
         for section in self.sections.values():

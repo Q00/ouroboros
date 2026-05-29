@@ -213,15 +213,28 @@ _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 # dispatch so an insufficient top-level pipeline budget remains a pipeline
 # timeout, not a Ralph argument-validation failure.
 _MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
-# Mirrors RalphHandler.MIN_PER_ITERATION_TIMEOUT_SECONDS / DEFAULT_PER_ITERATION_TIMEOUT_SECONDS.
-# When the remaining pipeline budget is shorter than the Ralph default
-# per-iteration timeout, the auto layer caps ``per_iteration_timeout_seconds``
-# so a single ``evolve_step`` cannot block past ``deadline_at``. RalphLoopRunner
-# only checks ``max_total_seconds`` at iteration boundaries, so without this cap
-# the first iteration could still run for the full default 1800s — violating
-# the top-level pipeline deadline contract pinned by Q00/ouroboros#779.
+# Mirrors RalphHandler per-iteration bounds
+# (MIN_/MAX_PER_ITERATION_TIMEOUT_SECONDS). The auto layer sizes
+# ``per_iteration_timeout_seconds`` to the *remaining pipeline budget* so a
+# single ``evolve_step`` cannot block past ``deadline_at`` (Q00/ouroboros#779)
+# — RalphLoopRunner only checks ``max_total_seconds`` at iteration boundaries,
+# so without an upper bound the iteration could overshoot the deadline.
+#
+# It must NOT, however, cap below that budget. A ``complete_product`` gen-1
+# iteration legitimately runs both the implementation pass and the evolve
+# verification pass in one ``evolve_step``; the standalone Ralph default
+# (1800s) is far too small for that and was observed killing a
+# still-progressing iteration with ~5400s of pipeline budget left (cli-todo
+# live R2: 14/14 ACs complete, then cancelled at 1800s -> failed/iteration_timeout
+# despite the working product on disk). The ceiling is therefore the
+# Ralph-supported maximum, not the standalone default; ``max_total_seconds``
+# still bounds the whole loop.
 _MIN_RALPH_PER_ITERATION_SECONDS = 30.0
+# Standalone Ralph default — kept for parity with RalphHandler, but NOT used as
+# the auto-path per-iteration ceiling (see ``_MAX_RALPH_PER_ITERATION_SECONDS``).
 _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
+# Mirrors RalphHandler.MAX_PER_ITERATION_TIMEOUT_SECONDS.
+_MAX_RALPH_PER_ITERATION_SECONDS = 7200.0
 
 # Q00/ouroboros#782 review-12 BLOCKING #1: when the top-level deadline has
 # already expired but a persisted Ralph job awaits reconciliation, give the
@@ -1572,6 +1585,21 @@ class AutoPipeline:
                                 )
                         state.run_handoff_status = "completed"
                         state.run_handoff_guidance = None
+                        # RFC #1256 §I4 (#1254): emit the typed
+                        # ``auto.product.emitted`` terminal for the synchronous
+                        # complete-product success path — the branch
+                        # ``cli/commands/auto.py`` wires via
+                        # ``HandlerSynchronousRunStarter``, which completes
+                        # inline at RUN without RALPH_HANDOFF/EVALUATE. Without
+                        # this, a successful synchronous CLI run left no
+                        # queryable terminal event (ouroboros-agent[bot]
+                        # req_1780072861_321 blocker). There is no ralph/QA
+                        # stop_reason on this path, so ``stop_reason=None``.
+                        await self._emit_product_emitted_terminal(
+                            state,
+                            review=review,
+                            stop_reason=None,
+                        )
                         state.transition(
                             AutoPhase.COMPLETE,
                             "synchronous execution completed for complete-product run",
@@ -1980,6 +2008,57 @@ class AutoPipeline:
         self._save(state)
         return self._result(state, ledger, review=review)
 
+    async def _emit_product_emitted_terminal(
+        self,
+        state: AutoPipelineState,
+        *,
+        review: SeedReview | None,
+        stop_reason: str | None,
+        resumed: bool = False,
+    ) -> None:
+        """Emit a typed ``auto.product.emitted`` at a complete-product success terminal.
+
+        RFC #1256 §I4 (#1254). Symmetric to
+        :meth:`_emit_partial_product_terminal`'s ``auto.product.partial_emitted``
+        on the degraded path. Shared by *every* in-process complete-product
+        success terminal so a successful run always leaves at least one
+        queryable terminal event under ``ouroboros_query_events(auto_session_id)``
+        instead of the auto session aggregate being empty on success:
+
+        * the direct ralph-completed path in :meth:`_evaluate_or_complete`
+          (no evaluator wired),
+        * the evaluator-pass path in :meth:`_finalize_evaluate` — the branch
+          MCP wires for normal non-plugin complete-product runs,
+        * the synchronous CLI run-success path (``HandlerSynchronousRunStarter``,
+          which completes inline at RUN), and
+        * the ralph re-attach success path in :meth:`_reattach_ralph_job`.
+
+        These terminals are mutually exclusive for a single run, so a
+        complete-product success emits **exactly one** ``auto.product.emitted``.
+
+        Deliberately *not* emitted on the OpenCode **plugin-delegation**
+        terminals ("ralph loop delegated…" / "resumed … plugin Ralph delegation
+        checkpoint"): in plugin mode the loop and its product are owned by the
+        spawned child session, so this process has not produced a product to
+        announce — emitting here would be a false terminal.
+
+        Awaited inline via the same fail-open :meth:`_emit_runtime_event`, so a
+        slow/absent EventStore never converts a successful COMPLETE into a
+        BLOCKED. ``review`` may be ``None`` (re-attach observer has no
+        in-scope grade), in which case ``grade`` resolves to ``None``.
+        """
+        await self._emit_runtime_event(
+            "auto.product.emitted",
+            state.auto_session_id,
+            {
+                "auto_session_id": state.auto_session_id,
+                "seed_id": state.seed_id,
+                "grade": (review.grade_result.grade.value if review is not None else None),
+                "stop_reason": stop_reason,
+                "resumed": resumed,
+            },
+        )
+
     async def _emit_runtime_event(
         self,
         event_type: str,
@@ -2108,21 +2187,25 @@ class AutoPipeline:
                     run_subagent=run_subagent,
                 )
             max_total_seconds = remaining
-            # Cap per-iteration so a single ``evolve_step`` cannot block past
-            # the remaining deadline. ``RalphLoopRunner`` checks
-            # ``max_total_seconds`` only at the top of each iteration, so
-            # without this cap the first iteration could still run for the
-            # full default 1800s after the deadline expired. Floored at the
+            # Size per-iteration to the remaining pipeline budget so a single
+            # ``evolve_step`` cannot block past ``deadline_at`` while ALSO not
+            # being capped below that budget. ``RalphLoopRunner`` checks
+            # ``max_total_seconds`` only at iteration boundaries, so the upper
+            # bound here is what stops a single iteration from overshooting the
+            # deadline. The ceiling is the Ralph-supported maximum (7200s), NOT
+            # the standalone default (1800s): a ``complete_product`` gen-1
+            # iteration does implementation + evolve verification in one step
+            # and the 1800s default was killing it mid-verification with
+            # pipeline budget still remaining (cli-todo live R2). Floored at the
             # Ralph minimum (30s) — when the remaining budget is itself below
-            # that floor we still cap at 30s rather than rejecting at the
-            # auto layer, since the pre-dispatch ``MIN_RALPH_MAX_TOTAL_SECONDS``
-            # check already protects against a sub-second budget. The
-            # ``max_total_seconds`` cap then aborts the loop before any
-            # follow-up iteration starts, so the worst-case overshoot is one
-            # iteration of up to 30 seconds.
+            # that floor we still cap at 30s rather than rejecting at the auto
+            # layer, since the pre-dispatch ``MIN_RALPH_MAX_TOTAL_SECONDS`` check
+            # already protects against a sub-second budget; ``max_total_seconds``
+            # then aborts the loop before any follow-up iteration starts, so the
+            # worst-case overshoot is one iteration of up to 30 seconds.
             per_iteration_timeout_seconds = max(
                 _MIN_RALPH_PER_ITERATION_SECONDS,
-                min(_DEFAULT_RALPH_PER_ITERATION_SECONDS, remaining),
+                min(_MAX_RALPH_PER_ITERATION_SECONDS, remaining),
             )
 
         ralph_mirror_task: asyncio.Task[None] | None = None
@@ -2388,6 +2471,17 @@ class AutoPipeline:
                 state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
             )
         message_prefix = "resumed ralph loop completed" if resumed else "ralph loop completed"
+        # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted`` terminal
+        # for the direct ralph-completed success path (no evaluator wired, or
+        # plugin mode). The evaluator-pass path emits the same event from
+        # :meth:`_finalize_evaluate`; both share
+        # :meth:`_emit_product_emitted_terminal`.
+        await self._emit_product_emitted_terminal(
+            state,
+            review=review,
+            stop_reason=stop_reason,
+            resumed=resumed,
+        )
         state.transition(
             AutoPhase.COMPLETE,
             f"{message_prefix} ({stop_reason or 'qa passed'})",
@@ -2788,6 +2882,16 @@ class AutoPipeline:
                 return self._result(
                     state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
                 )
+            # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted``
+            # terminal for the evaluator-pass success path — the branch MCP
+            # wires for normal non-plugin complete-product runs. Without this,
+            # the production path transitioned to COMPLETE with no queryable
+            # terminal event (ouroboros-agent[bot] req_1780070213_316 blocker).
+            await self._emit_product_emitted_terminal(
+                state,
+                review=review,
+                stop_reason=stop_reason,
+            )
             state.transition(
                 AutoPhase.COMPLETE,
                 f"evaluator passed: {verdict} (score {score:.2f}){cache_suffix}"
@@ -3567,6 +3671,19 @@ class AutoPipeline:
         if current_generation is not None:
             state.ralph_current_generation = current_generation
         if terminal_status == "completed":
+            # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted``
+            # terminal for the ralph re-attach success path — resume after a
+            # crash between persisting ``ralph_job_id`` and the original wait
+            # finishing. This observes an already-dispatched job's terminal and
+            # transitions straight to COMPLETE (no ``_evaluate_or_complete``),
+            # so without this a re-attached successful run left no queryable
+            # terminal event. ``review`` is not in scope on the re-attach
+            # observer, so ``grade`` resolves to ``None``.
+            await self._emit_product_emitted_terminal(
+                state,
+                review=None,
+                stop_reason=stop_reason,
+            )
             state.transition(
                 AutoPhase.COMPLETE,
                 f"ralph loop completed on re-attach ({stop_reason or 'qa passed'})",
