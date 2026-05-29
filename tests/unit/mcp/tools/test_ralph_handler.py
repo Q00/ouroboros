@@ -324,6 +324,81 @@ async def test_ralph_handler_plugin_mode_delegates_without_local_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ralph_handler_plugin_mode_forwards_checkpoint_contract() -> None:
+    """#1281 review blocker: plugin-mode Ralph must carry the AC checkpoint
+    contract the in-process RalphLoopRunner receives, otherwise coding
+    complete-product sessions silently run Ralph without checkpoint policy/state.
+    """
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    job_manager = JobManager(store)
+    evolve = _FakeEvolveHandler(["converged"])
+    handler = RalphHandler(
+        evolve_handler=evolve,  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=job_manager,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    try:
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_ckpt",
+                "seed_content": "goal: plugin",
+                "max_generations": 3,
+                "commit_policy": "ac_checkpoint",
+                "auto_session_id": "auto_ckpt123",
+                "execution_id": "exec_ckpt123",
+                "checkpoint_commits": [{"ac_id": "AC-1", "commit": "abc1234"}],
+                "checkpoint_attempted_ac_ids": ["AC-1"],
+            }
+        )
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["status"] == "delegated_to_plugin"
+        ctx = meta["_subagent"]["context"]
+        assert ctx["commit_policy"] == "ac_checkpoint"
+        assert ctx["auto_session_id"] == "auto_ckpt123"
+        assert ctx["execution_id"] == "exec_ckpt123"
+        assert ctx["checkpoint_commits"] == [{"ac_id": "AC-1", "commit": "abc1234"}]
+        assert ctx["checkpoint_attempted_ac_ids"] == ["AC-1"]
+        # The prompt advertises the checkpoint obligation to the child session.
+        assert "Checkpoint Commits" in meta["_subagent"]["prompt"]
+        assert evolve.calls == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_ralph_handler_plugin_mode_omits_checkpoint_when_unset() -> None:
+    """Legacy callers that never set commit_policy keep the prior context shape."""
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    job_manager = JobManager(store)
+    evolve = _FakeEvolveHandler(["converged"])
+    handler = RalphHandler(
+        evolve_handler=evolve,  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=job_manager,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    try:
+        result = await handler.handle(
+            {"lineage_id": "lin_plain", "seed_content": "goal: plugin", "max_generations": 3}
+        )
+
+        assert result.is_ok
+        ctx = result.value.meta["_subagent"]["context"]
+        assert "commit_policy" not in ctx
+        assert "checkpoint_commits" not in ctx
+        assert "Checkpoint Commits" not in result.value.meta["_subagent"]["prompt"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_start_ralph_handler_plugin_mode_delegates_without_local_job() -> None:
     store = EventStore("sqlite+aiosqlite:///:memory:")
     job_manager = JobManager(store)

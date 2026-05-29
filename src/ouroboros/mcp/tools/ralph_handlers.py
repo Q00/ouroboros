@@ -430,6 +430,11 @@ class RalphHandler:
                 max_total_seconds=config.max_total_seconds,
                 oscillation_window=config.oscillation_window,
                 grade_regression_window=config.grade_regression_window,
+                commit_policy=config.commit_policy,
+                auto_session_id=config.auto_session_id,
+                execution_id=config.execution_id,
+                checkpoint_commits=config.checkpoint_commits,
+                checkpoint_attempted_ac_ids=config.checkpoint_attempted_ac_ids,
             )
             await self._event_store.initialize()
             await emit_subagent_dispatched_event(

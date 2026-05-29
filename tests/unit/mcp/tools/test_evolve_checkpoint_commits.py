@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 import subprocess
 
 from ouroboros.core.lineage import ACResult, EvaluationSummary
-from ouroboros.mcp.tools.evolution_handlers import _checkpoint_passed_generation_acs
+from ouroboros.mcp.tools.evolution_handlers import (
+    _checkpoint_passed_generation_acs,
+    _resolve_checkpoint_working_dir,
+)
+
+
+@dataclass
+class _FakeWorkspace:
+    effective_cwd: str
 
 
 def _git(repo, *args: str) -> str:
@@ -104,3 +114,53 @@ def test_evolve_checkpoint_does_not_retry_attempted_pass_without_diff(tmp_path) 
     assert repeated_commits == []
     assert repeated_attempts == ["AC-1"]
     assert _git(repo, "rev-list", "--count", "HEAD") == "1"
+
+
+def test_resolve_checkpoint_working_dir_prefers_effective_worktree(tmp_path) -> None:
+    """#1281 review blocker 1: when a managed lineage worktree is active, the
+    checkpoint must target the worktree that execution mutated — not the
+    original project_dir preferred by verification-dir resolution.
+    """
+    project_dir = tmp_path / "project"
+    worktree = tmp_path / "worktree"
+
+    assert _resolve_checkpoint_working_dir(None, project_dir) == project_dir
+    assert (
+        _resolve_checkpoint_working_dir(_FakeWorkspace(effective_cwd=str(worktree)), project_dir)
+        == worktree
+    )
+
+
+def test_evolve_checkpoint_commits_target_worktree_not_parent_project(tmp_path) -> None:
+    """The passed AC's diff lives in the lineage worktree; committing the parent
+    project_dir (no diff) would burn the attempt as ``no_safe_changes`` and lose
+    the checkpoint. Resolving to the effective worktree commits it correctly and
+    leaves the parent checkout untouched.
+    """
+    project_dir = tmp_path / "project"
+    _init_repo(project_dir)
+    worktree = tmp_path / "worktree"
+    _init_repo(worktree)
+    # The generation's mutation only exists in the worktree.
+    (worktree / "feature.py").write_text("print('ok')\n", encoding="utf-8")
+    summary = EvaluationSummary(
+        final_approved=True,
+        highest_stage_passed=3,
+        ac_results=(ACResult(ac_index=0, ac_content="Command prints stable output", passed=True),),
+    )
+
+    checkpoint_dir = _resolve_checkpoint_working_dir(
+        _FakeWorkspace(effective_cwd=str(worktree)),
+        Path(project_dir),
+    )
+    commits, attempts = _checkpoint_passed_generation_acs(
+        {"commit_policy": "ac_checkpoint", "auto_session_id": "auto_test123"},
+        summary,
+        checkpoint_dir,
+    )
+
+    assert len(commits) == 1
+    assert commits[0]["ac_id"] == "AC-1"
+    # Commit landed in the worktree, not the parent project checkout.
+    assert _git(worktree, "rev-list", "--count", "HEAD") == "2"
+    assert _git(project_dir, "rev-list", "--count", "HEAD") == "1"

@@ -1256,6 +1256,11 @@ def build_ralph_subagent(
     max_total_seconds: float | None = None,
     oscillation_window: int | None = None,
     grade_regression_window: int | None = None,
+    commit_policy: str | None = None,
+    auto_session_id: str | None = None,
+    execution_id: str | None = None,
+    checkpoint_commits: tuple[dict[str, Any], ...] = (),
+    checkpoint_attempted_ac_ids: tuple[str, ...] = (),
     delegation_depth: int = 1,
     allow_nested_ouroboros_ralph: bool = False,
 ) -> SubagentPayload:
@@ -1396,6 +1401,22 @@ def build_ralph_subagent(
             "`stop_reason=wall_clock_exhausted`.\n"
         )
 
+    checkpoint_note = ""
+    if commit_policy and commit_policy != "none" and auto_session_id:
+        checkpoint_note = (
+            "\n## Checkpoint Commits\n"
+            f"commit_policy: {commit_policy}\n"
+            f"auto_session_id: {auto_session_id}\n"
+            f"execution_id: {execution_id or 'none'}\n"
+            "When you run each `evolve_step`, forward `commit_policy`, "
+            "`auto_session_id`, `execution_id`, `checkpoint_commits`, and "
+            "`checkpoint_attempted_ac_ids` so verified acceptance criteria are "
+            "checkpoint-committed in the execution worktree. Carry the updated "
+            "`checkpoint_commits` / `checkpoint_attempted_ac_ids` returned by one "
+            "`evolve_step` into the next so commits stay idempotent across "
+            "iterations.\n"
+        )
+
     prompt = f"""## Your Task
 
 Run a Ralph loop for the given lineage inside this OpenCode child session.
@@ -1427,7 +1448,7 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - allow_nested_ouroboros_ralph: {str(allow_nested_ouroboros_ralph).lower()}
 - Do not call ouroboros_ralph from this child session. Run the loop directly
   by executing/evaluating one generation at a time.
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{total_timeout_note}{timeout_note}{progress_note}{budget_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{total_timeout_note}{timeout_note}{progress_note}{budget_note}{checkpoint_note}
 For generation 1, use the seed content when present. For later generations,
 reconstruct state from the lineage and continue without resending seed_content.
 
@@ -1455,6 +1476,17 @@ do not enqueue another background Ralph job."""
         context["oscillation_window"] = oscillation_window
     if grade_regression_window is not None:
         context["grade_regression_window"] = grade_regression_window
+    # Forward the checkpoint contract so plugin-mode Ralph reaches the same AC
+    # checkpoint behavior as the in-process RalphLoopRunner. Only attach the
+    # fields when a committing policy is actually configured, so legacy callers
+    # that never set commit_policy keep the prior context shape.
+    if commit_policy and commit_policy != "none" and auto_session_id:
+        context["commit_policy"] = commit_policy
+        context["auto_session_id"] = auto_session_id
+        if execution_id:
+            context["execution_id"] = execution_id
+        context["checkpoint_commits"] = [dict(item) for item in checkpoint_commits]
+        context["checkpoint_attempted_ac_ids"] = list(checkpoint_attempted_ac_ids)
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",

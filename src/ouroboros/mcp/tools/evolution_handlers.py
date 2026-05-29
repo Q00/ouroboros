@@ -123,6 +123,26 @@ def _resolve_evolve_verification_working_dir(
     return stable_base
 
 
+def _resolve_checkpoint_working_dir(
+    workspace: TaskWorkspace | None,
+    resolved_verification_working_dir: Path,
+) -> Path:
+    """Resolve the directory AC checkpoint commits must target.
+
+    Checkpoint commits have to be created in the same filesystem root that the
+    generation actually mutated. When ``maybe_restore_task_workspace`` created a
+    managed lineage worktree, execution ran in ``workspace.effective_cwd`` — not
+    the caller's original ``project_dir`` that
+    ``_resolve_evolve_verification_working_dir`` prefers. Committing the parent
+    project dir there records the AC as *attempted* with ``no_safe_changes`` (no
+    diff outside the worktree), so the passed AC is never checkpointed. Prefer
+    the effective worktree whenever one is active.
+    """
+    if workspace is not None:
+        return Path(workspace.effective_cwd)
+    return resolved_verification_working_dir
+
+
 @dataclass
 class EvolveStepHandler(BridgeAwareMixin):
     """Handler for the ouroboros_evolve_step tool.
@@ -433,7 +453,7 @@ class EvolveStepHandler(BridgeAwareMixin):
         checkpoint_commits, checkpoint_attempted_ac_ids = _checkpoint_passed_generation_acs(
             arguments,
             gen.evaluation_summary,
-            resolved_verification_working_dir,
+            _resolve_checkpoint_working_dir(workspace, resolved_verification_working_dir),
         )
         if checkpoint_commits:
             text_lines.append("")
