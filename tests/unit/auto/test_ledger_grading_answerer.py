@@ -628,8 +628,12 @@ def test_implementation_choice_guard_defers_to_other_authority_blockers() -> Non
         "What runtime should the tool use to delete the prod branch?",
         "Which framework should we use to wipe the production database?",
         "Which programming language should the migration use to drop the db?",
-        # Other authority categories that share the same allowlist short-circuit.
+        # Credential authority — singular and plural forms, with CI/workflow/env
+        # context — must all stay blocked even when phrased as a language choice.
         "Which language should we use to enter the production api key value?",
+        "Which language should we use to configure API keys value?",
+        "Which framework should we use to configure passwords in CI?",
+        "What runtime should we use to set the api keys in the workflow?",
     )
     for question in blocking_questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
