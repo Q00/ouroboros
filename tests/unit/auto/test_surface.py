@@ -105,7 +105,7 @@ def test_auto_skill_frontmatter_dispatches_to_mcp_tool() -> None:
     content = skill.read_text(encoding="utf-8")
 
     assert "name: auto" in content
-    assert "mcp_tool: ouroboros_auto" in content
+    assert "mcp_tool: ouroboros_start_auto" in content
     assert 'goal: "$goal"' in content
     assert 'resume: "$resume"' in content
     assert 'skip_run: "$skip_run"' in content

@@ -1,7 +1,7 @@
 ---
 name: auto
 description: "Automatically converge from goal to A-grade Seed and execute it"
-mcp_tool: ouroboros_auto
+mcp_tool: ouroboros_start_auto
 mcp_args:
   goal: "$goal"
   resume: "$resume"
@@ -19,17 +19,23 @@ Run the full-quality auto pipeline from a single task description.
 
 ## Dispatch requirement
 
-This skill must be executed by invoking MCP tool `ouroboros_auto`. Do not
+This skill must be executed by invoking MCP tool `ouroboros_start_auto`. Do not
 manually inspect repositories, run shell commands, query GitHub, edit files, or
-otherwise emulate the auto pipeline as a substitute.
+otherwise emulate the auto pipeline as a substitute. Full auto runs routinely
+exceed interactive MCP tool-call timeouts, so the background starter is the
+supported default: it returns `job_id` and `auto_session_id` quickly. Retain
+both, poll progress with `ouroboros_job_wait` / `ouroboros_job_status`, and read
+terminal results with `ouroboros_job_result`.
 
-If `ouroboros_auto` is unavailable, stop and report that the required MCP tool
-is unavailable. A manual fallback is not an `ooo auto` run.
+If `ouroboros_start_auto` is unavailable, or if any required job polling/result
+MCP tool is unavailable, stop and report that the required MCP tool is
+unavailable. A manual fallback is not an `ooo auto` run.
 
-If `ouroboros_auto` is invoked successfully but returns `blocked`, `failed`, or
-another terminal auto-session status, report that auto-session status and the
-tool's blocker. Do not label that outcome as MCP dispatch failure; dispatch
-failure means the MCP tool could not be invoked.
+If a started auto job later returns `detached`, `blocked`, `failed`, or another
+auto-session status, report that auto-session status and the tool's blocker.
+`detached` is non-terminal tracked background work; surface the job/Ralph
+handles and keep polling. Do not label a `blocked` or `failed` outcome as MCP
+dispatch failure; dispatch failure means the MCP tool could not be invoked.
 
 ## Usage
 
@@ -43,7 +49,7 @@ ooo auto "Build a local-first habit tracker CLI" --complete-product
 
 ## CLI flag → MCP arg translation
 
-When the user types `ooo auto` with CLI-style flags inside chat, translate to MCP arguments before invoking `ouroboros_auto`:
+When the user types `ooo auto` with CLI-style flags inside chat, translate to MCP arguments before invoking `ouroboros_start_auto`:
 
 | CLI flag | MCP arg | Type |
 |----------|---------|------|

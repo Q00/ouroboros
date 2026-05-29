@@ -5,15 +5,21 @@ from pathlib import Path
 from ouroboros.router import Resolved, resolve_skill_dispatch
 
 
-def test_packaged_auto_skill_dispatches_to_ouroboros_auto(tmp_path: Path) -> None:
-    """Lock the packaged ``ooo auto`` dispatch metadata used by Codex runtimes."""
+def test_packaged_auto_skill_dispatches_to_ouroboros_start_auto(tmp_path: Path) -> None:
+    """Lock the packaged ``ooo auto`` dispatch metadata used by Codex/Hermes runtimes.
+
+    Regression for #1283: the deterministic skill/router path must resolve typed
+    ``ooo auto`` to the async background starter ``ouroboros_start_auto`` so it
+    stays in parity with the Codex rules and doctor surface. A full synchronous
+    ``ouroboros_auto`` call exceeds interactive MCP tool-call timeouts.
+    """
     prompt = 'ooo auto "Audit the open PRs" --skip-run'
 
     result = resolve_skill_dispatch(prompt, cwd=tmp_path)
 
     assert isinstance(result, Resolved)
     assert result.command_prefix == "ooo auto"
-    assert result.mcp_tool == "ouroboros_auto"
+    assert result.mcp_tool == "ouroboros_start_auto"
     assert result.mcp_args == {
         "goal": "Audit the open PRs",
         "resume": "",

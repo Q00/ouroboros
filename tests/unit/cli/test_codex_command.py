@@ -78,7 +78,7 @@ class TestCodexDoctor:
         skill_path.write_text(
             "---\n"
             "name: auto\n"
-            "mcp_tool: ouroboros_auto\n"
+            "mcp_tool: ouroboros_start_auto\n"
             "---\n"
             "Manual fallback is not allowed when the tool is unavailable.\n",
             encoding="utf-8",
@@ -661,7 +661,7 @@ class TestCodexDoctor:
         failures = _check_auto_dispatch_surface(codex_dir)
 
         assert "Codex rules do not map `ooo auto` to `ouroboros_start_auto`" in failures
-        assert "auto skill does not declare `mcp_tool: ouroboros_auto`" in failures
+        assert "auto skill does not declare `mcp_tool: ouroboros_start_auto`" in failures
         assert "Codex config does not contain [mcp_servers.ouroboros]" in failures
 
     def test_doctor_command_exits_nonzero_when_dispatch_surface_is_broken(

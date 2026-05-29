@@ -145,11 +145,11 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
     assert runtime._skill_dispatcher is not None
     with resolve_packaged_codex_skill_path("auto", skills_dir=runtime._skills_dir) as skill_md_path:
         content = skill_md_path.read_text(encoding="utf-8")
-    assert "mcp_tool: ouroboros_auto" in content
+    assert "mcp_tool: ouroboros_start_auto" in content
 
     fake_server = AsyncMock()
     fake_server.call_tool = AsyncMock(
-        side_effect=LookupError("No local handler registered for tool: ouroboros_auto")
+        side_effect=LookupError("No local handler registered for tool: ouroboros_start_auto")
     )
 
     with (
@@ -162,13 +162,13 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
         messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
 
     fake_server.call_tool.assert_awaited_once()
-    assert fake_server.call_tool.await_args.args[0] == "ouroboros_auto"
+    assert fake_server.call_tool.await_args.args[0] == "ouroboros_start_auto"
     mock_exec.assert_not_called()
     mock_warning.assert_called_once()
     assert mock_warning.call_args.kwargs["fallback"] == "terminal_error"
     assert len(messages) == 1
     assert messages[0].is_error is True
     assert messages[0].content.startswith("Cannot run ooo auto")
-    assert "`ouroboros_auto` is unavailable" in messages[0].content
+    assert "`ouroboros_start_auto` is unavailable" in messages[0].content
     assert messages[0].data["error_type"] == "SkillDispatchUnavailable"
-    assert messages[0].data["tool_name"] == "ouroboros_auto"
+    assert messages[0].data["tool_name"] == "ouroboros_start_auto"
