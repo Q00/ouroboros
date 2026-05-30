@@ -18,6 +18,7 @@ from ouroboros.auto.adapters import (
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
+    HandlerSeedQAEvaluator,
     HandlerSynchronousRunStarter,
     load_seed,
     save_seed,
@@ -51,6 +52,7 @@ from ouroboros.cli.formatters.panels import print_error, print_info, print_succe
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.persistence.event_store import EventStore
@@ -505,6 +507,7 @@ async def _run_auto(
     start_execute = StartExecuteSeedHandler(
         execute_handler=execute_seed, agent_runtime_backend=runtime, opencode_mode=opencode_mode
     )
+    seed_qa = QAHandler(agent_runtime_backend=runtime, opencode_mode=authoring_opencode_mode)
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
@@ -567,6 +570,7 @@ async def _run_auto(
         ralph_starter=ralph_starter,
         ralph_resumer=ralph_resumer,
         complete_product=complete_product,
+        seed_qa_evaluator=HandlerSeedQAEvaluator(seed_qa),
         progress_callback=progress_callback,
         watchdog=watchdog,
         probe_runner=EnvRuntimeProbeRunner() if complete_product else None,

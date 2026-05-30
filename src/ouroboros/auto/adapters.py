@@ -788,6 +788,65 @@ class HandlerEvaluator:
         )
 
 
+class HandlerSeedQAEvaluator:
+    """Callable Seed QA evaluator backed by ``ouroboros_qa``."""
+
+    def __init__(self, qa_handler: QAHandler) -> None:
+        self.qa_handler = qa_handler
+
+    async def __call__(self, seed: Seed, ledger: Any) -> EvaluateResult:
+        seed_yaml = yaml.dump(
+            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
+        ledger_reference = yaml.dump(
+            ledger.to_dict() if hasattr(ledger, "to_dict") else ledger,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+        quality_bar = (
+            "The Seed must be ready for autonomous execution before run starts. "
+            "It must preserve the interview/ledger intent, have ambiguity_score <= 0.20, "
+            "contain concrete acceptance criteria, include constraints/non-goals/runtime "
+            "context, and avoid unsupported assumptions or missing requirements."
+        )
+        result = await self.qa_handler.handle(
+            {
+                "artifact": seed_yaml,
+                "artifact_type": "document",
+                "quality_bar": quality_bar,
+                "reference": ledger_reference,
+                "seed_content": seed_yaml,
+                "pass_threshold": 0.80,
+            }
+        )
+        if result.is_err:
+            return EvaluateResult(
+                passed=False,
+                score=0.0,
+                verdict="fail",
+                error=str(result.error),
+            )
+        meta = result.value.meta or {}
+        if str(meta.get("status", "")) == "delegated_to_subagent":
+            return EvaluateResult(
+                passed=False,
+                score=0.0,
+                verdict="fail",
+                error=(
+                    "QAHandler returned a plugin-delegation envelope; the auto pipeline "
+                    "cannot grade Seed QA via out-of-band subagent dispatch"
+                ),
+            )
+        return EvaluateResult(
+            passed=bool(meta.get("passed", False)),
+            score=float(meta.get("score", 0.0)),
+            verdict=str(meta.get("verdict", "fail")),
+            differences=tuple(meta.get("differences", ()) or ()),
+            suggestions=tuple(meta.get("suggestions", ()) or ()),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class LateralResult:
     """Structured result returned by :class:`HandlerLateralThinker`.

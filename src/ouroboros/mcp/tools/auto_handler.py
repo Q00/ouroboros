@@ -23,6 +23,7 @@ from ouroboros.auto.adapters import (
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
+    HandlerSeedQAEvaluator,
     load_seed,
     save_seed,
 )
@@ -521,6 +522,7 @@ class AutoHandler:
         # for that callsite without re-instantiating ``lateral_thinker``
         # here.
         evaluator = None
+        seed_qa_evaluator = None
         if complete_product and not opencode_plugin_mode:
             qa_handler = QAHandler(
                 llm_backend=self.llm_backend,
@@ -528,6 +530,14 @@ class AutoHandler:
                 opencode_mode=opencode_mode,
             )
             evaluator = HandlerEvaluator(qa_handler)
+            seed_qa_evaluator = HandlerSeedQAEvaluator(qa_handler)
+        elif not opencode_plugin_mode:
+            seed_qa_handler = QAHandler(
+                llm_backend=self.llm_backend,
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            )
+            seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
         watchdog_event_store = self.event_store or EventStore()
         await watchdog_event_store.initialize()
         watchdog = Watchdog(
@@ -557,6 +567,7 @@ class AutoHandler:
             ralph_resumer=ralph_resumer,
             complete_product=complete_product,
             evaluator=evaluator,
+            seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
             probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
