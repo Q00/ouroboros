@@ -131,8 +131,7 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert (
-        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0"
-        in calls
+        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0" in calls
     )
     assert "--prerelease=allow" not in calls
 
