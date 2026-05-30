@@ -149,7 +149,7 @@ _EXTRA_TO_PACKAGES: dict[str, tuple[str, ...]] = {
     "claude": ("claude-agent-sdk", "anthropic"),
     "copilot": (),  # pyproject declares copilot extras as []; nothing to install
     "litellm": ("litellm",),
-    "dashboard": ("streamlit", "plotly", "pandas"),
+    "dashboard": (),  # compatibility alias; no runtime payload
     "mcp": ("mcp",),
     "tui": ("textual",),
 }
@@ -172,8 +172,8 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
     """`[all]` under uv must install every extra that pyproject declares.
 
     Catches the contract drift flagged by ouroboros-agent on PR #654:
-    install.sh's hand-maintained --with list silently dropped tui and
-    dashboard packages, so users picking 'All' got an incomplete tree.
+    install.sh's hand-maintained --with list silently dropped tui, so
+    users picking 'All' got an incomplete tree.
     """
     extras = _read_pyproject_extras()
     # `all` is a single self-referential entry, e.g.

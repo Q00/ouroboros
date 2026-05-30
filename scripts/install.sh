@@ -344,8 +344,8 @@ if [ "$HAS_UV" = true ]; then
   # NOTE: Pin specs MUST mirror [project.optional-dependencies] in
   # pyproject.toml. tests/unit/scripts/test_install_runtime_selection.py
   # asserts the `[all]` set covers every declared extra so silent drift
-  # (e.g. forgetting `tui` / `dashboard`) is caught in CI rather than
-  # discovered by a user with a half-installed `[all]` tree.
+  # (e.g. forgetting `tui`) is caught in CI rather than discovered by a
+  # user with a half-installed `[all]` tree.
   case "$EXTRAS" in
     "[mcp,claude]")
       UV_ARGS+=(
@@ -364,9 +364,6 @@ if [ "$HAS_UV" = true ]; then
         --with "anthropic>=0.52.0,<1.0.0"
         --with "litellm>=1.80.0,<=1.82.6"
         --with "textual>=1.0.0,<9.0.0"
-        --with "streamlit>=1.40.0,<2.0.0"
-        --with "plotly>=5.24.0,<7.0.0"
-        --with "pandas>=2.2.0,<3.0.0"
       )
       ;;
   esac
