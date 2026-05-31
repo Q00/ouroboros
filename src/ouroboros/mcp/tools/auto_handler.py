@@ -500,19 +500,14 @@ class AutoHandler:
         # ``EventStore``) — without that share the poller would query a
         # fresh, empty job table.
         ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
-        # RFC #809 Phase 2.1 — wire the QA-backed evaluator only when the
-        # session is in complete-product mode. Outside that mode the chain
-        # is RUN → COMPLETE (async run handoff) so there is no synchronous
-        # artifact to grade; instantiating QAHandler would be wasted setup.
-        #
-        # Plugin-mode skip: ``QAHandler`` dispatches to OpenCode Task panes
-        # when ``opencode_mode == "plugin"``. The auto pipeline's Phase
-        # 2.1/2.2 advisory layer is synchronous and cannot consume
-        # out-of-band subagent output, so the evaluator stays unwired in
-        # plugin mode. The chain then falls back to the pre-Phase-2.1
-        # behaviour (RUN → RALPH_HANDOFF → COMPLETE) — the existing Ralph
-        # plugin delegation continues to drive complete-product sessions
-        # in OpenCode Task panes as before.
+        # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
+        # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
+        # demoted authoring mode as Interview/GenerateSeed so QA executes
+        # inline instead of emitting an out-of-band ``_subagent`` envelope that
+        # the synchronous pipeline cannot consume. Keep the optional
+        # complete-product execution evaluator plugin-skipped: that later
+        # EVALUATE-stage advisory path still grades post-run artifacts and
+        # cannot consume plugin Task-pane output.
         #
         # Issue #1248 — ``lateral_thinker`` is constructed above (before
         # the driver) so it is available to both the driver's
@@ -522,22 +517,14 @@ class AutoHandler:
         # for that callsite without re-instantiating ``lateral_thinker``
         # here.
         evaluator = None
-        seed_qa_evaluator = None
+        seed_qa_handler = QAHandler(
+            llm_backend=self.llm_backend,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=authoring_opencode_mode,
+        )
+        seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
         if complete_product and not opencode_plugin_mode:
-            qa_handler = QAHandler(
-                llm_backend=self.llm_backend,
-                agent_runtime_backend=runtime_backend,
-                opencode_mode=opencode_mode,
-            )
-            evaluator = HandlerEvaluator(qa_handler)
-            seed_qa_evaluator = HandlerSeedQAEvaluator(qa_handler)
-        elif not opencode_plugin_mode:
-            seed_qa_handler = QAHandler(
-                llm_backend=self.llm_backend,
-                agent_runtime_backend=runtime_backend,
-                opencode_mode=opencode_mode,
-            )
-            seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
+            evaluator = HandlerEvaluator(seed_qa_handler)
         watchdog_event_store = self.event_store or EventStore()
         await watchdog_event_store.initialize()
         watchdog = Watchdog(

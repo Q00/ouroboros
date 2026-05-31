@@ -1138,6 +1138,52 @@ class TestBackgroundJobPath:
         assert "user_preferences" not in runner_args
 
     @pytest.mark.asyncio
+    async def test_mcp_plugin_mode_wires_seed_qa_with_demoted_authoring_handler(
+        self, event_store, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plugin auto must not bypass the pre-run Seed QA gate."""
+
+        captured: dict[str, object] = {}
+
+        class FakeQAHandler:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                captured["qa_handler"] = self
+
+        class FakeAutoPipeline:
+            def __init__(self, *_args, **kwargs):
+                captured["pipeline_kwargs"] = kwargs
+
+            async def run(self, state):
+                captured["state"] = state
+                return AutoPipelineResult(
+                    status="blocked",
+                    auto_session_id=state.auto_session_id,
+                    phase=str(state.phase.value),
+                )
+
+        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.QAHandler", FakeQAHandler)
+        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline)
+
+        h = AutoHandler(
+            store=AutoStore(tmp_path),
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await h._run({"goal": "build a CLI"})
+
+        assert result.status == "blocked"
+        qa_handler = captured["qa_handler"]
+        assert qa_handler.kwargs["agent_runtime_backend"] == "opencode"
+        assert qa_handler.kwargs["opencode_mode"] == "subprocess"
+        kwargs = captured["pipeline_kwargs"]
+        assert kwargs["seed_qa_evaluator"] is not None
+        assert kwargs["seed_qa_evaluator"].qa_handler is qa_handler
+        assert kwargs["evaluator"] is None
+
+    @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
