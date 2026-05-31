@@ -86,6 +86,8 @@ def test_goose_command_uses_run_stream_json_and_stdin() -> None:
 
     assert command[:4] == ["/tmp/goose", "run", "--output-format", "stream-json"]
     assert "--resume" in command
+    assert "--no-profile" not in command
+    assert "--quiet" not in command
     assert command[-2:] == ["-i", "-"]
     assert "session-1" in command
 
