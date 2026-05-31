@@ -1474,10 +1474,10 @@ def _select_plugins_terminal_fallback(
         raise typer.Exit(code=1)
 
     console.print("Select plugins to install:")
-    for index, entry in enumerate(catalog, start=1):
-        description = entry.manifest.description or ""
+    for index, catalog_entry in enumerate(catalog, start=1):
+        description = catalog_entry.manifest.description or ""
         console.print(
-            f"  {index}. {entry.manifest.name} ({entry.manifest.version}) {description}".rstrip()
+            f"  {index}. {catalog_entry.manifest.name} ({catalog_entry.manifest.version}) {description}".rstrip()
         )
     console.print("Enter comma-separated numbers or names; press Enter with no input to abort.")
 
