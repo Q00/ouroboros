@@ -512,6 +512,16 @@ def deterministic_floor(ledger: SeedDraftLedger) -> float:
     return min(1.0, max(0.0, floor))
 
 
+# Assumption-class sources whose unreviewed best-guess content must still be
+# screened for high-risk terms before a seed can grade as runnable.
+# ``AUTO_FILL_INFERENCE`` (RFC #1256 §I3) joins ``ASSUMPTION`` here: an
+# auto-filled slot can close a required section with no user signal at all, so a
+# risky inferred value must block grading exactly as a risky human-style
+# assumption does — otherwise the §I3 closure path becomes a way to smuggle
+# unreviewed credential/production/payment content past this safety gate.
+_HIGH_RISK_GATED_SOURCES = frozenset({LedgerSource.ASSUMPTION, LedgerSource.AUTO_FILL_INFERENCE})
+
+
 def _high_risk_assumption_count(ledger: SeedDraftLedger) -> int:
     risky_terms = ("credential", "api key", "production", "payment", "legal", "medical")
     inactive_statuses = {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
@@ -519,7 +529,7 @@ def _high_risk_assumption_count(ledger: SeedDraftLedger) -> int:
         1
         for section in ledger.sections.values()
         for entry in section.entries
-        if entry.source == LedgerSource.ASSUMPTION
+        if entry.source in _HIGH_RISK_GATED_SOURCES
         and section.name != "non_goals"
         and entry.status not in inactive_statuses
         and any(term in entry.value.lower() for term in risky_terms)

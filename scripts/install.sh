@@ -12,6 +12,7 @@
 set -euo pipefail
 
 PACKAGE_NAME="ouroboros-ai"
+CLICK_SPEC="click>=8.1.0,<9.0.0"
 MIN_PYTHON="3.12"
 IS_LOCAL=false
 RECONFIGURE="${OUROBOROS_INSTALL_RECONFIGURE:-}"
@@ -333,7 +334,9 @@ echo "Installing ${INSTALL_SPEC} ..."
 INSTALL_METHOD=""
 if [ "$HAS_UV" = true ]; then
   INSTALL_METHOD="uv"
-  UV_ARGS=(tool install --upgrade --python ">=3.12" "$PACKAGE_NAME")
+  # `click` is also declared in pyproject, but keep this explicit so the
+  # installer can repair already-published wheels whose metadata missed it.
+  UV_ARGS=(tool install --upgrade --python ">=3.12" "$PACKAGE_NAME" --with "$CLICK_SPEC")
   if [ -n "$PRE_FLAG" ]; then
     UV_ARGS+=(--prerelease=allow)
   fi
@@ -375,12 +378,14 @@ elif [ "$HAS_PIPX" = true ]; then
   else
     pipx install --force --python "$PYTHON" "$INSTALL_SPEC"
   fi
+  # The venv name is the distribution name even when installing from a local path.
+  pipx inject "ouroboros-ai" "$CLICK_SPEC"
 else
   INSTALL_METHOD="pip"
   if [ -n "$PRE_FLAG" ]; then
-    $PYTHON -m pip install --user --upgrade --pre "$INSTALL_SPEC"
+    $PYTHON -m pip install --user --upgrade --pre "$INSTALL_SPEC" "$CLICK_SPEC"
   else
-    $PYTHON -m pip install --user --upgrade "$INSTALL_SPEC"
+    $PYTHON -m pip install --user --upgrade "$INSTALL_SPEC" "$CLICK_SPEC"
   fi
 fi
 
