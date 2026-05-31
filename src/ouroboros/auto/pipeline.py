@@ -1158,9 +1158,7 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
 
-            seed_qa, seed, review = await self._run_seed_qa_gate(
-                state, ledger, seed, review=review
-            )
+            seed_qa, seed, review = await self._run_seed_qa_gate(state, ledger, seed, review=review)
             if seed_qa is not None:
                 return seed_qa
 
@@ -2559,7 +2557,9 @@ class AutoPipeline:
             except TimeoutError:
                 if self._enforce_deadline(state):
                     return (
-                        self._result(state, ledger, review=current_review, blocker=state.last_error),
+                        self._result(
+                            state, ledger, review=current_review, blocker=state.last_error
+                        ),
                         current_seed,
                         current_review,
                     )
@@ -4426,9 +4426,8 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
     normalized_feedback = tuple(dict.fromkeys(item.strip() for item in feedback if item.strip()))
     if not normalized_feedback:
         normalized_feedback = ("Seed QA failed without actionable differences or suggestions.",)
-    constraint = (
-        f"[seed qa repair attempt {attempt}] Resolve before execution: "
-        + " | ".join(normalized_feedback)
+    constraint = f"[seed qa repair attempt {attempt}] Resolve before execution: " + " | ".join(
+        normalized_feedback
     )
     return seed.model_copy(
         update={
