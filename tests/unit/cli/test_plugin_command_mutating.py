@@ -8,14 +8,23 @@ multi-select interactive flow is exercised via the non-interactive
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.plugin import app as plugin_app
+from ouroboros.cli.commands.plugin import (
+    _enumerate_catalog,
+    _select_plugins,
+)
+from ouroboros.cli.commands.plugin import (
+    app as plugin_app,
+)
 from ouroboros.plugin.lockfile import Lockfile
 from ouroboros.plugin.trust_store import TrustStore
 
@@ -43,6 +52,11 @@ REFERENCE_MANIFEST: dict = {
     ],
     "entrypoint": {"type": "command", "command": "python -m github_pr_ops"},
 }
+
+
+class _TtyStdin(io.StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 @pytest.fixture
@@ -4333,6 +4347,49 @@ def test_add_registers_catalog_when_interactive_selection_empty(
     for entry in payload["catalogs"]:
         plugins_recorded.update(entry.get("plugins", []))
     assert plugins_recorded == {"github-pr-ops", "github-issue-ops"}, plugins_recorded
+
+
+def test_select_plugins_without_questionary_accepts_numbers_and_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    sibling = json.loads(json.dumps(REFERENCE_MANIFEST))
+    sibling["name"] = "github-issue-ops"
+    sibling["source"] = {
+        "type": "local_path",
+        "path": "plugins/github-issue-ops",
+    }
+    _make_repo_layout(repo, [REFERENCE_MANIFEST, sibling])
+    catalog = _enumerate_catalog(repo)
+
+    monkeypatch.setitem(sys.modules, "questionary", None)
+    monkeypatch.setattr(sys, "stdin", _TtyStdin("2,github-issue-ops\n"))
+
+    selected = _select_plugins(catalog, requested=None)
+
+    assert [entry.manifest.name for entry in selected] == [
+        "github-pr-ops",
+        "github-issue-ops",
+    ]
+
+
+def test_select_plugins_without_questionary_rejects_invalid_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    _make_repo_layout(repo, [REFERENCE_MANIFEST])
+    catalog = _enumerate_catalog(repo)
+
+    monkeypatch.setitem(sys.modules, "questionary", None)
+    monkeypatch.setattr(sys, "stdin", _TtyStdin("99\n"))
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _select_plugins(catalog, requested=None)
+
+    assert exc_info.value.exit_code == 1
+    output = capsys.readouterr().out
+    assert "invalid plugin selection" in output
+    assert "number out of range" in output
 
 
 def test_atomic_install_rollback_preserves_backup_on_restore_failure(

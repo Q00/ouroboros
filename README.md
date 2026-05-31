@@ -163,11 +163,11 @@ pip install ouroboros-ai[claude]        # + Claude Code deps
 pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider
 pip install ouroboros-ai[mcp]           # + MCP server/client support
 pip install ouroboros-ai[tui]           # + Textual terminal UI
-pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui + dashboard)
+pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui)
 ouroboros setup                         # configure runtime
 ```
 
-Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias while extras migrate.
+Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 
 See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md)
 

@@ -23,6 +23,7 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import sys
 from typing import Annotated
 
 import typer
@@ -1431,17 +1432,13 @@ def _select_plugins(
             raise typer.Exit(code=1)
         return [by_name[r] for r in requested]
 
-    # Interactive multi-select via questionary (optional import — fall back
-    # to a clear error if missing so contributors know how to install).
+    # Interactive multi-select via questionary when available. Base installs
+    # intentionally do not require questionary, so fall back to a small stdlib
+    # terminal prompt instead of making the default interactive path unusable.
     try:
         import questionary
     except ImportError:
-        print_error(
-            "interactive multi-select requires `questionary`; install it or "
-            "pass `--plugin <name>` for non-interactive selection. "
-            f"(catalog has: {sorted(by_name)})"
-        )
-        raise typer.Exit(code=1)
+        return _select_plugins_terminal_fallback(catalog, by_name)
 
     choices = [
         questionary.Choice(
@@ -1461,6 +1458,76 @@ def _select_plugins(
         print_info("no plugins selected; aborting")
         raise typer.Exit(code=0)
     return [by_name[a] for a in answers]
+
+
+def _select_plugins_terminal_fallback(
+    catalog: list[CatalogEntry],
+    by_name: dict[str, CatalogEntry],
+) -> list[CatalogEntry]:
+    """Prompt for plugin names/numbers without optional prompt libraries."""
+    if not sys.stdin.isatty():
+        print_error(
+            "interactive plugin selection needs a terminal stdin. Re-run with "
+            "`--plugin <name>` for non-interactive selection. "
+            f"(catalog has: {sorted(by_name)})"
+        )
+        raise typer.Exit(code=1)
+
+    console.print("Select plugins to install:")
+    for index, entry in enumerate(catalog, start=1):
+        description = entry.manifest.description or ""
+        console.print(
+            f"  {index}. {entry.manifest.name} ({entry.manifest.version}) {description}".rstrip()
+        )
+    console.print("Enter comma-separated numbers or names; press Enter with no input to abort.")
+
+    try:
+        raw = input("Plugin selection: ")
+    except EOFError:
+        print_error(
+            "no plugin selection was provided. Re-run with `--plugin <name>` "
+            "for non-interactive selection."
+        )
+        raise typer.Exit(code=1) from None
+
+    if not raw.strip():
+        print_info("no plugins selected; aborting")
+        raise typer.Exit(code=0)
+
+    selected: list[CatalogEntry] = []
+    selected_names: set[str] = set()
+    invalid: list[str] = []
+    for token in [part.strip() for part in raw.split(",")]:
+        if not token:
+            continue
+        entry: CatalogEntry | None = None
+        if token.isdecimal():
+            number = int(token)
+            if 1 <= number <= len(catalog):
+                entry = catalog[number - 1]
+            else:
+                invalid.append(f"{token} (number out of range)")
+                continue
+        else:
+            entry = by_name.get(token)
+            if entry is None:
+                invalid.append(f"{token} (unknown plugin)")
+                continue
+        if entry.manifest.name not in selected_names:
+            selected.append(entry)
+            selected_names.add(entry.manifest.name)
+
+    if invalid:
+        print_error(
+            "invalid plugin selection: "
+            f"{', '.join(invalid)}. Use comma-separated numbers or names from "
+            f"the catalog: {sorted(by_name)}"
+        )
+        raise typer.Exit(code=1)
+    if not selected:
+        print_info("no plugins selected; aborting")
+        raise typer.Exit(code=0)
+    return selected
 
 
 def _manifest_checksum(plugin_home: Path) -> str:
