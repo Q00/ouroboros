@@ -60,7 +60,8 @@ from ouroboros.auto.state import (
     AutoPipelineState,
     AutoResumeCapability,
     AutoStore,
-    AutoWorktreePolicy,
+    parse_auto_worktree_policy,
+    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.config import get_opencode_mode
@@ -330,6 +331,10 @@ class AutoHandler:
                 "pipeline_timeout_seconds cannot be changed on resume; the "
                 "original deadline is preserved across process restarts"
             )
+        validate_complete_product_timeout(
+            complete_product=complete_product and not (isinstance(resume, str) and resume),
+            pipeline_timeout_seconds=pipeline_timeout_seconds,
+        )
         # Distinguish "caller did not pass user_preferences" from "caller
         # passed an empty mapping". Only validate/parse when the caller
         # actually supplied the arg so a resume call can defer to persisted
@@ -663,6 +668,10 @@ class StartAutoHandler:
                 for field_name in ("attach_execution", "attach_job", "attach_session")
             )
             requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
+            validate_complete_product_timeout(
+                complete_product=bool(arguments.get("complete_product", False)) and not has_resume,
+                pipeline_timeout_seconds=requested_pipeline_timeout,
+            )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
         if attach_requested and not has_resume:
@@ -1018,7 +1027,7 @@ def _apply_requested_domain_and_policies(
 
     worktree_policy = _optional_text_arg(arguments, "worktree_policy")
     if worktree_policy is not None:
-        state.worktree_policy = AutoWorktreePolicy(worktree_policy)
+        state.worktree_policy = parse_auto_worktree_policy(worktree_policy)
 
 
 def _build_auto_subagent(

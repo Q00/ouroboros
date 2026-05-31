@@ -43,7 +43,8 @@ from ouroboros.auto.state import (
     AutoPhase,
     AutoPipelineState,
     AutoStore,
-    AutoWorktreePolicy,
+    parse_auto_worktree_policy,
+    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.cli.formatters import console
@@ -353,6 +354,11 @@ async def _run_auto(
         raise ValueError("--attach-execution/--attach-job/--attach-session require --resume")
     if reconcile_run and not resume:
         raise ValueError("--reconcile-run requires --resume")
+    validate_complete_product_timeout(
+        complete_product=complete_product and not bool(resume),
+        pipeline_timeout_seconds=pipeline_timeout_seconds,
+        option_name="--timeout",
+    )
     if resume:
         if pipeline_timeout_seconds is not None:
             raise ValueError(
@@ -449,7 +455,7 @@ async def _run_auto(
     if commit_policy is not None:
         state.commit_policy = AutoCommitPolicy(commit_policy)
     if worktree_policy is not None:
-        state.worktree_policy = AutoWorktreePolicy(worktree_policy)
+        state.worktree_policy = parse_auto_worktree_policy(worktree_policy)
 
     if runtime == "opencode":
         # Q00/ouroboros#782 review-7 BLOCKING #3 + review-8 BLOCKING #1: keep

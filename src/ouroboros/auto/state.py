@@ -79,6 +79,72 @@ class AutoWorktreePolicy(StrEnum):
     NONE = "none"
 
 
+WORKTREE_POLICY_ALIASES: dict[str, str] = {
+    # Natural-language / older gateway spellings for mandatory isolation.
+    "create_isolated_worktree": AutoWorktreePolicy.ALWAYS.value,
+    "isolated": AutoWorktreePolicy.ALWAYS.value,
+    "isolate": AutoWorktreePolicy.ALWAYS.value,
+    "required": AutoWorktreePolicy.ALWAYS.value,
+    "use_isolated_worktree": AutoWorktreePolicy.ALWAYS.value,
+    "always_create": AutoWorktreePolicy.ALWAYS.value,
+    # Explicit current-worktree spellings.
+    "current_worktree": AutoWorktreePolicy.CURRENT.value,
+    "reuse_current": AutoWorktreePolicy.CURRENT.value,
+    "use_current_worktree": AutoWorktreePolicy.CURRENT.value,
+    # Explicit opt-out spellings.
+    "no_worktree": AutoWorktreePolicy.NONE.value,
+    "disable_worktree": AutoWorktreePolicy.NONE.value,
+}
+
+
+def parse_auto_worktree_policy(value: str) -> AutoWorktreePolicy:
+    """Parse a worktree isolation policy, accepting stable aliases.
+
+    External callers often express the intent as ``create_isolated_worktree``
+    or ``required`` even though the durable enum is intentionally compact.
+    Normalizing those spellings at the boundary keeps the persisted state
+    canonical while making the MCP/CLI surface resilient to natural policy
+    names emitted by agents and gateways.
+    """
+    raw = value.strip()
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    canonical = WORKTREE_POLICY_ALIASES.get(normalized, normalized)
+    try:
+        return AutoWorktreePolicy(canonical)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in AutoWorktreePolicy)
+        alias_hint = "create_isolated_worktree → always"
+        msg = (
+            f"worktree_policy must be one of: {valid}. "
+            f"Accepted aliases include {alias_hint}. Got {raw!r}."
+        )
+        raise ValueError(msg) from exc
+
+
+COMPLETE_PRODUCT_MIN_PIPELINE_TIMEOUT_SECONDS: float = 1800.0
+
+
+def validate_complete_product_timeout(
+    *,
+    complete_product: bool,
+    pipeline_timeout_seconds: float | None,
+    option_name: str = "pipeline_timeout_seconds",
+) -> None:
+    """Fail fast when complete-product auto is given an impractical deadline."""
+    if (
+        complete_product
+        and pipeline_timeout_seconds is not None
+        and pipeline_timeout_seconds < COMPLETE_PRODUCT_MIN_PIPELINE_TIMEOUT_SECONDS
+    ):
+        msg = (
+            f"complete_product=true requires {option_name} >= "
+            f"{COMPLETE_PRODUCT_MIN_PIPELINE_TIMEOUT_SECONDS:g} seconds. "
+            f"Omit {option_name} to use the default 7200s long-running auto budget, "
+            "or pass a larger value for interview, Seed, run, and Ralph/QA phases."
+        )
+        raise ValueError(msg)
+
+
 class SeedOrigin(StrEnum):
     """Provenance of the persisted Seed for an auto session.
 
@@ -983,10 +1049,9 @@ class AutoPipelineState:
             msg = f"commit_policy must be one of {[item.value for item in AutoCommitPolicy]}"
             raise ValueError(msg) from exc
         try:
-            payload["worktree_policy"] = AutoWorktreePolicy(payload["worktree_policy"])
+            payload["worktree_policy"] = parse_auto_worktree_policy(payload["worktree_policy"])
         except ValueError as exc:
-            msg = f"worktree_policy must be one of {[item.value for item in AutoWorktreePolicy]}"
-            raise ValueError(msg) from exc
+            raise ValueError(str(exc)) from exc
         try:
             payload["seed_origin"] = SeedOrigin(payload["seed_origin"])
         except ValueError as exc:

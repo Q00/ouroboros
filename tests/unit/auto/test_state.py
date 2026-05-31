@@ -93,6 +93,31 @@ def test_legacy_state_defaults_to_non_coding_policy() -> None:
     assert restored.final_checkpoint_attempted is False
 
 
+def test_worktree_policy_aliases_parse_to_canonical_values() -> None:
+    from ouroboros.auto.state import parse_auto_worktree_policy
+
+    assert parse_auto_worktree_policy("create_isolated_worktree") is AutoWorktreePolicy.ALWAYS
+    assert parse_auto_worktree_policy("required") is AutoWorktreePolicy.ALWAYS
+    assert parse_auto_worktree_policy("reuse-current") is AutoWorktreePolicy.CURRENT
+    assert parse_auto_worktree_policy("no worktree") is AutoWorktreePolicy.NONE
+
+
+def test_worktree_policy_aliases_load_from_state_payload() -> None:
+    payload = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project").to_dict()
+    payload["worktree_policy"] = "create_isolated_worktree"
+
+    restored = AutoPipelineState.from_dict(payload)
+
+    assert restored.worktree_policy is AutoWorktreePolicy.ALWAYS
+
+
+def test_invalid_worktree_policy_names_suggest_alias() -> None:
+    from ouroboros.auto.state import parse_auto_worktree_policy
+
+    with pytest.raises(ValueError, match="create_isolated_worktree .* always"):
+        parse_auto_worktree_policy("make_new_tree")
+
+
 def test_terminal_state_is_not_stale() -> None:
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
     state.transition(AutoPhase.INTERVIEW, "starting")
