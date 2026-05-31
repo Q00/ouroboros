@@ -167,7 +167,12 @@ def _lateral_response_authorizes_demotion(text: str | None) -> bool:
 
 
 def _backend_confirmed_seed_ready(turn: InterviewTurn) -> bool:
-    """Return True when the backend closed the interview below the ambiguity gate."""
+    """Return True when the backend closed the interview within the ambiguity gate.
+
+    Backends that do not yet report ``ambiguity_score`` remain compatible:
+    ``seed_ready`` / ``completed`` without a score is accepted as a backend
+    confirmation.
+    """
     if not (turn.seed_ready or turn.completed):
         return False
     if turn.ambiguity_score is None:
@@ -192,10 +197,10 @@ class InterviewTurn:
     session_id: str
     seed_ready: bool = False
     completed: bool = False
-    # Optional diagnostic surface — backend's own ambiguity reading for the
-    # current turn. The driver never gates on this; it is only used to build
-    # informative blocker messages when the mutual-agreement closure gate
-    # exhausts its budget without both parties converging.
+    # Optional backend ambiguity reading for the current turn. When present,
+    # the driver uses it for the low-ambiguity backend closure gate and for
+    # blocker/status messages; when absent, legacy ``seed_ready`` /
+    # ``completed`` confirmations remain accepted.
     ambiguity_score: float | None = None
 
 
