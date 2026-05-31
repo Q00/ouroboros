@@ -415,7 +415,7 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
         messages = [
             message
             async for message in runtime.execute_task(
-                f'ooo auto "{user_goal}" --complete-product --pipeline-timeout-seconds 600.5'
+                f'ooo auto "{user_goal}" --complete-product --pipeline-timeout-seconds 1800.5'
             )
         ]
 
@@ -449,7 +449,7 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
         f"resolve_skill_dispatch must inject runtime cwd via $CWD; got {args!r}"
     )
     assert args["complete_product"] is True
-    assert args["pipeline_timeout_seconds"] == 600.5
+    assert args["pipeline_timeout_seconds"] == 1800.5
     assert isinstance(args["pipeline_timeout_seconds"], float)
 
     # AutoHandler._run actually executed: stub AutoPipeline observed the state.
@@ -461,7 +461,7 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     )
     assert captured.get("complete_product") is True
     assert captured.get("state_complete_product") is True
-    assert captured.get("state_pipeline_timeout_seconds") == 600.5
+    assert captured.get("state_pipeline_timeout_seconds") == 1800.5
 
     # The runtime must yield a single final result message carrying the Seed.
     assert len(messages) == 1, f"expected single dispatch result, got {messages!r}"
