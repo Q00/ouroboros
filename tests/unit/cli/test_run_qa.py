@@ -694,6 +694,24 @@ async def test_run_orchestrator_falls_back_when_artifact_generation_fails(tmp_pa
 class TestDetectProjectRootFromSeedPath:
     """Tests for ouroboros.cli.commands.run._detect_project_root_from_seed_path."""
 
+    def test_returns_none_when_candidate_is_home_dir(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Seeds in ~/.ouroboros/seeds/ must not yield home dir as project root (issue #1312)."""
+        from ouroboros.cli.commands.run import _detect_project_root_from_seed_path
+
+        fake_home = tmp_path / "home"
+        global_seeds = fake_home / ".ouroboros" / "seeds" / "myfeat"
+        global_seeds.mkdir(parents=True)
+        seed_file = global_seeds / "seed.yaml"
+        seed_file.write_text("goal: x")
+
+        with patch.object(Path, "home", return_value=fake_home):
+            result = _detect_project_root_from_seed_path(seed_file)
+
+        assert result is None
+
     def test_returns_root_when_seed_lives_under_dot_ouroboros_seeds(
         self,
         tmp_path: Path,

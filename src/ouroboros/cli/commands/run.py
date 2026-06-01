@@ -189,7 +189,15 @@ def _detect_project_root_from_seed_path(seed_file: Path, *, max_levels: int = 6)
     current = seed_file.parent.resolve()
     for _ in range(max_levels):
         if current.name == "seeds" and current.parent.name == ".ouroboros":
-            return current.parent.parent
+            candidate = current.parent.parent
+            # Do not treat the home directory as a project root.
+            # ~/.ouroboros/seeds/ is the global Ouroboros seed store and
+            # matches the central-seed pattern structurally, but ~ is not a
+            # project root. Returning it as one causes opencode to start with
+            # cwd=$HOME for every globally-stored seed (issue #1312).
+            if candidate.resolve() == Path.home().resolve():
+                return None
+            return candidate
         parent = current.parent
         if parent == current:
             break
