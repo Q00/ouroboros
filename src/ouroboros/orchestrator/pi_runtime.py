@@ -121,15 +121,8 @@ class PiRuntime:
 
         Prompt is piped via stdin (avoids ARG_MAX limits).
         Pi reads stdin when it detects a non-TTY input stream.
-
-        On Windows, npm-installed CLIs are .CMD batch files which cannot be
-        executed directly by asyncio.create_subprocess_exec; they are wrapped
-        with ``cmd.exe /c`` so the OS shell dispatches them correctly.
         """
-        if os.name == "nt" and self._cli_path.upper().endswith(".CMD"):
-            command = ["cmd.exe", "/c", self._cli_path, "--mode", "json"]
-        else:
-            command = [self._cli_path, "--mode", "json"]
+        command = [self._cli_path, "--mode", "json"]
 
         if self._model:
             command.extend(["--model", self._model.strip()])
