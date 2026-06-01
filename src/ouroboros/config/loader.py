@@ -1087,6 +1087,31 @@ def get_goose_cli_path() -> str | None:
     return None
 
 
+def get_pi_cli_path() -> str | None:
+    """Get Pi CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_PI_CLI_PATH environment variable
+        2. config.yaml orchestrator.pi_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to Pi CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_PI_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.pi_cli_path:
+            return config.orchestrator.pi_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_opencode_mode() -> str | None:
     """Get configured OpenCode integration mode from config file.
 

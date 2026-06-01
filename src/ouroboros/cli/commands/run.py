@@ -69,6 +69,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     COPILOT = "copilot"
     GOOSE = "goose"
     KIRO = "kiro"
+    PI = "pi"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:
