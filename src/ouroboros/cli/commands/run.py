@@ -783,7 +783,7 @@ def workflow(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator mode (claude, codex, opencode, hermes, gemini, copilot, goose, or kiro).",
+            help="Agent runtime backend for orchestrator mode (claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi).",
             case_sensitive=False,
         ),
     ] = None,

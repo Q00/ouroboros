@@ -39,6 +39,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     KIRO = "kiro"
     COPILOT = "copilot"
     GOOSE = "goose"
+    PI = "pi"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042

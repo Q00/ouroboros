@@ -463,6 +463,7 @@ class PiRuntime:
                             data={"subtype": "success"},
                             resume_handle=current_handle,
                         )
+                        break
 
         except TimeoutError as e:
             if process is not None:

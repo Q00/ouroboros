@@ -95,6 +95,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GEMINI = "gemini"
     COPILOT = "copilot"
     KIRO = "kiro"
+    PI = "pi"
 
 
 app = typer.Typer(
