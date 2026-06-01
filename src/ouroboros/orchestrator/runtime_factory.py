@@ -15,8 +15,8 @@ from ouroboros.config import (
     get_hermes_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
-    get_runtime_profile,
     get_pi_cli_path,
+    get_runtime_profile,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
