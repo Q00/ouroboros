@@ -32,6 +32,7 @@ from ouroboros.config.loader import (
     get_max_parallel_workers,
     get_ontology_analysis_model,
     get_opencode_cli_path,
+    get_pi_cli_path,
     get_qa_model,
     get_reflect_model,
     get_runtime_controls_config,
@@ -414,6 +415,13 @@ class TestRuntimeHelperLookups:
         monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
         assert get_agent_runtime_backend() == "codex"
 
+    def test_get_agent_runtime_backend_accepts_pi_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pi can be selected through OUROBOROS_AGENT_RUNTIME."""
+        monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "pi")
+        assert get_agent_runtime_backend() == "pi"
+
     def test_get_agent_runtime_backend_falls_back_to_config(self) -> None:
         """Config is used when env override is absent."""
         with (
@@ -426,6 +434,11 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_agent_runtime_backend() == "codex"
+
+    def test_orchestrator_config_accepts_pi_runtime_backend(self) -> None:
+        """Pi is valid for persisted orchestrator runtime backend config."""
+        config = OrchestratorConfig(runtime_backend="pi")
+        assert config.runtime_backend == "pi"
 
     def test_get_codex_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for Codex CLI path."""
@@ -462,6 +475,24 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_opencode_cli_path() == "/tmp/opencode"
+
+    def test_get_pi_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for Pi CLI path."""
+        monkeypatch.setenv("OUROBOROS_PI_CLI_PATH", "~/bin/pi")
+        assert get_pi_cli_path() == str(Path("~/bin/pi").expanduser())
+
+    def test_get_pi_cli_path_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(pi_cli_path="/tmp/pi")
+                ),
+            ),
+        ):
+            assert get_pi_cli_path() == "/tmp/pi"
 
     def test_get_gemini_cli_path_returns_executable_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

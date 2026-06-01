@@ -228,6 +228,17 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         soft_tool_enforcement=True,
     ),
     BackendCapability(
+        name="pi",
+        aliases=("pi_cli",),
+        supports_runtime=True,
+        supports_llm=True,
+        supports_interview_driver=True,
+        switchable_runtime=True,
+        cli_name="pi",
+        cli_config_key="pi_cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         name="goose",
         aliases=("goose_cli",),
         supports_runtime=True,

@@ -369,3 +369,38 @@ def test_create_goose_runtime_uses_configured_cli_path() -> None:
     assert runtime._cwd == "/tmp/project"
     assert runtime._skill_dispatcher is mock_dispatcher
     assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "goose"
+
+
+def test_resolve_pi_aliases() -> None:
+    """Pi aliases normalize to pi."""
+    assert resolve_agent_runtime_backend("pi") == "pi"
+    assert resolve_agent_runtime_backend("pi_cli") == "pi"
+
+
+def test_create_pi_runtime_uses_configured_cli_path() -> None:
+    """Creates Pi runtime with the configured CLI path."""
+    from ouroboros.orchestrator.pi_runtime import PiRuntime
+
+    mock_dispatcher = object()
+
+    with (
+        patch(
+            "ouroboros.orchestrator.runtime_factory.get_pi_cli_path",
+            return_value="/tmp/pi",
+        ),
+        patch(
+            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+            return_value=mock_dispatcher,
+        ) as mock_create_dispatcher,
+    ):
+        runtime = create_agent_runtime(
+            backend="pi",
+            permission_mode="acceptEdits",
+            cwd="/tmp/project",
+        )
+
+    assert isinstance(runtime, PiRuntime)
+    assert runtime._cli_path == "/tmp/pi"
+    assert runtime._cwd == "/tmp/project"
+    assert runtime._skill_dispatcher is mock_dispatcher
+    assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "pi"

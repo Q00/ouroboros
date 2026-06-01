@@ -37,6 +37,7 @@ def test_resolves_aliases_to_canonical_names() -> None:
 def test_runtime_choices_include_runtime_only_backends() -> None:
     choices = runtime_backend_choices()
     assert "hermes" in choices
+    assert "pi" in choices
     assert "litellm" not in choices
 
 

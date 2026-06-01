@@ -16,6 +16,7 @@ from ouroboros.config import (
     get_kiro_cli_path,
     get_llm_backend,
     get_runtime_profile,
+    get_pi_cli_path,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
@@ -139,6 +140,14 @@ def create_agent_runtime(
             cli_path=cli_path or get_goose_cli_path(),
             startup_output_timeout_seconds=startup_output_timeout_seconds,
             stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
+            **runtime_kwargs,
+        )
+
+    if resolved_backend == "pi":
+        from ouroboros.orchestrator.pi_runtime import PiRuntime
+
+        return PiRuntime(
+            cli_path=cli_path or get_pi_cli_path(),
             **runtime_kwargs,
         )
 
