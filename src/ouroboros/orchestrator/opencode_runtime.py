@@ -1304,8 +1304,7 @@ class OpenCodeRuntime:
                     if pid is not None:
                         with contextlib.suppress(Exception):
                             subprocess.run(
-                                ["wmic", "process", "where",
-                                 f"(ParentProcessId={pid})", "delete"],
+                                ["wmic", "process", "where", f"(ParentProcessId={pid})", "delete"],
                                 capture_output=True,
                                 timeout=5,
                             )
