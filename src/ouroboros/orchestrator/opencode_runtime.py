@@ -567,7 +567,7 @@ class OpenCodeRuntime:
 
     # -- Process management ------------------------------------------------
 
-    def _cleanup_windows_child_processes(self, process: Any) -> None:
+    def _cleanup_windows_child_processes(self, process: Any) -> bool:
         """Best-effort cleanup for Windows children orphaned by Node CLIs.
 
         OpenCode may leave session-server children behind after the parent
@@ -576,10 +576,10 @@ class OpenCodeRuntime:
         after ``process.wait()`` has completed.
         """
         if os.name != "nt":
-            return
+            return True
         pid = getattr(process, "pid", None)
         if pid is None:
-            return
+            return True
         try:
             subprocess.run(
                 ["wmic", "process", "where", f"(ParentProcessId={pid})", "delete"],
@@ -587,12 +587,36 @@ class OpenCodeRuntime:
                 timeout=5,
                 check=False,
             )
+            return True
         except Exception as exc:
             log.warning(
                 f"{self._log_namespace}.windows_child_cleanup_failed",
                 pid=pid,
                 error=str(exc),
             )
+            return False
+
+    async def _collect_stderr_after_windows_cleanup(
+        self,
+        stderr_task: asyncio.Task[list[str]] | None,
+        *,
+        cleanup_succeeded: bool,
+    ) -> list[str]:
+        """Drain stderr, but do not hang forever after failed Windows cleanup.
+
+        Windows child cleanup is best-effort. If it fails while an orphaned
+        child still owns the inherited stderr pipe, waiting for EOF can block
+        normal result emission. In that failure mode, cancel the stderr drain
+        and let the caller return the best available result/error message.
+        """
+        if stderr_task is None:
+            return []
+        if cleanup_succeeded or stderr_task.done():
+            return await stderr_task
+        stderr_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stderr_task
+        return []
 
     async def _terminate_process(self, process: Any) -> None:
         """Best-effort subprocess shutdown.
@@ -1126,6 +1150,7 @@ class OpenCodeRuntime:
         process_finished = False
         process_terminated = False
         windows_child_cleanup_done = False
+        windows_child_cleanup_succeeded = True
         control_state: dict[str, Any] | None = None
         stderr_task: asyncio.Task[list[str]] | None = None
 
@@ -1255,12 +1280,15 @@ class OpenCodeRuntime:
         except TimeoutError as e:
             if process is not None and control_state is not None:
                 await self._terminate_process(process)
-                self._cleanup_windows_child_processes(process)
+                windows_child_cleanup_succeeded = self._cleanup_windows_child_processes(process)
                 windows_child_cleanup_done = True
                 control_state["terminated"] = True
             process_terminated = True
             if stderr_task is not None:
-                stderr_lines = await stderr_task
+                stderr_lines = await self._collect_stderr_after_windows_cleanup(
+                    stderr_task,
+                    cleanup_succeeded=windows_child_cleanup_succeeded,
+                )
             final_message = "\n".join(stderr_lines).strip()
             if not final_message:
                 final_message = f"{self._display_name} became unresponsive and was terminated: {e}"
@@ -1290,9 +1318,12 @@ class OpenCodeRuntime:
                 process=process,
                 control_state=control_state,
             )
-            self._cleanup_windows_child_processes(process)
+            windows_child_cleanup_succeeded = self._cleanup_windows_child_processes(process)
             windows_child_cleanup_done = True
-            stderr_lines = await stderr_task
+            stderr_lines = await self._collect_stderr_after_windows_cleanup(
+                stderr_task,
+                cleanup_succeeded=windows_child_cleanup_succeeded,
+            )
 
             if yielded_final:
                 return

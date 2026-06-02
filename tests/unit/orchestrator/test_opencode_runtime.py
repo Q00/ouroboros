@@ -1351,6 +1351,42 @@ class TestOpenCodeRuntimeExecuteTask:
         assert any(msg.type == "result" for msg in messages)
 
     @pytest.mark.asyncio
+    async def test_execute_task_windows_cleanup_failure_does_not_block_on_stderr(
+        self,
+    ) -> None:
+        text_event = json.dumps(
+            {
+                "type": "text",
+                "sessionID": "sess-windows-stderr-cleanup-fails",
+                "part": {"type": "text", "text": "Done"},
+            }
+        )
+        cleanup_started = asyncio.Event()
+        process = _FakeProcess(stdout_lines=[text_event], stderr_lines=[], returncode=0)
+        process.stderr = _WaitForCleanupStream(cleanup_started)
+        process.pid = 9753
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+
+        def cleanup_children(*_args: object, **_kwargs: object) -> None:
+            cleanup_started.set()
+            raise TimeoutError("wmic hung")
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=process),
+            patch.object(opencode_runtime_module.os, "name", "nt"),
+            patch.object(opencode_runtime_module.subprocess, "run", side_effect=cleanup_children),
+            patch.object(opencode_runtime_module.log, "warning") as mock_warning,
+        ):
+            messages = await asyncio.wait_for(
+                _collect_async(runtime.execute_task("Hello")),
+                timeout=1,
+            )
+
+        assert cleanup_started.is_set()
+        assert any(msg.type == "result" for msg in messages)
+        assert mock_warning.call_args.args[0] == "opencode_runtime.windows_child_cleanup_failed"
+
+    @pytest.mark.asyncio
     async def test_execute_task_windows_child_cleanup_runs_after_aclose_termination(
         self,
     ) -> None:
