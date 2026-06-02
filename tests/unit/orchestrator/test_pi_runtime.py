@@ -257,6 +257,50 @@ async def test_agent_end_does_not_mask_nonzero_exit() -> None:
     assert result.data["error_type"] == "PiError"
 
 
+@pytest.mark.asyncio
+async def test_execute_task_reports_malformed_json_event() -> None:
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            "not-json",
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with patch("asyncio.create_subprocess_exec", return_value=process):
+        messages = [msg async for msg in runtime.execute_task("Do it")]
+
+    result = [m for m in messages if m.type == "result"][-1]
+    assert result.is_error
+    assert result.content == "Malformed Pi JSON event: not-json"
+    assert result.data == {
+        "subtype": "error",
+        "error_type": "MalformedPiEvent",
+    }
+    assert result.resume_handle is not None
+    assert result.resume_handle.native_session_id == "session-1"
+    assert process.terminated
+
+
+@pytest.mark.asyncio
+async def test_execute_task_to_result_maps_malformed_event_to_provider_error() -> None:
+    process = _FakeProcess(stdout_lines=["[bad-json]"], stderr_lines=[], returncode=0)
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with patch("asyncio.create_subprocess_exec", return_value=process):
+        result = await runtime.execute_task_to_result("Do it")
+
+    assert result.is_err
+    error = result.error
+    assert error is not None
+    assert error.provider == "pi"
+    assert error.message == "Malformed Pi JSON event: [bad-json]"
+    assert error.details == {"messages": ["Malformed Pi JSON event: [bad-json]"]}
+    assert process.terminated
+
+
 def test_runtime_factory_constructs_pi_runtime() -> None:
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
