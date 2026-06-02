@@ -1289,6 +1289,91 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend="codex") == "gpt-5"
             assert get_assertion_extraction_model(backend="codex") == "gpt-5-nano"
 
+    @pytest.mark.parametrize("backend", ["codex", "copilot", "hermes", "kiro"])
+    def test_legacy_shipped_default_models_still_normalize_to_sentinel(self, backend: str) -> None:
+        """Regression for #1324 (ouroboros-agent[bot] req_1780385373_60).
+
+        A config persisted by a prior release holds the OLD shipped defaults
+        (``claude-opus-4-6`` for the Opus tier, ``claude-sonnet-4-20250514`` for
+        the QA Sonnet tier). After the pin bump these are no longer equal to the
+        current ``DEFAULT_*_MODEL`` constants, but they were still shipped
+        defaults the user never chose — so Claude-incapable backends must keep
+        normalizing them to the ``"default"`` sentinel rather than leaking an
+        unrunnable Claude id.
+        """
+        legacy_config = OuroborosConfig(
+            clarification=ClarificationConfig(default_model="claude-opus-4-6"),
+            llm=LLMConfig(
+                qa_model="claude-sonnet-4-20250514",
+                dependency_analysis_model="claude-opus-4-6",
+            ),
+            resilience=ResilienceConfig(
+                wonder_model="claude-opus-4-6",
+                reflect_model="claude-opus-4-6",
+            ),
+            evaluation=EvaluationConfig(
+                semantic_model="claude-opus-4-6",
+                assertion_extraction_model="claude-sonnet-4-6",
+            ),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=legacy_config),
+        ):
+            assert get_clarification_model(backend=backend) == "default"
+            assert get_qa_model(backend=backend) == "default"
+            assert get_dependency_analysis_model(backend=backend) == "default"
+            assert get_wonder_model(backend=backend) == "default"
+            assert get_reflect_model(backend=backend) == "default"
+            assert get_semantic_model(backend=backend) == "default"
+            assert get_assertion_extraction_model(backend=backend) == "default"
+
+    def test_consensus_advocate_legacy_shipped_default_normalizes_to_sentinel(self) -> None:
+        """A persisted legacy consensus advocate slug normalizes for Codex (#1324)."""
+        legacy_config = OuroborosConfig(
+            consensus=ConsensusConfig(advocate_model="openrouter/anthropic/claude-opus-4-6"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=legacy_config),
+        ):
+            assert get_consensus_advocate_model(backend="codex") == "default"
+
+    def test_consensus_roster_legacy_shipped_defaults_normalize_to_sentinel(self) -> None:
+        """A persisted legacy consensus roster (old Opus slot) normalizes (#1324).
+
+        The roster is matched element-wise against current + legacy shipped
+        defaults, so a roster generated before the Opus slug bump still resolves
+        to the backend-safe sentinel for Claude-incapable backends.
+        """
+        legacy_config = OuroborosConfig(
+            consensus=ConsensusConfig(
+                models=(
+                    "openrouter/openai/gpt-4o",
+                    "openrouter/anthropic/claude-opus-4-6",
+                    "openrouter/google/gemini-2.5-pro",
+                ),
+            ),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=legacy_config),
+        ):
+            assert get_consensus_models(backend="codex") == ("default", "default", "default")
+
+    def test_nonshipped_claude_id_is_preserved_not_normalized(self) -> None:
+        """Guard against over-broadening: a Claude id that was NEVER a shipped
+        default must still be preserved as an explicit user override, not
+        swallowed by the legacy-default recognition (#1324)."""
+        explicit_config = OuroborosConfig(
+            clarification=ClarificationConfig(default_model="claude-opus-4-1-20250805"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=explicit_config),
+        ):
+            assert get_clarification_model(backend="codex") == "claude-opus-4-1-20250805"
+
     def test_get_qa_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for QA model."""
         monkeypatch.setenv("OUROBOROS_QA_MODEL", "gpt-5-nano")

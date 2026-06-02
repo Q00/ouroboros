@@ -39,3 +39,32 @@ DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 # Anthropic-direct id above — LiteLLM forwards it verbatim to OpenRouter, so it
 # must match OpenRouter's published model id exactly or consensus voting fails.
 DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-4.8"
+
+
+# Historical shipped default pins from prior releases, keyed by the *current*
+# default that replaced them. A config persisted before a pin was bumped still
+# contains the older literal (e.g. ``claude-opus-4-6`` was the frozen Opus
+# default from 2026-02-28 until this change; ``claude-sonnet-4-20250514`` was
+# the pre-EOL QA default). Backends that cannot run Claude model names
+# (Codex/Copilot/Hermes/Kiro) must treat these legacy shipped defaults exactly
+# like the current shipped default and normalize them to the ``"default"``
+# sentinel — otherwise bumping a pin silently reclassifies an untouched shipped
+# default in an already-persisted config as an explicit user override and leaks
+# a Claude id to a backend that cannot execute it (Q00/ouroboros#1324 review).
+LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
+    DEFAULT_OPUS_MODEL: ("claude-opus-4-6",),
+    DEFAULT_SONNET_MODEL: ("claude-sonnet-4-20250514",),
+    DEFAULT_CONSENSUS_OPUS_MODEL: ("openrouter/anthropic/claude-opus-4-6",),
+}
+
+
+def recognized_shipped_defaults(default_model: str) -> tuple[str, ...]:
+    """Return every shipped-default value (current + historical) for a pin.
+
+    The loader's backend normalization treats any of these as "the shipped
+    default the user never chose," so a persisted config from a prior release
+    still resolves to the backend-safe ``"default"`` sentinel after a pin bump.
+    Genuinely explicit, never-shipped model ids are absent from this set and so
+    remain preserved verbatim.
+    """
+    return (default_model, *LEGACY_DEFAULT_MODELS.get(default_model, ()))
