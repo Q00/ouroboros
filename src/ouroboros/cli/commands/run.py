@@ -183,8 +183,9 @@ def _detect_project_root_from_seed_path(seed_file: Path, *, max_levels: int = 6)
     files at the repository root rather than next to the seed.
 
     Returns ``None`` when no ``.ouroboros/seeds`` ancestry is found within
-    ``max_levels`` parents; the caller falls back to ``seed_file.parent``
-    in that case.
+    ``max_levels`` parents, or when the matching ancestry is the global
+    ``~/.ouroboros/seeds`` store rather than a project-local seed store;
+    the caller falls back to ``seed_file.parent`` in that case.
     """
     current = seed_file.parent.resolve()
     for _ in range(max_levels):

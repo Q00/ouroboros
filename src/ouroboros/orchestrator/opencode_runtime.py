@@ -29,7 +29,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 from typing import Any
 
 from ouroboros.config import get_opencode_cli_path
@@ -1294,20 +1293,6 @@ class OpenCodeRuntime:
             )
         finally:
             if process is not None:
-                # On Windows, opencode (Node.js) spawns child processes such as
-                # a session server that outlive the parent subprocess. Windows
-                # preserves the original PPID on orphaned processes, so we can
-                # find and terminate them by PPID even after the parent has
-                # already exited (issue #1314).
-                if os.name == "nt":
-                    pid = getattr(process, "pid", None)
-                    if pid is not None:
-                        with contextlib.suppress(Exception):
-                            subprocess.run(
-                                ["wmic", "process", "where", f"(ParentProcessId={pid})", "delete"],
-                                capture_output=True,
-                                timeout=5,
-                            )
                 if (
                     not process_finished
                     and not process_terminated
