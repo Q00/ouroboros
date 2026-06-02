@@ -51,6 +51,7 @@ from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.orchestrator.opencode_runtime import (
     OpenCodeRuntime,
 )
+from ouroboros.orchestrator.pi_runtime import PiRuntime
 
 try:
     from ouroboros.orchestrator.dependency_analyzer import (
@@ -159,6 +160,7 @@ __all__ = [
     "GeminiCLIRuntime",
     "KiroAgentAdapter",
     "OpenCodeRuntime",
+    "PiRuntime",
     "DEFAULT_TOOLS",
     "RuntimeHandle",
     "TaskResult",

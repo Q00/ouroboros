@@ -1114,6 +1114,51 @@ def get_pi_cli_path() -> str | None:
     return None
 
 
+def get_pi_bridge_package() -> str | None:
+    """Get the import package used to derive the default Pi bridge module."""
+    env_value = os.environ.get("OUROBOROS_PI_BRIDGE_PACKAGE", "").strip()
+    if env_value:
+        return env_value
+
+    try:
+        config = load_config()
+        return getattr(config.orchestrator, "pi_bridge_package", None)
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_pi_bridge_module() -> str | None:
+    """Get the importable Pi bridge target in ``module:function`` format."""
+    env_value = os.environ.get("OUROBOROS_PI_BRIDGE_MODULE", "").strip()
+    if env_value:
+        return env_value
+
+    try:
+        config = load_config()
+        return getattr(config.orchestrator, "pi_bridge_module", None)
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_pi_bridge_command() -> str | None:
+    """Get the command PiRuntime should invoke with JSON stdin/stdout."""
+    env_value = os.environ.get("OUROBOROS_PI_BRIDGE_COMMAND", "").strip()
+    if env_value:
+        return env_value
+
+    try:
+        config = load_config()
+        return getattr(config.orchestrator, "pi_bridge_command", None)
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_opencode_mode() -> str | None:
     """Get configured OpenCode integration mode from config file.
 

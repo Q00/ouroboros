@@ -15,7 +15,6 @@ from ouroboros.config import (
     get_hermes_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
-    get_pi_cli_path,
     get_runtime_profile,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
@@ -146,10 +145,7 @@ def create_agent_runtime(
     if resolved_backend == "pi":
         from ouroboros.orchestrator.pi_runtime import PiRuntime
 
-        return PiRuntime(
-            cli_path=cli_path or get_pi_cli_path(),
-            **runtime_kwargs,
-        )
+        return PiRuntime(**runtime_kwargs)
 
     msg = (
         f"Unsupported orchestrator runtime backend: {resolved_backend}. "

@@ -520,6 +520,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
     kiro_cli_path: str | None = None
     goose_cli_path: str | None = None
     pi_cli_path: str | None = None
+    pi_bridge_package: str | None = None
+    pi_bridge_module: str | None = None
+    pi_bridge_command: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)

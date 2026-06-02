@@ -377,22 +377,16 @@ def test_resolve_pi_aliases() -> None:
     assert resolve_agent_runtime_backend("pi_cli") == "pi"
 
 
-def test_create_pi_runtime_uses_configured_cli_path() -> None:
-    """Creates Pi runtime with the configured CLI path."""
+def test_create_pi_runtime_constructs_bridge_runtime() -> None:
+    """Creates the bridge-backed Pi runtime without implying a CLI-path contract."""
     from ouroboros.orchestrator.pi_runtime import PiRuntime
 
     mock_dispatcher = object()
 
-    with (
-        patch(
-            "ouroboros.orchestrator.runtime_factory.get_pi_cli_path",
-            return_value="/tmp/pi",
-        ),
-        patch(
-            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
-            return_value=mock_dispatcher,
-        ) as mock_create_dispatcher,
-    ):
+    with patch(
+        "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+        return_value=mock_dispatcher,
+    ) as mock_create_dispatcher:
         runtime = create_agent_runtime(
             backend="pi",
             permission_mode="acceptEdits",
@@ -400,7 +394,7 @@ def test_create_pi_runtime_uses_configured_cli_path() -> None:
         )
 
     assert isinstance(runtime, PiRuntime)
-    assert runtime._cli_path == "/tmp/pi"
-    assert runtime._cwd == "/tmp/project"
-    assert runtime._skill_dispatcher is mock_dispatcher
+    assert runtime.working_directory == "/tmp/project"
+    assert runtime.permission_mode == "acceptEdits"
+    assert runtime.bridge_module == "pi.runtime.bridge:execute"
     assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "pi"
