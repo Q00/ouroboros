@@ -581,12 +581,20 @@ class OpenCodeRuntime:
         if pid is None:
             return True
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["wmic", "process", "where", f"(ParentProcessId={pid})", "delete"],
                 capture_output=True,
                 timeout=5,
                 check=False,
             )
+            returncode = getattr(result, "returncode", 0)
+            if isinstance(returncode, int) and returncode != 0:
+                log.warning(
+                    f"{self._log_namespace}.windows_child_cleanup_failed",
+                    pid=pid,
+                    returncode=returncode,
+                )
+                return False
             return True
         except Exception as exc:
             log.warning(
