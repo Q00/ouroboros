@@ -216,6 +216,11 @@ class TestLLMConfig:
         config = LLMConfig(backend="opencode")
         assert config.backend == "opencode"
 
+    def test_llm_config_accepts_pi_backend(self) -> None:
+        """LLMConfig accepts Pi as a local CLI backend."""
+        config = LLMConfig(backend="pi")
+        assert config.backend == "pi"
+
 
 class TestLLMTaskProfileConfig:
     """Test provider-neutral LLM task profile configuration."""
