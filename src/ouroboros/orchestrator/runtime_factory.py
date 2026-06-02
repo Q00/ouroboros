@@ -148,6 +148,8 @@ def create_agent_runtime(
 
         return PiRuntime(
             cli_path=cli_path or get_pi_cli_path(),
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
             **runtime_kwargs,
         )
 

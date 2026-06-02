@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from ouroboros.orchestrator.adapter import RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.pi_runtime import PiRuntime
 
 
@@ -126,6 +127,62 @@ def test_build_runtime_handle_from_session_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_task_dispatches_ooo_skill_before_spawning_pi() -> None:
+    captured: dict[str, Any] = {}
+    dispatched_handle = RuntimeHandle(backend="pi", native_session_id="skill-session")
+
+    async def skill_dispatcher(intercept: Any, current_handle: RuntimeHandle | None):
+        captured["skill_name"] = intercept.skill_name
+        captured["command_prefix"] = intercept.command_prefix
+        captured["current_handle"] = current_handle
+        return (
+            AgentMessage(
+                type="tool",
+                content="Calling tool: ouroboros_start_auto",
+                tool_name=intercept.mcp_tool,
+                data={"command_prefix": intercept.command_prefix},
+                resume_handle=dispatched_handle,
+            ),
+            AgentMessage(
+                type="result",
+                content="auto started",
+                data={"subtype": "success"},
+                resume_handle=dispatched_handle,
+            ),
+        )
+
+    runtime = PiRuntime(
+        cli_path="/tmp/pi",
+        cwd="/tmp/project",
+        skill_dispatcher=skill_dispatcher,
+    )
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        messages = [msg async for msg in runtime.execute_task("ooo auto Build docs")]
+
+    mock_exec.assert_not_called()
+    assert captured["skill_name"] == "auto"
+    assert captured["command_prefix"] == "ooo auto"
+    assert [message.content for message in messages] == [
+        "Calling tool: ouroboros_start_auto",
+        "auto started",
+    ]
+    assert messages[-1].resume_handle == dispatched_handle
+
+
+def test_pi_runtime_accepts_stream_timeout_overrides() -> None:
+    runtime = PiRuntime(
+        cli_path="/tmp/pi",
+        cwd="/tmp/project",
+        startup_output_timeout_seconds=0,
+        stdout_idle_timeout_seconds=0,
+    )
+
+    assert runtime._startup_output_timeout_seconds is None
+    assert runtime._stdout_idle_timeout_seconds is None
+
+
+@pytest.mark.asyncio
 async def test_execute_task_streams_delta_and_final_result() -> None:
     process = _FakeProcess(
         stdout_lines=[
@@ -208,6 +265,26 @@ def test_runtime_factory_constructs_pi_runtime() -> None:
     assert isinstance(runtime, PiRuntime)
     assert runtime.runtime_backend == "pi"
     assert runtime.working_directory == "/tmp/project"
+
+
+def test_runtime_factory_passes_pi_stream_timeout_overrides() -> None:
+    from ouroboros.orchestrator.runtime_factory import create_agent_runtime
+
+    with patch(
+        "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+        return_value=object(),
+    ):
+        runtime = create_agent_runtime(
+            backend="pi",
+            cli_path="/tmp/pi",
+            cwd="/tmp/project",
+            startup_output_timeout_seconds=0,
+            stdout_idle_timeout_seconds=0,
+        )
+
+    assert isinstance(runtime, PiRuntime)
+    assert runtime._startup_output_timeout_seconds is None
+    assert runtime._stdout_idle_timeout_seconds is None
 
 
 def test_runtime_handle_accepts_pi_backend() -> None:

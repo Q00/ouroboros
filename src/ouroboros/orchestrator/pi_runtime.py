@@ -25,10 +25,12 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
+    RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
 )
+from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 
 log = get_logger(__name__)
 
@@ -68,8 +70,11 @@ class PiRuntime:
         permission_mode: str | None = None,
         model: str | None = None,
         cwd: str | Path | None = None,
+        skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        startup_output_timeout_seconds: float | None = None,
+        stdout_idle_timeout_seconds: float | None = None,
         **_kwargs: Any,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
@@ -78,6 +83,25 @@ class PiRuntime:
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._skills_dir = Path(skills_dir).expanduser() if skills_dir is not None else None
+        self._interceptor = SkillInterceptor(
+            cwd=self._cwd,
+            runtime_backend=self._runtime_backend,
+            runtime_handle_backend=self._runtime_handle_backend,
+            permission_mode=self._permission_mode,
+            llm_backend=self._llm_backend,
+            log_namespace=self._log_namespace,
+            skills_dir=self._skills_dir,
+            skill_dispatcher=self._skill_dispatcher,
+        )
+        if startup_output_timeout_seconds is not None:
+            self._startup_output_timeout_seconds = (
+                None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
+            )
+        if stdout_idle_timeout_seconds is not None:
+            self._stdout_idle_timeout_seconds = (
+                None if stdout_idle_timeout_seconds <= 0 else stdout_idle_timeout_seconds
+            )
 
         log.info(
             f"{self._log_namespace}.initialized",
@@ -103,6 +127,14 @@ class PiRuntime:
     @property
     def permission_mode(self) -> str | None:
         return self._permission_mode
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        return RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+        )
 
     # -- CLI resolution ----------------------------------------------------
 
@@ -380,6 +412,14 @@ class PiRuntime:
         resume_session_id: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         current_handle = resume_handle
+        intercepted_messages = await self._interceptor.maybe_dispatch(prompt, current_handle)
+        if intercepted_messages is not None:
+            for message in intercepted_messages:
+                if message.resume_handle is not None:
+                    current_handle = message.resume_handle
+                yield message
+            return
+
         attempted_resume = (
             current_handle.native_session_id if current_handle is not None else resume_session_id
         )
