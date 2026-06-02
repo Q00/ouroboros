@@ -257,7 +257,6 @@ async def test_agent_end_does_not_mask_nonzero_exit() -> None:
     assert result.data["error_type"] == "PiError"
 
 
-
 @pytest.mark.asyncio
 async def test_execute_task_reports_malformed_json_event() -> None:
     process = _FakeProcess(
@@ -300,6 +299,7 @@ async def test_execute_task_to_result_maps_malformed_event_to_provider_error() -
     assert error.message == "Malformed Pi JSON event: [bad-json]"
     assert error.details == {"messages": ["Malformed Pi JSON event: [bad-json]"]}
     assert process.terminated
+
 
 def test_runtime_factory_constructs_pi_runtime() -> None:
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime
