@@ -145,7 +145,11 @@ def create_agent_runtime(
     if resolved_backend == "pi":
         from ouroboros.orchestrator.pi_runtime import PiRuntime
 
-        return PiRuntime(**runtime_kwargs)
+        return PiRuntime(
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
+            **runtime_kwargs,
+        )
 
     msg = (
         f"Unsupported orchestrator runtime backend: {resolved_backend}. "

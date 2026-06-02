@@ -25,18 +25,22 @@ from ouroboros.orchestrator.adapter import (
     AgentMessage,
     RuntimeCapabilities,
     RuntimeHandle,
+    SkillDispatchHandler,
     TaskResult,
 )
+from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 
 type PiBridge = Callable[[dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]]
 
 _PI_CAPABILITIES = RuntimeCapabilities(
-    skill_dispatch=False,
+    skill_dispatch=True,
     targeted_resume=True,
     structured_output=True,
 )
 _DEFAULT_PI_BRIDGE_PACKAGE = "pi"
 _DEFAULT_PI_BRIDGE_FUNCTION = "runtime.bridge:execute"
+_DEFAULT_STARTUP_OUTPUT_TIMEOUT_SECONDS = 120.0
+_DEFAULT_STDOUT_IDLE_TIMEOUT_SECONDS = 600.0
 
 
 class PiRuntime:
@@ -55,6 +59,10 @@ class PiRuntime:
         cwd: str | Path | None = None,
         permission_mode: str | None = None,
         llm_backend: str | None = None,
+        skill_dispatcher: SkillDispatchHandler | None = None,
+        skills_dir: str | Path | None = None,
+        startup_output_timeout_seconds: float | None = None,
+        stdout_idle_timeout_seconds: float | None = None,
         **_kwargs: object,
     ) -> None:
         self._bridge = bridge
@@ -65,6 +73,27 @@ class PiRuntime:
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._permission_mode = permission_mode or "acceptEdits"
         self._llm_backend = llm_backend or "pi"
+        self._skill_dispatcher = skill_dispatcher
+        self._startup_output_timeout_seconds = (
+            _DEFAULT_STARTUP_OUTPUT_TIMEOUT_SECONDS
+            if startup_output_timeout_seconds is None
+            else float(startup_output_timeout_seconds)
+        )
+        self._stdout_idle_timeout_seconds = (
+            _DEFAULT_STDOUT_IDLE_TIMEOUT_SECONDS
+            if stdout_idle_timeout_seconds is None
+            else float(stdout_idle_timeout_seconds)
+        )
+        self._skill_interceptor = SkillInterceptor(
+            cwd=self._cwd,
+            runtime_backend=self._runtime_backend_name,
+            runtime_handle_backend=self._runtime_backend_name,
+            permission_mode=self._permission_mode,
+            llm_backend=self._llm_backend,
+            log_namespace="pi_runtime",
+            skills_dir=skills_dir,
+            skill_dispatcher=skill_dispatcher,
+        )
 
     @property
     def runtime_backend(self) -> str:
@@ -94,6 +123,14 @@ class PiRuntime:
     def bridge_command(self) -> str | None:
         return self._bridge_command
 
+    @property
+    def startup_output_timeout_seconds(self) -> float:
+        return self._startup_output_timeout_seconds
+
+    @property
+    def stdout_idle_timeout_seconds(self) -> float:
+        return self._stdout_idle_timeout_seconds
+
     async def execute_task(
         self,
         prompt: str,
@@ -102,6 +139,13 @@ class PiRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
+        current_handle = resume_handle
+        intercepted_messages = await self._skill_interceptor.maybe_dispatch(prompt, current_handle)
+        if intercepted_messages is not None:
+            for message in intercepted_messages:
+                yield message
+            return
+
         request = self._build_bridge_request(
             prompt=prompt,
             tools=tools,
@@ -109,7 +153,6 @@ class PiRuntime:
             resume_handle=resume_handle,
             resume_session_id=resume_session_id,
         )
-        current_handle = resume_handle
         yield AgentMessage(
             type="system",
             content="Starting Pi bridge runtime",
@@ -237,12 +280,29 @@ class PiRuntime:
             stderr=asyncio.subprocess.PIPE,
             cwd=self._cwd,
         )
-        stdout, stderr = await proc.communicate(json.dumps(request, sort_keys=True).encode("utf-8"))
+        input_bytes = json.dumps(request, sort_keys=True).encode("utf-8")
+        communicate = proc.communicate(input_bytes)
+        timeout_seconds = self._command_bridge_timeout_seconds()
+        if timeout_seconds is None:
+            stdout, stderr = await communicate
+        else:
+            try:
+                stdout, stderr = await asyncio.wait_for(communicate, timeout=timeout_seconds)
+            except TimeoutError as exc:
+                proc.kill()
+                await proc.wait()
+                msg = f"Pi bridge command timed out after {timeout_seconds:g}s without completing"
+                raise TimeoutError(msg) from exc
         if proc.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
             msg = f"Pi bridge command failed (exit {proc.returncode}): {detail}"
             raise RuntimeError(msg)
         return _ensure_mapping(json.loads(stdout.decode("utf-8")))
+
+    def _command_bridge_timeout_seconds(self) -> float | None:
+        if self._stdout_idle_timeout_seconds <= 0:
+            return None
+        return self._stdout_idle_timeout_seconds
 
     def _runtime_config_source(self) -> dict[str, str]:
         if self._bridge is not None:
