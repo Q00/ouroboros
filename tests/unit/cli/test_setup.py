@@ -24,6 +24,7 @@ from ouroboros.cli.commands.setup import (
     _set_default_repo,
 )
 from ouroboros.codex import CodexArtifactInstallResult
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 
 # ── Codex setup tests ────────────────────────────────────────────
 
@@ -3318,8 +3319,8 @@ class TestCopilotSetup:
                 {
                     "orchestrator": {"runtime_backend": "claude"},
                     "llm": {"backend": "claude_code"},
-                    "clarification": {"default_model": "claude-opus-4-6"},
-                    "evaluation": {"semantic_model": "claude-opus-4-6"},
+                    "clarification": {"default_model": DEFAULT_OPUS_MODEL},
+                    "evaluation": {"semantic_model": DEFAULT_OPUS_MODEL},
                 },
                 sort_keys=False,
             ),

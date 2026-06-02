@@ -48,6 +48,11 @@ from pydantic import ValidationError as PydanticValidationError
 import yaml
 
 from ouroboros.backends import get_backend_capability
+from ouroboros.config._model_defaults import (  # noqa: E402
+    DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
     OuroborosConfig,
@@ -72,10 +77,10 @@ _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
-    "openrouter/anthropic/claude-opus-4-6",
+    DEFAULT_CONSENSUS_OPUS_MODEL,
     "openrouter/google/gemini-2.5-pro",
 )
-_DEFAULT_CONSENSUS_ADVOCATE_MODEL = "openrouter/anthropic/claude-opus-4-6"
+_DEFAULT_CONSENSUS_ADVOCATE_MODEL = DEFAULT_CONSENSUS_OPUS_MODEL
 _DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
 _DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
 _DEFAULT_USAGE_LIMIT_PAUSE_HOURS = 5.0
@@ -1293,11 +1298,11 @@ def get_clarification_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.clarification.default_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_qa_model(backend: str | None = None) -> str:
@@ -1310,11 +1315,11 @@ def get_qa_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.qa_model,
-            default_model="claude-sonnet-4-20250514",
+            default_model=DEFAULT_SONNET_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-sonnet-4-20250514", backend=backend)
+        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
 
 
 def get_dependency_analysis_model(backend: str | None = None) -> str:
@@ -1327,11 +1332,11 @@ def get_dependency_analysis_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.dependency_analysis_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_ontology_analysis_model(backend: str | None = None) -> str:
@@ -1344,11 +1349,11 @@ def get_ontology_analysis_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.ontology_analysis_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_context_compression_model(backend: str | None = None) -> str:
@@ -1378,11 +1383,11 @@ def get_atomicity_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.execution.atomicity_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_decomposition_model(backend: str | None = None) -> str:
@@ -1395,11 +1400,11 @@ def get_decomposition_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.execution.decomposition_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_double_diamond_model(backend: str | None = None) -> str:
@@ -1412,11 +1417,11 @@ def get_double_diamond_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.execution.double_diamond_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_wonder_model(backend: str | None = None) -> str:
@@ -1429,11 +1434,11 @@ def get_wonder_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.resilience.wonder_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_reflect_model(backend: str | None = None) -> str:
@@ -1446,11 +1451,11 @@ def get_reflect_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.resilience.reflect_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_semantic_model(backend: str | None = None) -> str:
@@ -1463,11 +1468,11 @@ def get_semantic_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.evaluation.semantic_model,
-            default_model="claude-opus-4-6",
+            default_model=DEFAULT_OPUS_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_assertion_extraction_model(backend: str | None = None) -> str:
@@ -1480,11 +1485,11 @@ def get_assertion_extraction_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.evaluation.assertion_extraction_model,
-            default_model="claude-sonnet-4-6",
+            default_model=DEFAULT_SONNET_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
+        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
 
 
 def get_mechanical_detector_model(backend: str | None = None) -> str:

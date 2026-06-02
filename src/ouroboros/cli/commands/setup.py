@@ -49,6 +49,11 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
 )
+from ouroboros.config._model_defaults import (
+    DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -324,38 +329,36 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
 
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
-    "openrouter/anthropic/claude-opus-4-6",
+    DEFAULT_CONSENSUS_OPUS_MODEL,
     "openrouter/google/gemini-2.5-pro",
 )
 
 _MISSING = object()
 
 _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], object], ...]] = {
-    "ambiguity": ((("clarification", "default_model"), "claude-opus-4-6"),),
-    "assertion_extraction": ((("evaluation", "assertion_extraction_model"), "claude-sonnet-4-6"),),
-    "atomicity": ((("execution", "atomicity_model"), "claude-opus-4-6"),),
-    "brownfield_explore": ((("clarification", "default_model"), "claude-opus-4-6"),),
-    "clarification": ((("clarification", "default_model"), "claude-opus-4-6"),),
-    "consensus_advocate": (
-        (("consensus", "advocate_model"), "openrouter/anthropic/claude-opus-4-6"),
-    ),
+    "ambiguity": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
+    "assertion_extraction": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
+    "atomicity": ((("execution", "atomicity_model"), DEFAULT_OPUS_MODEL),),
+    "brownfield_explore": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
+    "clarification": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
+    "consensus_advocate": ((("consensus", "advocate_model"), DEFAULT_CONSENSUS_OPUS_MODEL),),
     "consensus_judge": ((("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),),
     "consensus_vote": ((("consensus", "models"), _DEFAULT_CONSENSUS_MODELS),),
     "context_compression": ((("llm", "context_compression_model"), "gpt-4"),),
-    "decomposition": ((("execution", "decomposition_model"), "claude-opus-4-6"),),
-    "dependency_analysis": ((("llm", "dependency_analysis_model"), "claude-opus-4-6"),),
-    "double_diamond": ((("execution", "double_diamond_model"), "claude-opus-4-6"),),
-    "mechanical_detection": ((("evaluation", "assertion_extraction_model"), "claude-sonnet-4-6"),),
+    "decomposition": ((("execution", "decomposition_model"), DEFAULT_OPUS_MODEL),),
+    "dependency_analysis": ((("llm", "dependency_analysis_model"), DEFAULT_OPUS_MODEL),),
+    "double_diamond": ((("execution", "double_diamond_model"), DEFAULT_OPUS_MODEL),),
+    "mechanical_detection": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
     "ontology_analysis": (
-        (("llm", "ontology_analysis_model"), "claude-opus-4-6"),
+        (("llm", "ontology_analysis_model"), DEFAULT_OPUS_MODEL),
         (("consensus", "devil_model"), "openrouter/openai/gpt-4o"),
     ),
-    "pm_interview": ((("clarification", "default_model"), "claude-opus-4-6"),),
-    "qa": ((("llm", "qa_model"), "claude-sonnet-4-20250514"),),
-    "reflect": ((("resilience", "reflect_model"), "claude-opus-4-6"),),
-    "seed_generation": ((("clarification", "default_model"), "claude-opus-4-6"),),
-    "semantic_evaluation": ((("evaluation", "semantic_model"), "claude-opus-4-6"),),
-    "wonder": ((("resilience", "wonder_model"), "claude-opus-4-6"),),
+    "pm_interview": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
+    "qa": ((("llm", "qa_model"), DEFAULT_SONNET_MODEL),),
+    "reflect": ((("resilience", "reflect_model"), DEFAULT_OPUS_MODEL),),
+    "seed_generation": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
+    "semantic_evaluation": ((("evaluation", "semantic_model"), DEFAULT_OPUS_MODEL),),
+    "wonder": ((("resilience", "wonder_model"), DEFAULT_OPUS_MODEL),),
 }
 
 
@@ -1588,19 +1591,19 @@ def _register_copilot_mcp_server() -> None:
 
 
 _COPILOT_DEFAULT_MODEL_TARGETS: tuple[tuple[str, str, str], ...] = (
-    ("llm", "qa_model", "claude-sonnet-4-20250514"),
-    ("llm", "dependency_analysis_model", "claude-opus-4-6"),
-    ("llm", "ontology_analysis_model", "claude-opus-4-6"),
+    ("llm", "qa_model", DEFAULT_SONNET_MODEL),
+    ("llm", "dependency_analysis_model", DEFAULT_OPUS_MODEL),
+    ("llm", "ontology_analysis_model", DEFAULT_OPUS_MODEL),
     ("llm", "context_compression_model", "gpt-4"),
-    ("clarification", "default_model", "claude-opus-4-6"),
-    ("evaluation", "semantic_model", "claude-opus-4-6"),
-    ("evaluation", "assertion_extraction_model", "claude-sonnet-4-6"),
-    ("resilience", "wonder_model", "claude-opus-4-6"),
-    ("resilience", "reflect_model", "claude-opus-4-6"),
-    ("execution", "atomicity_model", "claude-opus-4-6"),
-    ("execution", "decomposition_model", "claude-opus-4-6"),
-    ("execution", "double_diamond_model", "claude-opus-4-6"),
-    ("consensus", "advocate_model", "openrouter/anthropic/claude-opus-4-6"),
+    ("clarification", "default_model", DEFAULT_OPUS_MODEL),
+    ("evaluation", "semantic_model", DEFAULT_OPUS_MODEL),
+    ("evaluation", "assertion_extraction_model", DEFAULT_SONNET_MODEL),
+    ("resilience", "wonder_model", DEFAULT_OPUS_MODEL),
+    ("resilience", "reflect_model", DEFAULT_OPUS_MODEL),
+    ("execution", "atomicity_model", DEFAULT_OPUS_MODEL),
+    ("execution", "decomposition_model", DEFAULT_OPUS_MODEL),
+    ("execution", "double_diamond_model", DEFAULT_OPUS_MODEL),
+    ("consensus", "advocate_model", DEFAULT_CONSENSUS_OPUS_MODEL),
     ("consensus", "devil_model", "openrouter/openai/gpt-4o"),
     ("consensus", "judge_model", "openrouter/google/gemini-2.5-pro"),
 )
@@ -1611,7 +1614,7 @@ _COPILOT_DEFAULT_MODEL_LIST_TARGETS: tuple[tuple[str, str, tuple[str, ...]], ...
         "models",
         (
             "openrouter/openai/gpt-4o",
-            "openrouter/anthropic/claude-opus-4-6",
+            DEFAULT_CONSENSUS_OPUS_MODEL,
             "openrouter/google/gemini-2.5-pro",
         ),
     ),

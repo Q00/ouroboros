@@ -3,6 +3,11 @@
 from pydantic import ValidationError
 import pytest
 
+from ouroboros.config._model_defaults import (
+    DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.config.models import (
     ClarificationConfig,
     ConsensusConfig,
@@ -201,9 +206,9 @@ class TestLLMConfig:
         assert config.backend == "claude_code"
         assert config.permission_mode == "default"
         assert config.opencode_permission_mode == "acceptEdits"
-        assert config.qa_model == "claude-sonnet-4-20250514"
-        assert config.dependency_analysis_model == "claude-opus-4-6"
-        assert config.ontology_analysis_model == "claude-opus-4-6"
+        assert config.qa_model == DEFAULT_SONNET_MODEL
+        assert config.dependency_analysis_model == DEFAULT_OPUS_MODEL
+        assert config.ontology_analysis_model == DEFAULT_OPUS_MODEL
         assert config.context_compression_model == "gpt-4"
 
     def test_llm_config_accepts_claude_shorthand(self) -> None:
@@ -265,9 +270,9 @@ class TestExecutionConfig:
         config = ExecutionConfig()
         assert config.max_iterations_per_ac == 10
         assert config.retrospective_interval == 3
-        assert config.atomicity_model == "claude-opus-4-6"
-        assert config.decomposition_model == "claude-opus-4-6"
-        assert config.double_diamond_model == "claude-opus-4-6"
+        assert config.atomicity_model == DEFAULT_OPUS_MODEL
+        assert config.decomposition_model == DEFAULT_OPUS_MODEL
+        assert config.double_diamond_model == DEFAULT_OPUS_MODEL
 
 
 class TestResilienceConfig:
@@ -293,8 +298,8 @@ class TestResilienceConfig:
         assert config.lateral_thinking_enabled is True
         assert config.lateral_model_tier == "frontier"
         assert config.lateral_temperature == 0.8
-        assert config.wonder_model == "claude-opus-4-6"
-        assert config.reflect_model == "claude-opus-4-6"
+        assert config.wonder_model == DEFAULT_OPUS_MODEL
+        assert config.reflect_model == DEFAULT_OPUS_MODEL
 
     def test_resilience_temperature_bounds(self) -> None:
         """ResilienceConfig lateral_temperature must be in [0, 2]."""
@@ -367,8 +372,8 @@ class TestEvaluationConfig:
         assert config.stage3_enabled is True
         assert config.satisfaction_threshold == 0.8
         assert config.uncertainty_threshold == 0.3
-        assert config.semantic_model == "claude-opus-4-6"
-        assert config.assertion_extraction_model == "claude-sonnet-4-6"
+        assert config.semantic_model == DEFAULT_OPUS_MODEL
+        assert config.assertion_extraction_model == DEFAULT_SONNET_MODEL
 
 
 class TestConsensusConfig:
@@ -392,7 +397,7 @@ class TestConsensusConfig:
         assert config.threshold == 0.67
         assert config.diversity_required is True
         assert len(config.models) == 3
-        assert config.advocate_model == "openrouter/anthropic/claude-opus-4-6"
+        assert config.advocate_model == DEFAULT_CONSENSUS_OPUS_MODEL
         assert config.devil_model == "openrouter/openai/gpt-4o"
         assert config.judge_model == "openrouter/google/gemini-2.5-pro"
 
