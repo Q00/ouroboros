@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.config import get_pi_cli_path
+from ouroboros.core.errors import ProviderError
+from ouroboros.core.types import Result
+from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
 
@@ -65,6 +68,11 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         """Pi JSON mode does not currently expose Codex-style permission flags."""
         return []
 
+    def _prompt_stdin_bytes(self, prompt: str) -> bytes | None:
+        """Pi JSON mode receives the prompt as a positional argument."""
+        del prompt
+        return None
+
     def _build_command(
         self,
         *,
@@ -86,6 +94,34 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             command.extend(["--model", model])
         command.append(prompt or "")
         return command
+
+    def _update_last_content(self, last_content: str, event_content: str) -> str:
+        """Accumulate Pi streaming deltas unless a full final message arrives."""
+        if not event_content:
+            return last_content
+        if last_content and event_content.startswith(last_content):
+            return event_content
+        return f"{last_content}{event_content}" if last_content else event_content
+
+    async def complete(
+        self,
+        messages: list[Message],
+        config: CompletionConfig,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """Make a Pi completion request, failing closed on unsupported schemas."""
+        if config.response_format:
+            response_format_type = config.response_format.get("type")
+            return Result.err(
+                ProviderError(
+                    message=(
+                        "Pi CLI LLM backend does not currently support structured "
+                        "response_format requests"
+                    ),
+                    provider=self._provider_name,
+                    details={"response_format_type": response_format_type},
+                )
+            )
+        return await super().complete(messages, config)
 
     def _extract_session_id_from_event(self, event: dict[str, Any]) -> str | None:
         if event.get("type") == "session" and isinstance(event.get("id"), str):

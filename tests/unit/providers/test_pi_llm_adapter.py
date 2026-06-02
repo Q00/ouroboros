@@ -1,5 +1,8 @@
 """Unit tests for the Pi LLM adapter."""
 
+import pytest
+
+from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
 
 
@@ -43,3 +46,35 @@ def test_extracts_pi_final_messages() -> None:
         )
         == "done"
     )
+
+
+def test_accumulates_pi_streaming_deltas() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    content = adapter._update_last_content("", "Hel")
+    content = adapter._update_last_content(content, "lo")
+
+    assert content == "Hello"
+
+
+def test_pi_prompt_is_not_written_to_stdin() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    assert adapter._prompt_stdin_bytes("Hello Pi") is None
+
+
+@pytest.mark.asyncio
+async def test_rejects_structured_response_format() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    result = await adapter.complete(
+        [],
+        CompletionConfig(
+            model="default",
+            response_format={"type": "json_object"},
+        ),
+    )
+
+    assert result.is_err
+    assert result.error.provider == "pi"
+    assert "response_format" in result.error.message

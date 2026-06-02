@@ -767,6 +767,10 @@ class CodexCliLLMAdapter:
             shutdown_timeout=self._process_shutdown_timeout_seconds,
         )
 
+    def _prompt_stdin_bytes(self, prompt: str) -> bytes | None:
+        """Return bytes to write to process stdin for the prompt, if any."""
+        return prompt.encode("utf-8")
+
     def _update_last_content(self, last_content: str, event_content: str) -> str:
         """Return the fallback completion content after a streamed event.
 
@@ -887,7 +891,7 @@ class CodexCliLLMAdapter:
             prompt=prompt,
         )
 
-        prompt_bytes = prompt.encode("utf-8")
+        prompt_stdin_bytes = self._prompt_stdin_bytes(prompt)
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -925,10 +929,12 @@ class CodexCliLLMAdapter:
                 )
             )
 
-        # Feed prompt via stdin to avoid ARG_MAX limits
-        if process.stdin is not None:
-            process.stdin.write(prompt_bytes)
+        # Feed prompt via stdin when the backend expects stdin delivery.
+        if process.stdin is not None and prompt_stdin_bytes is not None:
+            process.stdin.write(prompt_stdin_bytes)
             await process.stdin.drain()
+            process.stdin.close()
+        elif process.stdin is not None:
             process.stdin.close()
 
         if not hasattr(process, "stdout") or not callable(getattr(process, "wait", None)):
