@@ -166,6 +166,20 @@ def _lateral_response_authorizes_demotion(text: str | None) -> bool:
     return bool(_LATERAL_CLEARANCE_MARKER_RE.search(text))
 
 
+def _backend_confirmed_seed_ready(turn: InterviewTurn) -> bool:
+    """Return True when the backend closed the interview within the ambiguity gate.
+
+    Backends that do not yet report ``ambiguity_score`` remain compatible:
+    ``seed_ready`` / ``completed`` without a score is accepted as a backend
+    confirmation.
+    """
+    if not (turn.seed_ready or turn.completed):
+        return False
+    if turn.ambiguity_score is None:
+        return True
+    return float(turn.ambiguity_score) <= BACKEND_READY_AMBIGUITY_THRESHOLD
+
+
 # Structural alias for the production lateral-thinker callable. Mirrors the
 # alias declared on ``ouroboros.auto.pipeline``; duplicated locally because
 # ``adapters.LateralResult`` cannot be imported at module load time without
@@ -183,10 +197,10 @@ class InterviewTurn:
     session_id: str
     seed_ready: bool = False
     completed: bool = False
-    # Optional diagnostic surface — backend's own ambiguity reading for the
-    # current turn. The driver never gates on this; it is only used to build
-    # informative blocker messages when the mutual-agreement closure gate
-    # exhausts its budget without both parties converging.
+    # Optional backend ambiguity reading for the current turn. When present,
+    # the driver uses it for the low-ambiguity backend closure gate and for
+    # blocker/status messages; when absent, legacy ``seed_ready`` /
+    # ``completed`` confirmations remain accepted.
     ambiguity_score: float | None = None
 
 
@@ -617,37 +631,22 @@ class AutoInterviewDriver:
                 "blocked", state.interview_session_id, ledger, state.current_round, blocker
             )
 
-        # Closure gate (ledger-primary, backend-advisory per SSOT #1157
-        # *Closure Policy* section, 2026-05-27): an interview closes the
-        # moment ``ledger.is_seed_ready()`` returns True, regardless of
-        # backend ``seed_ready`` state. Backend signals remain useful as
-        # advisory metadata but no longer gate closure on their own.
-        # Disagreement is reframed as the next answer instead of a terminal
-        # block:
+        # Closure gate: the ledger must be structurally complete and the
+        # backend must acknowledge Seed readiness at or below the ambiguity
+        # threshold. Disagreement is reframed as the next answer until the
+        # bounded interview budget is exhausted:
         #
         # * backend signals completion but the ledger has open gaps → answer
         #   the first open gap so the backend re-scores against substantive
         #   new content; the loop refuses backend-only closure (the
         #   premature-closure invariant preserved below).
-        # * backend keeps asking but the ledger is structurally full → close
-        #   immediately as ``ledger_only``; do NOT let the backend extend the
-        #   dialogue past structural completeness, because an LLM evaluator
-        #   never saturates and waiting for its agreement stalls indefinitely
-        #   (the #1170 R2-diag failure mode).
+        # * backend keeps asking, or reports completion with ambiguity > 0.20,
+        #   while the ledger is structurally full → keep answering until the
+        #   backend score converges or max_rounds blocks the session.
         #
-        # ``max_rounds`` is the budget for ledger-filling rounds. The interview
-        # closes the moment ``ledger.is_seed_ready()`` returns True
-        # (ledger-primary closure policy per SSOT #1157 "Closure Policy"
-        # section, formalized 2026-05-27 after #1170 R2-diag confirmed the
-        # legacy AND-gate stalls the simplest canonical case). Backend
-        # ``seed_ready`` / ``completed`` / ``ambiguity_score`` is recorded as
-        # advisory signal on ``state.interview_closure_mode`` but no longer
-        # gates closure — an LLM evaluator never saturates, so requiring its
-        # agreement makes every populated ledger wait indefinitely for an
-        # acknowledgement that never comes. PR-B1 (#1148) shipped a
-        # ``ledger_only`` escape hatch at ``max_rounds`` but kept the AND-gate
-        # as the primary path; this PR promotes ``ledger_only`` to the
-        # primary in-loop closure mode (see SSOT freshness sync 2026-05-27).
+        # ``max_rounds`` is the budget for ledger-filling and backend
+        # convergence rounds. This intentionally prevents a high-ambiguity
+        # backend result from moving directly into Seed generation.
         #
         # Premature-closure invariant preserved below: when the backend
         # reports ``seed_ready`` / ``completed`` but the ledger has open
@@ -655,23 +654,10 @@ class AutoInterviewDriver:
         # the next answer toward filling the next detected gap.
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
             backend_done = turn.seed_ready or turn.completed
+            backend_confirmed = _backend_confirmed_seed_ready(turn)
             ledger_done = ledger.is_seed_ready()
-            if ledger_done:
-                closure_mode = "mutual_agreement" if backend_done else "ledger_only"
-                # Observability parity with the previous max_rounds-only
-                # ledger_only path: emit the same ``auto.interview.ledger_only_closure``
-                # event so existing log-grep consumers and #1170 R2 evidence
-                # captures continue to work. ``mutual_agreement`` is not given
-                # a dedicated event because it was not previously emitted in
-                # the in-loop close path.
-                if not backend_done:
-                    log.info(
-                        "auto.interview.ledger_only_closure",
-                        auto_session_id=state.auto_session_id,
-                        round_number=round_number,
-                        ambiguity_score=turn.ambiguity_score,
-                        interview_session_id=state.interview_session_id,
-                    )
+            if ledger_done and backend_confirmed:
+                closure_mode = "mutual_agreement"
                 state.pending_question = None
                 state.interview_completed = True
                 state.interview_closure_mode = closure_mode
@@ -851,7 +837,7 @@ class AutoInterviewDriver:
                     round_number=round_number + 1,
                 )
 
-        # max_rounds exhausted — one final ledger-primary closure check, then
+        # max_rounds exhausted — one final backend-confirmed closure check, then
         # safe-default finalization for autonomous ``ooo auto``.  The manual
         # ``ooo interview`` path remains strict/fail-closed in its own driver;
         # this auto driver is allowed to close missing/weak required sections
@@ -860,21 +846,13 @@ class AutoInterviewDriver:
         # interview loop: explicit/backend-provided answers always win first,
         # and defaults are only the final escape from a benign stalled dialog.
         #
-        # The final ledger-primary check catches the case where the last
-        # round's apply / backend exchange filled the ledger after the
-        # top-of-loop ledger check fired False for round ``max_rounds``.
+        # The final check catches the case where the last round's apply /
+        # backend exchange both filled the ledger and lowered ambiguity.
         backend_done = turn.seed_ready or turn.completed
+        backend_confirmed = _backend_confirmed_seed_ready(turn)
         ledger_done = ledger.is_seed_ready()
-        if ledger_done:
-            closure_mode = "mutual_agreement" if backend_done else "ledger_only"
-            if not backend_done:
-                log.info(
-                    "auto.interview.ledger_only_closure",
-                    auto_session_id=state.auto_session_id,
-                    round_number=self.max_rounds,
-                    ambiguity_score=turn.ambiguity_score,
-                    interview_session_id=state.interview_session_id,
-                )
+        if ledger_done and backend_confirmed:
+            closure_mode = "mutual_agreement"
             state.pending_question = None
             state.interview_completed = True
             state.interview_closure_mode = closure_mode
@@ -992,11 +970,18 @@ class AutoInterviewDriver:
                     )
                 state.interview_session_id = synthesis_turn.session_id
                 state.pending_question = synthesis_turn.question
-                if not (synthesis_turn.seed_ready or synthesis_turn.completed):
+                if not _backend_confirmed_seed_ready(synthesis_turn):
                     _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                    ambiguity_part = (
+                        f"ambiguity_score={synthesis_turn.ambiguity_score:.2f}"
+                        if synthesis_turn.ambiguity_score is not None
+                        else "ambiguity_score=unknown"
+                    )
                     blocker = (
-                        "safe-default synthesis did not close the persisted interview: "
-                        "backend_done=False, ledger defaults rolled back"
+                        "safe-default synthesis did not close the persisted interview "
+                        "within the backend ambiguity gate: "
+                        f"backend_done={bool(synthesis_turn.seed_ready or synthesis_turn.completed)}, "
+                        f"{ambiguity_part}, ledger defaults rolled back"
                     )
                     log.warning(
                         "auto.interview.safe_default_synthesis_nonclosure",
@@ -1005,6 +990,7 @@ class AutoInterviewDriver:
                         defaulted_sections=finalization.defaulted_sections,
                         backend_seed_ready=bool(synthesis_turn.seed_ready),
                         backend_completed=bool(synthesis_turn.completed),
+                        backend_ambiguity=synthesis_turn.ambiguity_score,
                         synthesis_pushed=synthesis_pushed,
                     )
                     state.ledger = ledger.to_dict()
@@ -1047,13 +1033,8 @@ class AutoInterviewDriver:
             ambiguity_part = "ambiguity_score=unknown"
         open_gaps = ledger.open_gaps()
         gaps_part = f"open_gaps={open_gaps}" if open_gaps else "open_gaps=[]"
-        # NOTE: PR-B1 (#1148) previously placed a ``ledger_only`` fallback
-        # here for the ``ledger_done and not backend_done`` case at
-        # max_rounds. That fallback is now unreachable — the ledger-primary
-        # check at the top of this max_rounds block (and at the top of each
-        # in-loop iteration) closes any ``ledger_done`` case before we get
-        # here, regardless of backend state. See SSOT #1157 "Closure Policy"
-        # section (formalized 2026-05-27) for the design rationale.
+        # A complete ledger without a low-ambiguity backend close lands here
+        # and blocks instead of forcing Seed generation from stale ambiguity.
         # PR-B2 / #821: partial safe-default closure — some required gaps were
         # safely defaultable, but at least one remained unsafe at max_rounds.
         # Distinguish from the generic "nothing was defaultable" path with a
@@ -1107,13 +1088,12 @@ class AutoInterviewDriver:
                 "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
             )
 
-        # Defensive last resort: ledger is not done, safe-default could not
-        # close, no unsafe-gap partial-rollback fired. Under the ledger-primary
-        # policy this means every required section was probed and the
-        # ``finalize_safe_defaultable_gaps`` policy found nothing safe to fill.
+        # Defensive last resort: the interview did not reach a low-ambiguity
+        # backend-confirmed close, safe-default could not close, and no
+        # unsafe-gap partial-rollback fired.
         # Surface as a typed BLOCKED so callers can resume / sharpen the goal.
-        # ``ledger_done`` is guaranteed False here (otherwise the top
-        # max_rounds check above would have returned ``seed_ready``).
+        # ``ledger_done`` may be true here; that means backend ambiguity never
+        # fell below the closure threshold.
         blocker = (
             f"auto interview reached max_rounds={self.max_rounds} without closure: "
             f"backend_done={backend_done} ({ambiguity_part}), "
@@ -1585,11 +1565,18 @@ class AutoInterviewDriver:
                 )
             state.interview_session_id = synthesis_turn.session_id
             state.pending_question = synthesis_turn.question
-            if not (synthesis_turn.seed_ready or synthesis_turn.completed):
+            if not _backend_confirmed_seed_ready(synthesis_turn):
                 _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                ambiguity_part = (
+                    f"ambiguity_score={synthesis_turn.ambiguity_score:.2f}"
+                    if synthesis_turn.ambiguity_score is not None
+                    else "ambiguity_score=unknown"
+                )
                 blocker = (
-                    "backend-ready safe-default synthesis did not close the persisted interview: "
-                    "ledger defaults rolled back"
+                    "backend-ready safe-default synthesis did not close the persisted interview "
+                    "within the backend ambiguity gate: "
+                    f"backend_done={bool(synthesis_turn.seed_ready or synthesis_turn.completed)}, "
+                    f"{ambiguity_part}, ledger defaults rolled back"
                 )
                 state.ledger = ledger.to_dict()
                 state.mark_blocked(

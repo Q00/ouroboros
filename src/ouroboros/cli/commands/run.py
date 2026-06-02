@@ -69,6 +69,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     COPILOT = "copilot"
     GOOSE = "goose"
     KIRO = "kiro"
+    PI = "pi"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:
@@ -183,13 +184,22 @@ def _detect_project_root_from_seed_path(seed_file: Path, *, max_levels: int = 6)
     files at the repository root rather than next to the seed.
 
     Returns ``None`` when no ``.ouroboros/seeds`` ancestry is found within
-    ``max_levels`` parents; the caller falls back to ``seed_file.parent``
-    in that case.
+    ``max_levels`` parents, or when the matching ancestry is the global
+    ``~/.ouroboros/seeds`` store rather than a project-local seed store;
+    the caller falls back to ``seed_file.parent`` in that case.
     """
     current = seed_file.parent.resolve()
     for _ in range(max_levels):
         if current.name == "seeds" and current.parent.name == ".ouroboros":
-            return current.parent.parent
+            candidate = current.parent.parent
+            # Do not treat the home directory as a project root.
+            # ~/.ouroboros/seeds/ is the global Ouroboros seed store and
+            # matches the central-seed pattern structurally, but ~ is not a
+            # project root. Returning it as one causes opencode to start with
+            # cwd=$HOME for every globally-stored seed (issue #1312).
+            if candidate.resolve() == Path.home().resolve():
+                return None
+            return candidate
         parent = current.parent
         if parent == current:
             break
@@ -782,7 +792,7 @@ def workflow(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator mode (claude, codex, opencode, hermes, gemini, copilot, goose, or kiro).",
+            help="Agent runtime backend for orchestrator mode (claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi).",
             case_sensitive=False,
         ),
     ] = None,

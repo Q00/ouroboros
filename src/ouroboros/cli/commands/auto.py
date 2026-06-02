@@ -18,6 +18,7 @@ from ouroboros.auto.adapters import (
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
+    HandlerSeedQAEvaluator,
     HandlerSynchronousRunStarter,
     load_seed,
     save_seed,
@@ -43,7 +44,8 @@ from ouroboros.auto.state import (
     AutoPhase,
     AutoPipelineState,
     AutoStore,
-    AutoWorktreePolicy,
+    parse_auto_worktree_policy,
+    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.cli.formatters import console
@@ -51,6 +53,7 @@ from ouroboros.cli.formatters.panels import print_error, print_info, print_succe
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.persistence.event_store import EventStore
@@ -95,6 +98,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GEMINI = "gemini"
     COPILOT = "copilot"
     KIRO = "kiro"
+    PI = "pi"
 
 
 app = typer.Typer(
@@ -353,6 +357,11 @@ async def _run_auto(
         raise ValueError("--attach-execution/--attach-job/--attach-session require --resume")
     if reconcile_run and not resume:
         raise ValueError("--reconcile-run requires --resume")
+    validate_complete_product_timeout(
+        complete_product=complete_product and not bool(resume),
+        pipeline_timeout_seconds=pipeline_timeout_seconds,
+        option_name="--timeout",
+    )
     if resume:
         if pipeline_timeout_seconds is not None:
             raise ValueError(
@@ -449,7 +458,7 @@ async def _run_auto(
     if commit_policy is not None:
         state.commit_policy = AutoCommitPolicy(commit_policy)
     if worktree_policy is not None:
-        state.worktree_policy = AutoWorktreePolicy(worktree_policy)
+        state.worktree_policy = parse_auto_worktree_policy(worktree_policy)
 
     if runtime == "opencode":
         # Q00/ouroboros#782 review-7 BLOCKING #3 + review-8 BLOCKING #1: keep
@@ -505,6 +514,7 @@ async def _run_auto(
     start_execute = StartExecuteSeedHandler(
         execute_handler=execute_seed, agent_runtime_backend=runtime, opencode_mode=opencode_mode
     )
+    seed_qa = QAHandler(agent_runtime_backend=runtime, opencode_mode=authoring_opencode_mode)
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
@@ -567,6 +577,7 @@ async def _run_auto(
         ralph_starter=ralph_starter,
         ralph_resumer=ralph_resumer,
         complete_product=complete_product,
+        seed_qa_evaluator=HandlerSeedQAEvaluator(seed_qa),
         progress_callback=progress_callback,
         watchdog=watchdog,
         probe_runner=EnvRuntimeProbeRunner() if complete_product else None,

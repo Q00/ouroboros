@@ -76,6 +76,8 @@ class TestGooseCliLLMAdapter:
         )
 
         assert command[:4] == ["/tmp/goose", "run", "--output-format", "stream-json"]
+        assert "--no-profile" in command
+        assert "--quiet" in command
         assert "--no-session" in command
         assert "--max-turns" in command
         assert "3" in command

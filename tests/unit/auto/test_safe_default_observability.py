@@ -70,19 +70,11 @@ def _ledger_all_filled_except(
 
 
 @pytest.mark.asyncio
-async def test_ledger_only_closes_in_loop_when_backend_never_converges(tmp_path) -> None:
-    """Ledger already seed-ready but backend keeps asking → in-loop ledger-only closure.
+async def test_complete_ledger_does_not_close_without_backend_low_ambiguity(tmp_path) -> None:
+    """Ledger completeness alone cannot close auto interview.
 
-    PR-β / SSOT #1157 "Closure Policy" (2026-05-27): the driver's in-loop
-    closure check is now ledger-primary. When ``ledger.is_seed_ready()`` returns
-    True the loop exits immediately as ``ledger_only`` regardless of backend
-    state — the safe-default fallback path is no longer needed in this case.
-
-    Replaces the older max_rounds-only ``ledger_only`` fallback assertion: the
-    safe-default block (``safe_default.entered``, ``no_gaps_to_default``) is
-    bypassed because closure happens before max_rounds, but the observability
-    contract is preserved via the ``auto.interview.ledger_only_closure`` event
-    emitted from the new in-loop path.
+    The backend must also signal completion at or below the ambiguity threshold
+    before the Seed can be generated and later run.
     """
     # Ledger is fully filled — is_seed_ready() returns True from round 0.
     ledger = _ledger_all_filled_except()
@@ -94,7 +86,6 @@ async def test_ledger_only_closes_in_loop_when_backend_never_converges(tmp_path)
     async def answer(
         session_id: str, text: str, *, last_question: str | None = None
     ) -> InterviewTurn:  # noqa: ARG001
-        # Backend never signals completion — it keeps asking.
         return InterviewTurn("What else should we know?", session_id, seed_ready=False)
 
     state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
@@ -109,16 +100,10 @@ async def test_ledger_only_closes_in_loop_when_backend_never_converges(tmp_path)
         result = await driver.run(state, ledger)
 
     events = [e["event"] for e in captured]
-    # In-loop ledger-primary closure means the safe-default block is bypassed.
-    assert "auto.interview.safe_default.entered" not in events
-    assert "auto.interview.safe_default.no_gaps_to_default" not in events
-    # Observability contract preserved: ledger_only_closure event still fires
-    # from the in-loop closure path.
-    assert "auto.interview.ledger_only_closure" in events
-
-    # PR-β: ledger-primary closure on the first round, no max_rounds wait.
-    assert result.status == "seed_ready"
-    assert state.interview_closure_mode == "ledger_only"
+    assert "auto.interview.ledger_only_closure" not in events
+    assert result.status == "blocked"
+    assert "without closure" in (result.blocker or "")
+    assert state.interview_closure_mode is None
 
 
 # ---------------------------------------------------------------------------

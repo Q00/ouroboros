@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from ouroboros.auto.adapters import PartialInterviewStartError
-from ouroboros.auto.grading import GradeResult, SeedGrade
+from ouroboros.auto.adapters import EvaluateResult, PartialInterviewStartError
+from ouroboros.auto.grading import GradeFinding, GradeGate, GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -749,6 +749,51 @@ async def test_interview_driver_finalizes_safe_defaults_after_benign_max_rounds(
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_rolls_back_safe_defaults_when_synthesis_is_high_ambiguity(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_defaults")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        if "[safe-default-synthesis]" in text:
+            return InterviewTurn(
+                "done",
+                session_id,
+                seed_ready=True,
+                completed=True,
+                ambiguity_score=0.42,
+            )
+        return InterviewTurn("What else should we know?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.interview_closure_mode is None
+    assert "ambiguity_score=0.42" in (result.blocker or "")
+    assert "ledger defaults rolled back" in (result.blocker or "")
+    assert state.last_error_code == "interview_safe_default_synthesis_incomplete"
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
+        for entry in section.entries
+    )
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_blocks_with_unsafe_gaps_when_partially_defaultable(
     tmp_path,
 ) -> None:
@@ -1383,6 +1428,343 @@ async def test_pipeline_skip_run_stops_after_a_grade_seed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_interview_requires_backend_ambiguity_below_threshold(tmp_path) -> None:
+    ledger = SeedDraftLedger.from_goal("Build a local CLI")
+    _fill_ready(ledger)
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "Still ambiguous",
+            "interview_high_ambiguity",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.42,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "Still ambiguous",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.42,
+        )
+
+    state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "ambiguity_score=0.42" in (result.blocker or "")
+    assert state.interview_completed is False
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_run_when_seed_qa_does_not_pass(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start before Seed QA passes")
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False,
+            score=0.58,
+            verdict="revise",
+            differences=("missing interview nuance",),
+            suggestions=("carry forward the unresolved decision",),
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert "Seed QA did not pass" in result.blocker
+    assert state.last_tool_name == "seed_qa"
+    assert state.last_qa_score == 0.58
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_after_seed_qa_passes(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_pass",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        return {"job_id": "job_seed_qa_pass"}
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(passed=True, score=0.92, verdict="pass")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.job_id == "job_seed_qa_pass"
+    assert state.last_qa_score == 0.92
+
+
+@pytest.mark.asyncio
+async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_repair",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    qa_calls = 0
+    captured_run_seed: Seed | None = None
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        if qa_calls == 1:
+            return EvaluateResult(
+                passed=False,
+                score=0.58,
+                verdict="revise",
+                differences=("missing explicit no-op scope",),
+                suggestions=("add no-op scope constraint",),
+            )
+        assert any("missing explicit no-op scope" in item for item in seed.constraints)
+        return EvaluateResult(passed=True, score=0.88, verdict="pass")
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        nonlocal captured_run_seed
+        captured_run_seed = seed
+        return {"job_id": "job_seed_qa_repaired"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.job_id == "job_seed_qa_repaired"
+    assert qa_calls == 2
+    assert captured_run_seed is not None
+    assert any("missing explicit no-op scope" in item for item in captured_run_seed.constraints)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_qa_repaired_seed_when_review_no_longer_may_run(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_repair_rejected",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("QA-passing but review-blocked repaired Seed must not run")
+
+    qa_calls = 0
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        if qa_calls == 1:
+            return EvaluateResult(
+                passed=False,
+                score=0.58,
+                verdict="revise",
+                suggestions=("introduce review-blocking post-QA constraint",),
+            )
+        assert any("review-blocking" in item for item in seed.constraints)
+        return EvaluateResult(passed=True, score=0.91, verdict="pass")
+
+    class ConstraintBlockingGate(GradeGate):
+        def grade_seed(
+            self,
+            seed: Seed,
+            *,
+            ledger: SeedDraftLedger | None = None,  # noqa: ARG002
+            closure_mode: str | None = None,  # noqa: ARG002
+            degraded: bool | None = None,  # noqa: ARG002
+        ) -> GradeResult:
+            if any("review-blocking" in constraint for constraint in seed.constraints):
+                blocker = GradeFinding(
+                    "post_qa_review_blocker",
+                    "high",
+                    "QA repair introduced a deterministic blocker",
+                    "constraints",
+                    "Remove the post-QA blocker before execution.",
+                )
+                return GradeResult(
+                    grade=SeedGrade.C,
+                    scores={
+                        "coverage": 0.5,
+                        "ambiguity": 0.5,
+                        "testability": 0.5,
+                        "execution_feasibility": 0.4,
+                        "risk": 0.4,
+                    },
+                    blockers=[blocker],
+                    may_run=False,
+                )
+            return GradeResult(
+                grade=SeedGrade.A,
+                scores={
+                    "coverage": 0.95,
+                    "ambiguity": 0.05,
+                    "testability": 0.95,
+                    "execution_feasibility": 0.95,
+                    "risk": 0.05,
+                },
+                may_run=True,
+            )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        grade_gate=ConstraintBlockingGate(),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert "Seed grade C did not meet required grade A" in result.blocker
+    assert qa_calls == 2
+    assert state.last_tool_name == "grade_gate"
+    assert state.last_qa_passed is True
+    assert state.last_grade == "C"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_result_surfaces_assumption_sources_with_provenance(tmp_path) -> None:
     """PR-C2 / #1157: ``AutoPipelineResult.assumption_sources`` carries the
     ledger's assumption-class entries with the source tag intact. The legacy
@@ -1577,19 +1959,10 @@ async def test_pipeline_syncs_state_seed_id_after_repair_changes_identity(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_interview_resume_with_complete_ledger_closes_via_ledger_only(tmp_path) -> None:
-    """Resume with a fully-populated ledger closes immediately as ``ledger_only``
-    without calling the backend with the persisted pending_question.
-
-    PR-β / SSOT #1157 "Closure Policy" (2026-05-27): the ledger-primary
-    policy says a complete ledger is sufficient evidence to proceed; calling
-    the backend to acknowledge what the ledger already contains is wasted
-    work. The original test asserted backend re-engagement on resume, which
-    was a consequence of the AND-gate (backend approval required regardless
-    of ledger state). Under ledger-primary, skipping the backend call is the
-    correct behavior — the persisted ``pending_question`` is informational
-    only when resume happens with the ledger already structurally complete.
-    """
+async def test_interview_resume_with_complete_ledger_requires_low_ambiguity_ack(
+    tmp_path,
+) -> None:
+    """Resume with a complete ledger still waits for backend low-ambiguity closure."""
     calls: list[str] = []
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -1597,7 +1970,9 @@ async def test_interview_resume_with_complete_ledger_closes_via_ledger_only(tmp_
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         calls.append(text)
-        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.transition(AutoPhase.INTERVIEW, "resume interview")
@@ -1612,9 +1987,8 @@ async def test_interview_resume_with_complete_ledger_closes_via_ledger_only(tmp_
     result = await driver.run(state, ledger)
 
     assert result.status == "seed_ready"
-    assert state.interview_closure_mode == "ledger_only"
-    # PR-β: complete ledger ⇒ no backend call needed on resume.
-    assert calls == []
+    assert state.interview_closure_mode == "mutual_agreement"
+    assert calls
 
 
 @pytest.mark.asyncio
@@ -1793,11 +2167,10 @@ async def test_interview_driver_blocks_when_backend_never_marks_ready(tmp_path) 
 
     result = await driver.run(state, ledger)
 
-    # PR-B1 / #821: ledger pre-filled + backend never closes → ledger-only closure, not blocked.
-    assert result.status == "seed_ready"
-    assert state.interview_completed is True
-    assert state.interview_closure_mode == "ledger_only"
-    assert state.phase != AutoPhase.BLOCKED
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.interview_closure_mode is None
+    assert state.phase == AutoPhase.BLOCKED
 
 
 @pytest.mark.asyncio
@@ -2548,10 +2921,9 @@ async def test_interview_driver_clears_pending_question_before_backend_answer(tm
         return InterviewTurn("What should we verify?", "interview_1")
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
-        persisted = store.load(state.auto_session_id)
-        assert persisted.pending_question is None
-        assert persisted.last_tool_name == "auto_answerer"
-        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
@@ -2972,15 +3344,8 @@ async def test_pipeline_retry_after_blocked_run_start_replay_from_seed_path(tmp_
 @pytest.mark.asyncio
 async def test_pipeline_recovers_auto_answerer_block_to_interview(tmp_path) -> None:
     """Resume after an auto_answerer block closes immediately when the ledger
-    is already complete — backend call is skipped (PR-β ledger-primary policy).
-
-    The original test asserted backend re-engagement (``calls`` non-empty).
-    Under SSOT #1157 "Closure Policy" (2026-05-27), recovering from a prior
-    block when the persisted ledger is already structurally complete should
-    close as ``ledger_only`` and proceed to Seed generation without
-    re-consuming the persisted ``pending_question``. The recovery contract
-    (transition from BLOCKED to INTERVIEW phase, then to seed_ready) is
-    still exercised; only the backend-call expectation is removed.
+    is already complete. The backend must still acknowledge low ambiguity
+    before Seed generation.
     """
     calls: list[str] = []
 
@@ -2989,7 +3354,9 @@ async def test_pipeline_recovers_auto_answerer_block_to_interview(tmp_path) -> N
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
         calls.append(text)
-        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
@@ -3010,9 +3377,8 @@ async def test_pipeline_recovers_auto_answerer_block_to_interview(tmp_path) -> N
     result = await pipeline.run(state)
 
     assert result.status == "complete"
-    assert state.interview_closure_mode == "ledger_only"
-    # PR-β: complete ledger ⇒ no backend re-engagement needed on recovery.
-    assert calls == []
+    assert state.interview_closure_mode == "mutual_agreement"
+    assert calls
 
 
 @pytest.mark.asyncio
@@ -3295,12 +3661,10 @@ async def test_ledger_primary_closes_as_ledger_only_when_backend_never_converges
 
     result = await driver.run(state, ledger)
 
-    assert result.status == "seed_ready"
-    assert state.interview_closure_mode == "ledger_only"
-    assert result.rounds == 0  # closed immediately, no rounds consumed
-    # Critical: no backend.answer() calls — the persistent saturation backend
-    # would have looped indefinitely under the legacy AND-gate.
-    assert backend_calls == 0
+    assert result.status == "blocked"
+    assert state.interview_closure_mode is None
+    assert result.rounds == 12
+    assert backend_calls == 12
 
 
 @pytest.mark.asyncio
@@ -3422,7 +3786,13 @@ async def test_pipeline_forwards_force_to_seed_generator_on_ledger_only_closure(
     async def answer(
         session_id: str, text: str, *, last_question: str | None = None
     ) -> InterviewTurn:  # noqa: ARG001
-        raise AssertionError("complete ledger should close on round 0 without answering")
+        return InterviewTurn(
+            "What else should we know?",
+            session_id,
+            seed_ready=False,
+            completed=False,
+            ambiguity_score=0.40,
+        )
 
     async def generate_seed(session_id: str, *, force: bool = False) -> Seed:
         seed_calls.append({"session_id": session_id, "force": force})
@@ -3449,20 +3819,10 @@ async def test_pipeline_forwards_force_to_seed_generator_on_ledger_only_closure(
 
     result = await pipeline.run(state)
 
-    # Interview closes as ledger_only at round 0 (no backend touches).
-    assert state.interview_closure_mode == "ledger_only"
-    # Seed generation actually runs and ``force=True`` is forwarded —
-    # this is the contract that closes the bot review #1 blocker.
-    assert len(seed_calls) == 1
-    assert seed_calls[0]["force"] is True
-    # End-to-end: the pipeline reaches RUN (or beyond) — i.e. the
-    # SEED_GENERATION boundary did NOT re-block ledger-only sessions.
-    assert result.status in ("complete", "blocked", "seed_ready")
-    if result.status == "blocked":
-        # Whatever blocked must NOT be the ambiguity-gate ValidationError
-        # the bot called out — that would mean ``force`` was not honored.
-        assert "Ambiguity score" not in (result.blocker or "")
-        assert "ambiguity_score" not in (result.blocker or "")
+    assert result.status == "blocked"
+    assert state.interview_closure_mode is None
+    assert seed_calls == []
+    assert "ambiguity_score=0.40" in (result.blocker or "")
 
 
 @pytest.mark.asyncio
@@ -3487,7 +3847,13 @@ async def test_pipeline_synthesizes_seed_when_completed_ledger_generator_times_o
         )
 
     async def answer(session_id, text, *, last_question=None):  # noqa: ARG001
-        raise AssertionError("complete ledger should close on round 0 without answering")
+        return InterviewTurn(
+            "What else should we know?",
+            session_id,
+            seed_ready=False,
+            completed=False,
+            ambiguity_score=0.40,
+        )
 
     async def generate_seed(session_id: str, *, force: bool = False) -> Seed:  # noqa: ARG001
         await asyncio.sleep(1)
@@ -3515,10 +3881,9 @@ async def test_pipeline_synthesizes_seed_when_completed_ledger_generator_times_o
 
     result = await pipeline.run(state)
 
-    assert state.interview_closure_mode == "ledger_only"
-    assert state.seed_origin == "auto_pipeline"
-    assert state.seed_artifact is not None
-    assert result.status in ("complete", "blocked", "seed_ready")
+    assert state.interview_closure_mode is None
+    assert not state.seed_artifact
+    assert result.status == "blocked"
     assert "seed generation timed out" not in (result.blocker or "")
 
 
@@ -3939,6 +4304,59 @@ async def test_backend_ready_low_ambiguity_closes_safe_defaultable_gaps(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_backend_ready_safe_default_rolls_back_when_synthesis_is_high_ambiguity(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "ready",
+            "interview_backend_ready_high_ambiguity_defaults",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.16,
+        )
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.42,
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["non_goals"].entries.clear()
+    ledger.sections["failure_modes"].entries.clear()
+    ledger.sections["runtime_context"].entries.clear()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.interview_closure_mode is None
+    assert "ambiguity_score=0.42" in (result.blocker or "")
+    assert "ledger defaults rolled back" in (result.blocker or "")
+    assert state.last_error_code == "interview_safe_default_synthesis_incomplete"
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
+        for entry in section.entries
+    )
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_does_not_replace_specific_verification_answer_with_gap_prompt(
     tmp_path,
 ) -> None:
@@ -4212,16 +4630,8 @@ async def test_resume_after_interview_max_rounds_can_continue_when_bound_raised(
 
     assert result.status == "complete", f"resume blocked: {result.blocker!r}"
     assert state.phase == AutoPhase.COMPLETE
-    # PR-β / SSOT #1157 "Closure Policy" (2026-05-27): the resume scenario
-    # carries a complete ledger (``_fill_ready`` populated all required
-    # sections before persistence), so the ledger-primary in-loop check
-    # closes immediately as ``ledger_only`` without re-engaging the backend.
-    # The test's purpose — verifying that a max_rounds-blocked session can
-    # resume cleanly when ``max_interview_rounds`` is raised — is satisfied
-    # by ``result.status == "complete"``; the previous backend-re-engagement
-    # assertion was a consequence of the AND-gate, not a contract of resume.
-    assert state.interview_closure_mode == "ledger_only"
-    assert answer_calls == [], "complete ledger ⇒ no backend re-engagement on resume"
+    assert state.interview_closure_mode == "mutual_agreement"
+    assert answer_calls
 
 
 @pytest.mark.asyncio
@@ -5075,10 +5485,10 @@ async def test_max_rounds_ledger_only_consensus_closes_interview(tmp_path) -> No
 
     result = await driver.run(state, ledger)
 
-    assert result.status == "seed_ready"
-    assert state.interview_completed is True
-    assert state.interview_closure_mode == "ledger_only"
-    assert state.phase != AutoPhase.BLOCKED
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.interview_closure_mode is None
+    assert state.phase == AutoPhase.BLOCKED
 
 
 @pytest.mark.asyncio

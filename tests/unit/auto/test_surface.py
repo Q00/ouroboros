@@ -40,6 +40,7 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "gemini",
         "copilot",
         "kiro",
+        "pi",
     }
 
 
@@ -704,6 +705,7 @@ async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tm
     class FakePipeline:
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             captured["skip_run"] = kwargs.get("skip_run")
+            captured["seed_qa_evaluator"] = kwargs.get("seed_qa_evaluator")
             captured["driver_rounds"] = args[0].max_rounds
             captured["repair_rounds"] = kwargs["repairer"].max_repair_rounds
 
@@ -741,6 +743,7 @@ async def test_cli_resume_replays_persisted_runtime_and_skip_run(monkeypatch, tm
     assert captured["state_runtime"] == "codex"
     assert captured["state_skip_run"] is True
     assert captured["skip_run"] is True
+    assert captured["seed_qa_evaluator"] is not None
     assert captured["driver_rounds"] == 2
     assert captured["repair_rounds"] == 3
     assert captured["runtimes"] == ["codex", "codex", "codex", "codex"]

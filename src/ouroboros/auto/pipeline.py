@@ -6,11 +6,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 import inspect
 import threading
 import time
 from typing import Any, Protocol
+from uuid import uuid4
 
 import structlog
 
@@ -182,6 +183,7 @@ SeedLoader = Callable[[str], Seed]
 # JobSnapshot.result_text from Ralph's terminal snapshot), returns a typed
 # EvaluateResult. See HandlerEvaluator for the production implementation.
 Evaluator = Callable[[Seed, str], Awaitable[EvaluateResult]]
+SeedQAEvaluator = Callable[[Seed, SeedDraftLedger], Awaitable[EvaluateResult]]
 # LateralThinker contract: invoked as keyword-only call with the persona +
 # QA-failure shape + run artifact, returns a typed LateralResult. See
 # HandlerLateralThinker for the production implementation.
@@ -431,6 +433,10 @@ class AutoPipeline:
     # to BLOCKED with the QA differences/suggestions in ``last_error``.
     # See :class:`HandlerEvaluator` in adapters.py for the production wiring.
     evaluator: Evaluator | None = None
+    # Optional pre-run Seed QA gate backed by ``ouroboros_qa``. Deterministic
+    # grading still owns cheap structural repair; this gate prevents a Seed
+    # that fails the same QA contract users run manually from reaching RUN.
+    seed_qa_evaluator: SeedQAEvaluator | None = None
     # RFC #809 Phase 2.2 — when set AND ``complete_product`` is True AND the
     # evaluator reports ``passed=False``, the pipeline inserts an
     # UNSTUCK_LATERAL phase between EVALUATE and the BLOCKED transition.
@@ -1151,6 +1157,10 @@ class AutoPipeline:
                 state.mark_blocked(blocker, tool_name="grade_gate")
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
+
+            seed_qa, seed, review = await self._run_seed_qa_gate(state, ledger, seed, review=review)
+            if seed_qa is not None:
+                return seed_qa
 
             if self.skip_run or state.skip_run:
                 state.transition(
@@ -1887,17 +1897,25 @@ class AutoPipeline:
 
         1. Emit ``runtime.deadline.interview.fired`` so post-hoc evidence
            inspection can see *why* the recovery path was taken.
-        2. If the ledger is Seed-ready, synthesize a normal Seed via
-           :func:`synthesize_seed_from_ledger`; otherwise fall back to
-           :func:`partial_seed_from_evidence` with
-           ``reason="interview_phase_deadline"`` so unresolved sections
-           become next-step hints on the resulting degraded Seed (PR-A).
+        2. Synthesize a Seed from the evidence collected so far. Either
+           branch yields a **degraded** Seed, because a deadline closure
+           never obtained backend-confirmed low ambiguity (#1302):
+
+           * complete ledger → :func:`synthesize_seed_from_ledger` with
+             ``recovery_reason="interview_phase_deadline"`` (full ledger
+             content, no ``unresolved_slots``, but ``degraded=True``);
+           * incomplete ledger → :func:`partial_seed_from_evidence` with
+             ``reason="interview_phase_deadline"`` so unresolved sections
+             become next-step hints on the degraded Seed (PR-A).
         3. Persist the Seed via :meth:`_record_generated_seed`, mark
            ``interview_completed = True``, and transition to ``REVIEW`` so
-           the rest of the pipeline (grading, run handoff) can still
-           surface a partial product. PR-C teaches the grade gate to
-           respect ``metadata.degraded`` so the degraded Seed is not
-           re-blocked at REVIEW solely on high-ambiguity grounds.
+           the rest of the pipeline can surface a typed partial product
+           via :meth:`_emit_partial_product_terminal`. PR-C teaches the
+           grade gate to respect ``metadata.degraded`` so a deadline Seed
+           is routed to the partial-product terminal (not auto-RUN) and is
+           not re-blocked solely on high-ambiguity grounds. Hard safety
+           blockers (``missing_goal`` / ``seed_goal_mismatch`` /
+           ``high_risk_assumptions``) still terminate.
 
         The global ``pipeline_timeout_seconds`` deadline is unaffected:
         callers gate on :meth:`_enforce_deadline` *before* invoking this
@@ -1914,9 +1932,23 @@ class AutoPipeline:
         )
 
         if ledger_ready:
-            seed = synthesize_seed_from_ledger(ledger, interview_id=state.interview_session_id)
+            # #1302 ambiguity-before-execution: a per-phase interview deadline
+            # cut the Socratic loop short before the backend could confirm low
+            # ambiguity (<= 0.20). A structurally complete ledger is NOT a
+            # substitute for that confirmation, so this Seed must NOT auto-RUN.
+            # Synthesize the full ledger content but stamp it as a degraded
+            # deadline-recovery terminal (``recovery_reason`` set), so REVIEW
+            # routes it to :meth:`_emit_partial_product_terminal` exactly like
+            # the incomplete-ledger branch below instead of proceeding through
+            # the grade / Seed QA / RUN gates on unconfirmed-ambiguity evidence.
+            seed = synthesize_seed_from_ledger(
+                ledger,
+                interview_id=state.interview_session_id,
+                recovery_reason="interview_phase_deadline",
+            )
             progress_message = (
-                "Interview phase deadline fired; closed via complete-ledger Seed synthesis"
+                "Interview phase deadline fired; closed via complete-ledger Seed synthesis "
+                "(degraded recovery: backend low ambiguity was never confirmed)"
             )
         else:
             seed = partial_seed_from_evidence(
@@ -2520,6 +2552,158 @@ class AutoPipeline:
         state.mark_blocked(msg, tool_name="probe_runner")
         self._save(state)
         return msg
+
+    async def _run_seed_qa_gate(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+    ) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+        """Run the optional ``ooo qa`` Seed gate before skip-run completion or RUN."""
+        if self.seed_qa_evaluator is None:
+            return None, seed, review
+
+        current_seed = seed
+        current_review = review
+        max_attempts = max(1, int(state.max_repair_rounds or 1))
+        for attempt in range(1, max_attempts + 1):
+            timeout = self._deadline_capped_timeout(
+                state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
+            )
+            try:
+                qa_result = await asyncio.wait_for(
+                    self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
+                )
+            except TimeoutError:
+                if self._enforce_deadline(state):
+                    return (
+                        self._result(
+                            state, ledger, review=current_review, blocker=state.last_error
+                        ),
+                        current_seed,
+                        current_review,
+                    )
+                state.mark_blocked(
+                    f"Seed QA timed out after {timeout:.0f}s",
+                    tool_name="seed_qa",
+                )
+                self._save(state)
+                return (
+                    self._result(state, ledger, review=current_review, blocker=state.last_error),
+                    current_seed,
+                    current_review,
+                )
+            except Exception as exc:
+                state.mark_blocked(f"Seed QA raised: {exc}", tool_name="seed_qa")
+                self._save(state)
+                return (
+                    self._result(state, ledger, review=current_review, blocker=state.last_error),
+                    current_seed,
+                    current_review,
+                )
+
+            if qa_result.error:
+                state.mark_blocked(
+                    f"Seed QA reported transient error: {qa_result.error}",
+                    tool_name="seed_qa",
+                )
+                self._save(state)
+                return (
+                    self._result(state, ledger, review=current_review, blocker=state.last_error),
+                    current_seed,
+                    current_review,
+                )
+
+            state.last_qa_score = float(qa_result.score)
+            state.last_qa_verdict = str(qa_result.verdict)
+            state.last_qa_passed = bool(qa_result.passed)
+            state.last_qa_differences = list(qa_result.differences)
+            state.last_qa_suggestions = list(qa_result.suggestions)
+            if qa_result.passed:
+                review_blocker = self._seed_review_gate_blocker(state, current_review)
+                if review_blocker is not None:
+                    state.mark_blocked(review_blocker, tool_name="grade_gate")
+                    self._save(state)
+                    return (
+                        self._result(state, ledger, review=current_review, blocker=review_blocker),
+                        current_seed,
+                        current_review,
+                    )
+                state.mark_progress(
+                    f"Seed QA passed: {qa_result.verdict} (score {qa_result.score:.2f})",
+                    tool_name="seed_qa",
+                )
+                self._save(state)
+                return None, current_seed, current_review
+
+            if attempt < max_attempts:
+                current_seed = normalize_execution_acceptance(
+                    _seed_with_seed_qa_feedback(current_seed, qa_result, attempt=attempt)
+                )
+                current_review = SeedReviewer(self.grade_gate).review(
+                    current_seed,
+                    ledger=ledger,
+                    closure_mode=state.interview_closure_mode,
+                    degraded=bool(getattr(current_seed.metadata, "degraded", False)),
+                )
+                state.seed_artifact = current_seed.to_dict()
+                state.seed_id = current_seed.metadata.seed_id
+                state.last_grade = current_review.grade_result.grade.value
+                state.findings = [asdict(finding) for finding in current_review.findings]
+                if self.seed_saver is not None:
+                    try:
+                        state.seed_path = self.seed_saver(current_seed)
+                    except Exception as exc:
+                        state.mark_failed(f"seed save failed: {exc}", tool_name="seed_saver")
+                        self._save(state)
+                        return (
+                            self._result(
+                                state, ledger, review=current_review, blocker=state.last_error
+                            ),
+                            current_seed,
+                            current_review,
+                        )
+                state.mark_progress(
+                    f"Seed QA repair attempt {attempt}/{max_attempts - 1} applied",
+                    tool_name="seed_qa",
+                )
+                self._save(state)
+                continue
+
+            details = [
+                f"Seed QA did not pass after {attempt} attempt(s): "
+                f"{qa_result.verdict} (score {qa_result.score:.2f})"
+            ]
+            if qa_result.differences:
+                details.append("differences: " + "; ".join(qa_result.differences[:3]))
+            if qa_result.suggestions:
+                details.append("suggestions: " + "; ".join(qa_result.suggestions[:3]))
+            state.mark_blocked("; ".join(details), tool_name="seed_qa")
+            self._save(state)
+            return (
+                self._result(state, ledger, review=current_review, blocker=state.last_error),
+                current_seed,
+                current_review,
+            )
+
+        return None, current_seed, current_review
+
+    def _seed_review_gate_blocker(
+        self, state: AutoPipelineState, review: SeedReview | None
+    ) -> str | None:
+        """Return the deterministic review blocker that must still gate Seed QA pass paths."""
+        if review is None:
+            return None
+        if not _grade_meets_required(review.grade_result.grade.value, state.required_grade):
+            return (
+                f"Seed grade {review.grade_result.grade.value} did not meet "
+                f"required grade {state.required_grade}"
+            )
+        if not review.may_run and not (self.skip_run or state.skip_run):
+            return "Seed review did not clear the Seed for execution"
+        return None
 
     async def _run_evaluate(
         self,
@@ -4160,7 +4344,7 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer"}:
+    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer", "seed_qa"}:
         # ``seed_repairer`` joins this set so a repair-phase timeout (the
         # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
         # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
@@ -4280,6 +4464,29 @@ def _seed_with_recovery_constraint(seed: Seed, plan: AutoRecoveryPlan) -> Seed:
         f"relaxing the goal or acceptance criteria: {instruction}"
     )
     return seed.model_copy(update={"constraints": (*seed.constraints, constraint)})
+
+
+def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attempt: int) -> Seed:
+    """Return a Seed revised with bounded pre-run Seed QA feedback."""
+    feedback = [*qa_result.differences[:3], *qa_result.suggestions[:3]]
+    normalized_feedback = tuple(dict.fromkeys(item.strip() for item in feedback if item.strip()))
+    if not normalized_feedback:
+        normalized_feedback = ("Seed QA failed without actionable differences or suggestions.",)
+    constraint = f"[seed qa repair attempt {attempt}] Resolve before execution: " + " | ".join(
+        normalized_feedback
+    )
+    return seed.model_copy(
+        update={
+            "constraints": tuple(dict.fromkeys((*seed.constraints, constraint))),
+            "metadata": seed.metadata.model_copy(
+                update={
+                    "seed_id": f"seed_{uuid4().hex[:12]}",
+                    "created_at": datetime.now(UTC),
+                    "parent_seed_id": seed.metadata.seed_id,
+                }
+            ),
+        }
+    )
 
 
 def _first_nonempty(*values: str | None) -> str | None:

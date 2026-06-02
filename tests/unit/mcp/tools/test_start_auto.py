@@ -1090,6 +1090,61 @@ class TestBackgroundJobPath:
         assert state.worktree_policy is AutoWorktreePolicy.CURRENT
 
     @pytest.mark.asyncio
+    async def test_new_auto_policy_args_accept_worktree_aliases(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        job_manager = MagicMock()
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy_alias"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path / "store")
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle(
+            {
+                "goal": "build a CLI",
+                "cwd": str(tmp_path),
+                "worktree_policy": "create_isolated_worktree",
+            }
+        )
+
+        assert result.is_ok
+        state = store.load(result.value.meta["auto_session_id"])
+        assert state.worktree_policy is AutoWorktreePolicy.ALWAYS
+
+    @pytest.mark.asyncio
+    async def test_complete_product_with_short_timeout_fails_fast(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        job_manager = MagicMock()
+        store = AutoStore(tmp_path / "store")
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle(
+            {
+                "goal": "build a product",
+                "cwd": str(tmp_path),
+                "complete_product": True,
+                "pipeline_timeout_seconds": 100,
+            }
+        )
+
+        assert result.is_err
+        assert "complete_product=true requires pipeline_timeout_seconds >= 1800" in str(
+            result.error
+        )
+        job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_fresh_structured_goal_runner_resumes_without_preference_override(
         self, event_store, tmp_path
     ) -> None:
@@ -1136,6 +1191,52 @@ class TestBackgroundJobPath:
         runner_args = inner.handle.await_args.args[0]
         assert runner_args["resume"] == auto_session_id
         assert "user_preferences" not in runner_args
+
+    @pytest.mark.asyncio
+    async def test_mcp_plugin_mode_wires_seed_qa_with_demoted_authoring_handler(
+        self, event_store, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plugin auto must not bypass the pre-run Seed QA gate."""
+
+        captured: dict[str, object] = {}
+
+        class FakeQAHandler:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                captured["qa_handler"] = self
+
+        class FakeAutoPipeline:
+            def __init__(self, *_args, **kwargs):
+                captured["pipeline_kwargs"] = kwargs
+
+            async def run(self, state):
+                captured["state"] = state
+                return AutoPipelineResult(
+                    status="blocked",
+                    auto_session_id=state.auto_session_id,
+                    phase=str(state.phase.value),
+                )
+
+        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.QAHandler", FakeQAHandler)
+        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline)
+
+        h = AutoHandler(
+            store=AutoStore(tmp_path),
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await h._run({"goal": "build a CLI"})
+
+        assert result.status == "blocked"
+        qa_handler = captured["qa_handler"]
+        assert qa_handler.kwargs["agent_runtime_backend"] == "opencode"
+        assert qa_handler.kwargs["opencode_mode"] == "subprocess"
+        kwargs = captured["pipeline_kwargs"]
+        assert kwargs["seed_qa_evaluator"] is not None
+        assert kwargs["seed_qa_evaluator"].qa_handler is qa_handler
+        assert kwargs["evaluator"] is None
 
     @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(

@@ -232,7 +232,14 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
     ) -> list[str]:
         """Build the ``goose run`` command; prompt is fed via stdin."""
         del output_last_message_path, output_schema_path, profile
-        command = [self._cli_path, "run", "--output-format", "stream-json"]
+        command = [
+            self._cli_path,
+            "run",
+            "--output-format",
+            "stream-json",
+            "--no-profile",
+            "--quiet",
+        ]
         if self._ephemeral:
             command.append("--no-session")
         else:

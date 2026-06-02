@@ -156,6 +156,7 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_HERMES_CLI_PATH",
         "OUROBOROS_GOOSE_CLI_PATH",
         "OUROBOROS_GEMINI_CLI_PATH",
+        "OUROBOROS_PI_CLI_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
@@ -1087,6 +1088,31 @@ def get_goose_cli_path() -> str | None:
             resolved = str(Path(goose_path).expanduser())
             if shutil.which(resolved):
                 return resolved
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_pi_cli_path() -> str | None:
+    """Get Pi CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_PI_CLI_PATH environment variable
+        2. config.yaml orchestrator.pi_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to Pi CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_PI_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.pi_cli_path:
+            return config.orchestrator.pi_cli_path
     except ConfigError:
         pass
 

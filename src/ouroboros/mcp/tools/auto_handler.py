@@ -23,6 +23,7 @@ from ouroboros.auto.adapters import (
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
+    HandlerSeedQAEvaluator,
     load_seed,
     save_seed,
 )
@@ -60,7 +61,8 @@ from ouroboros.auto.state import (
     AutoPipelineState,
     AutoResumeCapability,
     AutoStore,
-    AutoWorktreePolicy,
+    parse_auto_worktree_policy,
+    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.config import get_opencode_mode
@@ -330,6 +332,10 @@ class AutoHandler:
                 "pipeline_timeout_seconds cannot be changed on resume; the "
                 "original deadline is preserved across process restarts"
             )
+        validate_complete_product_timeout(
+            complete_product=complete_product and not (isinstance(resume, str) and resume),
+            pipeline_timeout_seconds=pipeline_timeout_seconds,
+        )
         # Distinguish "caller did not pass user_preferences" from "caller
         # passed an empty mapping". Only validate/parse when the caller
         # actually supplied the arg so a resume call can defer to persisted
@@ -499,19 +505,14 @@ class AutoHandler:
         # ``EventStore``) — without that share the poller would query a
         # fresh, empty job table.
         ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
-        # RFC #809 Phase 2.1 — wire the QA-backed evaluator only when the
-        # session is in complete-product mode. Outside that mode the chain
-        # is RUN → COMPLETE (async run handoff) so there is no synchronous
-        # artifact to grade; instantiating QAHandler would be wasted setup.
-        #
-        # Plugin-mode skip: ``QAHandler`` dispatches to OpenCode Task panes
-        # when ``opencode_mode == "plugin"``. The auto pipeline's Phase
-        # 2.1/2.2 advisory layer is synchronous and cannot consume
-        # out-of-band subagent output, so the evaluator stays unwired in
-        # plugin mode. The chain then falls back to the pre-Phase-2.1
-        # behaviour (RUN → RALPH_HANDOFF → COMPLETE) — the existing Ralph
-        # plugin delegation continues to drive complete-product sessions
-        # in OpenCode Task panes as before.
+        # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
+        # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
+        # demoted authoring mode as Interview/GenerateSeed so QA executes
+        # inline instead of emitting an out-of-band ``_subagent`` envelope that
+        # the synchronous pipeline cannot consume. Keep the optional
+        # complete-product execution evaluator plugin-skipped: that later
+        # EVALUATE-stage advisory path still grades post-run artifacts and
+        # cannot consume plugin Task-pane output.
         #
         # Issue #1248 — ``lateral_thinker`` is constructed above (before
         # the driver) so it is available to both the driver's
@@ -521,13 +522,14 @@ class AutoHandler:
         # for that callsite without re-instantiating ``lateral_thinker``
         # here.
         evaluator = None
+        seed_qa_handler = QAHandler(
+            llm_backend=self.llm_backend,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=authoring_opencode_mode,
+        )
+        seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
         if complete_product and not opencode_plugin_mode:
-            qa_handler = QAHandler(
-                llm_backend=self.llm_backend,
-                agent_runtime_backend=runtime_backend,
-                opencode_mode=opencode_mode,
-            )
-            evaluator = HandlerEvaluator(qa_handler)
+            evaluator = HandlerEvaluator(seed_qa_handler)
         watchdog_event_store = self.event_store or EventStore()
         await watchdog_event_store.initialize()
         watchdog = Watchdog(
@@ -557,6 +559,7 @@ class AutoHandler:
             ralph_resumer=ralph_resumer,
             complete_product=complete_product,
             evaluator=evaluator,
+            seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
             probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
@@ -663,6 +666,10 @@ class StartAutoHandler:
                 for field_name in ("attach_execution", "attach_job", "attach_session")
             )
             requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
+            validate_complete_product_timeout(
+                complete_product=bool(arguments.get("complete_product", False)) and not has_resume,
+                pipeline_timeout_seconds=requested_pipeline_timeout,
+            )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
         if attach_requested and not has_resume:
@@ -1018,7 +1025,7 @@ def _apply_requested_domain_and_policies(
 
     worktree_policy = _optional_text_arg(arguments, "worktree_policy")
     if worktree_policy is not None:
-        state.worktree_policy = AutoWorktreePolicy(worktree_policy)
+        state.worktree_policy = parse_auto_worktree_policy(worktree_policy)
 
 
 def _build_auto_subagent(

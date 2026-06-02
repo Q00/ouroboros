@@ -69,6 +69,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GEMINI = "gemini"
     KIRO = "kiro"
     COPILOT = "copilot"
+    PI = "pi"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -827,7 +828,7 @@ def start(
             "--runtime",
             help=(
                 "Agent runtime backend for the workflow execution step after seed generation "
-                "(claude, codex, opencode, hermes, gemini, copilot, or kiro)."
+                "(claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi)."
             ),
             case_sensitive=False,
         ),
