@@ -58,6 +58,28 @@ def test_accumulates_pi_streaming_deltas() -> None:
     assert content == "Hello world\nnext"
 
 
+def test_terminal_pi_final_message_replaces_accumulated_deltas() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    delta = adapter._extract_text(
+        {
+            "type": "message_update",
+            "assistantMessageEvent": {"delta": "Hello\n"},
+        }
+    )
+    content = adapter._update_last_content("", delta)
+
+    final = adapter._extract_text(
+        {
+            "type": "agent_end",
+            "messages": [{"role": "assistant", "content": "Hello"}],
+        }
+    )
+    content = adapter._update_last_content(content, final)
+
+    assert content == "Hello"
+
+
 def test_pi_prompt_is_not_written_to_stdin() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 

@@ -55,6 +55,7 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             timeout=timeout,
             runtime_profile=None,
         )
+        self._last_pi_event_kind: str | None = None
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve Pi CLI path from config helpers."""
@@ -96,10 +97,17 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         return command
 
     def _update_last_content(self, last_content: str, event_content: str) -> str:
-        """Accumulate Pi streaming deltas unless a full final message arrives."""
+        """Accumulate streaming deltas but replace them with terminal Pi content.
+
+        Pi JSON mode can emit both whitespace-preserving ``message_update``
+        deltas and a final ``agent_end`` / ``message_end`` full message. The
+        inherited Codex loop only passes extracted text into this hook, so this
+        adapter records the most recent Pi event kind in ``_extract_text`` and
+        uses it here to avoid returning duplicated ``delta + final`` content.
+        """
         if not event_content:
             return last_content
-        if last_content and event_content.startswith(last_content):
+        if self._last_pi_event_kind == "final":
             return event_content
         return f"{last_content}{event_content}" if last_content else event_content
 
@@ -109,6 +117,7 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
         """Make a Pi completion request, failing closed on unsupported schemas."""
+        self._last_pi_event_kind = None
         if config.response_format:
             response_format_type = config.response_format.get("type")
             return Result.err(
@@ -132,7 +141,9 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         """Extract content from documented Pi JSONL events."""
         if isinstance(value, dict):
             event_type = value.get("type")
+            self._last_pi_event_kind = None
             if event_type == "message_update":
+                self._last_pi_event_kind = "delta"
                 nested = value.get("assistantMessageEvent")
                 if isinstance(nested, dict):
                     delta = nested.get("delta")
@@ -145,11 +156,16 @@ class PiLLMAdapter(CodexCliLLMAdapter):
                 messages = value.get("messages")
                 text = super()._extract_text(messages)
                 if text:
+                    self._last_pi_event_kind = "final"
                     return text
                 for key in ("message", "content", "text", "result", "response"):
                     text = super()._extract_text(value.get(key))
                     if text:
+                        self._last_pi_event_kind = "final"
                         return text
+                self._last_pi_event_kind = "final"
+        else:
+            self._last_pi_event_kind = None
         return super()._extract_text(value)
 
 
