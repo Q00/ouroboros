@@ -239,6 +239,17 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         soft_tool_enforcement=True,
     ),
     BackendCapability(
+        name="pi",
+        aliases=("pi_cli",),
+        supports_runtime=True,
+        supports_llm=False,
+        supports_interview_driver=False,
+        cli_name="pi",
+        cli_config_key="pi_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         name="litellm",
         aliases=("openai", "openrouter"),
         supports_llm=True,

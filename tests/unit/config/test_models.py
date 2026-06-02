@@ -573,6 +573,13 @@ class TestOrchestratorConfig:
         assert config.gemini_cli_path is not None
         assert "~" not in config.gemini_cli_path
 
+    def test_orchestrator_config_accepts_pi_backend(self) -> None:
+        """Pi is a valid runtime-only backend."""
+        config = OrchestratorConfig(runtime_backend="pi", pi_cli_path="~/bin/pi")
+        assert config.runtime_backend == "pi"
+        assert config.pi_cli_path is not None
+        assert "~" not in config.pi_cli_path
+
 
 class TestGetDefaultConfig:
     """Test get_default_config helper function."""
@@ -694,6 +701,11 @@ class TestRuntimeProfileConfig:
     def test_runtime_profile_stages_accept_goose_backends(self) -> None:
         profile = RuntimeProfileConfig(stages={"execute": "goose", "reflect": "goose_cli"})
         assert profile.stages == {"execute": "goose", "reflect": "goose_cli"}
+
+    def test_runtime_profile_accepts_pi_backends(self) -> None:
+        profile = RuntimeProfileConfig(default="pi", stages={"execute": "pi_cli"})
+        assert profile.default == "pi"
+        assert profile.stages == {"execute": "pi_cli"}
 
     def test_orchestrator_runtime_profile_string_shorthand(self) -> None:
         config = OrchestratorConfig(runtime_profile="worker")

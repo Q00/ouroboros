@@ -255,6 +255,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "copilot_cli": "copilot_cli",
     "goose": "goose",
     "goose_cli": "goose",
+    "pi": "pi",
+    "pi_cli": "pi",
 }
 
 
