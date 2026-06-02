@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from pathlib import Path
@@ -16,6 +17,10 @@ import ouroboros.orchestrator.opencode_runtime as opencode_runtime_module
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router import resolve_skill_dispatch as shared_resolve_skill_dispatch
+
+
+async def _collect_async(iterator):
+    return [item async for item in iterator]
 
 
 class _FakeStream:
@@ -33,6 +38,19 @@ class _FakeStream:
         data = bytes(self._buffer[:n])
         del self._buffer[:n]
         return data
+
+
+class _WaitForCleanupStream:
+    def __init__(self, cleanup_started: asyncio.Event) -> None:
+        self._cleanup_started = cleanup_started
+        self._closed = False
+
+    async def read(self, _n: int = -1) -> bytes:
+        if self._closed:
+            return b""
+        await self._cleanup_started.wait()
+        self._closed = True
+        return b""
 
 
 class _FakeStdin:
@@ -1298,6 +1316,39 @@ class TestOpenCodeRuntimeExecuteTask:
             timeout=5,
             check=False,
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_task_windows_child_cleanup_runs_before_success_stderr_drain(
+        self,
+    ) -> None:
+        text_event = json.dumps(
+            {
+                "type": "text",
+                "sessionID": "sess-windows-stderr-held",
+                "part": {"type": "text", "text": "Done"},
+            }
+        )
+        cleanup_started = asyncio.Event()
+        process = _FakeProcess(stdout_lines=[text_event], stderr_lines=[], returncode=0)
+        process.stderr = _WaitForCleanupStream(cleanup_started)
+        process.pid = 1357
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+
+        def cleanup_children(*_args: object, **_kwargs: object) -> None:
+            cleanup_started.set()
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=process),
+            patch.object(opencode_runtime_module.os, "name", "nt"),
+            patch.object(opencode_runtime_module.subprocess, "run", side_effect=cleanup_children),
+        ):
+            messages = await asyncio.wait_for(
+                _collect_async(runtime.execute_task("Hello")),
+                timeout=1,
+            )
+
+        assert cleanup_started.is_set()
+        assert any(msg.type == "result" for msg in messages)
 
     @pytest.mark.asyncio
     async def test_execute_task_windows_child_cleanup_runs_after_aclose_termination(

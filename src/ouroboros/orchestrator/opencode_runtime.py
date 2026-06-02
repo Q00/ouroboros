@@ -1125,6 +1125,7 @@ class OpenCodeRuntime:
         process: Any | None = None
         process_finished = False
         process_terminated = False
+        windows_child_cleanup_done = False
         control_state: dict[str, Any] | None = None
         stderr_task: asyncio.Task[list[str]] | None = None
 
@@ -1254,6 +1255,8 @@ class OpenCodeRuntime:
         except TimeoutError as e:
             if process is not None and control_state is not None:
                 await self._terminate_process(process)
+                self._cleanup_windows_child_processes(process)
+                windows_child_cleanup_done = True
                 control_state["terminated"] = True
             process_terminated = True
             if stderr_task is not None:
@@ -1287,6 +1290,8 @@ class OpenCodeRuntime:
                 process=process,
                 control_state=control_state,
             )
+            self._cleanup_windows_child_processes(process)
+            windows_child_cleanup_done = True
             stderr_lines = await stderr_task
 
             if yielded_final:
@@ -1328,7 +1333,8 @@ class OpenCodeRuntime:
                 ):
                     await self._terminate_process(process)
                     process_terminated = True
-                self._cleanup_windows_child_processes(process)
+                if not windows_child_cleanup_done:
+                    self._cleanup_windows_child_processes(process)
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
