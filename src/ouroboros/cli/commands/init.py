@@ -828,7 +828,7 @@ def start(
             "--runtime",
             help=(
                 "Agent runtime backend for the workflow execution step after seed generation "
-                "(claude, codex, opencode, hermes, gemini, copilot, or kiro)."
+                "(claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi)."
             ),
             case_sensitive=False,
         ),

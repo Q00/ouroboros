@@ -1,6 +1,6 @@
 """Pi (pi.dev) CLI runtime for Ouroboros orchestrator execution.
 
-Drives workflows through the Pi CLI (`pi --mode json`), streaming JSONL
+Drives workflows through the Pi CLI (`pi --mode json <prompt>`), streaming JSONL
 events and normalising them into :class:`AgentMessage` values.
 
 Pi JSON mode reference: https://pi.dev/docs/latest/json
@@ -116,11 +116,17 @@ class PiRuntime:
 
     # -- Command building --------------------------------------------------
 
-    def _build_command(self, *, resume_session_id: str | None = None) -> list[str]:
-        """Assemble the CLI argument list for ``pi --mode json``.
+    def _build_command(
+        self,
+        *,
+        prompt: str,
+        resume_session_id: str | None = None,
+    ) -> list[str]:
+        """Assemble the CLI argument list for ``pi --mode json <prompt>``.
 
-        Prompt is piped via stdin (avoids ARG_MAX limits).
-        Pi reads stdin when it detects a non-TTY input stream.
+        Pi's documented JSON mode accepts the task as a positional message
+        argument. Keep that contract explicit instead of relying on stdin
+        behavior that is not documented for JSON mode.
         """
         command = [self._cli_path, "--mode", "json"]
 
@@ -132,6 +138,7 @@ class PiRuntime:
                 raise ValueError(f"Invalid resume_session_id: {resume_session_id!r}")
             command.extend(["--session", resume_session_id])
 
+        command.append(prompt)
         return command
 
     def _build_child_env(self) -> dict[str, str]:
@@ -232,35 +239,68 @@ class PiRuntime:
         return None
 
     def _extract_content_delta(self, event: dict[str, Any]) -> str | None:
-        """Extract streaming content from message_update events."""
+        """Extract streaming text from Pi ``message_update`` events."""
         if event.get("type") != "message_update":
             return None
+
+        assistant_event = event.get("assistantMessageEvent")
+        if isinstance(assistant_event, dict):
+            delta = assistant_event.get("delta")
+            if isinstance(delta, str):
+                return delta
+            text = assistant_event.get("text") or assistant_event.get("content")
+            if isinstance(text, str):
+                return text
+
+        # Compatibility fallback for older/provisional Pi builds and tests.
         delta = event.get("delta") or event.get("content") or event.get("text")
         if isinstance(delta, str):
             return delta
         if isinstance(delta, dict):
-            return delta.get("text") or delta.get("content")
+            text = delta.get("text") or delta.get("content")
+            return text if isinstance(text, str) else None
+        return None
+
+    def _extract_text_from_message(self, message: dict[str, Any]) -> str | None:
+        """Extract user-visible text from a Pi assistant message payload."""
+        content = message.get("content") or message.get("text") or ""
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            texts = []
+            for item in content:
+                if isinstance(item, str):
+                    texts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str) and (item.get("type") in {None, "text"}):
+                        texts.append(text)
+            joined = "".join(texts).strip()
+            if joined:
+                return joined
         return None
 
     def _extract_final_content(self, event: dict[str, Any]) -> str | None:
-        """Extract final assistant message from agent_end event."""
-        if event.get("type") != "agent_end":
+        """Extract final assistant text from Pi completion events."""
+        event_type = event.get("type")
+        if event_type == "message_end":
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                return self._extract_text_from_message(message)
+            return None
+        if event_type == "turn_end":
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                return self._extract_text_from_message(message)
+            return None
+        if event_type != "agent_end":
             return None
         messages = event.get("messages") or []
         for msg in reversed(messages):
             if isinstance(msg, dict) and msg.get("role") == "assistant":
-                content = msg.get("content") or msg.get("text") or ""
-                if isinstance(content, str) and content.strip():
-                    return content.strip()
-                if isinstance(content, list):
-                    texts = [
-                        c.get("text", "")
-                        for c in content
-                        if isinstance(c, dict) and c.get("type") == "text"
-                    ]
-                    joined = "".join(texts).strip()
-                    if joined:
-                        return joined
+                text = self._extract_text_from_message(msg)
+                if text:
+                    return text
         return None
 
     # -- Process management ------------------------------------------------
@@ -354,7 +394,9 @@ class PiRuntime:
         composed_prompt = "\n\n".join(p for p in composed_parts if p.strip())
 
         try:
-            command = self._build_command(resume_session_id=attempted_resume)
+            command = self._build_command(
+                prompt=composed_prompt, resume_session_id=attempted_resume
+            )
         except Exception as e:
             yield AgentMessage(
                 type="result",
@@ -379,7 +421,7 @@ class PiRuntime:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=self._cwd,
-                stdin=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_child_env(),
@@ -404,24 +446,12 @@ class PiRuntime:
             )
             return
 
-        if process.stdin is not None:
-            try:
-                if composed_prompt:
-                    process.stdin.write(composed_prompt.encode("utf-8"))
-                    await process.stdin.drain()
-                process.stdin.close()
-                await process.stdin.wait_closed()
-            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-                log.warning(f"{self._log_namespace}.stdin_write_failed", error=str(exc))
-                with contextlib.suppress(OSError):
-                    process.stdin.close()
-
         stderr_task = asyncio.create_task(
             self._collect_stream_lines(process.stderr, max_lines=self._max_stderr_lines)
         )
 
         last_content = ""
-        yielded_final = False
+        pending_final_content: str | None = None
 
         try:
             if process.stdout is not None:
@@ -453,16 +483,12 @@ class PiRuntime:
                         )
                         continue
 
-                    # Task complete
+                    # Completion events carry the final assistant text, but
+                    # process exit status still decides success vs error.
+                    final_content = self._extract_final_content(event)
+                    if final_content:
+                        pending_final_content = final_content
                     if event.get("type") == "agent_end":
-                        final_content = self._extract_final_content(event) or last_content
-                        yielded_final = True
-                        yield AgentMessage(
-                            type="result",
-                            content=final_content,
-                            data={"subtype": "success"},
-                            resume_handle=current_handle,
-                        )
                         break
 
         except TimeoutError as e:
@@ -490,12 +516,11 @@ class PiRuntime:
             returncode = await process.wait()
             process_finished = True
 
-            if yielded_final:
-                return
-
             stderr_lines = await stderr_task if stderr_task else []
             if returncode != 0:
-                final_message = "\n".join(stderr_lines).strip() or last_content or ""
+                final_message = (
+                    "\n".join(stderr_lines).strip() or pending_final_content or last_content or ""
+                )
                 if not final_message:
                     final_message = f"{self._display_name} exited with code {returncode}."
                 yield AgentMessage(
@@ -509,7 +534,9 @@ class PiRuntime:
                     resume_handle=current_handle,
                 )
             else:
-                final_message = last_content or f"{self._display_name} task completed."
+                final_message = (
+                    pending_final_content or last_content or f"{self._display_name} task completed."
+                )
                 yield AgentMessage(
                     type="result",
                     content=final_message,

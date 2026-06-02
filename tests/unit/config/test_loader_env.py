@@ -88,6 +88,7 @@ _DENYLISTED_KEYS = (
     "OUROBOROS_HERMES_CLI_PATH",
     "OUROBOROS_GOOSE_CLI_PATH",
     "OUROBOROS_GEMINI_CLI_PATH",
+    "OUROBOROS_PI_CLI_PATH",
     # Bare provider alias (no OUROBOROS_ prefix) honored + executed by
     # opencode_config._configured_opencode_cli_path.
     "OPENCODE_CLI_PATH",

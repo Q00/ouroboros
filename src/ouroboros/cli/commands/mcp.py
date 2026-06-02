@@ -371,7 +371,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, or kiro).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi).",
             case_sensitive=False,
         ),
     ] = None,
@@ -461,7 +461,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, or kiro).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi).",
             case_sensitive=False,
         ),
     ] = None,
