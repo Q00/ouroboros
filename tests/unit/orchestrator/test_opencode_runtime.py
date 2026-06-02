@@ -1225,7 +1225,6 @@ class TestOpenCodeRuntimeExecuteTask:
         assert len(text_msgs) >= 1
         assert "Task completed" in text_msgs[0].content
 
-
     def test_windows_child_cleanup_invokes_wmic_for_parent_pid(self) -> None:
         runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
         process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
@@ -1262,7 +1261,9 @@ class TestOpenCodeRuntimeExecuteTask:
 
         with (
             patch.object(opencode_runtime_module.os, "name", "nt"),
-            patch.object(opencode_runtime_module.subprocess, "run", side_effect=TimeoutError("slow")),
+            patch.object(
+                opencode_runtime_module.subprocess, "run", side_effect=TimeoutError("slow")
+            ),
             patch.object(opencode_runtime_module.log, "warning") as mock_warning,
         ):
             runtime._cleanup_windows_child_processes(process)
