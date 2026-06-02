@@ -66,6 +66,22 @@ def test_tool_envelope_support_is_registry_owned() -> None:
     assert backend_supports_tool_envelope("codex")
     assert backend_supports_tool_envelope("gemini_cli")
     assert not backend_supports_tool_envelope("hermes")
+    assert not backend_supports_tool_envelope("pi")
+
+
+def test_pi_runtime_capability_boundaries_stay_runtime_only() -> None:
+    capability = get_backend_capability("pi_cli")
+
+    assert capability is not None
+    assert capability.name == "pi"
+    assert capability.supports_runtime is True
+    assert capability.switchable_runtime is True
+    assert capability.supports_llm is False
+    assert capability.supports_interview_driver is False
+    assert capability.supports_tool_envelope is False
+    assert capability.cli_config_key == "pi_cli_path"
+    assert "pi" not in llm_backend_choices()
+    assert "pi" not in interview_driver_backend_choices()
 
 
 def test_switchable_runtime_metadata_is_registry_owned() -> None:

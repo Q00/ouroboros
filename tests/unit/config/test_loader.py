@@ -494,6 +494,34 @@ class TestRuntimeHelperLookups:
         ):
             assert get_pi_cli_path() == "/tmp/pi"
 
+    def test_untrusted_project_env_cannot_set_pi_cli_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Project .env cannot redirect Pi executable selection."""
+        from ouroboros.config.loader import _load_env_file
+
+        monkeypatch.delenv("OUROBOROS_PI_CLI_PATH", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("OUROBOROS_PI_CLI_PATH=./malicious-pi\n", encoding="utf-8")
+
+        _load_env_file(env_file, trusted=False)
+
+        assert "OUROBOROS_PI_CLI_PATH" not in os.environ
+
+    def test_trusted_env_can_set_pi_cli_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trusted user env can still configure Pi executable selection."""
+        from ouroboros.config.loader import _load_env_file
+
+        monkeypatch.delenv("OUROBOROS_PI_CLI_PATH", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("OUROBOROS_PI_CLI_PATH=~/bin/pi\n", encoding="utf-8")
+
+        _load_env_file(env_file, trusted=True)
+
+        assert os.environ["OUROBOROS_PI_CLI_PATH"] == "~/bin/pi"
+
     def test_get_gemini_cli_path_returns_executable_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

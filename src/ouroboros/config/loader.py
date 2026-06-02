@@ -150,6 +150,7 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_HERMES_CLI_PATH",
         "OUROBOROS_GOOSE_CLI_PATH",
         "OUROBOROS_GEMINI_CLI_PATH",
+        "OUROBOROS_PI_CLI_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
