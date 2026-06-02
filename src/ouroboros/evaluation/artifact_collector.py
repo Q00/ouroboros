@@ -89,6 +89,25 @@ _SKIP_DIRS: frozenset[str] = frozenset(
         ".tox",
         "coverage",
         ".nyc_output",
+        "docs",
+        "examples",
+        "fixtures",
+        "output",
+        "test",
+        "tests",
+    }
+)
+
+# Explicit development/evaluation configuration files are useful for local
+# setup, but they are not production source evidence and may contain
+# workstation-specific bridge paths.
+_SKIP_FILENAMES: frozenset[str] = frozenset(
+    {
+        ".ouroboros_eval_artifact.md",
+        "config.yaml",
+        "config.yml",
+        "mcp.yaml",
+        "mcp.yml",
     }
 )
 
@@ -166,6 +185,11 @@ def _is_sensitive_file(fname: str) -> bool:
         return True
     # Catch unlisted dotenv variants (e.g. .env.ci, .env.foo).
     return lowered.startswith(".env.")
+
+
+def _is_skipped_source_file(fname: str) -> bool:
+    """Return True when ``fname`` is not production source evidence."""
+    return fname.lower() in _SKIP_FILENAMES
 
 
 class ArtifactCollector:
@@ -302,6 +326,8 @@ class ArtifactCollector:
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in _SKIP_EXTENSIONS:
+                    continue
+                if _is_skipped_source_file(fname):
                     continue
                 if _is_sensitive_file(fname):
                     continue

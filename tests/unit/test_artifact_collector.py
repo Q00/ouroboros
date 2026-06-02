@@ -72,6 +72,32 @@ class TestArtifactCollector:
         assert len(bundle.files) >= 1
         assert bundle.text_summary == output
 
+    def test_directory_scan_collects_production_adapter_sources_only(self) -> None:
+        tmpdir = self._create_project(
+            {
+                "src/ouroboros/orchestrator/pi_runtime.py": "class PiRuntime:\n    pass\n",
+                "src/ouroboros/orchestrator/runtime_factory.py": "def create_agent_runtime():\n    pass\n",
+                "tests/unit/orchestrator/test_pi_runtime.py": "def test_pi_runtime():\n    pass\n",
+                "tests/fixtures/pi_bridge_fixture.py": "print('fixture bridge')\n",
+                "docs/pi-runtime.md": "# pi runtime docs\n",
+                ".ouroboros_eval_artifact.md": "temporary evaluation artifact\n",
+                "config.yaml": "pi_bridge_command: /Users/jaegyu.lee/Project/pi/bridge\n",
+            }
+        )
+
+        collector = ArtifactCollector()
+        bundle = collector.collect("No file operations here.", project_dir=tmpdir)
+        real_tmpdir = os.path.realpath(tmpdir)
+        relative_paths = {os.path.relpath(file.file_path, real_tmpdir) for file in bundle.files}
+
+        assert "src/ouroboros/orchestrator/pi_runtime.py" in relative_paths
+        assert "src/ouroboros/orchestrator/runtime_factory.py" in relative_paths
+        assert "tests/unit/orchestrator/test_pi_runtime.py" not in relative_paths
+        assert "tests/fixtures/pi_bridge_fixture.py" not in relative_paths
+        assert "docs/pi-runtime.md" not in relative_paths
+        assert ".ouroboros_eval_artifact.md" not in relative_paths
+        assert "config.yaml" not in relative_paths
+
     def test_total_chars_tracked(self) -> None:
         tmpdir = self._create_project(
             {
