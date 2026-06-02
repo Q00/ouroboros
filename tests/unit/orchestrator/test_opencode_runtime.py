@@ -1225,6 +1225,79 @@ class TestOpenCodeRuntimeExecuteTask:
         assert len(text_msgs) >= 1
         assert "Task completed" in text_msgs[0].content
 
+
+    def test_windows_child_cleanup_invokes_wmic_for_parent_pid(self) -> None:
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+        process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+        process.pid = 4242
+
+        with (
+            patch.object(opencode_runtime_module.os, "name", "nt"),
+            patch.object(opencode_runtime_module.subprocess, "run") as mock_run,
+        ):
+            runtime._cleanup_windows_child_processes(process)
+
+        mock_run.assert_called_once_with(
+            ["wmic", "process", "where", "(ParentProcessId=4242)", "delete"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
+    def test_windows_child_cleanup_skips_non_windows(self) -> None:
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+        process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+        with (
+            patch.object(opencode_runtime_module.os, "name", "posix"),
+            patch.object(opencode_runtime_module.subprocess, "run") as mock_run,
+        ):
+            runtime._cleanup_windows_child_processes(process)
+
+        mock_run.assert_not_called()
+
+    def test_windows_child_cleanup_logs_failures(self) -> None:
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+        process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+        with (
+            patch.object(opencode_runtime_module.os, "name", "nt"),
+            patch.object(opencode_runtime_module.subprocess, "run", side_effect=TimeoutError("slow")),
+            patch.object(opencode_runtime_module.log, "warning") as mock_warning,
+        ):
+            runtime._cleanup_windows_child_processes(process)
+
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args[0] == "opencode_runtime.windows_child_cleanup_failed"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_windows_child_cleanup_runs_after_success(self) -> None:
+        text_event = json.dumps(
+            {
+                "type": "text",
+                "sessionID": "sess-windows-cleanup",
+                "part": {"type": "text", "text": "Done"},
+            }
+        )
+        process = _FakeProcess(stdout_lines=[text_event], stderr_lines=[], returncode=0)
+        process.pid = 6789
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=process),
+            patch.object(opencode_runtime_module.os, "name", "nt"),
+            patch.object(opencode_runtime_module.subprocess, "run") as mock_run,
+        ):
+            messages = [msg async for msg in runtime.execute_task("Hello")]
+
+        assert any(msg.type == "result" for msg in messages)
+        mock_run.assert_called_once_with(
+            ["wmic", "process", "where", "(ParentProcessId=6789)", "delete"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
     @pytest.mark.asyncio
     async def test_execute_task_with_session_tracking(self) -> None:
         """Session ID from events is captured into the runtime handle."""

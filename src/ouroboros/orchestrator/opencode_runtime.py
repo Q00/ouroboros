@@ -567,6 +567,33 @@ class OpenCodeRuntime:
 
     # -- Process management ------------------------------------------------
 
+    def _cleanup_windows_child_processes(self, process: Any) -> None:
+        """Best-effort cleanup for Windows children orphaned by Node CLIs.
+
+        OpenCode may leave session-server children behind after the parent
+        subprocess exits normally. Windows preserves the original parent PID
+        on those orphaned children, so a PPID-targeted cleanup can run even
+        after ``process.wait()`` has completed.
+        """
+        if os.name != "nt":
+            return
+        pid = getattr(process, "pid", None)
+        if pid is None:
+            return
+        try:
+            subprocess.run(
+                ["wmic", "process", "where", f"(ParentProcessId={pid})", "delete"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception as exc:
+            log.warning(
+                f"{self._log_namespace}.windows_child_cleanup_failed",
+                pid=pid,
+                error=str(exc),
+            )
+
     async def _terminate_process(self, process: Any) -> None:
         """Best-effort subprocess shutdown.
 
@@ -1294,20 +1321,7 @@ class OpenCodeRuntime:
             )
         finally:
             if process is not None:
-                # On Windows, opencode (Node.js) spawns child processes such as
-                # a session server that outlive the parent subprocess. Windows
-                # preserves the original PPID on orphaned processes, so we can
-                # find and terminate them by PPID even after the parent has
-                # already exited (issue #1314).
-                if os.name == "nt":
-                    pid = getattr(process, "pid", None)
-                    if pid is not None:
-                        with contextlib.suppress(Exception):
-                            subprocess.run(
-                                ["wmic", "process", "where", f"(ParentProcessId={pid})", "delete"],
-                                capture_output=True,
-                                timeout=5,
-                            )
+                self._cleanup_windows_child_processes(process)
                 if (
                     not process_finished
                     and not process_terminated
