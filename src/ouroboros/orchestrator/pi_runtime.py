@@ -262,6 +262,12 @@ class PiRuntime:
             return None
         return event if isinstance(event, dict) else None
 
+    def _malformed_event_message(self, line: str) -> str:
+        preview = line.strip()
+        if len(preview) > 240:
+            preview = f"{preview[:237]}..."
+        return f"Malformed {self._display_name} JSON event: {preview}"
+
     def _extract_session_id(self, event: dict[str, Any]) -> str | None:
         """Extract session ID from the pi session header event."""
         if event.get("type") == "session":
@@ -504,7 +510,19 @@ class PiRuntime:
                         continue
                     event = self._parse_event(line)
                     if event is None:
-                        continue
+                        if process is not None:
+                            await self._terminate_process(process)
+                        process_terminated = True
+                        yield AgentMessage(
+                            type="result",
+                            content=self._malformed_event_message(line),
+                            data={
+                                "subtype": "error",
+                                "error_type": "MalformedPiEvent",
+                            },
+                            resume_handle=current_handle,
+                        )
+                        return
 
                     # Session header — extract ID
                     sid = self._extract_session_id(event)
