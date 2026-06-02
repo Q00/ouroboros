@@ -53,6 +53,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
+    recognized_shipped_defaults,
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
 
@@ -1632,20 +1633,46 @@ def _apply_copilot_default_model(
     Treat setup's selected model as the default for model fields that are
     absent or still equal to Ouroboros' shipped defaults, while preserving
     explicit user overrides.
+
+    "Shipped default" means the *current* pin OR any prior-release shipped
+    default (``recognized_shipped_defaults``): a config persisted before a pin
+    bump holds the old literal but is still an untouched shipped default the
+    user never chose, so Copilot setup must rewrite it to the discovered model
+    rather than mistaking it for an explicit override (Q00/ouroboros#1324).
     """
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
-        if current is None or current == shipped_default:
+        if current is None or current in recognized_shipped_defaults(shipped_default):
             section[key] = chosen_model
 
     for section_name, key, shipped_default in _COPILOT_DEFAULT_MODEL_LIST_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
         if current is None or (
-            isinstance(current, (list, tuple)) and tuple(current) == shipped_default
+            isinstance(current, (list, tuple))
+            and _is_shipped_default_roster(current, shipped_default)
         ):
             section[key] = list(model_roster)
+
+
+def _is_shipped_default_roster(
+    current: list | tuple,
+    shipped_roster: tuple[str, ...],
+) -> bool:
+    """True when ``current`` is a shipped default roster (current or legacy).
+
+    Element-wise match against ``recognized_shipped_defaults`` so a roster
+    persisted before a pin bump (e.g. the old OpenRouter Opus slug in the
+    consensus slot) is still recognized as an untouched shipped default.
+    """
+    current_tuple = tuple(current)
+    if len(current_tuple) != len(shipped_roster):
+        return False
+    return all(
+        str(candidate) in recognized_shipped_defaults(default)
+        for candidate, default in zip(current_tuple, shipped_roster, strict=True)
+    )
 
 
 def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
