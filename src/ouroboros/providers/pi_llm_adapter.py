@@ -137,10 +137,10 @@ class PiLLMAdapter(CodexCliLLMAdapter):
                 if isinstance(nested, dict):
                     delta = nested.get("delta")
                     if isinstance(delta, str):
-                        return delta.strip()
+                        return delta
                 delta = value.get("delta")
                 if isinstance(delta, str):
-                    return delta.strip()
+                    return delta
             if event_type in {"message_end", "turn_end", "agent_end"}:
                 messages = value.get("messages")
                 text = super()._extract_text(messages)

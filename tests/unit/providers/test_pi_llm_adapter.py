@@ -30,7 +30,7 @@ def test_extracts_pi_session_and_streaming_delta() -> None:
                 "assistantMessageEvent": {"delta": " partial "},
             }
         )
-        == "partial"
+        == " partial "
     )
 
 
@@ -51,10 +51,11 @@ def test_extracts_pi_final_messages() -> None:
 def test_accumulates_pi_streaming_deltas() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 
-    content = adapter._update_last_content("", "Hel")
-    content = adapter._update_last_content(content, "lo")
+    content = adapter._update_last_content("", "Hello")
+    content = adapter._update_last_content(content, " world")
+    content = adapter._update_last_content(content, "\nnext")
 
-    assert content == "Hello"
+    assert content == "Hello world\nnext"
 
 
 def test_pi_prompt_is_not_written_to_stdin() -> None:
