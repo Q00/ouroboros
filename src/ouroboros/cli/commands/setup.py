@@ -351,7 +351,7 @@ _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], obje
         (("consensus", "devil_model"), "openrouter/openai/gpt-4o"),
     ),
     "pm_interview": ((("clarification", "default_model"), "claude-opus-4-6"),),
-    "qa": ((("llm", "qa_model"), "claude-sonnet-4-20250514"),),
+    "qa": ((("llm", "qa_model"), "claude-sonnet-4-6"),),
     "reflect": ((("resilience", "reflect_model"), "claude-opus-4-6"),),
     "seed_generation": ((("clarification", "default_model"), "claude-opus-4-6"),),
     "semantic_evaluation": ((("evaluation", "semantic_model"), "claude-opus-4-6"),),
@@ -1588,7 +1588,7 @@ def _register_copilot_mcp_server() -> None:
 
 
 _COPILOT_DEFAULT_MODEL_TARGETS: tuple[tuple[str, str, str], ...] = (
-    ("llm", "qa_model", "claude-sonnet-4-20250514"),
+    ("llm", "qa_model", "claude-sonnet-4-6"),
     ("llm", "dependency_analysis_model", "claude-opus-4-6"),
     ("llm", "ontology_analysis_model", "claude-opus-4-6"),
     ("llm", "context_compression_model", "gpt-4"),

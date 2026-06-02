@@ -201,7 +201,7 @@ class TestLLMConfig:
         assert config.backend == "claude_code"
         assert config.permission_mode == "default"
         assert config.opencode_permission_mode == "acceptEdits"
-        assert config.qa_model == "claude-sonnet-4-20250514"
+        assert config.qa_model == "claude-sonnet-4-6"
         assert config.dependency_analysis_model == "claude-opus-4-6"
         assert config.ontology_analysis_model == "claude-opus-4-6"
         assert config.context_compression_model == "gpt-4"

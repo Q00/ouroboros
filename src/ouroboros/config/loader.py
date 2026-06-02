@@ -1310,11 +1310,11 @@ def get_qa_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.qa_model,
-            default_model="claude-sonnet-4-20250514",
+            default_model="claude-sonnet-4-6",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-sonnet-4-20250514", backend=backend)
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_dependency_analysis_model(backend: str | None = None) -> str:
