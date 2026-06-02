@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from ouroboros.auto.adapters import EvaluateResult, PartialInterviewStartError
-from ouroboros.auto.grading import GradeResult, SeedGrade
+from ouroboros.auto.grading import GradeFinding, GradeGate, GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -1605,6 +1605,118 @@ async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
     assert qa_calls == 2
     assert captured_run_seed is not None
     assert any("missing explicit no-op scope" in item for item in captured_run_seed.constraints)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_qa_repaired_seed_when_review_no_longer_may_run(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_repair_rejected",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("QA-passing but review-blocked repaired Seed must not run")
+
+    qa_calls = 0
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        if qa_calls == 1:
+            return EvaluateResult(
+                passed=False,
+                score=0.58,
+                verdict="revise",
+                suggestions=("introduce review-blocking post-QA constraint",),
+            )
+        assert any("review-blocking" in item for item in seed.constraints)
+        return EvaluateResult(passed=True, score=0.91, verdict="pass")
+
+    class ConstraintBlockingGate(GradeGate):
+        def grade_seed(
+            self,
+            seed: Seed,
+            *,
+            ledger: SeedDraftLedger | None = None,  # noqa: ARG002
+            closure_mode: str | None = None,  # noqa: ARG002
+            degraded: bool | None = None,  # noqa: ARG002
+        ) -> GradeResult:
+            if any("review-blocking" in constraint for constraint in seed.constraints):
+                blocker = GradeFinding(
+                    "post_qa_review_blocker",
+                    "high",
+                    "QA repair introduced a deterministic blocker",
+                    "constraints",
+                    "Remove the post-QA blocker before execution.",
+                )
+                return GradeResult(
+                    grade=SeedGrade.C,
+                    scores={
+                        "coverage": 0.5,
+                        "ambiguity": 0.5,
+                        "testability": 0.5,
+                        "execution_feasibility": 0.4,
+                        "risk": 0.4,
+                    },
+                    blockers=[blocker],
+                    may_run=False,
+                )
+            return GradeResult(
+                grade=SeedGrade.A,
+                scores={
+                    "coverage": 0.95,
+                    "ambiguity": 0.05,
+                    "testability": 0.95,
+                    "execution_feasibility": 0.95,
+                    "risk": 0.05,
+                },
+                may_run=True,
+            )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        grade_gate=ConstraintBlockingGate(),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert "Seed grade C did not meet required grade A" in result.blocker
+    assert qa_calls == 2
+    assert state.last_tool_name == "grade_gate"
+    assert state.last_qa_passed is True
+    assert state.last_grade == "C"
 
 
 @pytest.mark.asyncio

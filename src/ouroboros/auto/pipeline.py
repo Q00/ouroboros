@@ -2600,6 +2600,15 @@ class AutoPipeline:
             state.last_qa_differences = list(qa_result.differences)
             state.last_qa_suggestions = list(qa_result.suggestions)
             if qa_result.passed:
+                review_blocker = self._seed_review_gate_blocker(state, current_review)
+                if review_blocker is not None:
+                    state.mark_blocked(review_blocker, tool_name="grade_gate")
+                    self._save(state)
+                    return (
+                        self._result(state, ledger, review=current_review, blocker=review_blocker),
+                        current_seed,
+                        current_review,
+                    )
                 state.mark_progress(
                     f"Seed QA passed: {qa_result.verdict} (score {qa_result.score:.2f})",
                     tool_name="seed_qa",
@@ -2658,6 +2667,21 @@ class AutoPipeline:
             )
 
         return None, current_seed, current_review
+
+    def _seed_review_gate_blocker(
+        self, state: AutoPipelineState, review: SeedReview | None
+    ) -> str | None:
+        """Return the deterministic review blocker that must still gate Seed QA pass paths."""
+        if review is None:
+            return None
+        if not _grade_meets_required(review.grade_result.grade.value, state.required_grade):
+            return (
+                f"Seed grade {review.grade_result.grade.value} did not meet "
+                f"required grade {state.required_grade}"
+            )
+        if not review.may_run and not (self.skip_run or state.skip_run):
+            return "Seed review did not clear the Seed for execution"
+        return None
 
     async def _run_evaluate(
         self,
