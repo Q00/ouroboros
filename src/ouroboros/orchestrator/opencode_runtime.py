@@ -1321,13 +1321,14 @@ class OpenCodeRuntime:
             )
         finally:
             if process is not None:
-                self._cleanup_windows_child_processes(process)
                 if (
                     not process_finished
                     and not process_terminated
                     and getattr(process, "returncode", None) is None
                 ):
                     await self._terminate_process(process)
+                    process_terminated = True
+                self._cleanup_windows_child_processes(process)
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

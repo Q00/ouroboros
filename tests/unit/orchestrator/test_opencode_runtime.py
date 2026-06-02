@@ -1300,6 +1300,43 @@ class TestOpenCodeRuntimeExecuteTask:
         )
 
     @pytest.mark.asyncio
+    async def test_execute_task_windows_child_cleanup_runs_after_aclose_termination(
+        self,
+    ) -> None:
+        text_event = json.dumps(
+            {
+                "type": "text",
+                "sessionID": "sess-windows-aclose",
+                "part": {"type": "text", "text": "Partial"},
+            }
+        )
+        process = _FakeProcess(stdout_lines=[text_event], stderr_lines=[], returncode=0)
+        process.pid = 2468
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+        call_order: list[str] = []
+
+        async def terminate_process(proc: _FakeProcess) -> None:
+            call_order.append("terminate")
+            proc.terminate()
+
+        def cleanup_children(*_args: object, **_kwargs: object) -> None:
+            call_order.append("cleanup")
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=process),
+            patch.object(opencode_runtime_module.os, "name", "nt"),
+            patch.object(runtime, "_terminate_process", side_effect=terminate_process),
+            patch.object(opencode_runtime_module.subprocess, "run", side_effect=cleanup_children),
+        ):
+            stream = runtime.execute_task("Hello")
+            first_message = await stream.__anext__()
+            await stream.aclose()
+
+        assert first_message.type == "assistant"
+        assert process.terminated
+        assert call_order == ["terminate", "cleanup"]
+
+    @pytest.mark.asyncio
     async def test_execute_task_with_session_tracking(self) -> None:
         """Session ID from events is captured into the runtime handle."""
         text_event = json.dumps(
