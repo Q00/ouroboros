@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from uuid import uuid4
 
 from ouroboros.auto.grading import deterministic_floor
@@ -33,6 +34,18 @@ grade/run gates that suppress high-ambiguity-only blockers for degraded seeds
 (#1257 PR-C).
 """
 
+DEADLINE_LEDGER_SEED_GENERATION_MODE = "interview_deadline_complete_ledger"
+"""``SeedMetadata.generation_mode`` for a *complete* ledger that reached closure
+via the interview-phase deadline recovery path (#1302).
+
+Distinct from :data:`PARTIAL_SEED_GENERATION_MODE`: the ledger is fully resolved
+(no ``unresolved_slots``), but the per-phase interview deadline cut the Socratic
+loop short before the backend could confirm low ambiguity (``<= 0.20``). The
+Seed therefore carries the full ledger content yet is flagged ``degraded`` so
+the grade/run gates surface it as a typed partial-product terminal instead of
+auto-running a Seed whose low ambiguity was never backend-confirmed.
+"""
+
 _PARTIAL_DEFAULT_ACCEPTANCE = (
     "Synthesized Seed runs without raising and the recorded goal is "
     "surfaced in execution output (conservative smoke).",
@@ -55,6 +68,7 @@ def synthesize_seed_from_ledger(
     ledger: SeedDraftLedger,
     *,
     interview_id: str | None = None,
+    recovery_reason: str | None = None,
 ) -> Seed:
     """Build a valid Seed directly from a complete auto ledger.
 
@@ -62,6 +76,18 @@ def synthesize_seed_from_ledger(
     unavailable after the deterministic ledger has enough evidence to proceed.
     The ledger remains the source of truth; this function performs no model or
     external IO.
+
+    Args:
+        ledger: The complete ledger to synthesize from.
+        interview_id: Reference to the source interview, mirrored on
+            :attr:`~ouroboros.core.seed.SeedMetadata.interview_id`.
+        recovery_reason: When set (e.g. ``"interview_phase_deadline"``), the
+            ledger is complete but closure was reached via a recovery path that
+            never obtained backend-confirmed low ambiguity (#1302). The Seed
+            keeps its full ledger content but is stamped ``degraded`` with
+            :data:`DEADLINE_LEDGER_SEED_GENERATION_MODE` so the grade/run gates
+            route it to the typed partial-product terminal instead of auto-RUN.
+            ``None`` (default) yields the legacy fully-runnable ``"normal"`` Seed.
     """
     if not ledger.is_seed_ready():
         msg = f"cannot synthesize Seed from incomplete ledger: {', '.join(ledger.open_gaps())}"
@@ -132,11 +158,33 @@ def synthesize_seed_from_ledger(
             ),
         ),
         metadata=SeedMetadata(
-            seed_id=f"seed_{uuid4().hex[:12]}",
-            ambiguity_score=max(0.05, deterministic_floor(ledger)),
-            interview_id=interview_id,
+            **_synthesized_metadata_kwargs(ledger, interview_id, recovery_reason)
         ),
     )
+
+
+def _synthesized_metadata_kwargs(
+    ledger: SeedDraftLedger,
+    interview_id: str | None,
+    recovery_reason: str | None,
+) -> dict[str, Any]:
+    """Build the ``SeedMetadata`` kwargs for :func:`synthesize_seed_from_ledger`.
+
+    A plain ``recovery_reason is None`` keeps the legacy ``"normal"`` provenance.
+    When a recovery reason is supplied the complete-ledger Seed is flagged
+    ``degraded`` (with no ``unresolved_slots`` — the ledger is fully resolved)
+    so the deadline-recovery contract (#1302) routes it away from auto-RUN.
+    """
+    kwargs: dict[str, Any] = {
+        "seed_id": f"seed_{uuid4().hex[:12]}",
+        "ambiguity_score": max(0.05, deterministic_floor(ledger)),
+        "interview_id": interview_id,
+    }
+    if recovery_reason is not None:
+        kwargs["generation_mode"] = DEADLINE_LEDGER_SEED_GENERATION_MODE
+        kwargs["degraded"] = True
+        kwargs["recovery_reason"] = recovery_reason
+    return kwargs
 
 
 def partial_seed_from_evidence(

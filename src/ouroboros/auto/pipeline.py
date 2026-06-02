@@ -1897,17 +1897,25 @@ class AutoPipeline:
 
         1. Emit ``runtime.deadline.interview.fired`` so post-hoc evidence
            inspection can see *why* the recovery path was taken.
-        2. If the ledger is Seed-ready, synthesize a normal Seed via
-           :func:`synthesize_seed_from_ledger`; otherwise fall back to
-           :func:`partial_seed_from_evidence` with
-           ``reason="interview_phase_deadline"`` so unresolved sections
-           become next-step hints on the resulting degraded Seed (PR-A).
+        2. Synthesize a Seed from the evidence collected so far. Either
+           branch yields a **degraded** Seed, because a deadline closure
+           never obtained backend-confirmed low ambiguity (#1302):
+
+           * complete ledger → :func:`synthesize_seed_from_ledger` with
+             ``recovery_reason="interview_phase_deadline"`` (full ledger
+             content, no ``unresolved_slots``, but ``degraded=True``);
+           * incomplete ledger → :func:`partial_seed_from_evidence` with
+             ``reason="interview_phase_deadline"`` so unresolved sections
+             become next-step hints on the degraded Seed (PR-A).
         3. Persist the Seed via :meth:`_record_generated_seed`, mark
            ``interview_completed = True``, and transition to ``REVIEW`` so
-           the rest of the pipeline (grading, run handoff) can still
-           surface a partial product. PR-C teaches the grade gate to
-           respect ``metadata.degraded`` so the degraded Seed is not
-           re-blocked at REVIEW solely on high-ambiguity grounds.
+           the rest of the pipeline can surface a typed partial product
+           via :meth:`_emit_partial_product_terminal`. PR-C teaches the
+           grade gate to respect ``metadata.degraded`` so a deadline Seed
+           is routed to the partial-product terminal (not auto-RUN) and is
+           not re-blocked solely on high-ambiguity grounds. Hard safety
+           blockers (``missing_goal`` / ``seed_goal_mismatch`` /
+           ``high_risk_assumptions``) still terminate.
 
         The global ``pipeline_timeout_seconds`` deadline is unaffected:
         callers gate on :meth:`_enforce_deadline` *before* invoking this
@@ -1924,9 +1932,23 @@ class AutoPipeline:
         )
 
         if ledger_ready:
-            seed = synthesize_seed_from_ledger(ledger, interview_id=state.interview_session_id)
+            # #1302 ambiguity-before-execution: a per-phase interview deadline
+            # cut the Socratic loop short before the backend could confirm low
+            # ambiguity (<= 0.20). A structurally complete ledger is NOT a
+            # substitute for that confirmation, so this Seed must NOT auto-RUN.
+            # Synthesize the full ledger content but stamp it as a degraded
+            # deadline-recovery terminal (``recovery_reason`` set), so REVIEW
+            # routes it to :meth:`_emit_partial_product_terminal` exactly like
+            # the incomplete-ledger branch below instead of proceeding through
+            # the grade / Seed QA / RUN gates on unconfirmed-ambiguity evidence.
+            seed = synthesize_seed_from_ledger(
+                ledger,
+                interview_id=state.interview_session_id,
+                recovery_reason="interview_phase_deadline",
+            )
             progress_message = (
-                "Interview phase deadline fired; closed via complete-ledger Seed synthesis"
+                "Interview phase deadline fired; closed via complete-ledger Seed synthesis "
+                "(degraded recovery: backend low ambiguity was never confirmed)"
             )
         else:
             seed = partial_seed_from_evidence(

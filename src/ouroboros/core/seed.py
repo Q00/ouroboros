@@ -148,13 +148,20 @@ class SeedMetadata(BaseModel, frozen=True):
             paths (e.g. ``"partial_seed_from_evidence"``) MUST set this so
             grading/run gates can distinguish a fully-resolved Seed from one
             built under deadline pressure (#1257).
-        degraded: ``True`` when the Seed was synthesized from an incomplete
-            ledger and carries unresolved slots. Always pairs with a non-default
-            ``generation_mode`` and at least one entry in ``unresolved_slots``.
+        degraded: ``True`` when the Seed was synthesized under a recovery path
+            rather than a clean low-ambiguity closure, so grade/run gates route
+            it to a typed partial-product terminal instead of auto-RUN. Always
+            pairs with a non-default ``generation_mode``. Two cases:
+            (a) incomplete ledger (``partial_seed_from_evidence``) — carries at
+            least one entry in ``unresolved_slots``; (b) complete ledger closed
+            via the interview-phase deadline (#1302) — ``unresolved_slots`` is
+            empty because the ledger is fully resolved, but no backend-confirmed
+            low ambiguity exists.
         unresolved_slots: Ledger sections that were still
             MISSING/WEAK/CONFLICTING/BLOCKED at synthesis time. Empty for normal
-            seeds. Surfaced verbatim so downstream gates can transform them into
-            ``next_step`` hints instead of terminal blockers.
+            seeds and for complete-ledger deadline-recovery seeds. Surfaced
+            verbatim so downstream gates can transform them into ``next_step``
+            hints instead of terminal blockers.
         recovery_reason: Free-form description of why the degraded path was
             taken (e.g. ``"interview_phase_deadline"``). ``None`` for normal
             seeds.
