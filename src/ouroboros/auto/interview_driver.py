@@ -970,11 +970,18 @@ class AutoInterviewDriver:
                     )
                 state.interview_session_id = synthesis_turn.session_id
                 state.pending_question = synthesis_turn.question
-                if not (synthesis_turn.seed_ready or synthesis_turn.completed):
+                if not _backend_confirmed_seed_ready(synthesis_turn):
                     _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                    ambiguity_part = (
+                        f"ambiguity_score={synthesis_turn.ambiguity_score:.2f}"
+                        if synthesis_turn.ambiguity_score is not None
+                        else "ambiguity_score=unknown"
+                    )
                     blocker = (
-                        "safe-default synthesis did not close the persisted interview: "
-                        "backend_done=False, ledger defaults rolled back"
+                        "safe-default synthesis did not close the persisted interview "
+                        "within the backend ambiguity gate: "
+                        f"backend_done={bool(synthesis_turn.seed_ready or synthesis_turn.completed)}, "
+                        f"{ambiguity_part}, ledger defaults rolled back"
                     )
                     log.warning(
                         "auto.interview.safe_default_synthesis_nonclosure",
@@ -983,6 +990,7 @@ class AutoInterviewDriver:
                         defaulted_sections=finalization.defaulted_sections,
                         backend_seed_ready=bool(synthesis_turn.seed_ready),
                         backend_completed=bool(synthesis_turn.completed),
+                        backend_ambiguity=synthesis_turn.ambiguity_score,
                         synthesis_pushed=synthesis_pushed,
                     )
                     state.ledger = ledger.to_dict()
@@ -1557,11 +1565,18 @@ class AutoInterviewDriver:
                 )
             state.interview_session_id = synthesis_turn.session_id
             state.pending_question = synthesis_turn.question
-            if not (synthesis_turn.seed_ready or synthesis_turn.completed):
+            if not _backend_confirmed_seed_ready(synthesis_turn):
                 _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                ambiguity_part = (
+                    f"ambiguity_score={synthesis_turn.ambiguity_score:.2f}"
+                    if synthesis_turn.ambiguity_score is not None
+                    else "ambiguity_score=unknown"
+                )
                 blocker = (
-                    "backend-ready safe-default synthesis did not close the persisted interview: "
-                    "ledger defaults rolled back"
+                    "backend-ready safe-default synthesis did not close the persisted interview "
+                    "within the backend ambiguity gate: "
+                    f"backend_done={bool(synthesis_turn.seed_ready or synthesis_turn.completed)}, "
+                    f"{ambiguity_part}, ledger defaults rolled back"
                 )
                 state.ledger = ledger.to_dict()
                 state.mark_blocked(

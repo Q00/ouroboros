@@ -749,6 +749,51 @@ async def test_interview_driver_finalizes_safe_defaults_after_benign_max_rounds(
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_rolls_back_safe_defaults_when_synthesis_is_high_ambiguity(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_defaults")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        if "[safe-default-synthesis]" in text:
+            return InterviewTurn(
+                "done",
+                session_id,
+                seed_ready=True,
+                completed=True,
+                ambiguity_score=0.42,
+            )
+        return InterviewTurn("What else should we know?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.interview_closure_mode is None
+    assert "ambiguity_score=0.42" in (result.blocker or "")
+    assert "ledger defaults rolled back" in (result.blocker or "")
+    assert state.last_error_code == "interview_safe_default_synthesis_incomplete"
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
+        for entry in section.entries
+    )
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_blocks_with_unsafe_gaps_when_partially_defaultable(
     tmp_path,
 ) -> None:
@@ -4256,6 +4301,59 @@ async def test_backend_ready_low_ambiguity_closes_safe_defaultable_gaps(tmp_path
     assert ledger.is_seed_ready()
     assert observed_last_questions == ["[driver safe-default finalization: backend_ambiguity=0.16]"]
     assert observed_answers and "[safe-default-synthesis]" in observed_answers[0]
+
+
+@pytest.mark.asyncio
+async def test_backend_ready_safe_default_rolls_back_when_synthesis_is_high_ambiguity(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "ready",
+            "interview_backend_ready_high_ambiguity_defaults",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.16,
+        )
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.42,
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["non_goals"].entries.clear()
+    ledger.sections["failure_modes"].entries.clear()
+    ledger.sections["runtime_context"].entries.clear()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_completed is False
+    assert state.interview_closure_mode is None
+    assert "ambiguity_score=0.42" in (result.blocker or "")
+    assert "ledger defaults rolled back" in (result.blocker or "")
+    assert state.last_error_code == "interview_safe_default_synthesis_incomplete"
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key == f"{section_name}.safe_default_finalization"
+        for section_name, section in ledger.sections.items()
+        for entry in section.entries
+    )
 
 
 @pytest.mark.asyncio
