@@ -410,6 +410,65 @@ def test_run_auto_policy_args_override_detected_coding_defaults(tmp_path, monkey
     assert captured["worktree_policy"] is AutoWorktreePolicy.CURRENT
 
 
+def test_run_auto_accepts_current_worktree_policy_alias(tmp_path, monkeypatch) -> None:
+    import asyncio
+
+    from ouroboros.auto.state import AutoWorktreePolicy
+    from ouroboros.cli.commands.auto import _run_auto
+
+    monkeypatch.chdir(tmp_path)
+    captured: dict[str, object] = {}
+
+    async def fake_pipeline_run(self, run_state):  # noqa: ARG001
+        captured["worktree_policy"] = run_state.worktree_policy
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=run_state.auto_session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run):
+        result = asyncio.run(
+            _run_auto(
+                goal="Build a CLI",
+                resume=None,
+                runtime="claude",
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=True,
+                worktree_policy="reuse_current",
+            )
+        )
+
+    assert result.status == "complete"
+    assert captured["worktree_policy"] is AutoWorktreePolicy.CURRENT
+
+
+def test_run_auto_rejects_complete_product_short_timeout(tmp_path, monkeypatch) -> None:
+    import asyncio
+
+    import pytest
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="complete_product=true requires --timeout >= 1800"):
+        asyncio.run(
+            _run_auto(
+                goal="Build a product",
+                resume=None,
+                runtime="claude",
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=False,
+                complete_product=True,
+                pipeline_timeout_seconds=100,
+            )
+        )
+
+
 def test_resume_rejects_lower_bound_override(tmp_path) -> None:
     """Tightening a bound on resume must be refused — never trap a session further."""
     import asyncio

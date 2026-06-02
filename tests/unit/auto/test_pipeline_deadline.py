@@ -458,6 +458,24 @@ async def test_mcp_handler_rejects_timeout_below_floor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_handler_rejects_complete_product_short_timeout_before_pipeline() -> None:
+    """Complete-product auto should fail fast when the explicit deadline is too short."""
+    from ouroboros.mcp.tools.auto_handler import AutoHandler
+
+    handler = AutoHandler()
+    outcome = await handler.handle(
+        {
+            "goal": "Build a product",
+            "complete_product": True,
+            "pipeline_timeout_seconds": 100,
+        }
+    )
+
+    assert outcome.is_err
+    assert "complete_product=true requires pipeline_timeout_seconds >= 1800" in str(outcome.error)
+
+
+@pytest.mark.asyncio
 async def test_mcp_handler_rejects_timeout_above_ceiling() -> None:
     """The MCP handler rejects ``pipeline_timeout_seconds`` above the 86400s ceiling."""
     from ouroboros.mcp.tools.auto_handler import AutoHandler
