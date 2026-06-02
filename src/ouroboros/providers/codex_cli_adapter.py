@@ -406,6 +406,7 @@ class CodexCliLLMAdapter:
         output_schema_path: str | None,
         model: str | None,
         profile: str | None = None,
+        prompt: str | None = None,
     ) -> list[str]:
         """Build the `codex exec` command for a one-shot completion.
 
@@ -883,6 +884,7 @@ class CodexCliLLMAdapter:
             output_schema_path=str(schema_path) if schema_path else None,
             model=normalized_model,
             profile=resolved.backend_profile,
+            prompt=prompt,
         )
 
         prompt_bytes = prompt.encode("utf-8")

@@ -16,6 +16,7 @@ from ouroboros.config import (
     get_hermes_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
+    get_pi_cli_path,
     get_runtime_profile,
 )
 from ouroboros.providers.base import LLMAdapter
@@ -25,6 +26,7 @@ from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
+from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
 
 if TYPE_CHECKING:
     from ouroboros.events.io_recorder import IOJournalRecorder
@@ -101,6 +103,7 @@ def resolve_llm_permission_mode(
         "goose",
         "hermes",
         "opencode",
+        "pi",
     ):
         # Interview uses LLM to generate questions — no file writes, but
         # CLI sandbox modes block LLM output entirely. Must bypass.
@@ -237,6 +240,17 @@ def create_llm_adapter(
     if resolved_backend == "goose":
         return GooseCliLLMAdapter(
             cli_path=cli_path or get_goose_cli_path(),
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    if resolved_backend == "pi":
+        return PiLLMAdapter(
+            cli_path=cli_path or get_pi_cli_path(),
             cwd=cwd,
             permission_mode=resolved_permission_mode,
             allowed_tools=allowed_tools,

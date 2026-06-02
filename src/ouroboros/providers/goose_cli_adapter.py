@@ -229,9 +229,10 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
         output_schema_path: str | None,
         model: str | None,
         profile: str | None = None,
+        prompt: str | None = None,
     ) -> list[str]:
         """Build the ``goose run`` command; prompt is fed via stdin."""
-        del output_last_message_path, output_schema_path, profile
+        del output_last_message_path, output_schema_path, profile, prompt
         command = [
             self._cli_path,
             "run",

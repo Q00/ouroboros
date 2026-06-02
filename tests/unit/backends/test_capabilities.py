@@ -45,7 +45,7 @@ def test_llm_choices_include_hermes_adapter() -> None:
     choices = llm_backend_choices()
     assert "codex" in choices
     assert "hermes" in choices
-    assert "pi" not in choices
+    assert "pi" in choices
 
 
 def test_capability_specific_resolution_rejects_wrong_surface() -> None:

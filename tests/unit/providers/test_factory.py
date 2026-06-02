@@ -19,6 +19,7 @@ from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
+from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
 
 
 class _FakeEventStore:
@@ -74,6 +75,11 @@ class TestResolveLLMBackend:
         """Goose aliases normalize to goose."""
         assert resolve_llm_backend("goose") == "goose"
         assert resolve_llm_backend("goose_cli") == "goose"
+
+    def test_resolves_pi_aliases(self) -> None:
+        """Pi aliases normalize to pi."""
+        assert resolve_llm_backend("pi") == "pi"
+        assert resolve_llm_backend("pi_cli") == "pi"
 
 
 class TestCreateLLMAdapter:
@@ -134,6 +140,18 @@ class TestCreateLLMAdapter:
         )
         assert isinstance(adapter, ClaudeCodeAdapter)
         assert adapter._strict_mcp_config is False
+
+    def test_creates_pi_adapter(self) -> None:
+        """Pi backend returns PiLLMAdapter."""
+        adapter = create_llm_adapter(backend="pi", cli_path="/tmp/pi")
+        assert isinstance(adapter, PiLLMAdapter)
+        assert adapter._cli_path == "/tmp/pi"
+
+    def test_pi_interview_use_case_bypasses_permissions(self) -> None:
+        """Pi interview driver uses the text-only bypass permission convention."""
+        assert (
+            resolve_llm_permission_mode(backend="pi", use_case="interview") == "bypassPermissions"
+        )
 
     def test_creates_litellm_adapter(self) -> None:
         """LiteLLM backend returns LiteLLMAdapter."""

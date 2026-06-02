@@ -27,6 +27,8 @@ _BACKEND_ALIASES = {
     "hermes_cli": "hermes",
     "opencode": "opencode",
     "opencode_cli": "opencode",
+    "pi": "pi",
+    "pi_cli": "pi",
     "litellm": "litellm",
     "openai": "litellm",
     "openrouter": "litellm",
