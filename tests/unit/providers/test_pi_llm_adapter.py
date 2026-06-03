@@ -19,6 +19,19 @@ def test_builds_pi_json_command_with_prompt_and_model() -> None:
     assert command == ["/tmp/pi", "--mode", "json", "--model", "current", "Hello Pi"]
 
 
+def test_builds_pi_json_command_omits_default_model_sentinel() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    command = adapter._build_command(
+        output_last_message_path="/tmp/out.txt",
+        output_schema_path=None,
+        model="default",
+        prompt="Hello Pi",
+    )
+
+    assert command == ["/tmp/pi", "--mode", "json", "Hello Pi"]
+
+
 def test_extracts_pi_session_and_streaming_delta() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 

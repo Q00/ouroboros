@@ -91,7 +91,10 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         """
         del output_last_message_path, output_schema_path, profile
         command = [self._cli_path, "--mode", "json"]
-        if model:
+        # Ouroboros normalizes generic cross-provider defaults to the local-CLI
+        # sentinel "default". Pi should use its own backend default in that case
+        # rather than forwarding Anthropic-oriented or sentinel model names.
+        if model and model != "default":
             command.extend(["--model", model])
         command.append(prompt or "")
         return command
