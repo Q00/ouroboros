@@ -137,7 +137,6 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             return event["id"]
         return None
 
-
     def _extract_text_from_message(self, message: dict[str, Any]) -> str:
         """Extract assistant text from a Pi transcript message."""
         content = message.get("content")
