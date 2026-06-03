@@ -1524,6 +1524,7 @@ def _setup_kiro(kiro_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
     _register_kiro_mcp_server()
+    _install_runtime_instruction_artifact("kiro")
 
 
 def _register_copilot_mcp_server() -> None:

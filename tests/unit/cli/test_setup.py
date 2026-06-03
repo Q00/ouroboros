@@ -3009,6 +3009,24 @@ class TestGeminiSetup:
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 
+    def test_setup_kiro_installs_instruction_artifact(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_kiro_mcp_server"),
+        ):
+            setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+
+        guide_path = tmp_path / ".kiro" / "steering" / "ouroboros-skill-capability-guide.md"
+        assert guide_path.is_file()
+        assert "### When a skill requires `run_lateral_review`" in guide_path.read_text(
+            encoding="utf-8"
+        )
+
     def test_detect_runtimes_includes_kiro(self, tmp_path: Path) -> None:
         """_detect_runtimes should surface kiro when kiro-cli is on PATH.
 
