@@ -1790,7 +1790,7 @@ def _setup_gemini(gemini_path: str) -> None:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
     if not isinstance(config_dict, dict):
-        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Gemini setup.")
         return
 
     orch = config_dict.get("orchestrator")

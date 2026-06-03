@@ -77,7 +77,7 @@ Each task spawns:
 gemini --prompt <PROMPT> \
        --non-interactive \
        --output-format stream-json \
-       --approval-mode yolo \
+       --approval-mode auto_edit \
        [--model gemini-2.5-pro]
 ```
 
@@ -86,8 +86,20 @@ gemini --prompt <PROMPT> \
 | `--prompt`          | Carries the request (Gemini's documented headless API)  |
 | `--non-interactive` | Disables TTY prompts so the subprocess never blocks     |
 | `--output-format`   | NDJSON event stream parsed by `GeminiEventNormalizer`   |
-| `--approval-mode`   | `yolo` — required for headless approvals                |
+| `--approval-mode`   | `auto_edit` by default (`acceptEdits`); `yolo` only when `bypassPermissions` is explicitly configured |
 | `--model`           | Optional model override (`gemini-2.5-pro`, `flash`)     |
+
+Ouroboros maps its permission modes onto Gemini's non-blocking headless
+approval modes:
+
+| Ouroboros permission mode | Gemini flag value | When used                                      |
+|---------------------------|-------------------|------------------------------------------------|
+| `acceptEdits`             | `auto_edit`       | Default; applies edits without TTY prompts     |
+| `bypassPermissions`       | `yolo`            | Explicit full bypass requested by the operator |
+
+The interactive Ouroboros `default` permission mode is normalized to
+`acceptEdits` for Gemini because `--non-interactive` cannot service TTY
+approval prompts.
 
 ## Event mapping
 
