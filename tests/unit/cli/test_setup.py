@@ -3837,7 +3837,7 @@ class TestCopilotSetup:
         assert runtimes["pi"] == str(explicit)
 
     def test_setup_pi_writes_runtime_without_switching_llm_backend(self, tmp_path: Path) -> None:
-        """Pi setup keeps schema-dependent LLM flows on the existing backend."""
+        """Pi setup preserves the existing LLM backend unless explicitly changed."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text(

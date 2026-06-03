@@ -1828,9 +1828,10 @@ def _setup_pi(pi_path: str) -> None:
 
     Pi is a base-package agent runtime: setup records the executable path and
     runtime backend, while skill/MCP dispatch is handled by the adapter at
-    execution time before spawning the Pi subprocess. The Pi LLM adapter is
-    intentionally opt-in because it does not support structured response_format
-    calls used by QA/evaluation paths.
+    execution time before spawning the Pi subprocess. The Pi LLM adapter remains
+    opt-in so setup does not unexpectedly move authoring/evaluation traffic to a
+    different provider; when selected explicitly, structured response_format
+    requests are enforced cooperatively by that adapter.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
