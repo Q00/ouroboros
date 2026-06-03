@@ -62,11 +62,13 @@ _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli
 _KIRO_LLM_BACKENDS = frozenset({"kiro", "kiro_cli"})
 _COPILOT_LLM_BACKENDS = frozenset({"copilot", "copilot_cli"})
 _HERMES_LLM_BACKENDS = frozenset({"hermes", "hermes_cli"})
+_PI_LLM_BACKENDS = frozenset({"pi", "pi_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
 _COPILOT_DEFAULT_MODEL = "default"
 _HERMES_DEFAULT_MODEL = "default"
+_PI_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -1247,6 +1249,8 @@ def _default_model_for_backend(
         return _COPILOT_DEFAULT_MODEL
     if resolved in _HERMES_LLM_BACKENDS:
         return _HERMES_DEFAULT_MODEL
+    if resolved in _PI_LLM_BACKENDS:
+        return _PI_DEFAULT_MODEL
     return default_model
 
 
@@ -1279,6 +1283,8 @@ def _normalize_configured_model_for_backend(
         return _COPILOT_DEFAULT_MODEL
     if resolved in _HERMES_LLM_BACKENDS and candidate == default_model:
         return _HERMES_DEFAULT_MODEL
+    if resolved in _PI_LLM_BACKENDS and candidate == default_model:
+        return _PI_DEFAULT_MODEL
 
     return candidate
 

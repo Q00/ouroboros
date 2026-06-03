@@ -55,6 +55,7 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             timeout=timeout,
             runtime_profile=None,
         )
+        self._last_pi_event_kind: str | None = None
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve Pi CLI path from config helpers."""
@@ -90,16 +91,26 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         """
         del output_last_message_path, output_schema_path, profile
         command = [self._cli_path, "--mode", "json"]
-        if model:
+        # Ouroboros normalizes generic cross-provider defaults to the local-CLI
+        # sentinel "default". Pi should use its own backend default in that case
+        # rather than forwarding Anthropic-oriented or sentinel model names.
+        if model and model != "default":
             command.extend(["--model", model])
         command.append(prompt or "")
         return command
 
     def _update_last_content(self, last_content: str, event_content: str) -> str:
-        """Accumulate Pi streaming deltas unless a full final message arrives."""
+        """Accumulate streaming deltas but replace them with terminal Pi content.
+
+        Pi JSON mode can emit both whitespace-preserving ``message_update``
+        deltas and a final ``agent_end`` / ``message_end`` full message. The
+        inherited Codex loop only passes extracted text into this hook, so this
+        adapter records the most recent Pi event kind in ``_extract_text`` and
+        uses it here to avoid returning duplicated ``delta + final`` content.
+        """
         if not event_content:
             return last_content
-        if last_content and event_content.startswith(last_content):
+        if self._last_pi_event_kind == "final":
             return event_content
         return f"{last_content}{event_content}" if last_content else event_content
 
@@ -109,6 +120,7 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
         """Make a Pi completion request, failing closed on unsupported schemas."""
+        self._last_pi_event_kind = None
         if config.response_format:
             response_format_type = config.response_format.get("type")
             return Result.err(
@@ -128,28 +140,80 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             return event["id"]
         return None
 
+    def _extract_text_from_message(self, message: dict[str, Any]) -> str:
+        """Extract assistant text from a Pi transcript message."""
+        content = message.get("content") or message.get("text") or ""
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            texts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    texts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str) and item.get("type") in {None, "text"}:
+                        texts.append(text)
+            return "".join(texts).strip()
+        return ""
+
+    def _extract_content_delta(self, event: dict[str, Any]) -> str:
+        """Extract streaming text with parity to ``PiRuntime`` JSON parsing."""
+        if event.get("type") != "message_update":
+            return ""
+
+        assistant_event = event.get("assistantMessageEvent")
+        if isinstance(assistant_event, dict):
+            delta = assistant_event.get("delta")
+            if isinstance(delta, str):
+                return delta
+            text = assistant_event.get("text") or assistant_event.get("content")
+            if isinstance(text, str):
+                return text
+
+        delta = event.get("delta") or event.get("content") or event.get("text")
+        if isinstance(delta, str):
+            return delta
+        if isinstance(delta, dict):
+            text = delta.get("text") or delta.get("content")
+            return text if isinstance(text, str) else ""
+        return ""
+
+    def _extract_final_text(self, event: dict[str, Any]) -> str:
+        """Extract only terminal assistant content from Pi final events."""
+        event_type = event.get("type")
+        if event_type in {"message_end", "turn_end"}:
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                return self._extract_text_from_message(message)
+            return ""
+        if event_type == "agent_end":
+            messages = event.get("messages")
+            if isinstance(messages, list):
+                for message in reversed(messages):
+                    if isinstance(message, dict) and message.get("role") == "assistant":
+                        text = self._extract_text_from_message(message)
+                        if text:
+                            return text
+            return ""
+        return ""
+
     def _extract_text(self, value: object) -> str:
         """Extract content from documented Pi JSONL events."""
         if isinstance(value, dict):
             event_type = value.get("type")
+            self._last_pi_event_kind = None
             if event_type == "message_update":
-                nested = value.get("assistantMessageEvent")
-                if isinstance(nested, dict):
-                    delta = nested.get("delta")
-                    if isinstance(delta, str):
-                        return delta
-                delta = value.get("delta")
-                if isinstance(delta, str):
-                    return delta
+                self._last_pi_event_kind = "delta"
+                return self._extract_content_delta(value)
             if event_type in {"message_end", "turn_end", "agent_end"}:
-                messages = value.get("messages")
-                text = super()._extract_text(messages)
-                if text:
-                    return text
-                for key in ("message", "content", "text", "result", "response"):
-                    text = super()._extract_text(value.get(key))
-                    if text:
-                        return text
+                self._last_pi_event_kind = "final"
+                return self._extract_final_text(value)
+            # Pi control/metadata events (for example `session`) must never fall
+            # through to the broad Codex extractor, which treats shallow string
+            # fields such as `type` and `id` as user-visible completion text.
+            return ""
+        self._last_pi_event_kind = None
         return super()._extract_text(value)
 
 
