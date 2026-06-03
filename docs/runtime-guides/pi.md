@@ -50,7 +50,8 @@ oriented and is not the same auth surface.
 ```bash
 # 1. Install and authenticate Pi
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-pi login openai-codex
+pi
+# In the interactive Pi session, run /login and select openai-codex.
 
 # 2. Point Ouroboros at Pi
 ouroboros setup --runtime pi
@@ -168,7 +169,8 @@ but Ouroboros only depends on Pi's JSON-mode subprocess contract.
 
 ## Pi As LLM Backend
 
-Pi can also be selected as an LLM backend for unstructured completion flows:
+Pi can also be selected as an LLM backend for authoring, scoring, extraction,
+and other completion flows:
 
 ```yaml
 llm:
