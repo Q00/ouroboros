@@ -41,7 +41,7 @@ These capabilities are part of the Ouroboros core engine and work the same way r
 | Evaluation principles              |     Yes     |    Yes    |   Yes    |  Yes   |    Yes     |   Yes    |     Yes     |  Yes   | Weighted scoring against principles                         |
 | Exit conditions                    |     Yes     |    Yes    |   Yes    |  Yes   |    Yes     |   Yes    |     Yes     |  Yes   | Deterministic termination logic                             |
 | Event sourcing (SQLite)            |     Yes     |    Yes    |   Yes    |  Yes   |    Yes     |   Yes    |     Yes     |  Yes   | Full event log, replay support                              |
-| Checkpoint / resume                |     Yes     |    Yes    |   Yes    |  Yes   |     No     | Partial  |     No      |  Yes   | `--resume <session_id>` everywhere; Gemini and Copilot CLI do not expose native session-resume APIs; Kiro forwards to `--resume-id` **when the caller supplies the id** — headless does not surface session ids, so automatic checkpoint/resume is future work; Pi resumes with its native `--session` flag |
+| Checkpoint / resume                |     Yes     |    Yes    |   Yes    |  Yes   |     No     | Partial  |     No      |  Yes   | Native resume varies by backend: Claude/Codex/OpenCode/Hermes use `--resume <session_id>`; Gemini and Copilot CLI do not expose native session-resume APIs; Kiro forwards to `--resume-id` **when the caller supplies the id** — headless does not surface session ids, so automatic checkpoint/resume is future work; Pi resumes with its native `--session` flag |
 | TUI dashboard                      |     Yes     |    Yes    |   Yes    |  Yes   |    Yes     |   Yes    |     Yes     |  Yes   | Textual-based progress view                                 |
 | Interview (Socratic seed creation) |     Yes     |    Yes    |   Yes    |  Yes   |    Yes     |   Yes    |     Yes     |  Yes   | `ouroboros init start ...` with the appropriate LLM backend |
 | Dry-run validation                 |     Yes     |    Yes    |   Yes    |  Yes   |    Yes     |   Yes    |     Yes     |  Yes   | `--dry-run` validates without executing                     |
@@ -166,7 +166,8 @@ The table below covers the currently shipped backends. Because Ouroboros uses a 
 | Want to use Google's Gemini models                                     | Gemini CLI                                                                   |
 | Want to use OpenAI's GPT models                                        | Codex CLI or Copilot CLI                                                      |
 | Want to use multiple providers via a single runtime                    | OpenCode or Copilot CLI (Copilot multiplexes Anthropic + OpenAI under one auth) |
-| Need MCP server integration                                            | Claude Code, OpenCode, Hermes, Kiro, or Copilot CLI                           |
+| Need native MCP host integration                                       | Claude Code, OpenCode, Hermes, Kiro, or Copilot CLI                           |
+| Want deterministic adapter-level skill/MCP dispatch                    | Codex CLI, Gemini CLI, or Pi CLI                                              |
 | Want minimal Python dependencies                                       | Codex CLI, OpenCode, or Hermes                                                |
 | Want to integrate a custom or third-party AI coding agent              | Implement the `AgentRuntime` protocol and register it in `runtime_factory.py` |
 
