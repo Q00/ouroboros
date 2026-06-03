@@ -3836,8 +3836,21 @@ class TestCopilotSetup:
 
         assert runtimes["pi"] == str(explicit)
 
-    def test_setup_pi_writes_runtime_and_llm_backend(self, tmp_path: Path) -> None:
-        """Pi setup persists the runtime path without touching host MCP configs."""
+    def test_setup_pi_writes_runtime_without_switching_llm_backend(self, tmp_path: Path) -> None:
+        """Pi setup keeps schema-dependent LLM flows on the existing backend."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "claude"},
+                    "llm": {"backend": "codex"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
         with patch("pathlib.Path.home", return_value=tmp_path):
             setup_cmd._setup_pi("/opt/bin/pi")
 
@@ -3846,7 +3859,7 @@ class TestCopilotSetup:
 
         assert config["orchestrator"]["runtime_backend"] == "pi"
         assert config["orchestrator"]["pi_cli_path"] == "/opt/bin/pi"
-        assert config["llm"]["backend"] == "pi"
+        assert config["llm"]["backend"] == "codex"
 
     def test_setup_cli_with_runtime_pi_flag(self, tmp_path: Path) -> None:
         """`ouroboros setup --runtime pi --non-interactive` runs the Pi setup path."""

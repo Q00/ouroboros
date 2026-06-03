@@ -51,6 +51,14 @@ version-file = "src/ouroboros/_version.py"
 exclude = [
     "/.smoke-home",
     "**/node_modules",
+    "**/target",
+    "**/__pycache__",
+    "/.mypy_cache",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/.venv",
+    "/coverage.xml",
+    "/.coverage",
 ]
 
 [tool.hatch.build.targets.wheel]

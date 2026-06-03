@@ -1826,9 +1826,11 @@ def _setup_gemini(gemini_path: str) -> None:
 def _setup_pi(pi_path: str) -> None:
     """Configure Ouroboros for the Pi CLI runtime.
 
-    Pi is a base-package runtime like Gemini: setup records the executable path
-    and backend choice, while skill/MCP dispatch is handled by the adapter at
-    execution time before spawning the Pi subprocess.
+    Pi is a base-package agent runtime: setup records the executable path and
+    runtime backend, while skill/MCP dispatch is handled by the adapter at
+    execution time before spawning the Pi subprocess. The Pi LLM adapter is
+    intentionally opt-in because it does not support structured response_format
+    calls used by QA/evaluation paths.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -1851,12 +1853,6 @@ def _setup_pi(pi_path: str) -> None:
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = "pi"
     orch["pi_cli_path"] = pi_path
-
-    llm = config_dict.get("llm")
-    if not isinstance(llm, dict):
-        llm = {}
-        config_dict["llm"] = llm
-    llm["backend"] = "pi"
 
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)

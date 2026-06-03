@@ -85,3 +85,27 @@ def test_python_version_constraint():
 
     python_version = pyproject["project"]["requires-python"]
     assert python_version == ">=3.12", f"Python version should be '>=3.12', got '{python_version}'"
+
+
+def test_build_excludes_generated_artifacts():
+    """Source distributions should not ship local build/cache artifacts."""
+    root = Path(__file__).parent.parent.parent
+    pyproject_path = root / "pyproject.toml"
+
+    content = pyproject_path.read_text()
+    pyproject = tomllib.loads(content)
+
+    excludes = set(pyproject["tool"]["hatch"]["build"]["exclude"])
+    required_excludes = {
+        "**/target",
+        "**/__pycache__",
+        "/.mypy_cache",
+        "/.pytest_cache",
+        "/.ruff_cache",
+        "/.venv",
+        "/coverage.xml",
+        "/.coverage",
+    }
+
+    missing = required_excludes - excludes
+    assert not missing, f"Missing hatch build excludes for generated artifacts: {missing}"
