@@ -1223,6 +1223,32 @@ def _install_hermes_artifacts() -> None:
         print_error("Could not locate packaged skills for Hermes.")
 
 
+def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> None:
+    """Install a setup-owned runtime instruction artifact when supported."""
+    from ouroboros.runtime_instruction_artifacts import (
+        install_copilot_instruction_artifact,
+        install_gemini_instruction_artifact,
+        install_kiro_instruction_artifact,
+        install_opencode_instruction_artifact,
+    )
+
+    installers = {
+        "opencode": install_opencode_instruction_artifact,
+        "gemini": install_gemini_instruction_artifact,
+        "kiro": install_kiro_instruction_artifact,
+        "copilot": install_copilot_instruction_artifact,
+    }
+    installer = installers.get(backend)
+    if installer is None:
+        return
+    try:
+        artifact = installer(**kwargs)
+    except OSError as exc:
+        print_warning(f"Could not install {backend} instruction artifact: {exc}")
+        return
+    print_success(f"Installed {backend.title()} instruction guide → {artifact.path}")
+
+
 def _register_hermes_mcp_server() -> None:
     """Register the Ouroboros MCP hookup in ~/.hermes/config.yaml."""
     hermes_config = Path.home() / ".hermes" / "config.yaml"
@@ -2366,6 +2392,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
         # paths are not active simultaneously (duplicate dispatch).
         with _temporary_opencode_cli_path(opencode_path):
             _cleanup_plugin_artifacts()
+            _install_runtime_instruction_artifact("opencode", config_dir=opencode_config_dir())
 
         print_success(f"Configured OpenCode subprocess runtime (CLI: {opencode_path})")
         print_info(f"Config saved to: {config_path}")
@@ -2379,6 +2406,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
         _install_ok = _install_opencode_bridge_plugin()
         _mcp_ok = _ensure_opencode_mcp_entry()
         _plugin_ok = _ensure_opencode_plugin_entry()
+        _install_runtime_instruction_artifact("opencode", config_dir=opencode_config_dir())
 
     if not (_install_ok and _mcp_ok and _plugin_ok):
         failed = []
