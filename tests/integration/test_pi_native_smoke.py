@@ -15,6 +15,7 @@ from typing import NamedTuple
 
 import pytest
 
+from ouroboros.config import get_pi_cli_path
 from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
 SMOKE_ENABLED = os.environ.get("OUROBOROS_PI_NATIVE_SMOKE", "").strip() == "1"
@@ -61,6 +62,13 @@ def _git_snapshot(path: Path | None) -> GitSnapshot | None:
     return GitSnapshot(head=head, status=status)
 
 
+def _configured_pi_cli_path() -> str | None:
+    configured_path = get_pi_cli_path()
+    if not configured_path:
+        return None
+    return configured_path
+
+
 @pytest.fixture()
 def reference_repo_snapshot() -> GitSnapshot | None:
     reference_repo = _reference_repo_path()
@@ -81,8 +89,8 @@ async def test_real_pi_cli_runtime_returns_response_without_reference_repo_side_
     reference_repo_snapshot: GitSnapshot | None,
 ) -> None:
     del reference_repo_snapshot
-    if shutil.which("pi") is None and not os.environ.get("OUROBOROS_PI_CLI_PATH"):
-        pytest.skip("Pi CLI is not on PATH and OUROBOROS_PI_CLI_PATH is not set")
+    if shutil.which("pi") is None and _configured_pi_cli_path() is None:
+        pytest.skip("Pi CLI is not on PATH and no Pi CLI path is configured via env/config")
 
     runtime = create_agent_runtime(
         backend="pi",
