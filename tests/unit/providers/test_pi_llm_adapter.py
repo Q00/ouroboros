@@ -158,6 +158,36 @@ def test_unsupported_pi_events_do_not_fall_back_to_event_type_text() -> None:
     assert adapter._extract_text({"type": "agent_end", "messages": []}) == ""
 
 
+def test_pi_session_metadata_is_not_completion_text() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    session_text = adapter._extract_text({"type": "session", "id": "pi-session-123"})
+    content = adapter._update_last_content("", session_text)
+    delta = adapter._extract_text(
+        {
+            "type": "message_update",
+            "assistantMessageEvent": {"delta": "assistant only"},
+        }
+    )
+    content = adapter._update_last_content(content, delta)
+
+    assert session_text == ""
+    assert content == "assistant only"
+
+
+def test_pi_partial_content_ignores_session_metadata() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    content = ""
+    for event in [
+        {"type": "session", "id": "pi-session-123"},
+        {"type": "message_update", "delta": "partial"},
+    ]:
+        content = adapter._update_last_content(content, adapter._extract_text(event))
+
+    assert content == "partial"
+
+
 def test_pi_prompt_is_not_written_to_stdin() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 

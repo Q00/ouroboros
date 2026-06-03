@@ -206,8 +206,11 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             if event_type in {"message_end", "turn_end", "agent_end"}:
                 self._last_pi_event_kind = "final"
                 return self._extract_final_text(value)
-        else:
-            self._last_pi_event_kind = None
+            # Pi control/metadata events (for example `session`) must never fall
+            # through to the broad Codex extractor, which treats shallow string
+            # fields such as `type` and `id` as user-visible completion text.
+            return ""
+        self._last_pi_event_kind = None
         return super()._extract_text(value)
 
 
