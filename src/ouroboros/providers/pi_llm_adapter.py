@@ -128,8 +128,14 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             schema = response_format.get("json_schema")
             if not isinstance(schema, dict):
                 return None
-            schema_payload = schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
-            top_type = schema_payload.get("type", "object") if isinstance(schema_payload, dict) else "object"
+            schema_payload = (
+                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            )
+            top_type = (
+                schema_payload.get("type", "object")
+                if isinstance(schema_payload, dict)
+                else "object"
+            )
             type_noun = {
                 "array": "JSON array",
                 "object": "JSON object",
@@ -164,7 +170,9 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             schema = response_format.get("json_schema")
             if not isinstance(schema, dict):
                 return "json_schema response_format is missing a schema object"
-            schema_payload = schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            schema_payload = (
+                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            )
             try:
                 Draft202012Validator(schema_payload).validate(parsed)
             except JsonSchemaValidationError as exc:
