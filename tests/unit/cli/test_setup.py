@@ -2985,6 +2985,27 @@ class TestGooseSetup:
         assert chosen["path"] == "/custom/goose"
 
 
+class TestGeminiSetup:
+    """Tests for Gemini-specific setup behavior."""
+
+    def test_setup_gemini_installs_instruction_artifact(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            setup_cmd._setup_gemini("/opt/bin/gemini")
+
+        guide_path = tmp_path / ".gemini" / "GEMINI.md"
+        assert guide_path.is_file()
+        assert "## Ouroboros Skill Capability Guide: Gemini" in guide_path.read_text(
+            encoding="utf-8"
+        )
+
+
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 

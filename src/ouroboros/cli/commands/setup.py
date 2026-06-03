@@ -1838,6 +1838,7 @@ def _setup_gemini(gemini_path: str) -> None:
 
     print_success(f"Configured Gemini runtime (CLI: {gemini_path})")
     print_info(f"Config saved to: {config_path}")
+    _install_runtime_instruction_artifact("gemini")
 
 
 def _setup_goose(goose_path: str) -> None:
