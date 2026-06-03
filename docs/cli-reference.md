@@ -67,7 +67,7 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | Option | Description |
 |--------|-------------|
 | `--resume TEXT` | Resume an existing auto session id |
-| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow — see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
+| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `pi`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow — see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
 | `--max-interview-rounds INTEGER` | Maximum automatic interview rounds; prevents unbounded interview loops |
 | `--max-repair-rounds INTEGER` | Maximum Seed repair rounds; prevents unbounded repair loops |
 | `--skip-run` | Stop after creating an A-grade Seed |
@@ -226,7 +226,7 @@ truth table describes the gate function alone, not the auto flow:
 Detect available runtime backends and configure Ouroboros for your environment.
 
 Ouroboros supports multiple runtime backends via a pluggable `AgentRuntime` protocol. The `setup` command auto-detects
-which runtimes are available in your PATH (currently: Claude Code, Codex CLI, OpenCode) and
+which runtimes are available in your PATH (including Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, and Pi) and
 configures `orchestrator.runtime_backend` accordingly. Additional runtimes can be registered
 by implementing the protocol — see [Architecture](architecture.md#how-to-add-a-new-runtime-adapter).
 
@@ -238,7 +238,7 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `pi`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 | `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
@@ -323,8 +323,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
-| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `opencode`, `kiro`) |
+| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `pi`. Custom adapters registered in `runtime_factory.py` are also accepted. |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `kiro`, `pi`) |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -1023,7 +1023,7 @@ ouroboros mcp info [OPTIONS]
 ## Typical Workflows
 
 > For first-time setup and the complete onboarding flow, see **[Getting Started](getting-started.md)**.
-> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), and [OpenCode](runtime-guides/opencode.md) runtime guides.
+> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), and [Pi JSON mode](https://pi.dev/docs/latest/json) references.
 
 ### Cancelling Stuck Executions
 
@@ -1046,7 +1046,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude models |
 | `OPENAI_API_KEY` | — | OpenAI API key for LiteLLM / Codex CLI |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`) |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `pi`) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for Claude Code / Codex runtimes (no-op for OpenCode) |

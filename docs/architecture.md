@@ -607,4 +607,4 @@ For environment variables, `config.yaml` schema, and all configuration options, 
 ---
 
 > For install instructions and first-run onboarding, see **[Getting Started](getting-started.md)**.
-> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), and [GitHub Copilot CLI](runtime-guides/copilot.md) runtime guides. For Pi's JSON-mode contract, see the [Pi JSON mode documentation](https://pi.dev/docs/latest/json).
+> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), and [Pi JSON mode documentation](https://pi.dev/docs/latest/json) references.

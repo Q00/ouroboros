@@ -365,6 +365,7 @@ For backend-specific configuration:
 - [OpenCode runtime guide](runtime-guides/opencode.md)
 - [Kiro CLI runtime guide](runtime-guides/kiro.md)
 - [GitHub Copilot CLI runtime guide](runtime-guides/copilot.md)
+- [Pi JSON mode documentation](https://pi.dev/docs/latest/json)
 
 ---
 

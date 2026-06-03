@@ -226,6 +226,15 @@ def _detect_runtimes() -> dict[str, str | None]:
         copilot_path if copilot_path and shutil.which(copilot_path) else None
     ) or shutil.which("copilot")
 
+    # Pi: explicit-path config first, then PATH.
+    try:
+        from ouroboros.config import get_pi_cli_path
+
+        pi_path = get_pi_cli_path()
+    except Exception:
+        pi_path = None
+    runtimes["pi"] = (pi_path if pi_path and shutil.which(pi_path) else None) or shutil.which("pi")
+
     return runtimes
 
 
@@ -1814,6 +1823,48 @@ def _setup_gemini(gemini_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
+def _setup_pi(pi_path: str) -> None:
+    """Configure Ouroboros for the Pi CLI runtime.
+
+    Pi is a base-package runtime like Gemini: setup records the executable path
+    and backend choice, while skill/MCP dispatch is handled by the adapter at
+    execution time before spawning the Pi subprocess.
+    """
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Pi setup.")
+        return
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "pi"
+    orch["pi_cli_path"] = pi_path
+
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        config_dict["llm"] = llm
+    llm["backend"] = "pi"
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured Pi runtime (CLI: {pi_path})")
+    print_info(f"Config saved to: {config_path}")
+
+
 def _setup_goose(goose_path: str) -> None:
     """Configure Ouroboros for the Goose runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
@@ -2591,7 +2642,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, kiro, copilot).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, kiro, copilot, pi).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -2618,7 +2669,7 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose)
+    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi)
     and configures Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
@@ -2629,6 +2680,7 @@ def setup(
     [dim]    ouroboros setup --runtime gemini     # use Gemini CLI[/dim]
     [dim]    ouroboros setup --runtime kiro       # use Kiro CLI[/dim]
     [dim]    ouroboros setup --runtime copilot    # use GitHub Copilot CLI[/dim]
+    [dim]    ouroboros setup --runtime pi         # use Pi CLI[/dim]
     [dim]    ouroboros setup --runtime goose      # use Goose[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
@@ -2709,7 +2761,8 @@ def setup(
                 "  • Hermes CLI:  https://hermes.ai/cli\n"
                 "  • Gemini CLI:  npm install -g @google/gemini-cli\n"
                 "  • Kiro CLI:    https://kiro.dev/docs/cli/\n"
-                "  • Copilot CLI: https://docs.github.com/copilot/github-copilot-in-the-cli"
+                "  • Copilot CLI: https://docs.github.com/copilot/github-copilot-in-the-cli\n"
+                "  • Pi CLI:      npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
             )
             raise typer.Exit(1)
 
@@ -2794,6 +2847,17 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_copilot(copilot_path, non_interactive=non_interactive)
+    elif selected in ("pi", "pi_cli"):
+        pi_path = available.get("pi")
+        if not pi_path:
+            print_error(
+                "Pi CLI not found.\n"
+                "Install it with npm install -g --ignore-scripts "
+                "@earendil-works/pi-coding-agent, set OUROBOROS_PI_CLI_PATH, "
+                "or configure orchestrator.pi_cli_path."
+            )
+            raise typer.Exit(1)
+        _setup_pi(pi_path)
     elif selected in ("goose", "goose_cli"):
         goose_path = available.get("goose")
         if not goose_path:

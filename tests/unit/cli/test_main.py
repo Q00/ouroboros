@@ -99,6 +99,7 @@ class TestInitCommands:
         assert "context" in result.output.lower()
         assert "runtime" in result.output.lower()
         assert "llm-backend" in result.output.lower()
+        assert "pi" in result.output.lower()
 
 
 class TestConfigCommands:
@@ -174,6 +175,7 @@ class TestMCPCommands:
         assert "port" in result.output.lower()
         assert "runtime" in result.output.lower()
         assert "llm-backend" in result.output.lower()
+        assert "pi" in result.output.lower()
 
     def test_mcp_info(self) -> None:
         """Test mcp info command."""
