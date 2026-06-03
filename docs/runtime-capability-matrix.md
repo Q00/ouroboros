@@ -13,7 +13,7 @@ The runtime backend is selected via the `orchestrator.runtime_backend` config ke
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes | kiro | copilot | pi
+  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes | gemini | kiro | copilot | pi
                             # The runtime abstraction layer also accepts custom
                             # adapters registered in runtime_factory.py
 ```
@@ -150,7 +150,7 @@ hand `opencode_mode="subprocess"` to the authoring handlers.
 
 ## Choosing a Runtime
 
-The table below covers the three currently shipped backends. Because Ouroboros uses a pluggable `AgentRuntime` protocol, teams can register additional backends without modifying the core engine.
+The table below covers the currently shipped backends. Because Ouroboros uses a pluggable `AgentRuntime` protocol, teams can register additional backends without modifying the core engine.
 
 | If you...                                                              | Consider                                                                      |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
