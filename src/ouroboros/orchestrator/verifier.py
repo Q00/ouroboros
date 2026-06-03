@@ -21,9 +21,11 @@ Loop semantics:
        BLOCKED without verifier invocation. Other validation failures
        short-circuit the verifier and retry (the leaf would never satisfy
        the contract even if the verifier said PASS).
-    4. Otherwise the verifier is invoked. PASS → return. FAIL → retry,
-       feeding the verdict reasons back to the executor.
-    5. After `max_retries` exhausted FAILs, return the last attempt with
+    4. Otherwise the verifier is invoked. PASS → return. FAIL with
+       retry_admission=RETRY → retry, feeding the verdict reasons back to the
+       executor. Other retry admissions return immediately so the caller can
+       redispatch, escalate, or block without burning the same-leaf retry budget.
+    5. After `max_retries` exhausted retryable FAILs, return the last attempt with
        accepted=False so the outer orchestrator can escalate.
 
 The retry budget defaults to K=2 per shaun0927's H1 sketch in #830.
@@ -261,7 +263,9 @@ def _default_retry_admission_for_failure_class(
         return RetryAdmission.REDISPATCH
     if failure_class == "BLOCKED":
         return RetryAdmission.BLOCK
-    return RetryAdmission.RETRY
+    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH"}:
+        return RetryAdmission.RETRY
+    return RetryAdmission.REDISPATCH
 
 
 class Verifier(Protocol):

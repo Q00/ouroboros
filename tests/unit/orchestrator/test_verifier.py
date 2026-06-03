@@ -105,6 +105,13 @@ class TestVerifierVerdict:
         assert verdict.status is VerifierStatus.BLOCKED
         assert verdict.retry_admission is RetryAdmission.BLOCK
 
+    def test_unclassified_failure_defaults_to_stall_redispatch_policy(self) -> None:
+        verdict = VerifierVerdict(passed=False, reasons=("ambiguous verifier failure",))
+
+        assert verdict.status is VerifierStatus.FAIL
+        assert verdict.failure_class is None
+        assert verdict.retry_admission is RetryAdmission.REDISPATCH
+
     def test_fail_without_reasons_rejected(self) -> None:
         # A bare FAIL produces no feedback for the retry executor and no
         # explanation on budget exhaustion — rejected at construction
@@ -397,7 +404,11 @@ class TestRetryWithFeedback:
         executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
         verifier = ScriptedVerifier(
             verdicts=[
-                VerifierVerdict(passed=False, reasons=("tests look fake",)),
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("tests look fake",),
+                    retry_admission=RetryAdmission.RETRY,
+                ),
                 VerifierVerdict(passed=True),
             ]
         )
