@@ -6374,6 +6374,9 @@ class TestParallelACExecutor:
             verifier_passed=False,
             verifier_reasons=["claimed test command did not support the AC"],
             verifier_failure_class="FABRICATION_SUSPECTED",
+            verifier_status="FAIL",
+            retry_admission="ESCALATE_MODEL",
+            verifier_evidence_used=[],
         )
 
         assert result.success is False
@@ -6392,6 +6395,9 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_ran"] is True
         assert evidence_event.data["verifier_passed"] is False
         assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+        assert evidence_event.data["verifier_status"] == "FAIL"
+        assert evidence_event.data["retry_admission"] == "ESCALATE_MODEL"
+        assert evidence_event.data["verifier_evidence_used"] == []
         assert evidence_event.data["verifier_reasons"] == [
             "claimed test command did not support the AC"
         ]

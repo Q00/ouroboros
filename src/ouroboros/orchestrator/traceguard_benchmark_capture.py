@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ouroboros.harness.deliver_gate import DeliverGateVerdict
+from ouroboros.harness.deliver_routing import deliver_gate_verifier_verdict
 from ouroboros.orchestrator.baseline_metrics import (
     DEFAULT_MAX_RETRIES,
     FatHarnessMetricsReport,
@@ -26,6 +28,26 @@ from ouroboros.orchestrator.baseline_metrics_format import render_baseline_repor
 BENCHMARK_PROFILE_LEGACY = "legacy_self_report_fixture"
 BENCHMARK_PROFILE_TRACEGUARD = "traceguard_deliver_gate_fixture"
 BENCHMARK_PROFILE_TRACEGUARD_CLAIM_TERM_GUARD = "traceguard_plus_claim_term_guard_fixture"
+
+
+@dataclass(frozen=True)
+class H1RetryAdmissionFixtureRow:
+    """Recorded H1 admission outcome for a deliver-gate verdict fixture."""
+
+    fixture: str
+    accepted: bool
+    failure_class: str | None
+    retry_admission: str
+    evidence_used_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fixture": self.fixture,
+            "accepted": self.accepted,
+            "failure_class": self.failure_class,
+            "retry_admission": self.retry_admission,
+            "evidence_used_count": self.evidence_used_count,
+        }
 
 
 LEGACY_SELF_REPORT_ROWS: tuple[BaselineMetricFixtureRow, ...] = (
@@ -118,6 +140,7 @@ class TraceGuardBenchmarkCapture:
     legacy_rows: tuple[BaselineMetricFixtureRow, ...]
     traceguard_rows: tuple[BaselineMetricFixtureRow, ...]
     claim_term_guard_rows: tuple[BaselineMetricFixtureRow, ...]
+    h1_retry_admission_rows: tuple[H1RetryAdmissionFixtureRow, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +155,14 @@ class TraceGuardBenchmarkCapture:
             "claim_term_guard": {
                 "report": self.claim_term_guard_report.to_dict(),
                 "rows": [row.to_dict() for row in self.claim_term_guard_rows],
+            },
+            "h1_retry_admission": {
+                "rows": [row.to_dict() for row in self.h1_retry_admission_rows],
+                "all_typed": all(row.retry_admission for row in self.h1_retry_admission_rows),
+                "accepted_count": sum(1 for row in self.h1_retry_admission_rows if row.accepted),
+                "routed_count": sum(
+                    1 for row in self.h1_retry_admission_rows if row.retry_admission != "ACCEPT"
+                ),
             },
             "delta": {
                 "fabrication_incidents_per_100_acs": (
@@ -182,6 +213,7 @@ def build_traceguard_benchmark_capture() -> TraceGuardBenchmarkCapture:
         legacy_rows=LEGACY_SELF_REPORT_ROWS,
         traceguard_rows=traceguard_rows,
         claim_term_guard_rows=claim_term_guard_rows,
+        h1_retry_admission_rows=_h1_retry_admission_rows(),
     )
 
 
@@ -212,12 +244,66 @@ def _claim_term_guard_rows(
     return tuple(guarded)
 
 
+def _h1_retry_admission_rows() -> tuple[H1RetryAdmissionFixtureRow, ...]:
+    fixtures = {
+        "fixture:h1/traceguard/accepted": DeliverGateVerdict(
+            ac_id="AC-1",
+            accepted=True,
+            unsupported_claim_rate=0.0,
+            accepted_fact_ids=("fact_1",),
+            evidence_event_ids=("evt_accept",),
+        ),
+        "fixture:h1/traceguard/missing-evidence": DeliverGateVerdict(
+            ac_id="AC-2",
+            accepted=False,
+            unsupported_claim_rate=1.0,
+            rejected_fact_ids=("fact_missing",),
+            rejected_reasons=("missing_evidence_handle: ev_missing is not present in manifest",),
+        ),
+        "fixture:h1/claim-term/semantic-miss": DeliverGateVerdict(
+            ac_id="AC-3",
+            accepted=False,
+            unsupported_claim_rate=1.0,
+            rejected_fact_ids=("fact_semantic",),
+            rejected_reasons=("semantic_miss: evidence text lacks behavior=admin_delete_denied",),
+            evidence_event_ids=("evt_semantic",),
+        ),
+        "fixture:h1/traceguard/repeated-fabrication": DeliverGateVerdict(
+            ac_id="AC-4",
+            accepted=False,
+            unsupported_claim_rate=1.0,
+            rejected_fact_ids=("fact_fake",),
+            rejected_reasons=("unsupported_fact_id: fact_fake is not present",),
+        ),
+    }
+    rows: list[H1RetryAdmissionFixtureRow] = []
+    for fixture, verdict in fixtures.items():
+        rejection_count = 2 if fixture.endswith("repeated-fabrication") else 1
+        verifier_verdict = deliver_gate_verifier_verdict(
+            verdict,
+            rejection_count=rejection_count,
+            model_escalation_threshold=2,
+        )
+        rows.append(
+            H1RetryAdmissionFixtureRow(
+                fixture=fixture,
+                accepted=verifier_verdict.passed,
+                failure_class=verifier_verdict.failure_class,
+                retry_admission=verifier_verdict.retry_admission.value,
+                evidence_used_count=len(verifier_verdict.evidence_used),
+            )
+        )
+    return tuple(rows)
+
+
 def render_traceguard_benchmark_markdown(
     capture: TraceGuardBenchmarkCapture | None = None,
 ) -> str:
     """Render the benchmark artifact for maintainer review."""
     capture = build_traceguard_benchmark_capture() if capture is None else capture
-    data = capture.to_dict()["delta"]
+    capture_data = capture.to_dict()
+    data = capture_data["delta"]
+    h1_rows = capture_data["h1_retry_admission"]["rows"]
     lines = [
         "# #978 P4 TraceGuard vs legacy baseline benchmark",
         "",
@@ -251,12 +337,29 @@ def render_traceguard_benchmark_markdown(
         f"{data['claim_term_guard_semantic_miss_incidents_per_100_acs']:.4f}",
         f"- Claim-term guard median chars ratio: {data['claim_term_guard_median_chars_ratio']:.4f}",
         "",
+        "## H1 retry admission",
+        "",
+        "| Fixture | Accepted | Failure class | Retry admission | Evidence refs |",
+        "| --- | --- | --- | --- | ---: |",
+        *(
+            "| {fixture} | {accepted} | {failure_class} | {retry_admission} | "
+            "{evidence_used_count} |".format(
+                fixture=row["fixture"],
+                accepted=str(row["accepted"]).lower(),
+                failure_class=row["failure_class"] or "",
+                retry_admission=row["retry_admission"],
+                evidence_used_count=row["evidence_used_count"],
+            )
+            for row in h1_rows
+        ),
+        "",
         "## Gate interpretation",
         "",
         "- TraceGuard reduces fixture fabrication incidents to 0 per 100 ACs.",
         "- The deterministic claim-term guard rejects the fixture semantic miss without reintroducing fabrication.",
         "- One-shot pass rate drops because unsupported legacy self-reports are rejected instead of counted as accepted.",
         "- Median chars stay within the <= 1.5x C.4 budget guardrail.",
+        "- H1 admission is typed for accepted, retryable, redispatch, and model-escalation verdicts.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -274,6 +377,7 @@ __all__ = [
     "BENCHMARK_PROFILE_TRACEGUARD",
     "BENCHMARK_PROFILE_TRACEGUARD_CLAIM_TERM_GUARD",
     "LEGACY_SELF_REPORT_ROWS",
+    "H1RetryAdmissionFixtureRow",
     "TraceGuardBenchmarkCapture",
     "build_traceguard_benchmark_capture",
     "render_traceguard_benchmark_markdown",

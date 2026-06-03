@@ -73,6 +73,19 @@ def test_traceguard_benchmark_delta_is_json_serializable() -> None:
     json.dumps(payload)
 
 
+def test_traceguard_benchmark_records_h1_retry_admission_outcomes() -> None:
+    payload = build_traceguard_benchmark_capture().to_dict()
+    rows = {row["fixture"]: row for row in payload["h1_retry_admission"]["rows"]}
+
+    assert payload["h1_retry_admission"]["all_typed"] is True
+    assert rows["fixture:h1/traceguard/accepted"]["retry_admission"] == "ACCEPT"
+    assert rows["fixture:h1/traceguard/missing-evidence"]["failure_class"] == "EVIDENCE_MISSING"
+    assert rows["fixture:h1/traceguard/missing-evidence"]["retry_admission"] == "RETRY"
+    assert rows["fixture:h1/claim-term/semantic-miss"]["failure_class"] == "SCOPE_CREEP"
+    assert rows["fixture:h1/claim-term/semantic-miss"]["retry_admission"] == "REDISPATCH"
+    assert rows["fixture:h1/traceguard/repeated-fabrication"]["retry_admission"] == "ESCALATE_MODEL"
+
+
 def test_traceguard_benchmark_markdown_artifact_matches_renderer() -> None:
     expected = render_traceguard_benchmark_markdown()
     artifact = Path("docs/agentos/traceguard-vs-legacy-benchmark.md").read_text()
@@ -81,3 +94,4 @@ def test_traceguard_benchmark_markdown_artifact_matches_renderer() -> None:
     assert "Fabrication incidents per 100 ACs" in artifact
     assert "Semantic-miss incidents per 100 ACs" in artifact
     assert "TraceGuard + claim-term guard" in artifact
+    assert "H1 retry admission" in artifact

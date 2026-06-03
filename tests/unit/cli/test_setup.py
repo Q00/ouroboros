@@ -24,6 +24,7 @@ from ouroboros.cli.commands.setup import (
     _set_default_repo,
 )
 from ouroboros.codex import CodexArtifactInstallResult
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 
 # ── Codex setup tests ────────────────────────────────────────────
 
@@ -3318,8 +3319,8 @@ class TestCopilotSetup:
                 {
                     "orchestrator": {"runtime_backend": "claude"},
                     "llm": {"backend": "claude_code"},
-                    "clarification": {"default_model": "claude-opus-4-6"},
-                    "evaluation": {"semantic_model": "claude-opus-4-6"},
+                    "clarification": {"default_model": DEFAULT_OPUS_MODEL},
+                    "evaluation": {"semantic_model": DEFAULT_OPUS_MODEL},
                 },
                 sort_keys=False,
             ),
@@ -3352,6 +3353,75 @@ class TestCopilotSetup:
         assert config["consensus"]["devil_model"] == "claude-opus-4.6"
         assert config["consensus"]["judge_model"] == "claude-opus-4.6"
         assert "default_model" not in config["llm"]
+
+    def test_setup_copilot_replaces_legacy_shipped_default_model_fields(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1324 (ouroboros-agent[bot] req_1780391230_63).
+
+        A config persisted by a prior release holds the OLD shipped defaults
+        (``claude-opus-4-6``, ``claude-sonnet-4-20250514``, the old OpenRouter
+        consensus slug). These are untouched shipped defaults the user never
+        chose, so Copilot setup must rewrite them to the discovered model just
+        like the current shipped defaults — not mistake them for explicit
+        overrides and leave unrunnable Claude ids in config.yaml. An explicit
+        non-shipped override must still be preserved.
+        """
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "claude"},
+                    "llm": {"backend": "claude_code", "qa_model": "claude-sonnet-4-20250514"},
+                    "clarification": {"default_model": "claude-opus-4-6"},
+                    "evaluation": {"semantic_model": "claude-opus-4-6"},
+                    "resilience": {
+                        "wonder_model": "claude-opus-4-6",
+                        # Explicit, never-shipped override — must be preserved.
+                        "reflect_model": "gpt-5-mini",
+                    },
+                    "consensus": {
+                        "advocate_model": "openrouter/anthropic/claude-opus-4-6",
+                        "models": [
+                            "openrouter/openai/gpt-4o",
+                            "openrouter/anthropic/claude-opus-4-6",
+                            "openrouter/google/gemini-2.5-pro",
+                        ],
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=self._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server"),
+        ):
+            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
+
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # Legacy shipped defaults are rewritten to the discovered Copilot model.
+        assert config["llm"]["qa_model"] == "claude-opus-4.6"
+        assert config["clarification"]["default_model"] == "claude-opus-4.6"
+        assert config["evaluation"]["semantic_model"] == "claude-opus-4.6"
+        assert config["resilience"]["wonder_model"] == "claude-opus-4.6"
+        assert config["consensus"]["advocate_model"] == "claude-opus-4.6"
+        assert config["consensus"]["models"] == [
+            "claude-opus-4.6",
+            "claude-sonnet-4.5",
+            "claude-opus-4.6",
+        ]
+        # Explicit, never-shipped override is preserved (no over-broadening).
+        assert config["resilience"]["reflect_model"] == "gpt-5-mini"
 
     def test_setup_copilot_aborts_on_non_mapping_sections(self, tmp_path: Path) -> None:
         """Malformed sections must not be clobbered or crash setup."""

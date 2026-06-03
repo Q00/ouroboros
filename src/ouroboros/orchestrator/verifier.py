@@ -21,9 +21,11 @@ Loop semantics:
        BLOCKED without verifier invocation. Other validation failures
        short-circuit the verifier and retry (the leaf would never satisfy
        the contract even if the verifier said PASS).
-    4. Otherwise the verifier is invoked. PASS → return. FAIL → retry,
-       feeding the verdict reasons back to the executor.
-    5. After `max_retries` exhausted FAILs, return the last attempt with
+    4. Otherwise the verifier is invoked. PASS → return. FAIL with
+       retry_admission=RETRY → retry, feeding the verdict reasons back to the
+       executor. Other retry admissions return immediately so the caller can
+       redispatch, escalate, or block without burning the same-leaf retry budget.
+    5. After `max_retries` exhausted retryable FAILs, return the last attempt with
        accepted=False so the outer orchestrator can escalate.
 
 The retry budget defaults to K=2 per shaun0927's H1 sketch in #830.
@@ -32,6 +34,7 @@ The retry budget defaults to K=2 per shaun0927's H1 sketch in #830.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 import subprocess
 from typing import Protocol
 
@@ -94,6 +97,25 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
 )
 
 
+class VerifierStatus(StrEnum):
+    """Machine-readable verifier outcome for H1 retry admission."""
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    BLOCKED = "BLOCKED"
+
+
+class RetryAdmission(StrEnum):
+    """Harness-owned next-action admission after a verifier verdict."""
+
+    ACCEPT = "ACCEPT"
+    RETRY = "RETRY"
+    REDISPATCH = "REDISPATCH"
+    ESCALATE_MODEL = "ESCALATE_MODEL"
+    ESCALATE_HUMAN = "ESCALATE_HUMAN"
+    BLOCK = "BLOCK"
+
+
 @dataclass(frozen=True)
 class VerifierVerdict:
     """Outcome of a single verifier pass.
@@ -109,13 +131,31 @@ class VerifierVerdict:
             "EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH",
             "FABRICATION_SUSPECTED", "SCOPE_CREEP", "STALL",
             "BLOCKED", or None for an unclassified failure.
+        status: Typed verifier status. Defaults from ``passed`` and
+            ``failure_class`` for backward compatibility.
+        evidence_used: Stable evidence refs used by the verifier.
+        retry_admission: Machine-readable next-action admission. Defaults to
+            ACCEPT for passes and the H7 recovery policy for failures.
     """
 
     passed: bool
     reasons: tuple[str, ...] = ()
     failure_class: str | None = None
+    status: VerifierStatus | str | None = None
+    evidence_used: tuple[str, ...] = ()
+    retry_admission: RetryAdmission | str | None = None
 
     def __post_init__(self) -> None:
+        status = _normalize_verifier_status(
+            self.status,
+            passed=self.passed,
+            failure_class=self.failure_class,
+        )
+        retry_admission = _normalize_retry_admission(
+            self.retry_admission,
+            passed=self.passed,
+            failure_class=self.failure_class,
+        )
         if self.passed and self.reasons:
             msg = "VerifierVerdict(passed=True) must not carry reasons"
             raise VerifierContractError(msg)
@@ -144,6 +184,88 @@ class VerifierVerdict:
                 f"not a recognized taxonomy value. Valid: {valid}, or None."
             )
             raise VerifierContractError(msg)
+        if self.passed and status is not VerifierStatus.PASS:
+            msg = "VerifierVerdict(passed=True) must have status PASS"
+            raise VerifierContractError(msg)
+        if self.passed and retry_admission is not RetryAdmission.ACCEPT:
+            msg = "VerifierVerdict(passed=True) must have retry_admission ACCEPT"
+            raise VerifierContractError(msg)
+        if not self.passed and status is VerifierStatus.PASS:
+            msg = "VerifierVerdict(passed=False) cannot have status PASS"
+            raise VerifierContractError(msg)
+        if not self.passed and retry_admission is RetryAdmission.ACCEPT:
+            msg = "VerifierVerdict(passed=False) cannot have retry_admission ACCEPT"
+            raise VerifierContractError(msg)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "retry_admission", retry_admission)
+        object.__setattr__(self, "evidence_used", _normalize_evidence_used(self.evidence_used))
+
+
+def _normalize_verifier_status(
+    status: VerifierStatus | str | None,
+    *,
+    passed: bool,
+    failure_class: str | None,
+) -> VerifierStatus:
+    if status is None:
+        return (
+            VerifierStatus.PASS
+            if passed
+            else (VerifierStatus.BLOCKED if failure_class == "BLOCKED" else VerifierStatus.FAIL)
+        )
+    try:
+        return VerifierStatus(status)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in VerifierStatus)
+        msg = f"VerifierVerdict.status={status!r} is not valid. Valid: {valid}."
+        raise VerifierContractError(msg) from exc
+
+
+def _normalize_retry_admission(
+    retry_admission: RetryAdmission | str | None,
+    *,
+    passed: bool,
+    failure_class: str | None,
+) -> RetryAdmission:
+    if retry_admission is None:
+        if passed:
+            return RetryAdmission.ACCEPT
+        return _default_retry_admission_for_failure_class(failure_class)
+    try:
+        return RetryAdmission(retry_admission)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in RetryAdmission)
+        msg = f"VerifierVerdict.retry_admission={retry_admission!r} is not valid. Valid: {valid}."
+        raise VerifierContractError(msg) from exc
+
+
+def _normalize_evidence_used(evidence_used: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in evidence_used:
+        if not isinstance(item, str):
+            msg = "VerifierVerdict.evidence_used must contain strings"
+            raise VerifierContractError(msg)
+        stripped = item.strip()
+        if not stripped or stripped in seen:
+            continue
+        seen.add(stripped)
+        normalized.append(stripped)
+    return tuple(normalized)
+
+
+def _default_retry_admission_for_failure_class(
+    failure_class: str | None,
+) -> RetryAdmission:
+    if failure_class == "FABRICATION_SUSPECTED":
+        return RetryAdmission.ESCALATE_MODEL
+    if failure_class in {"SCOPE_CREEP", "STALL"}:
+        return RetryAdmission.REDISPATCH
+    if failure_class == "BLOCKED":
+        return RetryAdmission.BLOCK
+    if failure_class in {"EVIDENCE_MISSING", "EVIDENCE_FORM_MISMATCH"}:
+        return RetryAdmission.RETRY
+    return RetryAdmission.REDISPATCH
 
 
 class Verifier(Protocol):
@@ -178,6 +300,7 @@ def verifier_operational_failure_verdict(exc: BaseException) -> VerifierVerdict:
             passed=False,
             reasons=(f"verifier raised {type(exc).__name__}: {exc}",),
             failure_class="STALL",
+            retry_admission=RetryAdmission.RETRY,
         )
     raise exc
 
@@ -403,6 +526,11 @@ def run_with_verifier(
             return LoopResult(accepted=True, attempts=tuple(attempts))
         if attempt.blocked:
             return LoopResult(accepted=False, attempts=tuple(attempts))
+        if (
+            attempt.verdict is not None
+            and attempt.verdict.retry_admission is not RetryAdmission.RETRY
+        ):
+            return LoopResult(accepted=False, attempts=tuple(attempts))
 
         feedback = _failure_reasons(attempt)
 
@@ -416,6 +544,8 @@ __all__ = [
     "LoopResult",
     "Verifier",
     "VerifierContractError",
+    "RetryAdmission",
+    "VerifierStatus",
     "VerifierVerdict",
     "run_with_verifier",
     "structural_atomic_verifier",

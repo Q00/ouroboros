@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from ouroboros.harness.deliver_gate import DeliverGateVerdict
 from ouroboros.orchestrator.failure_taxonomy import RecoveryAction
+from ouroboros.orchestrator.verifier import RetryAdmission, VerifierStatus, VerifierVerdict
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,11 +134,89 @@ def route_deliver_gate_verdict(
     )
 
 
+def deliver_gate_verifier_verdict(
+    verdict: DeliverGateVerdict,
+    *,
+    rejection_count: int = 1,
+    model_escalation_threshold: int = 2,
+) -> VerifierVerdict:
+    """Promote a TraceGuard deliver verdict into the H1 verifier contract.
+
+    This is the #1306 behavior-change bridge: callers can pass the returned
+    ``VerifierVerdict`` through the existing H1 acceptance boundary instead of
+    treating ``DeliverGateVerdict`` as read-only observation.
+    """
+    route = route_deliver_gate_verdict(
+        verdict,
+        rejection_count=rejection_count,
+        model_escalation_threshold=model_escalation_threshold,
+    )
+    if route.accepted:
+        return VerifierVerdict(
+            passed=True,
+            status=VerifierStatus.PASS,
+            evidence_used=verdict.evidence_event_ids,
+            retry_admission=RetryAdmission.ACCEPT,
+        )
+
+    failure_class = _failure_class_for_route(route)
+    status = VerifierStatus.BLOCKED if failure_class == "BLOCKED" else VerifierStatus.FAIL
+    return VerifierVerdict(
+        passed=False,
+        reasons=(
+            f"{route.reason}: " + "; ".join(route.source_reasons)
+            if route.source_reasons
+            else route.reason,
+        ),
+        failure_class=failure_class,
+        status=status,
+        evidence_used=verdict.evidence_event_ids,
+        retry_admission=_retry_admission_for_route(route),
+    )
+
+
+def _retry_admission_for_route(route: DeliverGateRoute) -> RetryAdmission:
+    if route.action is RecoveryAction.RETRY:
+        return RetryAdmission.RETRY
+    if route.action is RecoveryAction.REDISPATCH:
+        return RetryAdmission.REDISPATCH
+    if route.action is RecoveryAction.ESCALATE_MODEL:
+        return RetryAdmission.ESCALATE_MODEL
+    if route.action is RecoveryAction.ESCALATE_HUMAN:
+        return RetryAdmission.ESCALATE_HUMAN
+    return RetryAdmission.BLOCK
+
+
+def _failure_class_for_route(route: DeliverGateRoute) -> str:
+    reason_codes = tuple(_reason_code(reason) for reason in route.source_reasons)
+    if route.action is RecoveryAction.ESCALATE_HUMAN:
+        return "BLOCKED"
+    if any(reason in _RETRY_REASONS for reason in reason_codes):
+        return "EVIDENCE_MISSING"
+    if any(reason == "semantic_miss" for reason in reason_codes):
+        return "SCOPE_CREEP"
+    if any(
+        reason in {"evidence_handle_mismatch", "chunk_handle_without_fact"}
+        for reason in reason_codes
+    ):
+        return "EVIDENCE_FORM_MISMATCH"
+    if any(
+        reason in {"unsupported_fact_id", "malformed_evidence_claim"} for reason in reason_codes
+    ):
+        return "FABRICATION_SUSPECTED"
+    if route.action is RecoveryAction.ESCALATE_MODEL:
+        return "FABRICATION_SUSPECTED"
+    if route.action is RecoveryAction.REDISPATCH:
+        return "STALL"
+    return "BLOCKED"
+
+
 def _reason_code(reason: str) -> str:
     return reason.split(":", maxsplit=1)[0].strip()
 
 
 __all__ = [
     "DeliverGateRoute",
+    "deliver_gate_verifier_verdict",
     "route_deliver_gate_verdict",
 ]

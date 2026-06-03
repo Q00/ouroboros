@@ -26,6 +26,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from ouroboros.config._model_defaults import (
+    DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
 
 
@@ -132,9 +137,9 @@ class LLMConfig(BaseModel, frozen=True):
     ] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
-    qa_model: str = "claude-sonnet-4-20250514"
-    dependency_analysis_model: str = "claude-opus-4-6"
-    ontology_analysis_model: str = "claude-opus-4-6"
+    qa_model: str = DEFAULT_SONNET_MODEL
+    dependency_analysis_model: str = DEFAULT_OPUS_MODEL
+    ontology_analysis_model: str = DEFAULT_OPUS_MODEL
     context_compression_model: str = "gpt-4"
 
 
@@ -178,7 +183,7 @@ class ClarificationConfig(BaseModel, frozen=True):
     ambiguity_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
     max_interview_rounds: int = Field(default=10, ge=1)
     model_tier: Literal["frugal", "standard", "frontier"] = "standard"
-    default_model: str = "claude-opus-4-6"
+    default_model: str = DEFAULT_OPUS_MODEL
 
 
 class ExecutionConfig(BaseModel, frozen=True):
@@ -194,9 +199,9 @@ class ExecutionConfig(BaseModel, frozen=True):
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
     retrospective_interval: int = Field(default=3, ge=1)
-    atomicity_model: str = "claude-opus-4-6"
-    decomposition_model: str = "claude-opus-4-6"
-    double_diamond_model: str = "claude-opus-4-6"
+    atomicity_model: str = DEFAULT_OPUS_MODEL
+    decomposition_model: str = DEFAULT_OPUS_MODEL
+    double_diamond_model: str = DEFAULT_OPUS_MODEL
 
 
 class ResilienceConfig(BaseModel, frozen=True):
@@ -215,8 +220,8 @@ class ResilienceConfig(BaseModel, frozen=True):
     lateral_thinking_enabled: bool = True
     lateral_model_tier: Literal["frugal", "standard", "frontier"] = "frontier"
     lateral_temperature: float = Field(default=0.8, ge=0.0, le=2.0)
-    wonder_model: str = "claude-opus-4-6"
-    reflect_model: str = "claude-opus-4-6"
+    wonder_model: str = DEFAULT_OPUS_MODEL
+    reflect_model: str = DEFAULT_OPUS_MODEL
 
 
 class EvaluationConfig(BaseModel, frozen=True):
@@ -237,8 +242,8 @@ class EvaluationConfig(BaseModel, frozen=True):
     stage3_enabled: bool = True
     satisfaction_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     uncertainty_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
-    semantic_model: str = "claude-opus-4-6"
-    assertion_extraction_model: str = "claude-sonnet-4-6"
+    semantic_model: str = DEFAULT_OPUS_MODEL
+    assertion_extraction_model: str = DEFAULT_SONNET_MODEL
 
 
 class ConsensusConfig(BaseModel, frozen=True):
@@ -259,10 +264,10 @@ class ConsensusConfig(BaseModel, frozen=True):
     diversity_required: bool = True
     models: tuple[str, ...] = (
         "openrouter/openai/gpt-4o",
-        "openrouter/anthropic/claude-opus-4-6",
+        DEFAULT_CONSENSUS_OPUS_MODEL,
         "openrouter/google/gemini-2.5-pro",
     )
-    advocate_model: str = "openrouter/anthropic/claude-opus-4-6"
+    advocate_model: str = DEFAULT_CONSENSUS_OPUS_MODEL
     devil_model: str = "openrouter/openai/gpt-4o"
     judge_model: str = "openrouter/google/gemini-2.5-pro"
 
@@ -611,7 +616,7 @@ def get_default_config() -> OuroborosConfig:
                     intelligence_range=(14, 16),
                     models=[
                         ModelConfig(provider="openai", model="gpt-4o"),
-                        ModelConfig(provider="anthropic", model="claude-sonnet-4-6"),
+                        ModelConfig(provider="anthropic", model=DEFAULT_SONNET_MODEL),
                         ModelConfig(provider="google", model="gemini-2.5-pro"),
                     ],
                     use_cases=["logic_design", "stage2_evaluation", "refactoring"],
@@ -621,7 +626,7 @@ def get_default_config() -> OuroborosConfig:
                     intelligence_range=(18, 20),
                     models=[
                         ModelConfig(provider="openai", model="o3"),
-                        ModelConfig(provider="anthropic", model="claude-opus-4-6"),
+                        ModelConfig(provider="anthropic", model=DEFAULT_OPUS_MODEL),
                     ],
                     use_cases=["consensus", "lateral_thinking", "big_bang"],
                 ),

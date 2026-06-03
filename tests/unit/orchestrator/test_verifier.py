@@ -7,12 +7,16 @@ import json
 
 import pytest
 
+from ouroboros.harness.deliver_gate import DeliverGateVerdict
+from ouroboros.harness.deliver_routing import deliver_gate_verifier_verdict
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ProfileEvidenceConfigError
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile, load_profile
 from ouroboros.orchestrator.verifier import (
     DEFAULT_MAX_RETRIES,
     LoopResult,
+    RetryAdmission,
     VerifierContractError,
+    VerifierStatus,
     VerifierVerdict,
     run_with_verifier,
 )
@@ -81,6 +85,32 @@ class TestVerifierVerdict:
             passed=False, reasons=("missing test",), failure_class="EVIDENCE_MISSING"
         )
         assert verdict.passed is False
+        assert verdict.status is VerifierStatus.FAIL
+        assert verdict.retry_admission is RetryAdmission.RETRY
+
+    def test_pass_defaults_to_typed_acceptance(self) -> None:
+        verdict = VerifierVerdict(passed=True, evidence_used=(" evt_1 ", "evt_1", "evt_2"))
+
+        assert verdict.status is VerifierStatus.PASS
+        assert verdict.retry_admission is RetryAdmission.ACCEPT
+        assert verdict.evidence_used == ("evt_1", "evt_2")
+
+    def test_blocked_failure_defaults_to_block_status_and_admission(self) -> None:
+        verdict = VerifierVerdict(
+            passed=False,
+            reasons=("blocked",),
+            failure_class="BLOCKED",
+        )
+
+        assert verdict.status is VerifierStatus.BLOCKED
+        assert verdict.retry_admission is RetryAdmission.BLOCK
+
+    def test_unclassified_failure_defaults_to_stall_redispatch_policy(self) -> None:
+        verdict = VerifierVerdict(passed=False, reasons=("ambiguous verifier failure",))
+
+        assert verdict.status is VerifierStatus.FAIL
+        assert verdict.failure_class is None
+        assert verdict.retry_admission is RetryAdmission.REDISPATCH
 
     def test_fail_without_reasons_rejected(self) -> None:
         # A bare FAIL produces no feedback for the retry executor and no
@@ -105,6 +135,18 @@ class TestVerifierVerdict:
         # verifier impl that typo'd the tag. Reject at construction.
         with pytest.raises(ValueError, match="not a recognized taxonomy"):
             VerifierVerdict(passed=False, reasons=("bad",), failure_class="MYSTERY")
+
+    def test_pass_cannot_use_non_accept_retry_admission(self) -> None:
+        with pytest.raises(ValueError, match="retry_admission ACCEPT"):
+            VerifierVerdict(passed=True, retry_admission="RETRY")
+
+    def test_fail_cannot_use_accept_retry_admission(self) -> None:
+        with pytest.raises(ValueError, match="cannot have retry_admission ACCEPT"):
+            VerifierVerdict(
+                passed=False,
+                reasons=("bad",),
+                retry_admission="ACCEPT",
+            )
 
     @pytest.mark.parametrize(
         "klass",
@@ -362,7 +404,11 @@ class TestRetryWithFeedback:
         executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
         verifier = ScriptedVerifier(
             verdicts=[
-                VerifierVerdict(passed=False, reasons=("tests look fake",)),
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("tests look fake",),
+                    retry_admission=RetryAdmission.RETRY,
+                ),
                 VerifierVerdict(passed=True),
             ]
         )
@@ -380,7 +426,8 @@ class TestRetryWithFeedback:
     def test_exhaust_retries_returns_unaccepted(self, code_profile: ExecutionProfile) -> None:
         outputs = [_code_evidence() for _ in range(3)]
         verdicts = [
-            VerifierVerdict(passed=False, reasons=("bad",), failure_class="STALL") for _ in range(3)
+            VerifierVerdict(passed=False, reasons=("bad",), failure_class="EVIDENCE_MISSING")
+            for _ in range(3)
         ]
         executor = ScriptedExecutor(outputs=outputs)
         verifier = ScriptedVerifier(verdicts=verdicts)
@@ -398,10 +445,107 @@ class TestRetryWithFeedback:
         assert verifier.calls == 3
         # Final attempt is not accepted but verdict is recorded.
         assert result.final.verdict is not None
-        assert result.final.verdict.failure_class == "STALL"
+        assert result.final.verdict.retry_admission is RetryAdmission.RETRY
 
     def test_default_max_retries_is_two(self) -> None:
         assert DEFAULT_MAX_RETRIES == 2
+
+    def test_h1_stops_same_leaf_retry_for_traceguard_redispatch_admission(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
+
+        def traceguard_backed_verifier(
+            *,
+            profile: ExecutionProfile,
+            ac: str,
+            leaf_output: str,
+            record: EvidenceRecord,
+        ) -> VerifierVerdict:
+            del profile, ac, leaf_output, record
+            return deliver_gate_verifier_verdict(
+                DeliverGateVerdict(
+                    ac_id="AC-1",
+                    accepted=False,
+                    unsupported_claim_rate=1.0,
+                    rejected_fact_ids=("fact_1",),
+                    rejected_reasons=(
+                        "semantic_miss: evidence text lacks behavior=admin_delete_denied",
+                    ),
+                    evidence_event_ids=("evt_semantic_miss",),
+                )
+            )
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=traceguard_backed_verifier,
+            profile=code_profile,
+            ac="deny admin delete",
+            max_retries=1,
+        )
+
+        assert result.accepted is False
+        assert len(result.attempts) == 1
+        first = result.attempts[0]
+        assert first.verdict is not None
+        assert first.verdict.failure_class == "SCOPE_CREEP"
+        assert first.verdict.retry_admission is RetryAdmission.REDISPATCH
+        assert first.verdict.evidence_used == ("evt_semantic_miss",)
+        assert executor.feedbacks == [()]
+
+    @pytest.mark.parametrize(
+        ("verdict", "expected_admission"),
+        [
+            (
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("fabricated",),
+                    failure_class="FABRICATION_SUSPECTED",
+                ),
+                RetryAdmission.ESCALATE_MODEL,
+            ),
+            (
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("blocked",),
+                    failure_class="BLOCKED",
+                ),
+                RetryAdmission.BLOCK,
+            ),
+            (
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("human needed",),
+                    failure_class="BLOCKED",
+                    retry_admission=RetryAdmission.ESCALATE_HUMAN,
+                ),
+                RetryAdmission.ESCALATE_HUMAN,
+            ),
+        ],
+    )
+    def test_h1_stops_same_leaf_retry_for_non_retry_admissions(
+        self,
+        code_profile: ExecutionProfile,
+        verdict: VerifierVerdict,
+        expected_admission: RetryAdmission,
+    ) -> None:
+        executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[verdict, VerifierVerdict(passed=True)])
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=verifier,
+            profile=code_profile,
+            ac="x",
+            max_retries=1,
+        )
+
+        assert result.accepted is False
+        assert len(result.attempts) == 1
+        assert verifier.calls == 1
+        assert executor.feedbacks == [()]
+        assert result.final.verdict is not None
+        assert result.final.verdict.retry_admission is expected_admission
 
 
 class TestEvidenceShortCircuit:
