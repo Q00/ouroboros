@@ -5634,6 +5634,17 @@ Files present:
                     verifier_failure_class=(
                         verifier_verdict.failure_class if verifier_verdict is not None else None
                     ),
+                    verifier_status=(
+                        verifier_verdict.status.value if verifier_verdict is not None else None
+                    ),
+                    retry_admission=(
+                        verifier_verdict.retry_admission.value
+                        if verifier_verdict is not None
+                        else None
+                    ),
+                    verifier_evidence_used=(
+                        list(verifier_verdict.evidence_used) if verifier_verdict is not None else []
+                    ),
                 )
                 result_final_message = (
                     f"{fat_harness_error}\n\nRuntime final message:\n{final_message}"
@@ -6036,6 +6047,9 @@ Files present:
         if verifier_verdict is not None:
             data["verifier_reasons"] = list(verifier_verdict.reasons)
             data["verifier_failure_class"] = verifier_verdict.failure_class
+            data["verifier_status"] = verifier_verdict.status.value
+            data["retry_admission"] = verifier_verdict.retry_admission.value
+            data["verifier_evidence_used"] = list(verifier_verdict.evidence_used)
         if typed_evidence is not None:
             data["typed_evidence_fields"] = sorted(typed_evidence.data)
             data["ignored_out_of_scope_evidence_fields"] = list(

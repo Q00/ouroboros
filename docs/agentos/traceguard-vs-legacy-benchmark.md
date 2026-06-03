@@ -74,9 +74,19 @@ Fat-harness baseline report — profile=traceguard_plus_claim_term_guard_fixture
 - Claim-term guard semantic-miss incidents per 100 ACs: -12.5000
 - Claim-term guard median chars ratio: 1.4054
 
+## H1 retry admission
+
+| Fixture | Accepted | Failure class | Retry admission | Evidence refs |
+| --- | --- | --- | --- | ---: |
+| fixture:h1/traceguard/accepted | true |  | ACCEPT | 1 |
+| fixture:h1/traceguard/missing-evidence | false | EVIDENCE_MISSING | RETRY | 0 |
+| fixture:h1/claim-term/semantic-miss | false | SCOPE_CREEP | REDISPATCH | 1 |
+| fixture:h1/traceguard/repeated-fabrication | false | FABRICATION_SUSPECTED | ESCALATE_MODEL | 0 |
+
 ## Gate interpretation
 
 - TraceGuard reduces fixture fabrication incidents to 0 per 100 ACs.
 - The deterministic claim-term guard rejects the fixture semantic miss without reintroducing fabrication.
 - One-shot pass rate drops because unsupported legacy self-reports are rejected instead of counted as accepted.
 - Median chars stay within the <= 1.5x C.4 budget guardrail.
+- H1 admission is typed for accepted, retryable, redispatch, and model-escalation verdicts.

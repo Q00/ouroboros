@@ -7,12 +7,16 @@ import json
 
 import pytest
 
+from ouroboros.harness.deliver_gate import DeliverGateVerdict
+from ouroboros.harness.deliver_routing import deliver_gate_verifier_verdict
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ProfileEvidenceConfigError
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile, load_profile
 from ouroboros.orchestrator.verifier import (
     DEFAULT_MAX_RETRIES,
     LoopResult,
+    RetryAdmission,
     VerifierContractError,
+    VerifierStatus,
     VerifierVerdict,
     run_with_verifier,
 )
@@ -81,6 +85,25 @@ class TestVerifierVerdict:
             passed=False, reasons=("missing test",), failure_class="EVIDENCE_MISSING"
         )
         assert verdict.passed is False
+        assert verdict.status is VerifierStatus.FAIL
+        assert verdict.retry_admission is RetryAdmission.RETRY
+
+    def test_pass_defaults_to_typed_acceptance(self) -> None:
+        verdict = VerifierVerdict(passed=True, evidence_used=(" evt_1 ", "evt_1", "evt_2"))
+
+        assert verdict.status is VerifierStatus.PASS
+        assert verdict.retry_admission is RetryAdmission.ACCEPT
+        assert verdict.evidence_used == ("evt_1", "evt_2")
+
+    def test_blocked_failure_defaults_to_block_status_and_admission(self) -> None:
+        verdict = VerifierVerdict(
+            passed=False,
+            reasons=("blocked",),
+            failure_class="BLOCKED",
+        )
+
+        assert verdict.status is VerifierStatus.BLOCKED
+        assert verdict.retry_admission is RetryAdmission.BLOCK
 
     def test_fail_without_reasons_rejected(self) -> None:
         # A bare FAIL produces no feedback for the retry executor and no
@@ -105,6 +128,18 @@ class TestVerifierVerdict:
         # verifier impl that typo'd the tag. Reject at construction.
         with pytest.raises(ValueError, match="not a recognized taxonomy"):
             VerifierVerdict(passed=False, reasons=("bad",), failure_class="MYSTERY")
+
+    def test_pass_cannot_use_non_accept_retry_admission(self) -> None:
+        with pytest.raises(ValueError, match="retry_admission ACCEPT"):
+            VerifierVerdict(passed=True, retry_admission="RETRY")
+
+    def test_fail_cannot_use_accept_retry_admission(self) -> None:
+        with pytest.raises(ValueError, match="cannot have retry_admission ACCEPT"):
+            VerifierVerdict(
+                passed=False,
+                reasons=("bad",),
+                retry_admission="ACCEPT",
+            )
 
     @pytest.mark.parametrize(
         "klass",
@@ -402,6 +437,61 @@ class TestRetryWithFeedback:
 
     def test_default_max_retries_is_two(self) -> None:
         assert DEFAULT_MAX_RETRIES == 2
+
+    def test_h1_consumes_traceguard_deliver_verdict_for_retry_admission(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
+
+        def traceguard_backed_verifier(
+            *,
+            profile: ExecutionProfile,
+            ac: str,
+            leaf_output: str,
+            record: EvidenceRecord,
+        ) -> VerifierVerdict:
+            del profile, ac, leaf_output, record
+            if not getattr(traceguard_backed_verifier, "fired", False):
+                traceguard_backed_verifier.fired = True  # type: ignore[attr-defined]
+                return deliver_gate_verifier_verdict(
+                    DeliverGateVerdict(
+                        ac_id="AC-1",
+                        accepted=False,
+                        unsupported_claim_rate=1.0,
+                        rejected_fact_ids=("fact_1",),
+                        rejected_reasons=(
+                            "semantic_miss: evidence text lacks behavior=admin_delete_denied",
+                        ),
+                        evidence_event_ids=("evt_semantic_miss",),
+                    )
+                )
+            return deliver_gate_verifier_verdict(
+                DeliverGateVerdict(
+                    ac_id="AC-1",
+                    accepted=True,
+                    unsupported_claim_rate=0.0,
+                    accepted_fact_ids=("fact_1",),
+                    evidence_event_ids=("evt_fixed",),
+                )
+            )
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=traceguard_backed_verifier,
+            profile=code_profile,
+            ac="deny admin delete",
+            max_retries=1,
+        )
+
+        assert result.accepted is True
+        first = result.attempts[0]
+        assert first.verdict is not None
+        assert first.verdict.failure_class == "SCOPE_CREEP"
+        assert first.verdict.retry_admission is RetryAdmission.REDISPATCH
+        assert first.verdict.evidence_used == ("evt_semantic_miss",)
+        assert "semantic_miss" in executor.feedbacks[1][0]
+        assert result.final.verdict is not None
+        assert result.final.verdict.retry_admission is RetryAdmission.ACCEPT
 
 
 class TestEvidenceShortCircuit:

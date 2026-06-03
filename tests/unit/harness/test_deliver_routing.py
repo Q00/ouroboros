@@ -12,9 +12,13 @@ from ouroboros.harness.deliver_gate import (
     DeliverGateVerdict,
     evaluate_deliver_claim,
 )
-from ouroboros.harness.deliver_routing import route_deliver_gate_verdict
+from ouroboros.harness.deliver_routing import (
+    deliver_gate_verifier_verdict,
+    route_deliver_gate_verdict,
+)
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.orchestrator.failure_taxonomy import RecoveryAction
+from ouroboros.orchestrator.verifier import RetryAdmission, VerifierStatus
 
 
 def _verdict(*, accepted: bool, reasons: tuple[str, ...] = ()) -> DeliverGateVerdict:
@@ -35,6 +39,23 @@ def test_accepted_verdict_has_no_recovery_action() -> None:
     assert route.reason == "deliver_gate_accepted"
 
 
+def test_accepted_verdict_promotes_to_h1_accept_verifier_output() -> None:
+    verdict = DeliverGateVerdict(
+        ac_id="AC-1",
+        accepted=True,
+        unsupported_claim_rate=0.0,
+        accepted_fact_ids=("fact_1",),
+        evidence_event_ids=("evt_1", "evt_1", "evt_2"),
+    )
+
+    verifier_verdict = deliver_gate_verifier_verdict(verdict)
+
+    assert verifier_verdict.passed is True
+    assert verifier_verdict.status is VerifierStatus.PASS
+    assert verifier_verdict.retry_admission is RetryAdmission.ACCEPT
+    assert verifier_verdict.evidence_used == ("evt_1", "evt_2")
+
+
 def test_missing_evidence_routes_to_retry() -> None:
     route = route_deliver_gate_verdict(
         _verdict(accepted=False, reasons=("missing_evidence_handle: ev_1 was not found",))
@@ -42,6 +63,13 @@ def test_missing_evidence_routes_to_retry() -> None:
 
     assert route.action is RecoveryAction.RETRY
     assert route.reason == "deliver_gate_retryable_evidence_gap"
+
+    verifier_verdict = deliver_gate_verifier_verdict(
+        _verdict(accepted=False, reasons=("missing_evidence_handle: ev_1 was not found",))
+    )
+    assert verifier_verdict.status is VerifierStatus.FAIL
+    assert verifier_verdict.failure_class == "EVIDENCE_MISSING"
+    assert verifier_verdict.retry_admission is RetryAdmission.RETRY
 
 
 def test_missing_claim_handle_from_real_verdict_producer_routes_to_retry() -> None:
@@ -116,6 +144,17 @@ def test_semantic_miss_routes_to_redispatch_before_escalation_threshold() -> Non
     assert route.action is RecoveryAction.REDISPATCH
     assert route.reason == "deliver_gate_redispatch_required"
 
+    verifier_verdict = deliver_gate_verifier_verdict(
+        _verdict(
+            accepted=False,
+            reasons=("semantic_miss: evidence text lacks behavior=admin_delete_denied",),
+        ),
+        rejection_count=1,
+        model_escalation_threshold=2,
+    )
+    assert verifier_verdict.failure_class == "SCOPE_CREEP"
+    assert verifier_verdict.retry_admission is RetryAdmission.REDISPATCH
+
 
 def test_repeated_traceguard_rejections_route_to_model_escalation() -> None:
     route = route_deliver_gate_verdict(
@@ -127,6 +166,14 @@ def test_repeated_traceguard_rejections_route_to_model_escalation() -> None:
     assert route.action is RecoveryAction.ESCALATE_MODEL
     assert route.reason == "deliver_gate_repeated_rejection"
 
+    verifier_verdict = deliver_gate_verifier_verdict(
+        _verdict(accepted=False, reasons=("unsupported_fact_id: fact_1 is not present",)),
+        rejection_count=2,
+        model_escalation_threshold=2,
+    )
+    assert verifier_verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert verifier_verdict.retry_admission is RetryAdmission.ESCALATE_MODEL
+
 
 def test_external_dependency_routes_to_hitl() -> None:
     route = route_deliver_gate_verdict(
@@ -135,6 +182,13 @@ def test_external_dependency_routes_to_hitl() -> None:
 
     assert route.action is RecoveryAction.ESCALATE_HUMAN
     assert route.reason == "deliver_gate_requires_human"
+
+    verifier_verdict = deliver_gate_verifier_verdict(
+        _verdict(accepted=False, reasons=("external_dependency_missing: API key missing",))
+    )
+    assert verifier_verdict.status is VerifierStatus.BLOCKED
+    assert verifier_verdict.failure_class == "BLOCKED"
+    assert verifier_verdict.retry_admission is RetryAdmission.ESCALATE_HUMAN
 
 
 def test_rejects_invalid_routing_counters() -> None:
