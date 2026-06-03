@@ -163,6 +163,7 @@ Use WSL 2 for the supported Windows path, then run the Linux install commands fr
 | OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
 | Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), `pip install ouroboros-ai[claude]` (shares the Claude extras for the Agent SDK types). Then `ouroboros setup --runtime kiro` to register the Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
 | GitHub Copilot CLI backend | Python >= 3.12, `copilot` on PATH, `gh` on PATH (`gh auth login`), `pip install 'ouroboros-ai[mcp]'` (or `pipx`/`uv tool` install). Then `ouroboros setup --runtime copilot` to live-discover available models, pick a default, and register the Ouroboros MCP server in `~/.copilot/mcp-config.json` |
+| Pi CLI backend | Python >= 3.12, `pi` on PATH or `orchestrator.pi_cli_path` configured. Use `runtime_backend: pi` for workflow execution and `llm.backend: pi` only for unstructured LLM flows such as interview and seed generation |
 
 ---
 
@@ -186,10 +187,10 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | kiro | copilot
+  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | kiro | copilot | pi
 
 llm:
-  backend: claude_code      # claude_code | codex | litellm | kiro | copilot
+  backend: claude_code      # claude_code | codex | litellm | kiro | copilot | pi
 
 logging:
   level: info
