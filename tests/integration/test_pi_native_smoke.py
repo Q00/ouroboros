@@ -95,6 +95,7 @@ async def test_real_pi_cli_runtime_returns_response_without_reference_repo_side_
     runtime = create_agent_runtime(
         backend="pi",
         cwd=tmp_path,
+        model=os.environ.get("OUROBOROS_EXECUTION_MODEL") or None,
         permission_mode="acceptEdits",
     )
 
