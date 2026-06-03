@@ -206,7 +206,9 @@ class TestInstallCodexRules:
         assert _SKILL_CAPABILITY_GUIDE_MARKER in rules
         assert "## Ouroboros Skill Capability Guide: Codex" in rules
         assert "### When a skill requires `ask_user`" in rules
+        assert "### When a skill requires `run_lateral_review`" in rules
         assert "### When a skill requires `run_closure_gate`" in rules
+        assert "lateral_review_required=true" in rules
         assert "MCP `seed-ready`" in rules
 
     def test_rendered_skill_capability_guide_is_idempotent(self, tmp_path: Path) -> None:
@@ -279,6 +281,7 @@ class TestLoadPackagedCodexSkills:
         assert "WebFetch/WebSearch" not in skill
         assert "active runtime's `ask_user` capability" in skill
         assert "active runtime's tool-discovery capability" in skill
+        assert "`run_lateral_review`" in skill
 
     def test_raises_when_explicit_packaged_skill_is_missing(self, tmp_path: Path) -> None:
         """Missing skill entrypoints should fail fast."""

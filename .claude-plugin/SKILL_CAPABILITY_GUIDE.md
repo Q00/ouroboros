@@ -9,6 +9,9 @@ Use the runtime's local file search/read tools and prefer exact repository evide
 ### When a skill requires `call_mcp`
 Call available Ouroboros MCP tools through the runtime's MCP/tool surface instead of emulating MCP workflows manually.
 
+### When a skill requires `run_lateral_review`
+When an interview response marks `lateral_review_required=true`, call `ouroboros_lateral_think` with the supplied `lateral_review_tool_args` before routing the next interview turn. When directly synthesizing an answer for the user, run researcher, contrarian, and simplifier perspectives first, then collapse the result into concise choices or a recommended draft.
+
 ### When a skill requires `web_research`
 Use the runtime's web/search capability only when current external facts are required, and cite the sources used.
 

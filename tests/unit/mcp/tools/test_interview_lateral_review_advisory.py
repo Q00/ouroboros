@@ -143,7 +143,7 @@ def test_advisory_event_is_structured_and_non_blocking() -> None:
     }
 
 
-async def test_handler_surfaces_advisory_in_meta_without_question_text_leak() -> None:
+async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     state = InterviewState(
         interview_id="sess-817",
         # No stored ambiguity yet: this is the normal first live scoring path
@@ -184,10 +184,23 @@ async def test_handler_surfaces_advisory_in_meta_without_question_text_leak() ->
 
     assert result.is_ok
     assert result.value.meta["lateral_review_recommended"] is True
+    assert result.value.meta["lateral_review_required"] is True
     assert result.value.meta["lateral_review_from_milestone"] == "initial"
     assert result.value.meta["lateral_review_milestone"] == "progress"
     assert result.value.meta["lateral_review_reason"] == "first_forward_milestone_transition"
-    assert "lateral" not in result.value.content[0].text.lower()
+    assert result.value.meta["lateral_review_tool"] == "ouroboros_lateral_think"
+    assert result.value.meta["lateral_review_personas"] == [
+        "researcher",
+        "contrarian",
+        "simplifier",
+    ]
+    tool_args = result.value.meta["lateral_review_tool_args"]
+    assert tool_args["personas"] == ["researcher", "contrarian", "simplifier"]
+    assert "Milestone: initial -> progress" in tool_args["problem_context"]
+    assert "Next interview question: What edge case remains?" in tool_args["problem_context"]
+    content_text = result.value.content[0].text
+    assert content_text.startswith("Lateral review queued:")
+    assert "Session sess-817" in content_text
     assert state.lateral_review_advised_milestones == ["progress"]
     handler._emit_event_bg.assert_called()
 

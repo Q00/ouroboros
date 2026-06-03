@@ -81,6 +81,7 @@ class TestInstallHermesSkills:
             "ask_user",
             "inspect_code",
             "call_mcp",
+            "run_lateral_review",
             "web_research",
             "run_shell",
             "refine_answer",

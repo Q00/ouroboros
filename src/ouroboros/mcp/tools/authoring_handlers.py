@@ -379,6 +379,101 @@ def _maybe_record_lateral_review_advisory(
     }
 
 
+_INTERVIEW_LATERAL_PERSONAS = ("researcher", "contrarian", "simplifier")
+
+
+def _latest_answered_round(state: InterviewState) -> Any | None:
+    """Return the latest round with a user response, if any."""
+    for round_data in reversed(state.rounds):
+        if round_data.user_response is not None:
+            return round_data
+    return None
+
+
+def _build_interview_lateral_review_tool_args(
+    state: InterviewState,
+    *,
+    next_question: str,
+    score: AmbiguityScore | None,
+    lateral_review_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Build deterministic ``ouroboros_lateral_think`` args for interview review."""
+    latest = _latest_answered_round(state)
+    milestone = lateral_review_meta["lateral_review_milestone"]
+    from_milestone = lateral_review_meta["lateral_review_from_milestone"]
+    score_text = f"{score.overall_score:.2f}" if score is not None else "unknown"
+
+    problem_lines = [
+        "An Ouroboros interview just crossed an ambiguity milestone.",
+        f"Interview ID: {state.interview_id}",
+        f"Milestone: {from_milestone} -> {milestone}",
+        f"Ambiguity score: {score_text}",
+        f"Initial context: {state.initial_context[:700]}",
+    ]
+    if latest is not None:
+        problem_lines.extend(
+            [
+                f"Latest answered question: {latest.question[:500]}",
+                f"Latest answer: {(latest.user_response or '')[:700]}",
+            ]
+        )
+    problem_lines.append(f"Next interview question: {next_question[:500]}")
+
+    return {
+        "problem_context": "\n".join(problem_lines),
+        "current_approach": (
+            "The main session is continuing a Socratic interview and is about to "
+            "route the next question. Review hidden assumptions, missing context, "
+            "and simplifications before asking the user or auto-answering from code."
+        ),
+        "personas": list(_INTERVIEW_LATERAL_PERSONAS),
+        "failed_attempts": [],
+    }
+
+
+def _with_lateral_review_dispatch(
+    state: InterviewState,
+    *,
+    next_question: str,
+    score: AmbiguityScore | None,
+    lateral_review_meta: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Attach runnable lateral-think dispatch metadata to an advisory."""
+    if lateral_review_meta is None:
+        return None
+    enriched = dict(lateral_review_meta)
+    enriched.update(
+        {
+            "lateral_review_required": True,
+            "lateral_review_tool": "ouroboros_lateral_think",
+            "lateral_review_personas": list(_INTERVIEW_LATERAL_PERSONAS),
+            "lateral_review_tool_args": _build_interview_lateral_review_tool_args(
+                state,
+                next_question=next_question,
+                score=score,
+                lateral_review_meta=lateral_review_meta,
+            ),
+        }
+    )
+    return enriched
+
+
+def _prepend_lateral_review_notice(
+    response_text: str,
+    lateral_review_meta: dict[str, Any] | None,
+) -> str:
+    """Surface a short user-visible cue when a lateral review should run."""
+    if lateral_review_meta is None:
+        return response_text
+    personas = ", ".join(str(p) for p in lateral_review_meta["lateral_review_personas"])
+    milestone = lateral_review_meta["lateral_review_milestone"]
+    return (
+        "Lateral review queued: running "
+        f"{personas} before this interview turn "
+        f"(milestone: {milestone}).\n\n{response_text}"
+    )
+
+
 def _compute_transcript_chars(state: InterviewState) -> int:
     """Sum question + user_response length over every round in ``state``.
 
@@ -2637,6 +2732,12 @@ class InterviewHandler:
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
 
                 question = question_result.value
+                lateral_review_dispatch_meta = _with_lateral_review_dispatch(
+                    state,
+                    next_question=question,
+                    score=live_score,
+                    lateral_review_meta=lateral_review_meta,
+                )
                 if lateral_review_meta is not None and live_score is not None:
                     state.note_lateral_review_advisory(
                         lateral_review_meta["lateral_review_milestone"]
@@ -2706,10 +2807,14 @@ class InterviewHandler:
                     # the auto driver's ``answer()`` path is not raised on.
                     answer_meta.update(_length_guard_meta_fields())
 
-                if lateral_review_meta is not None:
-                    answer_meta.update(lateral_review_meta)
+                if lateral_review_dispatch_meta is not None:
+                    answer_meta.update(lateral_review_dispatch_meta)
 
                 answer_response_text = f"Session {session_id}\n\n{display_question}"
+                answer_response_text = _prepend_lateral_review_notice(
+                    answer_response_text,
+                    lateral_review_dispatch_meta,
+                )
                 # Q00/ouroboros#831 (diagnostics): response-shape event for
                 # the answer branch.  Pure observability.
                 from ouroboros.events.interview import interview_response_emitted

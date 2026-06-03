@@ -66,6 +66,16 @@ _CODEX_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
         ),
     ),
     SkillExecutionCapability(
+        name="run_lateral_review",
+        guidance=(
+            "When an interview response marks `lateral_review_required=true`, call "
+            "`ouroboros_lateral_think` with the supplied `lateral_review_tool_args` "
+            "before routing the next interview turn. For direct-answer synthesis, "
+            "run a lightweight multi-perspective review with researcher, contrarian, "
+            "and simplifier, then present only the actionable options or draft answer."
+        ),
+    ),
+    SkillExecutionCapability(
         name="web_research",
         guidance=(
             "Use Codex web/search tooling only when current external evidence is "
@@ -122,6 +132,17 @@ _GENERIC_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
     SkillExecutionCapability(
         name="call_mcp",
         guidance="Call available Ouroboros MCP tools through the runtime's MCP/tool surface instead of emulating MCP workflows manually.",
+    ),
+    SkillExecutionCapability(
+        name="run_lateral_review",
+        guidance=(
+            "When an interview response marks `lateral_review_required=true`, call "
+            "`ouroboros_lateral_think` with the supplied `lateral_review_tool_args` "
+            "before routing the next interview turn. When directly synthesizing an "
+            "answer for the user, run researcher, contrarian, and simplifier "
+            "perspectives first, then collapse the result into concise choices or a "
+            "recommended draft."
+        ),
     ),
     SkillExecutionCapability(
         name="web_research",

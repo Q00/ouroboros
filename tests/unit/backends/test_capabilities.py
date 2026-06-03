@@ -19,6 +19,7 @@ REQUIRED_SKILL_CAPABILITY_NAMES = {
     "ask_user",
     "inspect_code",
     "call_mcp",
+    "run_lateral_review",
     "web_research",
     "run_shell",
     "refine_answer",
@@ -104,14 +105,16 @@ def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
     assert "`rg`" in guide
     assert "### When a skill requires `call_mcp`" in guide
     assert "Do not rely on Claude-specific `ToolSearch` names." in guide
+    assert "### When a skill requires `run_lateral_review`" in guide
+    assert "lateral_review_required=true" in guide
     assert "### When a skill requires `run_closure_gate`" in guide
     assert "MCP `seed-ready`" in guide
     assert "### When a skill requires `restate_goal`" in guide
     assert "require explicit user approval" in guide
 
 
-def test_renders_generic_skill_capability_guides_for_phase_two_runtimes() -> None:
-    for backend_name in ("hermes", "claude"):
+def test_renders_generic_skill_capability_guides_for_runtime_backends() -> None:
+    for backend_name in ("hermes", "claude", "opencode", "gemini", "kiro", "copilot", "pi"):
         guide = render_backend_skill_capability_guide(backend_name)
 
         assert guide.startswith(f"## Ouroboros Skill Capability Guide: {backend_name.title()}\n")
