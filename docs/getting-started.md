@@ -187,10 +187,10 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | kiro | copilot | pi
+  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | copilot | goose | kiro | pi
 
 llm:
-  backend: claude_code      # claude_code | codex | litellm | kiro | copilot | pi
+  backend: claude_code      # claude_code | codex | litellm | copilot | opencode | gemini | goose | kiro | pi
 
 logging:
   level: info
