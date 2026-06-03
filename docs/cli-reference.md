@@ -67,7 +67,7 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | Option | Description |
 |--------|-------------|
 | `--resume TEXT` | Resume an existing auto session id |
-| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `pi`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow — see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
+| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow — see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
 | `--max-interview-rounds INTEGER` | Maximum automatic interview rounds; prevents unbounded interview loops |
 | `--max-repair-rounds INTEGER` | Maximum Seed repair rounds; prevents unbounded repair loops |
 | `--skip-run` | Stop after creating an A-grade Seed |
@@ -1046,7 +1046,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude models |
 | `OPENAI_API_KEY` | — | OpenAI API key for LiteLLM / Codex CLI |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `pi`) |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for Claude Code / Codex runtimes (no-op for OpenCode) |

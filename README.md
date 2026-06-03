@@ -351,7 +351,7 @@ src/ouroboros/
 - **Evolution** -- Up to 30 generations, convergence at ontology similarity >= 0.95
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
 - **Agent OS runtime** -- Replayable execution contract across capability discovery, policy, directives, event journal, and agent processes
-- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, and Pi; same workflow spec, different execution engines
+- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Goose, Kiro, Copilot, and Pi; same workflow spec, different execution engines
 
 See [Architecture](./docs/architecture.md) for the full design document.
 

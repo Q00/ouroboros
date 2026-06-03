@@ -516,18 +516,23 @@ async def test_parent_execution_child_events_reset_idle_timeout(
         generation_no_progress_timeout_seconds=0,
     )
 
-    async def child_work() -> str:
-        await event_store.append(_session_started(session_id, execution_id))
-        for count in range(1, 5):
-            await asyncio.sleep(0.04)
-            clock.advance(0.04)
-            await event_store.append(
-                _subagent_started(f"evolve_lin_child_generation_1_child_{count}", execution_id)
-            )
-        clock.advance(0.04)
-        return "done"
+    await watchdog.initialize_baseline()
+    await event_store.append(_session_started(session_id, execution_id))
+    await watchdog.poll()
 
-    assert await watchdog.watch(child_work()) == "done"
+    for count in range(1, 5):
+        clock.advance(0.06)
+        watchdog._raise_if_threshold_exceeded()
+
+        child_execution_id = f"evolve_lin_child_generation_1_child_{count}"
+        await event_store.append(_subagent_started(child_execution_id, execution_id))
+        await watchdog.poll()
+
+        assert watchdog._last_event_type == "execution.subagent.started"
+        assert watchdog._last_event_aggregate == f"execution/{child_execution_id}"
+
+    clock.advance(0.06)
+    watchdog._raise_if_threshold_exceeded()
 
 
 @pytest.mark.asyncio
