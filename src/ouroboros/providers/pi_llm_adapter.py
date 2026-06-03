@@ -139,8 +139,8 @@ class PiLLMAdapter(CodexCliLLMAdapter):
 
     def _extract_text_from_message(self, message: dict[str, Any]) -> str:
         """Extract assistant text from a Pi transcript message."""
-        content = message.get("content")
-        if isinstance(content, str):
+        content = message.get("content") or message.get("text") or ""
+        if isinstance(content, str) and content.strip():
             return content.strip()
         if isinstance(content, list):
             texts: list[str] = []
@@ -152,6 +152,28 @@ class PiLLMAdapter(CodexCliLLMAdapter):
                     if isinstance(text, str) and item.get("type") in {None, "text"}:
                         texts.append(text)
             return "".join(texts).strip()
+        return ""
+
+    def _extract_content_delta(self, event: dict[str, Any]) -> str:
+        """Extract streaming text with parity to ``PiRuntime`` JSON parsing."""
+        if event.get("type") != "message_update":
+            return ""
+
+        assistant_event = event.get("assistantMessageEvent")
+        if isinstance(assistant_event, dict):
+            delta = assistant_event.get("delta")
+            if isinstance(delta, str):
+                return delta
+            text = assistant_event.get("text") or assistant_event.get("content")
+            if isinstance(text, str):
+                return text
+
+        delta = event.get("delta") or event.get("content") or event.get("text")
+        if isinstance(delta, str):
+            return delta
+        if isinstance(delta, dict):
+            text = delta.get("text") or delta.get("content")
+            return text if isinstance(text, str) else ""
         return ""
 
     def _extract_final_text(self, event: dict[str, Any]) -> str:
@@ -180,25 +202,10 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             self._last_pi_event_kind = None
             if event_type == "message_update":
                 self._last_pi_event_kind = "delta"
-                nested = value.get("assistantMessageEvent")
-                if isinstance(nested, dict):
-                    delta = nested.get("delta")
-                    if isinstance(delta, str):
-                        return delta
-                delta = value.get("delta")
-                if isinstance(delta, str):
-                    return delta
+                return self._extract_content_delta(value)
             if event_type in {"message_end", "turn_end", "agent_end"}:
-                text = self._extract_final_text(value)
-                if text:
-                    self._last_pi_event_kind = "final"
-                    return text
-                for key in ("content", "text", "result", "response"):
-                    text = super()._extract_text(value.get(key))
-                    if text:
-                        self._last_pi_event_kind = "final"
-                        return text
                 self._last_pi_event_kind = "final"
+                return self._extract_final_text(value)
         else:
             self._last_pi_event_kind = None
         return super()._extract_text(value)

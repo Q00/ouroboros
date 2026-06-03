@@ -100,6 +100,64 @@ def test_terminal_pi_final_message_replaces_accumulated_deltas() -> None:
     assert content == "Hello"
 
 
+def test_extracts_pi_runtime_compatible_delta_shapes() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    cases = [
+        ({"type": "message_update", "assistantMessageEvent": {"text": "hello"}}, "hello"),
+        ({"type": "message_update", "assistantMessageEvent": {"content": "world"}}, "world"),
+        ({"type": "message_update", "content": "top content"}, "top content"),
+        ({"type": "message_update", "text": "top text"}, "top text"),
+        ({"type": "message_update", "delta": {"text": "dict text"}}, "dict text"),
+        ({"type": "message_update", "delta": {"content": "dict content"}}, "dict content"),
+    ]
+
+    for event, expected in cases:
+        assert adapter._extract_text(event) == expected
+
+
+def test_extracts_pi_runtime_compatible_final_text_shapes() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    assert (
+        adapter._extract_text(
+            {
+                "type": "agent_end",
+                "messages": [{"role": "assistant", "text": "done from text"}],
+            }
+        )
+        == "done from text"
+    )
+    assert (
+        adapter._extract_text(
+            {
+                "type": "message_end",
+                "message": {"role": "assistant", "text": "message text"},
+            }
+        )
+        == "message text"
+    )
+    assert (
+        adapter._extract_text(
+            {
+                "type": "turn_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "list "}, "content"],
+                },
+            }
+        )
+        == "list content"
+    )
+
+
+def test_unsupported_pi_events_do_not_fall_back_to_event_type_text() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    assert adapter._extract_text({"type": "message_update"}) == ""
+    assert adapter._extract_text({"type": "agent_end", "messages": []}) == ""
+
+
 def test_pi_prompt_is_not_written_to_stdin() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 
