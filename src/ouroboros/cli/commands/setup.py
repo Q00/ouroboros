@@ -1794,6 +1794,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     print_info(f"Config saved to: {config_path}")
 
     _register_copilot_mcp_server()
+    _install_runtime_instruction_artifact("copilot")
 
 
 def _setup_gemini(gemini_path: str) -> None:

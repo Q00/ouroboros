@@ -153,6 +153,7 @@ def build_copilot_child_env(
     # agent runtime and refuse to start or hang.
     env.pop("CLAUDECODE", None)
     env.pop("CODEX_THREAD_ID", None)
+    _add_ouroboros_copilot_instruction_dir(env)
 
     try:
         depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
@@ -164,6 +165,19 @@ def build_copilot_child_env(
 
     env["_OUROBOROS_DEPTH"] = str(depth)
     return env
+
+
+def _add_ouroboros_copilot_instruction_dir(env: dict[str, str]) -> None:
+    """Ensure Copilot CLI sees the setup-owned Ouroboros AGENTS.md directory."""
+    from ouroboros.runtime_instruction_artifacts import copilot_instruction_dir
+
+    instruction_dir = str(copilot_instruction_dir())
+    key = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    existing = env.get(key, "")
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if instruction_dir not in parts:
+        parts.append(instruction_dir)
+    env[key] = os.pathsep.join(parts)
 
 
 def _which(name: str) -> str | None:
