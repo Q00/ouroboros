@@ -228,6 +228,14 @@ def test_runtime_does_not_feed_prompt_via_stdin() -> None:
     assert runtime._requires_process_stdin() is False
 
 
+def test_runtime_capabilities_mark_targeted_resume_unsupported() -> None:
+    runtime = _make_runtime()
+
+    assert runtime.capabilities.skill_dispatch is True
+    assert runtime.capabilities.targeted_resume is False
+    assert runtime.capabilities.structured_output is True
+
+
 # ---------------------------------------------------------------------------
 # Recursion guard
 # ---------------------------------------------------------------------------

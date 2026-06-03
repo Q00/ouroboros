@@ -2626,6 +2626,7 @@ def setup(
     [dim]    ouroboros setup --runtime codex      # use Codex[/dim]
     [dim]    ouroboros setup --runtime claude     # use Claude Code[/dim]
     [dim]    ouroboros setup --runtime opencode   # use OpenCode[/dim]
+    [dim]    ouroboros setup --runtime gemini     # use Gemini CLI[/dim]
     [dim]    ouroboros setup --runtime kiro       # use Kiro CLI[/dim]
     [dim]    ouroboros setup --runtime copilot    # use GitHub Copilot CLI[/dim]
     [dim]    ouroboros setup --runtime goose      # use Goose[/dim]

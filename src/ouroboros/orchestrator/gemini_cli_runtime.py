@@ -24,7 +24,7 @@ from typing import Any
 import structlog
 
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeCapabilities, RuntimeHandle
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
 from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
 
@@ -259,6 +259,20 @@ class GeminiCLIRuntime(CodexCliRuntime):
     def _requires_process_stdin(self) -> bool:
         """Return False — Gemini CLI doesn't need an interactive stdin pipe."""
         return False
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        """Declare Gemini CLI's runtime feature contract.
+
+        Gemini emits structured ``stream-json`` events and can use the shared
+        skill dispatcher, but the native CLI does not expose targeted session
+        resume. Recovery happens at the Ouroboros checkpoint/lineage layer.
+        """
+        return RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=False,
+            structured_output=True,
+        )
 
     # -- Event parsing and normalization -----------------------------------
 
