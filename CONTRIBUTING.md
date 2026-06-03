@@ -15,6 +15,7 @@ Thank you for your interest in contributing to Ouroboros! This guide covers ever
 - [Documentation Coverage](#documentation-coverage)
   - [CLI Commands → Doc Mapping](#cli-commands--doc-mapping)
   - [Orchestrator → Doc Mapping](#orchestrator--doc-mapping)
+  - [Capability Graph → Doc Mapping](#capability-graph--doc-mapping)
   - [Configuration → Doc Mapping](#configuration--doc-mapping)
   - [Evaluation Pipeline → Doc Mapping](#evaluation-pipeline--doc-mapping)
   - [TUI Source → Doc Mapping](#tui-source--doc-mapping)
@@ -604,6 +605,23 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 
 ---
 
+### Capability Graph → Doc Mapping
+
+Changes that add, remove, rename, or reinterpret a skill execution capability
+must keep the capability graph and generated runtime instructions in sync.
+
+| Source path | Must update |
+|-------------|-------------|
+| `skills/*/SKILL.md` | `docs/runtime-guides/skill-capability-guides.md` if `required_capabilities` changes or the skill depends on a new abstract runtime action |
+| `src/ouroboros/backends/capabilities.py` | `docs/runtime-guides/skill-capability-guides.md`; renderer/package snapshot tests for Codex, Hermes, Claude, and setup-owned runtime artifacts |
+| `src/ouroboros/runtime_instruction_artifacts.py` | `docs/runtime-guides/skill-capability-guides.md`; `docs/cli-reference.md` setup section if install paths or managed surfaces change |
+| Packaged guide snapshots such as `.claude-plugin/SKILL_CAPABILITY_GUIDE.md` | Update when `render_backend_skill_capability_guide(<backend>)` output changes |
+
+Before submitting a capability graph PR, run the checklist in
+[`docs/runtime-guides/skill-capability-guides.md`](./docs/runtime-guides/skill-capability-guides.md#contributor-checklist-for-capability-changes).
+
+---
+
 ### Configuration → Doc Mapping
 
 Changes under `src/ouroboros/config/` affect configuration reference documentation:
@@ -668,7 +686,7 @@ Changes under `skills/` (YAML skill definitions used by Claude and Codex) or `sr
 | Source path | Must update |
 |-------------|-------------|
 | `skills/codex.md` | `docs/runtime-guides/codex.md` — if skill instructions change |
-| `skills/*.yaml` or `src/ouroboros/agents/*.md` | `docs/` guide that describes the affected skill/agent behaviour |
+| `skills/*.yaml`, `skills/*/SKILL.md`, or `src/ouroboros/agents/*.md` | `docs/` guide that describes the affected skill/agent behaviour; `docs/runtime-guides/skill-capability-guides.md` if required capabilities change |
 | `src/ouroboros/plugin/skills/executor.py` | `docs/architecture.md` — skill execution model |
 | `src/ouroboros/plugin/agents/registry.py` | `docs/architecture.md` — agent registry; `docs/runtime-capability-matrix.md` if supported agents change per runtime |
 
