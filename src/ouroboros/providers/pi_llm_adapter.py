@@ -137,6 +137,43 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             return event["id"]
         return None
 
+
+    def _extract_text_from_message(self, message: dict[str, Any]) -> str:
+        """Extract assistant text from a Pi transcript message."""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            texts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    texts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str) and item.get("type") in {None, "text"}:
+                        texts.append(text)
+            return "".join(texts).strip()
+        return ""
+
+    def _extract_final_text(self, event: dict[str, Any]) -> str:
+        """Extract only terminal assistant content from Pi final events."""
+        event_type = event.get("type")
+        if event_type in {"message_end", "turn_end"}:
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                return self._extract_text_from_message(message)
+            return ""
+        if event_type == "agent_end":
+            messages = event.get("messages")
+            if isinstance(messages, list):
+                for message in reversed(messages):
+                    if isinstance(message, dict) and message.get("role") == "assistant":
+                        text = self._extract_text_from_message(message)
+                        if text:
+                            return text
+            return ""
+        return ""
+
     def _extract_text(self, value: object) -> str:
         """Extract content from documented Pi JSONL events."""
         if isinstance(value, dict):
@@ -153,12 +190,11 @@ class PiLLMAdapter(CodexCliLLMAdapter):
                 if isinstance(delta, str):
                     return delta
             if event_type in {"message_end", "turn_end", "agent_end"}:
-                messages = value.get("messages")
-                text = super()._extract_text(messages)
+                text = self._extract_final_text(value)
                 if text:
                     self._last_pi_event_kind = "final"
                     return text
-                for key in ("message", "content", "text", "result", "response"):
+                for key in ("content", "text", "result", "response"):
                     text = super()._extract_text(value.get(key))
                     if text:
                         self._last_pi_event_kind = "final"

@@ -48,6 +48,26 @@ def test_extracts_pi_final_messages() -> None:
     )
 
 
+def test_extracts_pi_final_transcript_assistant_only() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    assert (
+        adapter._extract_text(
+            {
+                "type": "agent_end",
+                "messages": [
+                    {"role": "user", "content": "request"},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Done."}],
+                    },
+                ],
+            }
+        )
+        == "Done."
+    )
+
+
 def test_accumulates_pi_streaming_deltas() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 
