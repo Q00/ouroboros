@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
+
 from ouroboros.config import get_pi_cli_path
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
-from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
+from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.profiles import resolve_completion_profile_result
 
 
 class PiLLMAdapter(CodexCliLLMAdapter):
@@ -99,6 +106,71 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         command.append(prompt or "")
         return command
 
+    def _build_response_format_directive(
+        self,
+        response_format: dict[str, object] | None,
+    ) -> str | None:
+        """Translate response_format into Pi prompt instructions.
+
+        Pi JSON mode does not expose a Codex-style hard ``--output-schema``
+        flag, so structured output is cooperatively enforced through the
+        prompt and validated after extraction.
+        """
+        if not response_format:
+            return None
+        fmt_type = response_format.get("type")
+        if fmt_type == "json_object":
+            return (
+                "Respond with ONLY a valid JSON object. Do not use markdown fences, "
+                "headers, or explanatory text."
+            )
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema")
+            if not isinstance(schema, dict):
+                return None
+            schema_payload = schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            top_type = schema_payload.get("type", "object") if isinstance(schema_payload, dict) else "object"
+            type_noun = {
+                "array": "JSON array",
+                "object": "JSON object",
+            }.get(str(top_type), "JSON value")
+            try:
+                rendered = json.dumps(schema_payload, indent=2, sort_keys=True)
+            except (TypeError, ValueError):
+                rendered = str(schema_payload)
+            return (
+                f"Respond with ONLY a valid {type_noun} that matches this schema. "
+                "Do not use markdown fences, headers, or explanatory text.\n\n"
+                f"JSON schema:\n{rendered}"
+            )
+        return None
+
+    def _validate_response_format_payload(
+        self,
+        payload: str,
+        response_format: dict[str, object],
+    ) -> str | None:
+        """Validate extracted JSON against the requested response_format."""
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            return f"invalid JSON: {exc}"
+
+        fmt_type = response_format.get("type")
+        if fmt_type == "json_object":
+            return None if isinstance(parsed, dict) else "expected a JSON object"
+
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema")
+            if not isinstance(schema, dict):
+                return "json_schema response_format is missing a schema object"
+            schema_payload = schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            try:
+                Draft202012Validator(schema_payload).validate(parsed)
+            except JsonSchemaValidationError as exc:
+                return exc.message
+        return None
+
     def _update_last_content(self, last_content: str, event_content: str) -> str:
         """Accumulate streaming deltas but replace them with terminal Pi content.
 
@@ -119,21 +191,58 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         messages: list[Message],
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
-        """Make a Pi completion request, failing closed on unsupported schemas."""
+        """Make a Pi completion request, including soft structured output support."""
         self._last_pi_event_kind = None
-        if config.response_format:
-            response_format_type = config.response_format.get("type")
+        if not config.response_format:
+            return await super().complete(messages, config)
+
+        profile_result = resolve_completion_profile_result(
+            config,
+            backend=self._completion_profile_backend,
+        )
+        if profile_result.is_err:
+            return Result.err(profile_result.error)
+        effective_config = profile_result.value.config
+
+        directive = self._build_response_format_directive(effective_config.response_format)
+        if not directive:
             return Result.err(
                 ProviderError(
-                    message=(
-                        "Pi CLI LLM backend does not currently support structured "
-                        "response_format requests"
-                    ),
+                    message="Unsupported Pi structured response_format request",
                     provider=self._provider_name,
-                    details={"response_format_type": response_format_type},
+                    details={
+                        "response_format_type": effective_config.response_format.get("type"),
+                    },
                 )
             )
-        return await super().complete(messages, config)
+
+        patched_messages = [Message(role=MessageRole.SYSTEM, content=directive), *messages]
+        patched_config = replace(effective_config, response_format=None)
+        attempts = max(1, self._max_retries)
+        last_response_preview = ""
+        for _attempt in range(attempts):
+            self._last_pi_event_kind = None
+            result = await super().complete(patched_messages, patched_config)
+            if result.is_err:
+                return result
+            last_response_preview = result.value.content[:240]
+            extracted = extract_json_payload(result.value.content)
+            if not extracted:
+                continue
+            validation_error = self._validate_response_format_payload(
+                extracted,
+                effective_config.response_format,
+            )
+            if validation_error is None:
+                return Result.ok(replace(result.value, content=extracted))
+
+        return Result.err(
+            ProviderError(
+                message="JSON format required but Pi returned non-conforming output",
+                provider=self._provider_name,
+                details={"last_response_preview": last_response_preview},
+            )
+        )
 
     def _extract_session_id_from_event(self, event: dict[str, Any]) -> str | None:
         if event.get("type") == "session" and isinstance(event.get("id"), str):
@@ -164,6 +273,9 @@ class PiLLMAdapter(CodexCliLLMAdapter):
 
         assistant_event = event.get("assistantMessageEvent")
         if isinstance(assistant_event, dict):
+            assistant_event_type = assistant_event.get("type")
+            if assistant_event_type and assistant_event_type != "text_delta":
+                return ""
             delta = assistant_event.get("delta")
             if isinstance(delta, str):
                 return delta

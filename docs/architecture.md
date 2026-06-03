@@ -550,7 +550,7 @@ The orchestrator never inspects backend-specific internals — each adapter maps
 - **`KiroAdapter`** (`backend="kiro"`) — Drives the Kiro CLI in headless mode. Module: `src/ouroboros/orchestrator/kiro_adapter.py`
 - **`CopilotCliLLMAdapter`** (`backend="copilot"`) — Drives the GitHub Copilot CLI via `copilot -p`, with live model discovery (queries `https://api.githubcopilot.com/models` at setup) and automatic hyphen-to-dotted model name mapping for cross-runtime config compatibility. Module: `src/ouroboros/providers/copilot_cli_adapter.py`
 - **`PiRuntime`** (`backend="pi"`) — Drives the Pi CLI in documented JSON mode with skill dispatch, session resumption, and JSONL event normalization. Module: `src/ouroboros/orchestrator/pi_runtime.py`
-- **`PiLLMAdapter`** (`backend="pi"`) — Exposes the Pi CLI for unstructured LLM-only flows such as interview and seed generation. Module: `src/ouroboros/providers/pi_llm_adapter.py`
+- **`PiLLMAdapter`** (`backend="pi"`) — Exposes the Pi CLI for LLM-only flows such as interview, ambiguity scoring, seed extraction, and structured JSON responses. Structured `response_format` calls are soft-enforced with prompt instructions plus adapter-side extraction/validation because Pi has no native `--output-schema` flag. Module: `src/ouroboros/providers/pi_llm_adapter.py`
 
 > Each runtime has different tool sets, permission models, and streaming semantics. Ouroboros normalizes these differences at the adapter boundary, but feature parity is not guaranteed across runtimes.
 
@@ -607,4 +607,4 @@ For environment variables, `config.yaml` schema, and all configuration options, 
 ---
 
 > For install instructions and first-run onboarding, see **[Getting Started](getting-started.md)**.
-> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), and [Pi JSON mode documentation](https://pi.dev/docs/latest/json) references.
+> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), and [Pi CLI](runtime-guides/pi.md) references.

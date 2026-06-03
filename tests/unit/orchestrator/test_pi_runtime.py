@@ -96,6 +96,20 @@ def test_extract_content_delta_reads_documented_assistant_message_event() -> Non
     assert delta == "Hello"
 
 
+def test_extract_content_delta_ignores_documented_text_end_event() -> None:
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    delta = runtime._extract_content_delta(
+        {
+            "type": "message_update",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]},
+            "assistantMessageEvent": {"type": "text_end", "content": "Hello"},
+        }
+    )
+
+    assert delta is None
+
+
 def test_extract_final_content_reads_agent_end_messages() -> None:
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
 
@@ -110,6 +124,27 @@ def test_extract_final_content_reads_agent_end_messages() -> None:
     )
 
     assert content == "Done."
+
+
+def test_extract_error_content_reads_agent_end_stop_reason_error() -> None:
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    content = runtime._extract_error_content(
+        {
+            "type": "agent_end",
+            "messages": [
+                {"role": "user", "content": "request"},
+                {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "OpenAI API error (401)",
+                },
+            ],
+        }
+    )
+
+    assert content == "OpenAI API error (401)"
 
 
 def test_build_runtime_handle_from_session_header() -> None:
@@ -203,6 +238,16 @@ async def test_execute_task_streams_delta_and_final_result() -> None:
             ),
             _jsonl_event(
                 {
+                    "type": "message_update",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Hello"}],
+                    },
+                    "assistantMessageEvent": {"type": "text_end", "content": "Hello"},
+                }
+            ),
+            _jsonl_event(
+                {
                     "type": "agent_end",
                     "messages": [
                         {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}
@@ -210,7 +255,10 @@ async def test_execute_task_streams_delta_and_final_result() -> None:
                 }
             ),
         ],
-        stderr_lines=[],
+        stderr_lines=[
+            "Extension loading...",
+            "Extension loaded: /loop, /loop-stop, /loop-list, /loop-stop-all",
+        ],
         returncode=0,
     )
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
@@ -255,6 +303,46 @@ async def test_agent_end_does_not_mask_nonzero_exit() -> None:
     assert result.data["subtype"] == "error"
     assert result.data["returncode"] == 7
     assert result.data["error_type"] == "PiError"
+
+
+@pytest.mark.asyncio
+async def test_agent_stop_reason_error_overrides_zero_exit() -> None:
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": "request"}]},
+                        {
+                            "role": "assistant",
+                            "content": [],
+                            "stopReason": "error",
+                            "errorMessage": "OpenAI API error (401)",
+                        },
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with patch("asyncio.create_subprocess_exec", return_value=process):
+        messages = [msg async for msg in runtime.execute_task("Do it")]
+
+    result = [m for m in messages if m.type == "result"][-1]
+    assert result.is_error
+    assert result.content == "OpenAI API error (401)"
+    assert result.data == {
+        "subtype": "error",
+        "returncode": 0,
+        "error_type": "PiError",
+    }
+    assert result.resume_handle is not None
+    assert result.resume_handle.native_session_id == "session-1"
 
 
 @pytest.mark.asyncio

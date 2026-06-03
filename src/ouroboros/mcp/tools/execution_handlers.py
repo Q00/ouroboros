@@ -8,6 +8,7 @@ This module contains handlers for seed execution:
 import asyncio
 from dataclasses import dataclass, field
 import inspect
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -65,6 +66,23 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+
+def _resolve_execution_model(runtime_backend: str | None) -> str | None:
+    """Resolve the model pin for agent-runtime execution tasks.
+
+    ``OUROBOROS_EXECUTION_MODEL`` is already honored by the MCP evolution
+    executor. Keep execute-seed and auto run-handoff aligned so CLI-backed
+    runtimes such as Pi can be smoke-tested against an explicitly authenticated
+    provider/model without changing their global defaults.
+    """
+    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+    if execution_model is not None:
+        stripped = execution_model.strip()
+        return stripped or None
+    if runtime_backend == "claude":
+        return "claude-sonnet-4-6"
+    return None
 
 
 def _parse_seed_yaml_for_execution_mode(
@@ -564,6 +582,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 )
                 agent_adapter = create_agent_runtime(
                     backend=self.agent_runtime_backend,
+                    model=_resolve_execution_model(self.agent_runtime_backend),
                     cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
                     llm_backend=self.llm_backend,
                     startup_output_timeout_seconds=0,

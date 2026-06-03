@@ -53,6 +53,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     OPENCODE = "opencode"
     GEMINI = "gemini"
     KIRO = "kiro"
+    PI = "pi"
 
 
 def _write_pid_file() -> bool:
@@ -380,7 +381,7 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, copilot, opencode, gemini, goose, or kiro)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, copilot, opencode, gemini, goose, kiro, or pi)."
             ),
             case_sensitive=False,
         ),
@@ -470,7 +471,7 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, copilot, opencode, gemini, goose, or kiro)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, copilot, opencode, gemini, goose, kiro, or pi)."
             ),
             case_sensitive=False,
         ),

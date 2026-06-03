@@ -180,6 +180,7 @@ The table below covers the currently shipped backends. Because Ouroboros uses a 
 - [OpenCode runtime guide](runtime-guides/opencode.md)
 - [Kiro CLI runtime guide](runtime-guides/kiro.md)
 - [GitHub Copilot CLI runtime guide](runtime-guides/copilot.md)
+- [Pi CLI runtime guide](runtime-guides/pi.md)
 - [Pi JSON mode documentation](https://pi.dev/docs/latest/json)
 - [Platform support matrix](platform-support.md) (OS and Python version compatibility)
 - [Architecture overview](architecture.md) — including [How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter)

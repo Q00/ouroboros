@@ -177,13 +177,23 @@ class TestMCPCommands:
         assert "llm-backend" in result.output.lower()
         assert "pi" in result.output.lower()
 
-    def test_mcp_serve_rejects_pi_llm_backend(self) -> None:
-        """MCP LLM tools require structured output, which Pi does not support."""
-        result = runner.invoke(app, ["mcp", "serve", "--llm-backend", "pi"])
+    def test_mcp_serve_accepts_pi_llm_backend(self) -> None:
+        """Pi supports structured LLM flows through adapter-side validation."""
+        with patch(
+            "ouroboros.cli.commands.mcp._run_mcp_server",
+            new=AsyncMock(),
+        ) as mock_run_mcp_server:
+            result = runner.invoke(app, ["mcp", "serve", "--llm-backend", "pi"])
 
-        assert result.exit_code != 0
-        assert "invalid value" in result.output.lower()
-        assert "pi" in result.output.lower()
+        assert result.exit_code == 0
+        mock_run_mcp_server.assert_awaited_once_with(
+            "localhost",
+            8080,
+            "stdio",
+            None,
+            None,
+            "pi",
+        )
 
     def test_mcp_info(self) -> None:
         """Test mcp info command."""

@@ -766,7 +766,7 @@ llm:
   backend: pi
 ```
 
-Pi is available as an agent runtime backend and, when the Pi LLM adapter is installed, an LLM-only backend for unstructured interview and seed-generation flows. The Pi LLM adapter rejects structured `response_format` requests, so schema-dependent flows such as QA should continue to use a backend with structured output support. The runtime uses documented JSON mode (`pi --mode json <prompt>`) and preserves Pi native session IDs for targeted resume.
+Pi is available as an agent runtime backend and, when the Pi LLM adapter is installed, an LLM-only backend for interview, ambiguity scoring, seed-extraction, and structured JSON flows. The Pi LLM adapter supports structured `response_format` requests through prompt-level JSON/schema instructions plus adapter-side extraction and validation; Pi does not expose a Codex-style native `--output-schema` hard-enforcement flag. The runtime uses documented JSON mode (`pi --mode json <prompt>`) and preserves Pi native session IDs for targeted resume.
 
 ### Full Config Skeleton
 
