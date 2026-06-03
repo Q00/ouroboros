@@ -15,8 +15,9 @@ from ouroboros.orchestrator.failure_taxonomy import (
     RecoveryAction,
     classify,
     policy_for,
+    policy_for_attempt,
 )
-from ouroboros.orchestrator.verifier import Attempt, VerifierVerdict
+from ouroboros.orchestrator.verifier import Attempt, RetryAdmission, VerifierVerdict
 
 
 def _accepted_attempt() -> Attempt:
@@ -149,3 +150,64 @@ class TestPolicyTable:
 
     def test_blocked_escalates_to_human(self) -> None:
         assert policy_for(FailureClass.BLOCKED).action == RecoveryAction.ESCALATE_HUMAN
+
+
+class TestPolicyForAttempt:
+    def test_accepted_attempt_has_no_recovery_policy(self) -> None:
+        assert policy_for_attempt(_accepted_attempt()) is None
+
+    def test_retry_admission_wins_over_failure_class_policy(self) -> None:
+        attempt = _attempt(
+            validation=ValidationResult(ok=True),
+            verdict=VerifierVerdict(
+                passed=False,
+                reasons=("unsupported_fact_id: fact_fake is not present",),
+                failure_class="FABRICATION_SUSPECTED",
+                retry_admission=RetryAdmission.REDISPATCH,
+            ),
+        )
+
+        assert classify(attempt) == FailureClass.FABRICATION_SUSPECTED
+        assert policy_for(FailureClass.FABRICATION_SUSPECTED).action == (
+            RecoveryAction.ESCALATE_MODEL
+        )
+        policy = policy_for_attempt(attempt)
+        assert policy is not None
+        assert policy.action is RecoveryAction.REDISPATCH
+        assert "retry_admission" in policy.rationale
+
+    @pytest.mark.parametrize(
+        ("admission", "action"),
+        [
+            (RetryAdmission.RETRY, RecoveryAction.RETRY),
+            (RetryAdmission.REDISPATCH, RecoveryAction.REDISPATCH),
+            (RetryAdmission.ESCALATE_MODEL, RecoveryAction.ESCALATE_MODEL),
+            (RetryAdmission.ESCALATE_HUMAN, RecoveryAction.ESCALATE_HUMAN),
+            (RetryAdmission.BLOCK, RecoveryAction.ESCALATE_HUMAN),
+        ],
+    )
+    def test_retry_admission_maps_to_recovery_policy(
+        self,
+        admission: RetryAdmission,
+        action: RecoveryAction,
+    ) -> None:
+        attempt = _attempt(
+            validation=ValidationResult(ok=True),
+            verdict=VerifierVerdict(
+                passed=False,
+                reasons=("route me",),
+                retry_admission=admission,
+            ),
+        )
+
+        policy = policy_for_attempt(attempt)
+        assert policy is not None
+        assert policy.action is action
+
+    def test_falls_back_to_classification_when_no_verdict(self) -> None:
+        attempt = _attempt(evidence_error="not json")
+
+        policy = policy_for_attempt(attempt)
+
+        assert policy is not None
+        assert policy.action is RecoveryAction.RETRY
