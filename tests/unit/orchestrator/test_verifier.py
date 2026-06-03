@@ -415,7 +415,8 @@ class TestRetryWithFeedback:
     def test_exhaust_retries_returns_unaccepted(self, code_profile: ExecutionProfile) -> None:
         outputs = [_code_evidence() for _ in range(3)]
         verdicts = [
-            VerifierVerdict(passed=False, reasons=("bad",), failure_class="STALL") for _ in range(3)
+            VerifierVerdict(passed=False, reasons=("bad",), failure_class="EVIDENCE_MISSING")
+            for _ in range(3)
         ]
         executor = ScriptedExecutor(outputs=outputs)
         verifier = ScriptedVerifier(verdicts=verdicts)
@@ -433,12 +434,12 @@ class TestRetryWithFeedback:
         assert verifier.calls == 3
         # Final attempt is not accepted but verdict is recorded.
         assert result.final.verdict is not None
-        assert result.final.verdict.failure_class == "STALL"
+        assert result.final.verdict.retry_admission is RetryAdmission.RETRY
 
     def test_default_max_retries_is_two(self) -> None:
         assert DEFAULT_MAX_RETRIES == 2
 
-    def test_h1_consumes_traceguard_deliver_verdict_for_retry_admission(
+    def test_h1_stops_same_leaf_retry_for_traceguard_redispatch_admission(
         self, code_profile: ExecutionProfile
     ) -> None:
         executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
@@ -451,27 +452,16 @@ class TestRetryWithFeedback:
             record: EvidenceRecord,
         ) -> VerifierVerdict:
             del profile, ac, leaf_output, record
-            if not getattr(traceguard_backed_verifier, "fired", False):
-                traceguard_backed_verifier.fired = True  # type: ignore[attr-defined]
-                return deliver_gate_verifier_verdict(
-                    DeliverGateVerdict(
-                        ac_id="AC-1",
-                        accepted=False,
-                        unsupported_claim_rate=1.0,
-                        rejected_fact_ids=("fact_1",),
-                        rejected_reasons=(
-                            "semantic_miss: evidence text lacks behavior=admin_delete_denied",
-                        ),
-                        evidence_event_ids=("evt_semantic_miss",),
-                    )
-                )
             return deliver_gate_verifier_verdict(
                 DeliverGateVerdict(
                     ac_id="AC-1",
-                    accepted=True,
-                    unsupported_claim_rate=0.0,
-                    accepted_fact_ids=("fact_1",),
-                    evidence_event_ids=("evt_fixed",),
+                    accepted=False,
+                    unsupported_claim_rate=1.0,
+                    rejected_fact_ids=("fact_1",),
+                    rejected_reasons=(
+                        "semantic_miss: evidence text lacks behavior=admin_delete_denied",
+                    ),
+                    evidence_event_ids=("evt_semantic_miss",),
                 )
             )
 
@@ -483,15 +473,68 @@ class TestRetryWithFeedback:
             max_retries=1,
         )
 
-        assert result.accepted is True
+        assert result.accepted is False
+        assert len(result.attempts) == 1
         first = result.attempts[0]
         assert first.verdict is not None
         assert first.verdict.failure_class == "SCOPE_CREEP"
         assert first.verdict.retry_admission is RetryAdmission.REDISPATCH
         assert first.verdict.evidence_used == ("evt_semantic_miss",)
-        assert "semantic_miss" in executor.feedbacks[1][0]
+        assert executor.feedbacks == [()]
+
+    @pytest.mark.parametrize(
+        ("verdict", "expected_admission"),
+        [
+            (
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("fabricated",),
+                    failure_class="FABRICATION_SUSPECTED",
+                ),
+                RetryAdmission.ESCALATE_MODEL,
+            ),
+            (
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("blocked",),
+                    failure_class="BLOCKED",
+                ),
+                RetryAdmission.BLOCK,
+            ),
+            (
+                VerifierVerdict(
+                    passed=False,
+                    reasons=("human needed",),
+                    failure_class="BLOCKED",
+                    retry_admission=RetryAdmission.ESCALATE_HUMAN,
+                ),
+                RetryAdmission.ESCALATE_HUMAN,
+            ),
+        ],
+    )
+    def test_h1_stops_same_leaf_retry_for_non_retry_admissions(
+        self,
+        code_profile: ExecutionProfile,
+        verdict: VerifierVerdict,
+        expected_admission: RetryAdmission,
+    ) -> None:
+        executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[verdict, VerifierVerdict(passed=True)])
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=verifier,
+            profile=code_profile,
+            ac="x",
+            max_retries=1,
+        )
+
+        assert result.accepted is False
+        assert len(result.attempts) == 1
+        assert verifier.calls == 1
+        assert executor.feedbacks == [()]
         assert result.final.verdict is not None
-        assert result.final.verdict.retry_admission is RetryAdmission.ACCEPT
+        assert result.final.verdict.retry_admission is expected_admission
 
 
 class TestEvidenceShortCircuit:

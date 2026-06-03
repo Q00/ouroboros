@@ -296,6 +296,7 @@ def verifier_operational_failure_verdict(exc: BaseException) -> VerifierVerdict:
             passed=False,
             reasons=(f"verifier raised {type(exc).__name__}: {exc}",),
             failure_class="STALL",
+            retry_admission=RetryAdmission.RETRY,
         )
     raise exc
 
@@ -520,6 +521,11 @@ def run_with_verifier(
         if attempt.accepted:
             return LoopResult(accepted=True, attempts=tuple(attempts))
         if attempt.blocked:
+            return LoopResult(accepted=False, attempts=tuple(attempts))
+        if (
+            attempt.verdict is not None
+            and attempt.verdict.retry_admission is not RetryAdmission.RETRY
+        ):
             return LoopResult(accepted=False, attempts=tuple(attempts))
 
         feedback = _failure_reasons(attempt)
