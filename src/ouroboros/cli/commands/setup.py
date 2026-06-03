@@ -2638,7 +2638,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, kiro, copilot, pi).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi).",
         ),
     ] = None,
     non_interactive: Annotated[

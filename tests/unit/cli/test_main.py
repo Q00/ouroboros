@@ -177,6 +177,14 @@ class TestMCPCommands:
         assert "llm-backend" in result.output.lower()
         assert "pi" in result.output.lower()
 
+    def test_mcp_serve_rejects_pi_llm_backend(self) -> None:
+        """MCP LLM tools require structured output, which Pi does not support."""
+        result = runner.invoke(app, ["mcp", "serve", "--llm-backend", "pi"])
+
+        assert result.exit_code != 0
+        assert "invalid value" in result.output.lower()
+        assert "pi" in result.output.lower()
+
     def test_mcp_info(self) -> None:
         """Test mcp info command."""
         result = runner.invoke(app, ["mcp", "info"])

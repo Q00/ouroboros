@@ -67,6 +67,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     OPENCODE = "opencode"
     HERMES = "hermes"
     GEMINI = "gemini"
+    GOOSE = "goose"
     KIRO = "kiro"
     COPILOT = "copilot"
     PI = "pi"
@@ -81,6 +82,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     COPILOT = "copilot"
     OPENCODE = "opencode"
     GEMINI = "gemini"
+    GOOSE = "goose"
     KIRO = "kiro"
     PI = "pi"
 
@@ -840,7 +842,7 @@ def start(
             "--llm-backend",
             help=(
                 "LLM backend for interview, ambiguity scoring, and seed generation "
-                "(claude_code, litellm, codex, copilot, opencode, gemini, kiro, or pi)."
+                "(claude_code, litellm, codex, copilot, opencode, gemini, goose, kiro, or pi)."
             ),
             case_sensitive=False,
         ),
