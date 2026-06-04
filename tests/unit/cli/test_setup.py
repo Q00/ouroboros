@@ -2716,7 +2716,7 @@ class TestOpenCodeSetupConfigYaml:
         observed: list[str | None] = []
         monkeypatch.delenv("OUROBOROS_OPENCODE_CLI_PATH", raising=False)
 
-        def record_cli_path() -> bool:
+        def record_cli_path(*_args: object, **_kwargs: object) -> bool:
             observed.append(os.environ.get("OUROBOROS_OPENCODE_CLI_PATH"))
             return True
 
@@ -2734,13 +2734,16 @@ class TestOpenCodeSetupConfigYaml:
                 "ouroboros.cli.commands.setup._ensure_opencode_plugin_entry",
                 side_effect=record_cli_path,
             ),
-            patch("ouroboros.cli.commands.setup._install_runtime_instruction_artifact"),
+            patch(
+                "ouroboros.cli.commands.setup._install_runtime_instruction_artifact",
+                side_effect=record_cli_path,
+            ),
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
 
             assert _setup_opencode(cli_path, mode="plugin") is True
 
-        assert observed == [cli_path, cli_path, cli_path]
+        assert observed == [cli_path, cli_path, cli_path, cli_path]
         assert os.environ.get("OUROBOROS_OPENCODE_CLI_PATH") is None
 
     def test_plugin_setup_failure_returns_false_without_persisting_config(
