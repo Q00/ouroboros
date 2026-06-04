@@ -76,7 +76,7 @@ def test_marked_section_refresh_collapses_duplicate_managed_sections(tmp_path: P
         "<!-- ouroboros:skill-capability-guide:end -->\n"
     )
     path.write_text(
-        f"# User instructions\n\n{duplicate_section}\n{duplicate_section}\nKeep this line.\n",
+        f"# User instructions\n\n{duplicate_section}\nUSER CUSTOM LINE BETWEEN DUPLICATES\n\n{duplicate_section}\nKeep this line.\n",
         encoding="utf-8",
     )
 
@@ -86,5 +86,6 @@ def test_marked_section_refresh_collapses_duplicate_managed_sections(tmp_path: P
     assert content.count("<!-- ouroboros:skill-capability-guide:start -->") == 1
     assert content.count("<!-- ouroboros:skill-capability-guide:end -->") == 1
     assert "stale guide" not in content
+    assert "USER CUSTOM LINE BETWEEN DUPLICATES" in content
     assert content.startswith("# User instructions")
     assert "Keep this line." in content

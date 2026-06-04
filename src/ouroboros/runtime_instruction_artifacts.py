@@ -28,12 +28,30 @@ def _render_section(backend: str) -> str:
 
 
 def _upsert_marked_section(existing: str, section: str) -> str:
-    """Insert or replace the managed capability-guide section."""
-    start = existing.find(_SECTION_START)
-    end = existing.rfind(_SECTION_END)
-    if start != -1 and end != -1 and end > start:
-        end += len(_SECTION_END)
-        return f"{existing[:start].rstrip()}\n\n{section}{existing[end:].lstrip()}".rstrip() + "\n"
+    """Insert or replace managed guide sections without dropping user text."""
+    chunks: list[str] = []
+    replaced = False
+    cursor = 0
+
+    while True:
+        start = existing.find(_SECTION_START, cursor)
+        if start == -1:
+            chunks.append(existing[cursor:])
+            break
+
+        end = existing.find(_SECTION_END, start + len(_SECTION_START))
+        if end == -1:
+            chunks.append(existing[cursor:])
+            break
+
+        chunks.append(existing[cursor:start])
+        if not replaced:
+            chunks.append(section)
+            replaced = True
+        cursor = end + len(_SECTION_END)
+
+    if replaced:
+        return "".join(chunks).rstrip() + "\n"
 
     base = existing.rstrip()
     if not base:
