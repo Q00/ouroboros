@@ -299,6 +299,36 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             return text if isinstance(text, str) else ""
         return ""
 
+    def _extract_error_content(self, event: dict[str, Any]) -> str | None:
+        """Extract Pi assistant error text from zero-exit JSON events.
+
+        Pi can report provider/auth failures as assistant messages with
+        ``stopReason: "error"`` while the CLI process still exits 0. Treat
+        those as provider errors so LLM callers see the actionable Pi message
+        instead of a generic empty/non-conforming response.
+        """
+
+        def from_message(message: Any) -> str | None:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                return None
+            if message.get("stopReason") != "error":
+                return None
+            error = message.get("errorMessage") or message.get("error")
+            if isinstance(error, str) and error.strip():
+                return error.strip()
+            return self._extract_text_from_message(message)
+
+        event_type = event.get("type")
+        if event_type in {"message_start", "message_end", "turn_end"}:
+            return from_message(event.get("message"))
+        if event_type == "agent_end":
+            messages = event.get("messages") or []
+            for message in reversed(messages):
+                error = from_message(message)
+                if error:
+                    return error
+        return None
+
     def _extract_final_text(self, event: dict[str, Any]) -> str:
         """Extract only terminal assistant content from Pi final events."""
         event_type = event.get("type")
@@ -326,7 +356,16 @@ class PiLLMAdapter(CodexCliLLMAdapter):
             if event_type == "message_update":
                 self._last_pi_event_kind = "delta"
                 return self._extract_content_delta(value)
-            if event_type in {"message_end", "turn_end", "agent_end"}:
+            if event_type in {"message_start", "message_end", "turn_end", "agent_end"}:
+                error_content = self._extract_error_content(value)
+                if error_content:
+                    raise ProviderError(
+                        message=error_content,
+                        provider=self._provider_name,
+                        details={"event_type": event_type},
+                    )
+                if event_type == "message_start":
+                    return ""
                 self._last_pi_event_kind = "final"
                 return self._extract_final_text(value)
             # Pi control/metadata events (for example `session`) must never fall

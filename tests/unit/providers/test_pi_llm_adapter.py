@@ -253,6 +253,45 @@ def test_pi_partial_content_ignores_session_metadata() -> None:
     assert content == "partial"
 
 
+def test_extracts_pi_zero_exit_error_event_content() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    assert (
+        adapter._extract_error_content(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "error",
+                    "errorMessage": "OpenAI API error (401)",
+                },
+            }
+        )
+        == "OpenAI API error (401)"
+    )
+
+
+def test_extracts_pi_zero_exit_error_from_agent_end_transcript() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    assert (
+        adapter._extract_error_content(
+            {
+                "type": "agent_end",
+                "messages": [
+                    {"role": "assistant", "content": "older"},
+                    {
+                        "role": "assistant",
+                        "stopReason": "error",
+                        "error": "Model not found",
+                    },
+                ],
+            }
+        )
+        == "Model not found"
+    )
+
+
 def test_pi_prompt_is_not_written_to_stdin() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 
@@ -400,3 +439,77 @@ async def test_structured_json_schema_response_rejects_nonconforming_payload() -
     assert result.is_err
     assert result.error.provider == "pi"
     assert "non-conforming output" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_zero_exit_pi_error_event_returns_provider_error() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
+        return _FakeProcess(
+            stdout=_pi_jsonl(
+                {"type": "session", "id": "pi-session"},
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "stopReason": "error",
+                            "errorMessage": "OpenAI API error (401)",
+                        }
+                    ],
+                },
+            ),
+            returncode=0,
+        )
+
+    with patch(
+        "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+        side_effect=fake_create_subprocess_exec,
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Return a verdict.")],
+            CompletionConfig(model="default", response_format={"type": "json_object"}),
+        )
+
+    assert result.is_err
+    assert result.error.provider == "pi"
+    assert result.error.message == "OpenAI API error (401)"
+    assert result.error.details["event_type"] == "agent_end"
+    assert result.error.details["returncode"] == 0
+    assert result.error.details["session_id"] == "pi-session"
+
+
+@pytest.mark.asyncio
+async def test_zero_exit_pi_message_end_error_returns_provider_error() -> None:
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    async def fake_create_subprocess_exec(*_command: str, **_kwargs: Any) -> _FakeProcess:
+        return _FakeProcess(
+            stdout=_pi_jsonl(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "error",
+                        "error": "Model not found",
+                    },
+                }
+            ),
+            returncode=0,
+        )
+
+    with patch(
+        "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+        side_effect=fake_create_subprocess_exec,
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Return a verdict.")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_err
+    assert result.error.provider == "pi"
+    assert result.error.message == "Model not found"
+    assert result.error.details["event_type"] == "message_end"
+    assert result.error.details["returncode"] == 0
