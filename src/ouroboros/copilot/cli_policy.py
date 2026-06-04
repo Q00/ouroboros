@@ -174,10 +174,10 @@ def _add_ouroboros_copilot_instruction_dir(env: dict[str, str]) -> None:
     instruction_dir = str(copilot_instruction_dir())
     key = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
     existing = env.get(key, "")
-    parts = [part for part in existing.split(os.pathsep) if part]
+    parts = [part.strip() for part in existing.split(",") if part.strip()]
     if instruction_dir not in parts:
         parts.append(instruction_dir)
-    env[key] = os.pathsep.join(parts)
+    env[key] = ",".join(parts)
 
 
 def _which(name: str) -> str | None:
