@@ -238,7 +238,7 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `goose`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 | `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
@@ -264,7 +264,7 @@ ouroboros setup --non-interactive
 
 **What setup does:**
 
-- Scans PATH for `claude`, `codex`, `opencode`, `hermes`, `gemini`, and `kiro-cli` CLI binaries
+- Scans PATH for `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro-cli`, `copilot`, and `goose` CLI binaries
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
 - For Claude Code: registers the MCP server in `~/.claude/mcp.json`

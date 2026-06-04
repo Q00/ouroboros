@@ -233,14 +233,17 @@ through the capability graph.
 ```python
 SkillExecutionCapability(
     name="run_lateral_review",
-    tool_names=("ouroboros_lateral_think",),
-    instruction="Invoke lateral thinking personas when a skill requests review.",
+    guidance=(
+        "When an interview response marks `lateral_review_required=true`, "
+        "call `ouroboros_lateral_think` with the supplied tool args before "
+        "routing the next interview turn."
+    ),
 )
 ```
 
 **Rules**:
 - Keep `SKILL.md` capability names runtime-neutral
-- Put runtime-specific tool names and prompt wording in `SkillExecutionCapability`
+- Put runtime-specific tool names and prompt wording inside `SkillExecutionCapability.guidance`
 - Regenerate or update setup-owned instruction artifacts when rendered guide output changes
 - Follow `docs/runtime-guides/skill-capability-guides.md` before merging capability changes
 
