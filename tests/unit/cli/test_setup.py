@@ -2628,6 +2628,32 @@ class TestOpenCodeSetupConfigYaml:
             encoding="utf-8"
         )
 
+    def test_plugin_setup_installs_instruction_artifact_after_success(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        opencode_dir = tmp_path / "opencode-config"
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_opencode_bridge_plugin", return_value=True),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry", return_value=True),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry", return_value=True),
+            patch("ouroboros.cli.commands.setup.opencode_config_dir", return_value=opencode_dir),
+        ):
+            from ouroboros.cli.commands.setup import _setup_opencode
+
+            assert _setup_opencode("/usr/bin/opencode", mode="plugin") is True
+
+        guide_path = opencode_dir / "AGENTS.md"
+        assert guide_path.is_file()
+        assert "## Ouroboros Skill Capability Guide: Opencode" in guide_path.read_text(
+            encoding="utf-8"
+        )
+
     def test_orchestrator_as_list_repaired(self, tmp_path: Path) -> None:
         """If orchestrator is a list, _setup_opencode replaces with dict."""
         config_dir = tmp_path / ".ouroboros"
@@ -2726,6 +2752,7 @@ class TestOpenCodeSetupConfigYaml:
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
         config_path.write_text("{}", encoding="utf-8")
+        opencode_dir = tmp_path / "opencode-config"
 
         with (
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
@@ -2734,13 +2761,14 @@ class TestOpenCodeSetupConfigYaml:
             ),
             patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry", return_value=True),
             patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry", return_value=True),
-            patch("ouroboros.cli.commands.setup._install_runtime_instruction_artifact"),
+            patch("ouroboros.cli.commands.setup.opencode_config_dir", return_value=opencode_dir),
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
 
             assert _setup_opencode("/usr/bin/opencode", mode="plugin") is False
 
         assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {}
+        assert not (opencode_dir / "AGENTS.md").exists()
 
     def test_plugin_setup_failure_exits_before_success_banner(self, tmp_path: Path) -> None:
         """Top-level setup must propagate plugin setup failure to exit status."""
