@@ -17,6 +17,7 @@ Socratic interview to crystallize vague requirements into clear specifications.
 - `ask_user` — ask human-judgment questions through the active runtime's user-question surface.
 - `inspect_code` — answer repo-local factual questions from exact local files before asking the user.
 - `call_mcp` — use Ouroboros MCP tools for persistent interview state and seed generation.
+- `run_lateral_review` — invoke lateral thinking subagents before milestone turns and direct-answer synthesis.
 - `web_research` — fetch current external facts only when the interview genuinely depends on them.
 - `run_shell` — run bounded local commands for version checks and repository inspection.
 - `refine_answer` — confirm structured interpretations of free-text answers before forwarding them.
@@ -131,18 +132,70 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 2. **For each question from MCP, apply the routing paths below:**
 
-   **Milestone lateral-review advisory**:
+   **Parent-session question handoff**:
+   If an MCP response includes `meta.status="parent_question_required"` or
+   `meta.ask_user_directly=true`, treat it as a normal interview continuation,
+   not as an MCP/provider/tool failure. Do **not** tell the user MCP failed, do
+   not expose `reason_code`, and do not retry the MCP question generator. Ask
+   exactly one natural Socratic clarification question yourself, using the same
+   routing judgement as any other interview turn. Save the exact user-facing
+   question text. When the user answers, call:
+   ```
+   Tool: ouroboros_interview
+   Arguments:
+     session_id: <meta.session_id>
+     answer: <user answer>
+     last_question: <exact question you asked the user>
+   ```
+   `last_question` is required on this path so MCP can persist the real
+   transcript even though the parent session generated the question.
+
+   **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
-   as a non-blocking cue that the interview just crossed an ambiguity milestone
-   such as `initial -> progress`, `progress -> refined`, or `refined -> ready`.
-   The MCP tool is still only a question generator; it has not run lateral
-   personas, blocked the interview, or changed requirements. Before answering
-   the returned question, the main session may run `ooo lateral` / the
-   `ouroboros_lateral_think` MCP surface to inspect hidden assumptions for the
-   named `meta.lateral_review_milestone`, then fold only concrete, user-safe
-   findings into the next answer or user question. If lateral tooling is
-   unavailable or unnecessary, continue with the returned question; do not
-   restart the interview.
+   as a required lightweight subagent review for that turn. The interview just
+   crossed an ambiguity milestone such as `initial -> progress`,
+   `progress -> refined`, or `refined -> ready`, which is exactly when hidden
+   assumptions tend to matter.
+
+   Before answering or asking the returned question:
+   - Tell the user briefly that a few perspectives are checking the question.
+   - Call `ouroboros_lateral_think` with `meta.lateral_review_tool_args` when
+     present. If only the legacy advisory fields are present, call it with
+     `personas=["researcher","contrarian","simplifier"]`, a problem context
+     containing the current interview session/milestone/question, and a current
+     approach describing the next interview-routing decision.
+   - Fold only concrete, user-safe findings into the next answer or user
+     question. Do not present every subagent note as a report.
+   - If lateral tooling is unavailable, continue the interview and say the
+     review could not be run; do not restart the interview.
+
+   The MCP interview tool is still the question generator and source of
+   persistent state. Lateral review is a main-session assist layer: it helps the
+   user feel supported, but it does not by itself change requirements or mark the
+   interview complete.
+
+   **Main-session direct-answer assistance**:
+   Use lateral review frequently when the main session would otherwise answer
+   the MCP question directly or compress the user's free-text into a decision.
+   This is the supported "deep research style" experience for interviews: the
+   user should see that multiple perspectives are helping, while the final
+   prompt stays easy to answer.
+
+   Trigger a lightweight `ouroboros_lateral_think` call before continuing when
+   any of these are true:
+   - You are about to synthesize a product/UX/architecture answer from partial
+     user input.
+   - The question asks for tradeoffs, priorities, non-goals, risk, success
+     criteria, or rollout strategy.
+   - The factual code answer is lower confidence than an exact config/manifest
+     match.
+   - The user seems busy, uncertain, terse, or likely to benefit from selectable
+     options instead of another open-ended question.
+
+   Prefer `personas=["researcher","contrarian","simplifier"]` for this
+   assist. Add `architect` when the answer changes system shape or ownership.
+   Summarize the result as 2-3 concrete options or one recommended answer draft,
+   then let the user approve, tweak, or switch to auto.
 
    **PATH 1 — Code Answer** (describe current state from codebase):
    When the question asks about existing tech stack, frameworks, dependencies,
