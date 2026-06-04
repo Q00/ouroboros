@@ -226,7 +226,7 @@ truth table describes the gate function alone, not the auto flow:
 Detect available runtime backends and configure Ouroboros for your environment.
 
 Ouroboros supports multiple runtime backends via a pluggable `AgentRuntime` protocol. The `setup` command auto-detects
-which runtimes are available in your PATH (currently: Claude Code, Codex CLI, OpenCode) and
+which runtimes are available in your PATH (currently: Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, and Goose) and
 configures `orchestrator.runtime_backend` accordingly. Additional runtimes can be registered
 by implementing the protocol — see [Architecture](architecture.md#how-to-add-a-new-runtime-adapter).
 
