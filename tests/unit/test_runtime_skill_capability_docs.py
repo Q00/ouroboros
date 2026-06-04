@@ -8,9 +8,10 @@ from ouroboros.backends.capabilities import runtime_backend_choices
 def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> None:
     docs = Path("docs/runtime-guides/skill-capability-guides.md").read_text(encoding="utf-8")
 
+    coverage_section = docs.split("## Current coverage", 1)[1].split("## Seed generation", 1)[0]
     documented_runtime_names = {
         row.split("|")[1].strip().lower()
-        for row in docs.splitlines()
+        for row in coverage_section.splitlines()
         if row.startswith("|") and not row.startswith("| ---") and "Generated artifact surface" not in row
     }
     assert set(runtime_backend_choices()) <= documented_runtime_names

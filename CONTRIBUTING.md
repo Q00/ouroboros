@@ -601,7 +601,7 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `command_dispatcher.py` | `docs/architecture.md` — command dispatch model |
 | `level_context.py` | `docs/architecture.md` — level context description |
 
-**Runtime availability rule**: If `create_agent_runtime()` raises `NotImplementedError` for a backend, that backend **must not** appear in docs as a working option. All three backends (`claude`, `codex`, `opencode`) are fully implemented and documented.
+**Runtime availability rule**: If `create_agent_runtime()` raises `NotImplementedError` for a backend, that backend **must not** appear in docs as a working option. Runtime backend availability is registry-owned; when `runtime_backend_choices()` or setup support changes, update the runtime capability matrix, setup docs, and per-runtime guide/gap documentation together.
 
 ---
 
