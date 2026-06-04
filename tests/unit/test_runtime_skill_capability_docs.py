@@ -2,17 +2,25 @@
 
 from pathlib import Path
 
+from ouroboros.backends.capabilities import runtime_backend_choices
+
 
 def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> None:
     docs = Path("docs/runtime-guides/skill-capability-guides.md").read_text(encoding="utf-8")
 
-    for backend in ("Codex", "Hermes", "Claude", "OpenCode", "Gemini", "Kiro", "Copilot"):
-        assert f"| {backend} |" in docs
+    documented_runtime_names = {
+        row.split("|")[1].strip().lower()
+        for row in docs.splitlines()
+        if row.startswith("|") and not row.startswith("| ---") and "Generated artifact surface" not in row
+    }
+    assert set(runtime_backend_choices()) <= documented_runtime_names
 
     assert "Global `AGENTS.md`" in docs
     assert "`~/.gemini/GEMINI.md`" in docs
     assert "`~/.kiro/steering/ouroboros-skill-capability-guide.md`" in docs
     assert "`~/.copilot/ouroboros-instructions/AGENTS.md`" in docs
+    assert "| Goose | No setup-owned capability artifact yet |" in docs
+    assert "| Pi | No setup-owned capability artifact yet |" in docs
     assert "render_backend_skill_capability_guide(<backend>)" in docs
     assert "## Capability graph contract" in docs
     assert "## Contributor checklist for capability changes" in docs
