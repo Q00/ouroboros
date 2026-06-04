@@ -30,7 +30,7 @@ def _render_section(backend: str) -> str:
 def _upsert_marked_section(existing: str, section: str) -> str:
     """Insert or replace the managed capability-guide section."""
     start = existing.find(_SECTION_START)
-    end = existing.find(_SECTION_END)
+    end = existing.rfind(_SECTION_END)
     if start != -1 and end != -1 and end > start:
         end += len(_SECTION_END)
         return f"{existing[:start].rstrip()}\n\n{section}{existing[end:].lstrip()}".rstrip() + "\n"

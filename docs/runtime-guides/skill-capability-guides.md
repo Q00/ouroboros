@@ -11,10 +11,10 @@ consume the rendered guide through the instruction surface they actually own.
 | Codex | Managed rule under `~/.codex/rules/ouroboros.md` | Installed during Codex setup/update via the generated guide renderer. |
 | Hermes | `~/.hermes/skills/autonomous-ai-agents/ouroboros/SKILL_CAPABILITY_GUIDE.md` | Installed with the Hermes skill bundle. |
 | Claude | `.claude-plugin/SKILL_CAPABILITY_GUIDE.md` | Shipped with the Claude plugin package and checked against the renderer. |
-| OpenCode | Not yet a stable prompt/rule artifact in setup | Fallback: use the generic guide from `backends.capabilities` and keep bridge-plugin behavior unchanged until OpenCode exposes a durable instruction surface. |
-| Gemini | Not yet a setup-owned prompt/rule artifact | Fallback: use the generic guide from `backends.capabilities`; setup only switches Ouroboros runtime/backend config today. |
-| Kiro | Not yet a setup-owned prompt/rule artifact | Fallback: use the generic guide from `backends.capabilities`; setup currently registers MCP and backend config only. |
-| Copilot | Not yet a setup-owned prompt/rule artifact | Fallback: use the generic guide from `backends.capabilities`; setup currently registers MCP and model/runtime config only. |
+| OpenCode | `AGENTS.md` in the OpenCode config directory | Installer helper is available and writes a managed marked section; setup integration lands in the follow-up OpenCode PR. |
+| Gemini | `~/.gemini/GEMINI.md` | Installer helper is available and writes a managed marked section; setup integration is still pending. |
+| Kiro | `~/.kiro/steering/ouroboros-skill-capability-guide.md` | Installer helper is available and writes a managed marked section; setup integration is still pending. |
+| Copilot | `~/.copilot/ouroboros-instructions/AGENTS.md` | Installer helper is available and writes a managed marked section; setup integration is still pending. |
 
 ## Seed generation client-gate enforcement
 
@@ -26,12 +26,12 @@ existing clients. Set `OUROBOROS_REQUIRE_CLIENT_GATES=1` to promote missing
 gates to a hard MCP precondition while migrating maintained clients to pass the
 `client_gates` acknowledgements.
 
-## Fallback behavior for runtimes without generated artifacts
+## Fallback behavior before setup integration
 
-Until a runtime has a durable instruction surface owned by `ouroboros setup`,
-clients should render `render_backend_skill_capability_guide(<backend>)` when
-building prompts or user-facing setup guidance, but must not copy long adapter
-sections into individual `SKILL.md` files.
+Until a runtime installer is wired into `ouroboros setup`, clients should render
+`render_backend_skill_capability_guide(<backend>)` when building prompts or
+user-facing setup guidance, but must not copy long adapter sections into
+individual `SKILL.md` files.
 
 The fallback is intentionally conservative:
 
