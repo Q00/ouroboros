@@ -2406,7 +2406,6 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
         _install_ok = _install_opencode_bridge_plugin()
         _mcp_ok = _ensure_opencode_mcp_entry()
         _plugin_ok = _ensure_opencode_plugin_entry()
-        _install_runtime_instruction_artifact("opencode", config_dir=opencode_config_dir())
 
     if not (_install_ok and _mcp_ok and _plugin_ok):
         failed = []
@@ -2422,6 +2421,9 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
             "after fixing the issues above."
         )
         return False
+
+    with _temporary_opencode_cli_path(opencode_path):
+        _install_runtime_instruction_artifact("opencode", config_dir=opencode_config_dir())
 
     # All installs succeeded — now safe to persist config.
     # Plugin mode still needs runtime_backend=opencode so the MCP server's
