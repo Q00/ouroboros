@@ -44,6 +44,12 @@ def _upsert_marked_section(existing: str, section: str) -> str:
             chunks.append(existing[cursor:])
             break
 
+        nested_start = existing.find(_SECTION_START, start + len(_SECTION_START), end)
+        if nested_start != -1:
+            chunks.append(existing[cursor:nested_start])
+            cursor = nested_start
+            continue
+
         chunks.append(existing[cursor:start])
         if not replaced:
             chunks.append(section)
