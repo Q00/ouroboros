@@ -45,6 +45,7 @@ ouroboros setup --runtime copilot
 #   - calls https://api.githubcopilot.com/models with your gh token
 #   - prints the live model list and lets you pick a default
 #   - writes ~/.ouroboros/config.yaml + ~/.copilot/mcp-config.json
+#   - installs ~/.copilot/ouroboros-instructions/AGENTS.md for Ouroboros runs
 
 # 4. Restart your Copilot session, then use ooo skills
 copilot
@@ -63,6 +64,11 @@ The runtime looks for the binary in this order:
 This means non-PATH installs (for example, a winget or scoop install on
 Windows that lands the binary outside `$PATH`) work without modifying
 shell init.
+
+Ouroboros-launched Copilot child sessions append the setup-owned
+`~/.copilot/ouroboros-instructions` directory to
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` using Copilot CLI's comma-separated list
+format. Existing custom instruction directories are preserved.
 
 ## Live model discovery
 
