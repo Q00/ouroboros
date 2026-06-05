@@ -1778,6 +1778,138 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     _register_copilot_mcp_server()
 
 
+_PI_OOO_BRIDGE_FILENAME = "ouroboros-ooo-bridge.ts"
+
+
+def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
+    """Return the launcher a managed Pi bridge should use for this install."""
+    if _is_source_tree_ouroboros_build():
+        return sys.executable, ["-m", "ouroboros"]
+    try:
+        version = importlib_metadata.version("ouroboros-ai")
+    except importlib_metadata.PackageNotFoundError:
+        return sys.executable, ["-m", "ouroboros"]
+    if ".dev" in version:
+        return sys.executable, ["-m", "ouroboros"]
+    return shutil.which("ouroboros") or "ouroboros", []
+
+
+def _pi_ooo_bridge_source_text() -> str:
+    """Return the managed Pi extension source for ``ooo`` frontdoor dispatch."""
+    command, args = _detect_pi_bridge_dispatch_entry()
+    default_command = json.dumps(command)
+    default_args = json.dumps(args)
+    return f'''/**
+ * Ouroboros ooo bridge for Pi.
+ *
+ * Managed by `ouroboros setup --runtime pi`.
+ * Routes exact-prefix `ooo ...` inputs from interactive Pi into Ouroboros'
+ * shared skill dispatcher instead of sending them to the model as chat.
+ */
+import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
+
+const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;
+const UNSUPPORTED_DISPATCH_EXIT_CODE = 78;
+const TIMEOUT_MS = Number(process.env.OUROBOROS_PI_BRIDGE_TIMEOUT_MS || 6 * 60 * 60 * 1000);
+const DEFAULT_COMMAND = {default_command};
+const DEFAULT_ARGS = {default_args};
+
+function ouroborosEntry(): {{ command: string; args: string[] }} {{
+  if (process.env.OUROBOROS_CLI) return {{ command: process.env.OUROBOROS_CLI, args: [] }};
+  return {{ command: DEFAULT_COMMAND, args: DEFAULT_ARGS }};
+}}
+
+function outputText(stdout: string, stderr: string): string {{
+  const out = stdout.trim();
+  const err = stderr.trim();
+  if (out && err) return `${{out}}\\n\\n${{err}}`;
+  return out || err || "(no output)";
+}}
+
+async function dispatch(pi: ExtensionAPI, text: string, ctx: ExtensionContext): Promise<boolean> {{
+  ctx.ui.notify(`Ouroboros dispatch: ${{text}}`, "info");
+  const entry = ouroborosEntry();
+  const result = await pi.exec(
+    entry.command,
+    [...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text],
+    {{ cwd: ctx.cwd, timeout: TIMEOUT_MS }},
+  );
+  if (result.code === UNSUPPORTED_DISPATCH_EXIT_CODE) {{
+    ctx.ui.notify(`Ouroboros did not claim command; continuing in Pi`, "info");
+    return false;
+  }}
+  const body = outputText(result.stdout || "", result.stderr || "");
+  pi.sendMessage({{
+    customType: "ouroboros",
+    content: body,
+    display: true,
+    details: {{ command: text, exitCode: result.code }},
+  }});
+  if (result.code !== 0) {{
+    ctx.ui.notify(`Ouroboros dispatch failed (${{result.code ?? "unknown"}})`, "error");
+  }}
+  return true;
+}}
+
+export default function ouroborosBridge(pi: ExtensionAPI) {{
+  pi.registerCommand("ooo", {{
+    description: "Dispatch an Ouroboros ooo command",
+    handler: async (args, ctx) => {{
+      const text = `ooo ${{args}}`.trim();
+      await dispatch(pi, text, ctx);
+    }},
+  }});
+
+  pi.on("input", async (event, ctx) => {{
+    if (event.source === "extension") {{
+      return {{ action: "continue" }};
+    }}
+    if (!COMMAND_RE.test(event.text)) {{
+      return {{ action: "continue" }};
+    }}
+    const handled = await dispatch(pi, event.text.trim(), ctx);
+    return {{ action: handled ? "handled" : "continue" }};
+  }});
+}}
+'''
+
+
+def _install_pi_ooo_bridge() -> bool:
+    """Install the managed Pi extension that routes interactive ``ooo`` input.
+
+    Pi auto-discovers global extensions in ``~/.pi/agent/extensions/*.ts``.
+    Writing a single managed file there avoids modifying Pi itself or any
+    third-party package such as roach-pi, while making the bridge available to
+    every Pi-based/customized session after ``/reload`` or restart.
+    """
+    import hashlib
+
+    dest = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
+    content = _pi_ooo_bridge_source_text()
+    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    existing_hash: str | None = None
+    if dest.exists():
+        try:
+            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
+        except OSError:
+            existing_hash = None
+
+    if existing_hash == new_hash:
+        print_info(f"Pi ooo bridge already up to date: {dest}")
+        return True
+
+    try:
+        _atomic_write_text(dest, content)
+    except OSError as exc:
+        print_warning(f"Could not install Pi ooo bridge at {dest}: {exc}")
+        return False
+
+    print_success(f"{'Updated' if existing_hash is not None else 'Installed'} Pi ooo bridge: {dest}")
+    print_info("Restart Pi or run /reload in an existing Pi session to load the bridge.")
+    return True
+
+
 def _setup_gemini(gemini_path: str) -> None:
     """Configure Ouroboros for the Gemini CLI runtime.
 
@@ -1827,11 +1959,12 @@ def _setup_pi(pi_path: str) -> None:
     """Configure Ouroboros for the Pi CLI runtime.
 
     Pi is a base-package agent runtime: setup records the executable path and
-    runtime backend, while skill/MCP dispatch is handled by the adapter at
-    execution time before spawning the Pi subprocess. The Pi LLM adapter remains
-    opt-in so setup does not unexpectedly move authoring/evaluation traffic to a
-    different provider; when selected explicitly, structured response_format
-    requests are enforced cooperatively by that adapter.
+    runtime backend, and installs a managed Pi extension so interactive Pi
+    sessions can route ``ooo ...`` inputs into Ouroboros' shared skill
+    dispatcher. The Pi LLM adapter remains opt-in so setup does not
+    unexpectedly move authoring/evaluation traffic to a different provider;
+    when selected explicitly, structured response_format requests are enforced
+    cooperatively by that adapter.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -1860,6 +1993,7 @@ def _setup_pi(pi_path: str) -> None:
 
     print_success(f"Configured Pi runtime (CLI: {pi_path})")
     print_info(f"Config saved to: {config_path}")
+    _install_pi_ooo_bridge()
 
 
 def _setup_goose(goose_path: str) -> None:

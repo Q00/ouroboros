@@ -31,7 +31,8 @@ Pi model turn and JSONL events
 
 So "Pi is an Ouroboros runtime" means step 2b exists and is selectable. It
 does not mean Pi packages are imported into Ouroboros, and it does not mean
-Pi's interactive command UI becomes part of the Ouroboros command router.
+Pi's interactive command UI becomes part of the Ouroboros command router
+unless the managed Pi bridge extension is installed by setup.
 
 ## Prerequisites
 
@@ -53,11 +54,14 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 pi
 # In the interactive Pi session, run /login and select openai-codex.
 
-# 2. Point Ouroboros at Pi
+# 2. Point Ouroboros at Pi and install the Pi-side ooo bridge
 ouroboros setup --runtime pi
 
 # 3. Run a workflow through the configured runtime
 ouroboros run workflow seed.yaml
+
+# 4. In Pi or roach-pi/custom Pi, restart Pi or run /reload, then:
+ooo auto build a small CLI
 ```
 
 If Pi is installed outside `PATH`, set:
@@ -100,6 +104,11 @@ process return code.
 
 ## What `ooo` Means With Pi
 
+There are two supported entry paths.
+
+### Ouroboros Launches Pi
+
+When Ouroboros is already in control and `runtime_backend: pi` is selected,
 `ooo <skill>` is handled by Ouroboros before the Pi subprocess starts.
 
 The Pi runtime calls the shared `SkillInterceptor` at the top of
@@ -113,9 +122,51 @@ This means:
 - `ooo interview` in an Ouroboros-controlled Pi runtime means "Ouroboros
   handles the interview command, using the configured LLM backend for
   authoring."
-- It does not mean Pi has learned a new native `ooo` slash command.
-- It does not mean typing `ooo interview` inside an unrelated interactive Pi
-  terminal session will invoke Ouroboros.
+- Pi only runs normal Seed execution prompts after the command dispatch path
+  has decided the input is not an `ooo` shortcut.
+
+### Pi Or roach-pi Launches Ouroboros
+
+`ouroboros setup --runtime pi` also installs a managed global Pi extension:
+
+```text
+~/.pi/agent/extensions/ouroboros-ooo-bridge.ts
+```
+
+Pi auto-loads extensions from that directory. After restarting Pi or running
+`/reload`, interactive Pi sessions, including customized Pi setups such as
+roach-pi, can type:
+
+```text
+ooo auto build a small CLI
+ooo interview clarify this feature
+/ooo status auto --resume auto_...
+```
+
+The extension intercepts exact-prefix `ooo ...` input and runs:
+
+```text
+ouroboros dispatch --runtime pi --cwd <pi-session-cwd> "ooo ..."
+```
+
+That hidden `dispatch` entrypoint uses the same shared skill resolver and MCP
+handler composition as the runtime adapters. This is intentionally not a
+roach-pi-specific adapter: roach-pi remains Pi customization loaded by Pi, and
+Ouroboros owns only the bridge that forwards `ooo` commands into Ouroboros.
+
+The bridge only consumes commands that the hidden dispatcher can execute through
+MCP-backed skill frontmatter. Commands that are first-party shortcuts but do not
+declare an MCP dispatch target, such as `ooo help` or bare `ooo`, are returned
+to Pi with a deterministic unsupported-dispatch exit code so the normal Pi
+session can continue handling the input instead of receiving a hard bridge
+failure.
+
+For `ooo auto`, the dispatcher owns the background job lifecycle. After
+`ouroboros_start_auto` returns a `job_id`, the dispatch process polls
+`ouroboros_job_wait` and fetches `ouroboros_job_result` when the job reaches a
+terminal state. This keeps interactive Pi sessions aligned with the normal
+`ooo auto` contract: users do not have to manually poll the background job just
+because the command entered through Pi.
 
 ## `ooo auto --runtime pi`
 
@@ -160,12 +211,15 @@ That is different from saying `roach-pi` is the Ouroboros runtime adapter.
 | Ouroboros launches `pi --mode json` | Supported Pi runtime path |
 | Pi loads installed packages/extensions during that process | Allowed by Pi; visible to the Pi run |
 | A package adds headless-compatible tools/hooks used by Pi's model turn | May work, because it runs inside Pi |
-| A package adds interactive slash commands or UI prompts | Not guaranteed by the Ouroboros Pi runtime |
+| A package adds interactive slash commands or UI prompts | Works in normal interactive Pi; not guaranteed in Ouroboros-launched JSON mode |
+| Interactive Pi/roach-pi user types `ooo ...` after setup bridge install | Supported through the managed Pi extension |
 | `roach-pi` becomes a selectable Ouroboros runtime backend by itself | No; that would require a dedicated adapter or bridge |
 
 In short: `runtime_backend: pi` selects the Pi CLI as the execution engine.
 A customized Pi distribution can affect what happens inside that Pi process,
-but Ouroboros only depends on Pi's JSON-mode subprocess contract.
+but Ouroboros only depends on Pi's JSON-mode subprocess contract for runtime
+execution and on Pi's documented global extension loader for the interactive
+`ooo` bridge.
 
 ## Pi As LLM Backend
 
@@ -200,7 +254,7 @@ JSON extraction and validation rather than provider-native schema enforcement.
 | Structured event stream | Yes, JSONL parsed by `PiRuntime` |
 | Structured schema responses as LLM backend | Soft-enforced and validated |
 | Pi extension loading | Pi-owned; works when compatible with headless JSON mode |
-| Interactive Pi slash UI under Ouroboros | Not part of the runtime contract |
+| Interactive Pi `ooo` frontdoor | Yes, via managed setup-installed extension |
 
 ## Troubleshooting
 
@@ -217,3 +271,7 @@ The command may depend on Pi's interactive UI context. Ouroboros runs Pi in
 one-shot JSON mode, so interactive slash-command UX is not guaranteed. Prefer
 normal Seed execution prompts or headless-compatible Pi extensions for
 Ouroboros workflows.
+
+**`ooo ...` is sent to the model as ordinary chat inside Pi**
+Run `ouroboros setup --runtime pi`, then restart Pi or run `/reload`. Confirm
+that `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts` exists.

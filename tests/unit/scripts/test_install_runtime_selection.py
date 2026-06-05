@@ -120,6 +120,37 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     assert "ouroboros setup --runtime claude --non-interactive" in calls
 
 
+def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
+        fake_commands={"pi": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "Runtime: pi (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
+    assert calls == [
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0",
+        "ouroboros setup --runtime pi --non-interactive",
+    ]
+
+
+def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={"pi": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "Pi:" in result.stdout
+    assert calls == [
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0",
+        "ouroboros setup --runtime pi --non-interactive",
+    ]
+
+
 def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
