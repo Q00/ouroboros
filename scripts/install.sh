@@ -4,7 +4,7 @@
 #
 # Runtime selection (first match wins):
 #   1. OUROBOROS_INSTALL_RUNTIME env var
-#      (claude|codex|opencode|hermes|gemini|kiro|copilot|all)
+#      (claude|codex|opencode|hermes|gemini|kiro|copilot|pi|all)
 #   2. Existing ~/.ouroboros/config.yaml runtime — preserved on upgrade
 #      unless OUROBOROS_INSTALL_RECONFIGURE=1 (or --reconfigure flag) is set.
 #   3. Interactive prompt when stdin is a TTY.
@@ -153,6 +153,7 @@ HAS_OPENCODE=false
 HAS_GEMINI=false
 HAS_KIRO=false
 HAS_COPILOT=false
+HAS_PI=false
 if command -v codex &>/dev/null; then
   echo "  Codex:  $(which codex)"
   HAS_CODEX=true
@@ -181,6 +182,10 @@ if command -v copilot &>/dev/null; then
   echo "  Copilot: $(which copilot)"
   HAS_COPILOT=true
 fi
+if command -v pi &>/dev/null; then
+  echo "  Pi:      $(which pi)"
+  HAS_PI=true
+fi
 
 RUNTIME_COUNT=0
 [ "$HAS_CLAUDE" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
@@ -190,6 +195,7 @@ RUNTIME_COUNT=0
 [ "$HAS_GEMINI" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_KIRO" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_COPILOT" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+[ "$HAS_PI" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 
 # Map a runtime name to (EXTRAS, RUNTIME) pair.
 # Used after explicit/preserved runtime resolution to derive install extras.
@@ -202,10 +208,11 @@ _runtime_to_extras() {
     gemini)  EXTRAS=""; RUNTIME="gemini" ;;
     kiro)    EXTRAS=""; RUNTIME="kiro" ;;
     copilot) EXTRAS=""; RUNTIME="copilot" ;;
+    pi)      EXTRAS=""; RUNTIME="pi" ;;
     all)     EXTRAS="[all]"; RUNTIME="" ;;
     "")      EXTRAS=""; RUNTIME="" ;;
     *)
-      echo "Error: unsupported runtime '$1' (expected: claude, codex, opencode, hermes, gemini, kiro, copilot, all)"
+      echo "Error: unsupported runtime '$1' (expected: claude, codex, opencode, hermes, gemini, kiro, copilot, pi, all)"
       exit 1
       ;;
   esac
@@ -218,7 +225,7 @@ EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
-supported = {'claude', 'codex', 'opencode', 'hermes', 'gemini', 'kiro', 'copilot'}
+supported = {'claude', 'codex', 'opencode', 'hermes', 'gemini', 'kiro', 'copilot', 'pi'}
 try:
     lines = open(os.environ['EXISTING_CONFIG']).read().splitlines()
     in_orchestrator = False
@@ -258,7 +265,8 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
     echo "  [5] Gemini   (pip install ${PACKAGE_NAME})"
     echo "  [6] Kiro     (pip install ${PACKAGE_NAME})"
     echo "  [7] Copilot  (pip install ${PACKAGE_NAME})"
-    echo "  [8] All      (pip install ${PACKAGE_NAME}[all])"
+    echo "  [8] Pi       (pip install ${PACKAGE_NAME})"
+    echo "  [9] All      (pip install ${PACKAGE_NAME}[all])"
     read -rp "Select [1]: " choice
     case "${choice:-1}" in
       2) _runtime_to_extras "codex" ;;
@@ -267,7 +275,8 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
       5) _runtime_to_extras "gemini" ;;
       6) _runtime_to_extras "kiro" ;;
       7) _runtime_to_extras "copilot" ;;
-      8) _runtime_to_extras "all" ;;
+      8) _runtime_to_extras "pi" ;;
+      9) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else
@@ -288,6 +297,8 @@ elif [ "$HAS_KIRO" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "kiro"
 elif [ "$HAS_COPILOT" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "copilot"
+elif [ "$HAS_PI" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "pi"
 else
   # No runtime CLI on PATH yet — first install. Always prompt when interactive
   # so the user picks deliberately rather than silently defaulting to claude.
@@ -301,7 +312,8 @@ else
     echo "  [5] Gemini   (pip install ${PACKAGE_NAME})"
     echo "  [6] Kiro     (pip install ${PACKAGE_NAME})"
     echo "  [7] Copilot  (pip install ${PACKAGE_NAME})"
-    echo "  [8] All      (pip install ${PACKAGE_NAME}[all])"
+    echo "  [8] Pi       (pip install ${PACKAGE_NAME})"
+    echo "  [9] All      (pip install ${PACKAGE_NAME}[all])"
     echo "  [0] None     (install base package only — pick a backend later)"
     read -rp "Select [1]: " choice
     case "${choice:-1}" in
@@ -312,14 +324,15 @@ else
       5) _runtime_to_extras "gemini" ;;
       6) _runtime_to_extras "kiro" ;;
       7) _runtime_to_extras "copilot" ;;
-      8) _runtime_to_extras "all" ;;
+      8) _runtime_to_extras "pi" ;;
+      9) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else
     # Pipe mode (curl | bash): install base package, skip runtime-specific setup.
     echo
     echo "  No runtime detected (non-interactive: installing base package)"
-    echo "  Pick a backend afterwards with: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot>"
+    echo "  Pick a backend afterwards with: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
     _runtime_to_extras ""
   fi
 fi
@@ -501,4 +514,4 @@ echo
 if [ -n "$RUNTIME" ]; then
   echo "  Current backend: $RUNTIME"
 fi
-echo "  Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot>"
+echo "  Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"

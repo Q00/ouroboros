@@ -3856,10 +3856,29 @@ class TestCopilotSetup:
 
         config_path = tmp_path / ".ouroboros" / "config.yaml"
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        bridge_path = tmp_path / ".pi" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
 
         assert config["orchestrator"]["runtime_backend"] == "pi"
         assert config["orchestrator"]["pi_cli_path"] == "/opt/bin/pi"
         assert config["llm"]["backend"] == "codex"
+        assert bridge_path.exists()
+        bridge_source = bridge_path.read_text(encoding="utf-8")
+        assert 'pi.registerCommand("ooo"' in bridge_source
+        assert 'pi.on("input"' in bridge_source
+        assert '[...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text]' in bridge_source
+        assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge_source
+        assert 'return { action: handled ? "handled" : "continue" }' in bridge_source
+
+    def test_install_pi_ooo_bridge_is_idempotent(self, tmp_path: Path) -> None:
+        """The managed Pi bridge should not rewrite an already-current extension."""
+        bridge_path = tmp_path / ".pi" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._install_pi_ooo_bridge() is True
+            first_mtime = bridge_path.stat().st_mtime_ns
+            assert setup_cmd._install_pi_ooo_bridge() is True
+
+        assert bridge_path.stat().st_mtime_ns == first_mtime
 
     def test_setup_cli_with_runtime_pi_flag(self, tmp_path: Path) -> None:
         """`ouroboros setup --runtime pi --non-interactive` runs the Pi setup path."""

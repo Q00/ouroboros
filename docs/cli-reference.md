@@ -243,6 +243,10 @@ ouroboros setup [OPTIONS]
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 | `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
 
+For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
+Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
+`ooo ...` commands into Ouroboros through the shared skill router.
+
 **Examples:**
 
 ```bash

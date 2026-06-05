@@ -27,6 +27,7 @@ from ouroboros.cli.commands import (
     codex,
     config,
     detect,
+    dispatch,
     init,
     job,
     mcp,
@@ -108,6 +109,7 @@ app.add_typer(plugin.app, name="plugin")
 app.add_typer(resume.app, name="resume")
 app.add_typer(uninstall.app, name="uninstall")
 app.add_typer(workflow_ir.app, name="workflow-ir")
+app.command(name="dispatch", hidden=True)(dispatch.dispatch_command)
 
 
 # Top-level convenience aliases
