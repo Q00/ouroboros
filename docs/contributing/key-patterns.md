@@ -223,6 +223,30 @@ seed.goal = "Different goal"  # ValidationError: frozen
 - The ontology can evolve with consensus, but direction fields cannot
 - Use `seed.to_dict()` / `Seed.from_dict()` for serialization
 
+## 8. Capability Graph for Skill Execution
+
+Skills declare abstract runtime needs; runtime adapters translate those needs
+through the capability graph.
+
+**Location**: `src/ouroboros/backends/capabilities.py`
+
+```python
+SkillExecutionCapability(
+    name="run_lateral_review",
+    guidance=(
+        "When an interview response marks `lateral_review_required=true`, "
+        "call `ouroboros_lateral_think` with the supplied tool args before "
+        "routing the next interview turn."
+    ),
+)
+```
+
+**Rules**:
+- Keep `SKILL.md` capability names runtime-neutral
+- Put runtime-specific tool names and prompt wording inside `SkillExecutionCapability.guidance`
+- Regenerate or update setup-owned instruction artifacts when rendered guide output changes
+- Follow `docs/runtime-guides/skill-capability-guides.md` before merging capability changes
+
 ## Summary Table
 
 | Pattern | When to Use | Key File |
@@ -234,3 +258,4 @@ seed.goal = "Different goal"  # ValidationError: frozen
 | Three-stage eval | Artifact verification | `evaluation/pipeline.py` |
 | TUI SSOT | UI state management | `tui/app.py`, `tui/events.py` |
 | Seed immutability | Workflow specification | `core/seed.py` |
+| Capability graph | Runtime-specific skill execution | `backends/capabilities.py` |

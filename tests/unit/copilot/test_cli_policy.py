@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
@@ -134,6 +135,35 @@ class TestBuildCopilotChildEnv:
         # GH_TOKEN / GITHUB_TOKEN must survive — child needs them to authenticate.
         assert env["GH_TOKEN"] == "ghp_secret"
         assert env["GITHUB_TOKEN"] == "ghp_other"
+        parts = env["COPILOT_CUSTOM_INSTRUCTIONS_DIRS"].split(",")
+        assert parts[-1].endswith(os.path.join(".copilot", "ouroboros-instructions"))
+
+    def test_preserves_existing_custom_instruction_dirs(self, tmp_path: Path) -> None:
+        existing = str(tmp_path / "existing")
+        env = build_copilot_child_env(
+            base_env={"COPILOT_CUSTOM_INSTRUCTIONS_DIRS": existing},
+            depth_error_factory=lambda depth, max_depth: RuntimeError(f"depth {depth}/{max_depth}"),
+        )
+
+        parts = env["COPILOT_CUSTOM_INSTRUCTIONS_DIRS"].split(",")
+        assert parts[0] == existing
+        assert parts[-1].endswith(os.path.join(".copilot", "ouroboros-instructions"))
+
+    def test_preserves_existing_comma_separated_custom_instruction_dirs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        first = str(tmp_path / "first")
+        second = str(tmp_path / "second")
+        env = build_copilot_child_env(
+            base_env={"COPILOT_CUSTOM_INSTRUCTIONS_DIRS": f"{first},{second}"},
+            depth_error_factory=lambda depth, max_depth: RuntimeError(f"depth {depth}/{max_depth}"),
+        )
+
+        parts = env["COPILOT_CUSTOM_INSTRUCTIONS_DIRS"].split(",")
+        assert parts[0] == first
+        assert parts[1] == second
+        assert parts[-1].endswith(os.path.join(".copilot", "ouroboros-instructions"))
 
     def test_uses_supplied_error_factory_for_depth_guard(self) -> None:
         class DepthExceededError(RuntimeError):
