@@ -2639,7 +2639,9 @@ class TestOpenCodeSetupConfigYaml:
 
         with (
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch("ouroboros.cli.commands.setup._install_opencode_bridge_plugin", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._install_opencode_bridge_plugin", return_value=True
+            ),
             patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry", return_value=True),
             patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry", return_value=True),
             patch("ouroboros.cli.commands.setup.opencode_config_dir", return_value=opencode_dir),

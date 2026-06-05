@@ -12,7 +12,9 @@ def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> Non
     documented_runtime_names = {
         row.split("|")[1].strip().lower()
         for row in coverage_section.splitlines()
-        if row.startswith("|") and not row.startswith("| ---") and "Generated artifact surface" not in row
+        if row.startswith("|")
+        and not row.startswith("| ---")
+        and "Generated artifact surface" not in row
     }
     assert set(runtime_backend_choices()) <= documented_runtime_names
 
