@@ -1799,7 +1799,7 @@ def _pi_ooo_bridge_source_text() -> str:
     command, args = _detect_pi_bridge_dispatch_entry()
     default_command = json.dumps(command)
     default_args = json.dumps(args)
-    return f'''/**
+    return f"""/**
  * Ouroboros ooo bridge for Pi.
  *
  * Managed by `ouroboros setup --runtime pi`.
@@ -1871,7 +1871,7 @@ export default function ouroborosBridge(pi: ExtensionAPI) {{
     return {{ action: handled ? "handled" : "continue" }};
   }});
 }}
-'''
+"""
 
 
 def _install_pi_ooo_bridge() -> bool:
@@ -1905,7 +1905,9 @@ def _install_pi_ooo_bridge() -> bool:
         print_warning(f"Could not install Pi ooo bridge at {dest}: {exc}")
         return False
 
-    print_success(f"{'Updated' if existing_hash is not None else 'Installed'} Pi ooo bridge: {dest}")
+    print_success(
+        f"{'Updated' if existing_hash is not None else 'Installed'} Pi ooo bridge: {dest}"
+    )
     print_info("Restart Pi or run /reload in an existing Pi session to load the bridge.")
     return True
 

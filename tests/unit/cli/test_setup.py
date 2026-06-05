@@ -3865,7 +3865,10 @@ class TestCopilotSetup:
         bridge_source = bridge_path.read_text(encoding="utf-8")
         assert 'pi.registerCommand("ooo"' in bridge_source
         assert 'pi.on("input"' in bridge_source
-        assert '[...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text]' in bridge_source
+        assert (
+            '[...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text]'
+            in bridge_source
+        )
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge_source
         assert 'return { action: handled ? "handled" : "continue" }' in bridge_source
 
