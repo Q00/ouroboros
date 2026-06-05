@@ -324,3 +324,64 @@ def test_normalize_execution_acceptance_preserves_exact_product_metadata_require
     ).model_copy(update={"goal": "Build a product final-report endpoint"})
 
     assert normalize_execution_acceptance(seed) is seed
+
+
+def test_normalize_execution_acceptance_drops_library_defaults_for_file_artifact() -> None:
+    seed = _seed(
+        "All public API symbols are importable from the documented module path.",
+        "Unit tests cover every public function/method's primary success path.",
+        "`ruff check` and the project's type-check command exit 0.",
+        "pi_auto_smoke.txt exists at repository root.",
+        "pi_auto_smoke.txt full content exactly pi-auto-ok followed by a newline.",
+    ).model_copy(
+        update={
+            "goal": (
+                "Create a tiny smoke-test file named pi_auto_smoke.txt. "
+                "The file must contain exactly the single line pi-auto-ok."
+            ),
+            "constraints": ("Keep the implementation to this one smoke-test file.",),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "pi_auto_smoke.txt exists at repository root.",
+        "pi_auto_smoke.txt full content exactly pi-auto-ok followed by a newline.",
+    )
+
+
+def test_normalize_execution_acceptance_drops_wrapped_library_defaults_for_file_artifact() -> None:
+    seed = _seed(
+        "A command/API check returns stable observable output or artifacts proving the original requirement for All public API symbols importable from the documented module path.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Unit tests cover every public function/method's primary success path.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for `ruff check` and the project's type-check command exit 0.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for pi_auto_smoke.txt exists at repository root.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for pi_auto_smoke.txt full content exactly pi-auto-ok followed by a newline.",
+    ).model_copy(
+        update={
+            "goal": (
+                "Create a tiny smoke-test file named pi_auto_smoke.txt. "
+                "The file must contain exactly the single line pi-auto-ok."
+            ),
+            "constraints": ("Keep the implementation to this one smoke-test file.",),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "A command/API check returns stable observable output or artifacts proving the original requirement for pi_auto_smoke.txt exists at repository root.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for pi_auto_smoke.txt full content exactly pi-auto-ok followed by a newline.",
+    )
+
+
+def test_normalize_execution_acceptance_preserves_library_defaults_for_api_goal() -> None:
+    seed = _seed(
+        "All public API symbols are importable from the documented module path.",
+        "Unit tests cover every public function/method's primary success path.",
+        "`ruff check` and the project's type-check command exit 0.",
+        "client.py exists.",
+    ).model_copy(update={"goal": "Build an importable SDK package with a public API"})
+
+    assert normalize_execution_acceptance(seed) is seed

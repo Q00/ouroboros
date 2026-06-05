@@ -283,6 +283,9 @@ class PiRuntime:
 
         assistant_event = event.get("assistantMessageEvent")
         if isinstance(assistant_event, dict):
+            assistant_event_type = assistant_event.get("type")
+            if assistant_event_type and assistant_event_type != "text_delta":
+                return None
             delta = assistant_event.get("delta")
             if isinstance(delta, str):
                 return delta
@@ -339,6 +342,35 @@ class PiRuntime:
                 text = self._extract_text_from_message(msg)
                 if text:
                     return text
+        return None
+
+    def _extract_error_content(self, event: dict[str, Any]) -> str | None:
+        """Extract Pi assistant error text from JSON events.
+
+        Pi may report model/auth failures as assistant messages with
+        ``stopReason: "error"`` while still exiting 0, so the runtime must treat
+        those events as errors instead of relying only on process status.
+        """
+
+        def from_message(message: Any) -> str | None:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                return None
+            if message.get("stopReason") != "error":
+                return None
+            error = message.get("errorMessage") or message.get("error")
+            if isinstance(error, str) and error.strip():
+                return error.strip()
+            return self._extract_text_from_message(message)
+
+        event_type = event.get("type")
+        if event_type in {"message_start", "message_end", "turn_end"}:
+            return from_message(event.get("message"))
+        if event_type == "agent_end":
+            messages = event.get("messages") or []
+            for msg in reversed(messages):
+                error = from_message(msg)
+                if error:
+                    return error
         return None
 
     # -- Process management ------------------------------------------------
@@ -498,6 +530,7 @@ class PiRuntime:
 
         last_content = ""
         pending_final_content: str | None = None
+        pending_error_content: str | None = None
 
         try:
             if process.stdout is not None:
@@ -546,6 +579,9 @@ class PiRuntime:
                     final_content = self._extract_final_content(event)
                     if final_content:
                         pending_final_content = final_content
+                    error_content = self._extract_error_content(event)
+                    if error_content:
+                        pending_error_content = error_content
                     if event.get("type") == "agent_end":
                         break
 
@@ -575,10 +611,18 @@ class PiRuntime:
             process_finished = True
 
             stderr_lines = await stderr_task if stderr_task else []
-            if returncode != 0:
-                final_message = (
-                    "\n".join(stderr_lines).strip() or pending_final_content or last_content or ""
-                )
+            if returncode != 0 or pending_error_content:
+                stderr_text = "\n".join(stderr_lines).strip()
+                if returncode == 0 and pending_error_content:
+                    final_message = pending_error_content
+                else:
+                    final_message = (
+                        stderr_text
+                        or pending_error_content
+                        or pending_final_content
+                        or last_content
+                        or ""
+                    )
                 if not final_message:
                     final_message = f"{self._display_name} exited with code {returncode}."
                 yield AgentMessage(

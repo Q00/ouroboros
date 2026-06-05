@@ -226,6 +226,15 @@ def _detect_runtimes() -> dict[str, str | None]:
         copilot_path if copilot_path and shutil.which(copilot_path) else None
     ) or shutil.which("copilot")
 
+    # Pi: explicit-path config first, then PATH.
+    try:
+        from ouroboros.config import get_pi_cli_path
+
+        pi_path = get_pi_cli_path()
+    except Exception:
+        pi_path = None
+    runtimes["pi"] = (pi_path if pi_path and shutil.which(pi_path) else None) or shutil.which("pi")
+
     return runtimes
 
 
@@ -1797,6 +1806,140 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     _install_runtime_instruction_artifact("copilot")
 
 
+_PI_OOO_BRIDGE_FILENAME = "ouroboros-ooo-bridge.ts"
+
+
+def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
+    """Return the launcher a managed Pi bridge should use for this install."""
+    if _is_source_tree_ouroboros_build():
+        return sys.executable, ["-m", "ouroboros"]
+    try:
+        version = importlib_metadata.version("ouroboros-ai")
+    except importlib_metadata.PackageNotFoundError:
+        return sys.executable, ["-m", "ouroboros"]
+    if ".dev" in version:
+        return sys.executable, ["-m", "ouroboros"]
+    return shutil.which("ouroboros") or "ouroboros", []
+
+
+def _pi_ooo_bridge_source_text() -> str:
+    """Return the managed Pi extension source for ``ooo`` frontdoor dispatch."""
+    command, args = _detect_pi_bridge_dispatch_entry()
+    default_command = json.dumps(command)
+    default_args = json.dumps(args)
+    return f"""/**
+ * Ouroboros ooo bridge for Pi.
+ *
+ * Managed by `ouroboros setup --runtime pi`.
+ * Routes exact-prefix `ooo ...` inputs from interactive Pi into Ouroboros'
+ * shared skill dispatcher instead of sending them to the model as chat.
+ */
+import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
+
+const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;
+const UNSUPPORTED_DISPATCH_EXIT_CODE = 78;
+const TIMEOUT_MS = Number(process.env.OUROBOROS_PI_BRIDGE_TIMEOUT_MS || 6 * 60 * 60 * 1000);
+const DEFAULT_COMMAND = {default_command};
+const DEFAULT_ARGS = {default_args};
+
+function ouroborosEntry(): {{ command: string; args: string[] }} {{
+  if (process.env.OUROBOROS_CLI) return {{ command: process.env.OUROBOROS_CLI, args: [] }};
+  return {{ command: DEFAULT_COMMAND, args: DEFAULT_ARGS }};
+}}
+
+function outputText(stdout: string, stderr: string): string {{
+  const out = stdout.trim();
+  const err = stderr.trim();
+  if (out && err) return `${{out}}\\n\\n${{err}}`;
+  return out || err || "(no output)";
+}}
+
+async function dispatch(pi: ExtensionAPI, text: string, ctx: ExtensionContext): Promise<boolean> {{
+  ctx.ui.notify(`Ouroboros dispatch: ${{text}}`, "info");
+  const entry = ouroborosEntry();
+  const result = await pi.exec(
+    entry.command,
+    [...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text],
+    {{ cwd: ctx.cwd, timeout: TIMEOUT_MS }},
+  );
+  if (result.code === UNSUPPORTED_DISPATCH_EXIT_CODE) {{
+    ctx.ui.notify(`Ouroboros did not claim command; continuing in Pi`, "info");
+    return false;
+  }}
+  const body = outputText(result.stdout || "", result.stderr || "");
+  pi.sendMessage({{
+    customType: "ouroboros",
+    content: body,
+    display: true,
+    details: {{ command: text, exitCode: result.code }},
+  }});
+  if (result.code !== 0) {{
+    ctx.ui.notify(`Ouroboros dispatch failed (${{result.code ?? "unknown"}})`, "error");
+  }}
+  return true;
+}}
+
+export default function ouroborosBridge(pi: ExtensionAPI) {{
+  pi.registerCommand("ooo", {{
+    description: "Dispatch an Ouroboros ooo command",
+    handler: async (args, ctx) => {{
+      const text = `ooo ${{args}}`.trim();
+      await dispatch(pi, text, ctx);
+    }},
+  }});
+
+  pi.on("input", async (event, ctx) => {{
+    if (event.source === "extension") {{
+      return {{ action: "continue" }};
+    }}
+    if (!COMMAND_RE.test(event.text)) {{
+      return {{ action: "continue" }};
+    }}
+    const handled = await dispatch(pi, event.text.trim(), ctx);
+    return {{ action: handled ? "handled" : "continue" }};
+  }});
+}}
+"""
+
+
+def _install_pi_ooo_bridge() -> bool:
+    """Install the managed Pi extension that routes interactive ``ooo`` input.
+
+    Pi auto-discovers global extensions in ``~/.pi/agent/extensions/*.ts``.
+    Writing a single managed file there avoids modifying Pi itself or any
+    third-party package such as roach-pi, while making the bridge available to
+    every Pi-based/customized session after ``/reload`` or restart.
+    """
+    import hashlib
+
+    dest = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
+    content = _pi_ooo_bridge_source_text()
+    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    existing_hash: str | None = None
+    if dest.exists():
+        try:
+            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
+        except OSError:
+            existing_hash = None
+
+    if existing_hash == new_hash:
+        print_info(f"Pi ooo bridge already up to date: {dest}")
+        return True
+
+    try:
+        _atomic_write_text(dest, content)
+    except OSError as exc:
+        print_warning(f"Could not install Pi ooo bridge at {dest}: {exc}")
+        return False
+
+    print_success(
+        f"{'Updated' if existing_hash is not None else 'Installed'} Pi ooo bridge: {dest}"
+    )
+    print_info("Restart Pi or run /reload in an existing Pi session to load the bridge.")
+    return True
+
+
 def _setup_gemini(gemini_path: str) -> None:
     """Configure Ouroboros for the Gemini CLI runtime.
 
@@ -1841,6 +1984,47 @@ def _setup_gemini(gemini_path: str) -> None:
     print_success(f"Configured Gemini runtime (CLI: {gemini_path})")
     print_info(f"Config saved to: {config_path}")
     _install_runtime_instruction_artifact("gemini")
+
+
+def _setup_pi(pi_path: str) -> None:
+    """Configure Ouroboros for the Pi CLI runtime.
+
+    Pi is a base-package agent runtime: setup records the executable path and
+    runtime backend, and installs a managed Pi extension so interactive Pi
+    sessions can route ``ooo ...`` inputs into Ouroboros' shared skill
+    dispatcher. The Pi LLM adapter remains opt-in so setup does not
+    unexpectedly move authoring/evaluation traffic to a different provider;
+    when selected explicitly, structured response_format requests are enforced
+    cooperatively by that adapter.
+    """
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Pi setup.")
+        return
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "pi"
+    orch["pi_cli_path"] = pi_path
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured Pi runtime (CLI: {pi_path})")
+    print_info(f"Config saved to: {config_path}")
+    _install_pi_ooo_bridge()
 
 
 def _setup_goose(goose_path: str) -> None:
@@ -2624,7 +2808,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, kiro, copilot, goose).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -2651,7 +2835,7 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose)
+    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi)
     and configures Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
@@ -2662,6 +2846,7 @@ def setup(
     [dim]    ouroboros setup --runtime gemini     # use Gemini CLI[/dim]
     [dim]    ouroboros setup --runtime kiro       # use Kiro CLI[/dim]
     [dim]    ouroboros setup --runtime copilot    # use GitHub Copilot CLI[/dim]
+    [dim]    ouroboros setup --runtime pi         # use Pi CLI[/dim]
     [dim]    ouroboros setup --runtime goose      # use Goose[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
@@ -2742,7 +2927,8 @@ def setup(
                 "  • Hermes CLI:  https://hermes.ai/cli\n"
                 "  • Gemini CLI:  npm install -g @google/gemini-cli\n"
                 "  • Kiro CLI:    https://kiro.dev/docs/cli/\n"
-                "  • Copilot CLI: https://docs.github.com/copilot/github-copilot-in-the-cli"
+                "  • Copilot CLI: https://docs.github.com/copilot/github-copilot-in-the-cli\n"
+                "  • Pi CLI:      npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
             )
             raise typer.Exit(1)
 
@@ -2827,6 +3013,17 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_copilot(copilot_path, non_interactive=non_interactive)
+    elif selected in ("pi", "pi_cli"):
+        pi_path = available.get("pi")
+        if not pi_path:
+            print_error(
+                "Pi CLI not found.\n"
+                "Install it with npm install -g --ignore-scripts "
+                "@earendil-works/pi-coding-agent, set OUROBOROS_PI_CLI_PATH, "
+                "or configure orchestrator.pi_cli_path."
+            )
+            raise typer.Exit(1)
+        _setup_pi(pi_path)
     elif selected in ("goose", "goose_cli"):
         goose_path = available.get("goose")
         if not goose_path:

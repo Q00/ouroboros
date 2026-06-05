@@ -242,6 +242,86 @@ class TestExecuteSeedHandler:
         assert missing_contract_resumed.is_ok
         assert captured_modes == [False, True, False, False]
 
+    async def test_handle_passes_execution_model_to_runtime(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Execution handoff honors OUROBOROS_EXECUTION_MODEL for CLI runtimes."""
+        captured_runtime_kwargs: dict[str, object] = {}
+        tracker = SessionTracker.create("exec_model", "seed-123")
+        workspace = SimpleNamespace(
+            effective_cwd="/tmp/ouroboros-worktree",
+            worktree_path="/tmp/ouroboros-worktree",
+            branch="ooo/test",
+            lock_path="/tmp/ouroboros.lock",
+        )
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, _session_id: str) -> Result:
+                return Result.ok(tracker)
+
+            async def mark_failed(self, session_id: str, *, error_message: str) -> None:
+                raise AssertionError(f"unexpected failure mark for {session_id}: {error_message}")
+
+        class FakeRunner:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def prepare_session(self, *args: object, **kwargs: object) -> Result:
+                return Result.ok(tracker)
+
+            async def execute_precreated_session(self, *args: object, **kwargs: object) -> Result:
+                return Result.ok(
+                    SimpleNamespace(
+                        success=True,
+                        execution_id="exec_model",
+                        summary={},
+                        final_message="done",
+                    )
+                )
+
+        def fake_create_agent_runtime(**kwargs: object) -> SimpleNamespace:
+            captured_runtime_kwargs.update(kwargs)
+            return SimpleNamespace(runtime_backend="pi")
+
+        monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "openai-codex/gpt-5.4-mini")
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        monkeypatch.setattr("ouroboros.mcp.tools.execution_handlers.OrchestratorRunner", FakeRunner)
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+            fake_create_agent_runtime,
+        )
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.maybe_prepare_task_workspace",
+            lambda *_args, **_kwargs: workspace,
+        )
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.release_lock", lambda *_args: None
+        )
+
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="pi",
+            llm_backend="claude_code",
+        )
+
+        result = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "skip_qa": True},
+            synchronous=True,
+        )
+
+        assert result.is_ok
+        assert captured_runtime_kwargs["backend"] == "pi"
+        assert captured_runtime_kwargs["model"] == "openai-codex/gpt-5.4-mini"
+        assert captured_runtime_kwargs["llm_backend"] == "claude_code"
+
     async def test_handle_rejects_removed_legacy_execution_mode(self) -> None:
         """MCP execute_seed matches the CLI removal of the legacy selector."""
         handler = ExecuteSeedHandler()

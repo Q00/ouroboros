@@ -3900,6 +3900,148 @@ class TestCopilotSetup:
 
         assert runtimes["copilot"] == str(explicit)
 
+    def test_detect_runtimes_picks_up_pi_from_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`_detect_runtimes()` should report pi when the binary is on PATH."""
+        fake = tmp_path / "pi"
+        fake.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.delenv("OUROBOROS_PI_CLI_PATH", raising=False)
+
+        def fake_which(name: str) -> str | None:
+            return str(fake) if name == "pi" else None
+
+        with patch("shutil.which", side_effect=fake_which):
+            runtimes = setup_cmd._detect_runtimes()
+
+        assert runtimes["pi"] == str(fake)
+
+    def test_detect_runtimes_honours_explicit_pi_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """OUROBOROS_PI_CLI_PATH wins over the bare PATH lookup."""
+        explicit = tmp_path / "from-env-pi"
+        explicit.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_PI_CLI_PATH", str(explicit))
+
+        on_path = tmp_path / "from-path-pi"
+        on_path.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        def fake_which(name: str) -> str | None:
+            if name == str(explicit):
+                return str(explicit)
+            if name == "pi":
+                return str(on_path)
+            return None
+
+        with patch("shutil.which", side_effect=fake_which):
+            runtimes = setup_cmd._detect_runtimes()
+
+        assert runtimes["pi"] == str(explicit)
+
+    def test_setup_pi_writes_runtime_without_switching_llm_backend(self, tmp_path: Path) -> None:
+        """Pi setup preserves the existing LLM backend unless explicitly changed."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "claude"},
+                    "llm": {"backend": "codex"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._setup_pi("/opt/bin/pi")
+
+        config_path = tmp_path / ".ouroboros" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        bridge_path = tmp_path / ".pi" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
+
+        assert config["orchestrator"]["runtime_backend"] == "pi"
+        assert config["orchestrator"]["pi_cli_path"] == "/opt/bin/pi"
+        assert config["llm"]["backend"] == "codex"
+        assert bridge_path.exists()
+        bridge_source = bridge_path.read_text(encoding="utf-8")
+        assert 'pi.registerCommand("ooo"' in bridge_source
+        assert 'pi.on("input"' in bridge_source
+        assert (
+            '[...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text]'
+            in bridge_source
+        )
+        assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge_source
+        assert 'return { action: handled ? "handled" : "continue" }' in bridge_source
+
+    def test_install_pi_ooo_bridge_is_idempotent(self, tmp_path: Path) -> None:
+        """The managed Pi bridge should not rewrite an already-current extension."""
+        bridge_path = tmp_path / ".pi" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._install_pi_ooo_bridge() is True
+            first_mtime = bridge_path.stat().st_mtime_ns
+            assert setup_cmd._install_pi_ooo_bridge() is True
+
+        assert bridge_path.stat().st_mtime_ns == first_mtime
+
+    def test_setup_cli_with_runtime_pi_flag(self, tmp_path: Path) -> None:
+        """`ouroboros setup --runtime pi --non-interactive` runs the Pi setup path."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={
+                    "claude": None,
+                    "codex": None,
+                    "opencode": None,
+                    "hermes": None,
+                    "gemini": None,
+                    "kiro": None,
+                    "copilot": None,
+                    "pi": "/opt/bin/pi",
+                },
+            ),
+            patch("ouroboros.cli.commands.setup._setup_pi") as mock_setup,
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "pi", "--non-interactive"],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_setup.assert_called_once_with("/opt/bin/pi")
+
+    def test_setup_cli_pi_missing_binary_errors_cleanly(self, tmp_path: Path) -> None:
+        """Explicit --runtime pi with no pi binary should exit non-zero."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={
+                    "claude": None,
+                    "codex": None,
+                    "opencode": None,
+                    "hermes": None,
+                    "gemini": None,
+                    "kiro": None,
+                    "copilot": None,
+                    "pi": None,
+                },
+            ),
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "pi", "--non-interactive"],
+            )
+
+        assert result.exit_code != 0
+        assert "Pi CLI not found" in result.output
+
     def test_setup_cli_with_runtime_copilot_flag(self, tmp_path: Path) -> None:
         """`ouroboros setup --runtime copilot --non-interactive` runs the
         copilot setup path without requiring user interaction."""

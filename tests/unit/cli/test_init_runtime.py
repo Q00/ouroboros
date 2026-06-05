@@ -66,6 +66,25 @@ class TestInitWorkflowRuntimeHandoff:
         assert mock_run_interview.await_args.args[6] == "codex"
         assert mock_run_interview.await_args.args[5] == "codex"
 
+    def test_cli_accepts_pi_llm_backend_for_interview_flow(self) -> None:
+        """Pi is accepted as an explicit LLM backend for interview authoring."""
+        mock_run_interview = AsyncMock()
+
+        with patch("ouroboros.cli.commands.init._run_interview", new=mock_run_interview):
+            result = runner.invoke(
+                app,
+                [
+                    "init",
+                    "start",
+                    "Build a REST API",
+                    "--llm-backend",
+                    "pi",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_run_interview.await_args.args[6] == "pi"
+
     def test_get_adapter_respects_configured_llm_backend_without_flags(self) -> None:
         """init start without flags uses llm.backend config instead of forcing LiteLLM."""
         mock_adapter = MagicMock()

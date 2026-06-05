@@ -36,6 +36,9 @@ def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> Non
 def test_cli_reference_setup_runtime_list_includes_supported_runtime_backends() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
 
-    assert "`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `goose`" in docs
-    assert "Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, and Goose" in docs
+    assert (
+        "`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`"
+        in docs
+    )
+    assert "Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, and Pi" in docs
     assert "`kiro-cli`, `copilot`, and `goose` CLI binaries" in docs

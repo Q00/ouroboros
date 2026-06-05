@@ -35,6 +35,16 @@ from ouroboros.evaluation.verification_artifacts import build_verification_artif
 from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 
 
+def _resolve_execution_model(runtime_backend: str | None) -> str | None:
+    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+    if execution_model is not None:
+        stripped = execution_model.strip()
+        return stripped or None
+    if runtime_backend == "claude":
+        return "claude-sonnet-4-6"
+    return None
+
+
 class _DefaultWorkflowGroup(typer.core.TyperGroup):
     """TyperGroup that falls back to 'workflow' when no subcommand matches.
 
@@ -620,6 +630,7 @@ async def _run_orchestrator(
 
     adapter = create_agent_runtime(
         backend=runtime_backend,
+        model=_resolve_execution_model(runtime_backend),
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
     runner = OrchestratorRunner(

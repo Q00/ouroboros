@@ -113,6 +113,35 @@ _HELLO_AUTO_OBSERVATION_UNIT_EQUIVALENTS = (
     | _HELLO_AUTO_EXISTENCE_EQUIVALENTS
 )
 
+_LIBRARY_DEFAULT_AC_EQUIVALENTS = frozenset(
+    {
+        "all public api symbols are importable from the documented module path",
+        "all public api symbols importable from the documented module path",
+        "unit tests cover every public function/method's primary success path",
+        "`ruff check` and the project's type-check command exit 0",
+        "ruff check and the project's type-check command exit 0",
+    }
+)
+
+_LIBRARY_CONTEXT_SIGNALS = (
+    "library",
+    "package",
+    "api surface",
+    "public api",
+    "sdk",
+    "importable",
+)
+
+_FILE_ARTIFACT_SIGNALS = (
+    " file ",
+    " file named ",
+    " exists",
+    " content",
+    " full content",
+    " single line",
+    " exact",
+)
+
 
 def normalize_execution_acceptance(seed: Seed) -> Seed:
     """Remove auto-observation/reporting criteria from execution Seeds.
@@ -125,10 +154,18 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     """
     criteria = tuple(ac for ac in seed.acceptance_criteria if ac and ac.strip())
     direction_context = "\n".join((seed.goal, *seed.constraints))
-    if not criteria or not _has_auto_wrapper_context(seed.goal, criteria):
+    if not criteria:
         return seed
 
-    filtered = normalize_observation_execution_criteria(criteria, context_text=direction_context)
+    filtered = criteria
+    if _has_auto_wrapper_context(seed.goal, criteria):
+        filtered = normalize_observation_execution_criteria(
+            filtered, context_text=direction_context
+        )
+    filtered = normalize_file_artifact_execution_criteria(
+        filtered,
+        context_text=direction_context,
+    )
     if not filtered or filtered == criteria:
         return seed
     return seed.model_copy(update={"acceptance_criteria": filtered})
@@ -184,12 +221,55 @@ def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
     return _criterion_key(criterion) in _AUTO_WRAPPER_CRITERIA
 
 
+def normalize_file_artifact_execution_criteria(
+    criteria: tuple[str, ...],
+    *,
+    context_text: str = "",
+) -> tuple[str, ...]:
+    """Drop library defaults from direct file-artifact Seeds.
+
+    When task-class inference falls back to ``library`` for a tiny file
+    artifact, the catalog's import/unit-test/lint defaults are unrelated and
+    can prevent ``ooo auto`` from reaching the requested runtime. Keep this
+    scoped to file-state goals that do not explicitly ask for a library/API.
+    """
+    if not _has_file_artifact_context(context_text, criteria):
+        return criteria
+
+    filtered = tuple(
+        criterion for criterion in criteria if not _is_library_default_acceptance(criterion)
+    )
+    return filtered or criteria
+
+
 def has_auto_wrapper_context(text: str) -> bool:
     """Return true only for the known hello_auto observation prompt shape."""
     lowered = text.casefold()
     return all(marker in lowered for marker in _OBSERVATION_CONTEXT_REQUIRED) and any(
         marker in lowered for marker in _OBSERVATION_CONTEXT_ALTERNATES
     )
+
+
+def _has_file_artifact_context(context_text: str, criteria: tuple[str, ...]) -> bool:
+    context_lowered = f" {context_text} ".casefold()
+    if any(signal in context_lowered for signal in _LIBRARY_CONTEXT_SIGNALS):
+        return False
+    text = f"{context_lowered}\n" + "\n".join(criteria).casefold()
+    lowered = text.casefold()
+    if not any(signal in lowered for signal in _FILE_ARTIFACT_SIGNALS):
+        return False
+    has_file_path = bool(re.search(r"\b[\w.-]+\.[A-Za-z0-9]{1,8}\b", lowered))
+    has_file_check = any("exists" in criterion.casefold() for criterion in criteria)
+    has_content_check = any(
+        marker in criterion.casefold() for criterion in criteria for marker in ("content", "line")
+    )
+    return has_file_path and (has_file_check or has_content_check)
+
+
+def _is_library_default_acceptance(criterion: str) -> bool:
+    subject = _unwrap_seed_repairer_original_requirement(criterion)
+    key = _criterion_key(subject)
+    return key in _LIBRARY_DEFAULT_AC_EQUIVALENTS
 
 
 def _has_auto_wrapper_context(goal: str, criteria: tuple[str, ...]) -> bool:

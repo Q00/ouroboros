@@ -3959,7 +3959,7 @@ class AutoPipeline:
         if task_class is not None:
             applied = apply_default_ac_template(seed, task_class)
             if applied.injected_ac:
-                seed = applied.seed
+                seed = normalize_execution_acceptance(applied.seed)
                 state.seed_id = seed.metadata.seed_id
                 state.seed_artifact = seed.to_dict()
             state.active_task_class = task_class.value
