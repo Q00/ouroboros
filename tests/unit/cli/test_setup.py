@@ -3401,6 +3401,11 @@ class TestCopilotSetup:
         assert config["clarification"]["default_model"] == "claude-opus-4.6"
         # Explicit user overrides are preserved.
         assert config["llm"]["qa_model"] == "x"
+        guide_path = tmp_path / ".copilot" / "ouroboros-instructions" / "AGENTS.md"
+        assert guide_path.is_file()
+        assert "### When a skill requires `run_lateral_review`" in guide_path.read_text(
+            encoding="utf-8"
+        )
         mock_register.assert_called_once_with()
 
     def test_setup_copilot_replaces_shipped_default_model_fields(self, tmp_path: Path) -> None:
