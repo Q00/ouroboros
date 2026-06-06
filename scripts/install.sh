@@ -18,6 +18,76 @@ IS_LOCAL=false
 RECONFIGURE="${OUROBOROS_INSTALL_RECONFIGURE:-}"
 EXPLICIT_RUNTIME="${OUROBOROS_INSTALL_RUNTIME:-}"
 
+if [ -z "${NO_COLOR:-}" ] && { [ -t 1 ] || [ -n "${FORCE_COLOR:-}" ]; } && { [ "${TERM:-}" != "dumb" ] || [ -n "${FORCE_COLOR:-}" ]; }; then
+  BOLD="$(printf '\033[1m')"
+  DIM="$(printf '\033[2m')"
+  GREEN="$(printf '\033[1;32m')"
+  YELLOW="$(printf '\033[1;33m')"
+  BLUE="$(printf '\033[1;34m')"
+  CYAN="$(printf '\033[1;36m')"
+  MAGENTA="$(printf '\033[1;35m')"
+  RED="$(printf '\033[1;31m')"
+  RESET="$(printf '\033[0m')"
+else
+  BOLD=""
+  DIM=""
+  GREEN=""
+  YELLOW=""
+  BLUE=""
+  CYAN=""
+  MAGENTA=""
+  RED=""
+  RESET=""
+fi
+
+_say() {
+  printf '%s\n' "$*"
+}
+
+_blank() {
+  printf '\n'
+}
+
+_banner() {
+  _say "${MAGENTA}╭────────────────────────────────────────────╮${RESET}"
+  _say "${MAGENTA}│${RESET} ${BOLD}${CYAN}Ouroboros installer${RESET}                         ${MAGENTA}│${RESET}"
+  _say "${MAGENTA}│${RESET} ${DIM}Specification-first AI development${RESET}          ${MAGENTA}│${RESET}"
+  _say "${MAGENTA}╰────────────────────────────────────────────╯${RESET}"
+  _say "${DIM}Installs the CLI, chooses an agent backend, and wires up local skills.${RESET}"
+}
+
+_step() {
+  _blank
+  _say "${BLUE}◆${RESET} ${BOLD}$1${RESET}"
+  if [ "${2:-}" != "" ]; then
+    _say "  ${DIM}$2${RESET}"
+  fi
+}
+
+_ok() {
+  _say "  ${GREEN}✓${RESET} $1"
+}
+
+_warn() {
+  _say "  ${YELLOW}!${RESET} $1"
+}
+
+_err() {
+  _say "  ${RED}✗${RESET} $1"
+}
+
+_info() {
+  _say "  ${DIM}•${RESET} $1"
+}
+
+_choice() {
+  printf '  %b[%s]%b %-8s %s\n' "$BOLD" "$1" "$RESET" "$2" "$3"
+}
+
+_prompt() {
+  printf '%b' "${BOLD}$1${RESET}"
+}
+
 # Parse simple flags: --reconfigure, --runtime <name>
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,22 +131,21 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   fi
 fi
 
-echo "╭──────────────────────────────────────╮"
-echo "│     Ouroboros Installer              │"
-echo "╰──────────────────────────────────────╯"
-echo
+_banner
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
 HAS_PIPX=false
 PYTHON=""
 
+_step "1/4  Checking Python tooling" "Prefer uv, then pipx, then pip."
+
 if command -v uv &>/dev/null; then
   HAS_UV=true
-  echo "  uv:     $(uv --version)"
+  _ok "uv found: $(uv --version)"
 elif command -v pipx &>/dev/null; then
   HAS_PIPX=true
-  echo "  pipx:   $(pipx --version)"
+  _ok "pipx found: $(pipx --version)"
 fi
 
 # NOTE: Interpreter selection branches (uv, pipx, pip) are not covered
@@ -108,17 +177,18 @@ if [ "$HAS_UV" = false ]; then
       fi
     done
     if [ -z "$PYTHON" ]; then
-      echo "Error: pipx requires Python >=${MIN_PYTHON} but none was found."
-      echo ""
-      echo "Install Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
-      echo "Or install uv (recommended). Pick whichever fits your environment:"
-      echo "  pipx install uv"
-      echo "  pip install --user uv"
-      echo "  brew install uv          # macOS / Linuxbrew"
-      echo "  curl -LsSf https://astral.sh/uv/install.sh | sh   # vendor one-liner"
+      _blank
+      _err "pipx requires Python >=${MIN_PYTHON}, but none was found."
+      _blank
+      _say "${BOLD}Install one of these, then run the installer again:${RESET}"
+      _info "uv: pipx install uv"
+      _info "uv: pip install --user uv"
+      _info "uv: brew install uv"
+      _info "uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+      _info "Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
       exit 1
     fi
-    echo "  Python: $($PYTHON --version)"
+    _ok "Python found: $($PYTHON --version)"
   else
     # pip fallback: any matching python3/python will do.
     for cmd in python3 python; do
@@ -128,22 +198,23 @@ if [ "$HAS_UV" = false ]; then
       fi
     done
     if [ -z "$PYTHON" ]; then
-      echo "Error: No installer found (uv, pipx) and Python >=${MIN_PYTHON} not available."
-      echo ""
-      echo "Install one of:"
-      echo "  • uv (recommended). Pick whichever fits your environment:"
-      echo "      pipx install uv"
-      echo "      pip install --user uv"
-      echo "      brew install uv          # macOS / Linuxbrew"
-      echo "      curl -LsSf https://astral.sh/uv/install.sh | sh   # vendor one-liner"
-      echo "  • Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
+      _blank
+      _err "No installer found: uv, pipx, or Python >=${MIN_PYTHON}."
+      _blank
+      _say "${BOLD}Install one of these, then run the installer again:${RESET}"
+      _info "uv: pipx install uv"
+      _info "uv: pip install --user uv"
+      _info "uv: brew install uv"
+      _info "uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+      _info "Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
       exit 1
     fi
-    echo "  Python: $($PYTHON --version)"
+    _ok "Python found: $($PYTHON --version)"
   fi
 fi
 
 # 2. Detect runtimes
+_step "2/4  Choosing an agent backend" "Codex, Claude, Hermes, OpenCode, Gemini, Kiro, Copilot, and Pi are supported."
 EXTRAS=""
 RUNTIME=""
 HAS_CODEX=false
@@ -155,35 +226,35 @@ HAS_KIRO=false
 HAS_COPILOT=false
 HAS_PI=false
 if command -v codex &>/dev/null; then
-  echo "  Codex:  $(which codex)"
+  _ok "Codex found: $(which codex)"
   HAS_CODEX=true
 fi
 if command -v claude &>/dev/null; then
-  echo "  Claude: $(which claude)"
+  _ok "Claude found: $(which claude)"
   HAS_CLAUDE=true
 fi
 if command -v hermes &>/dev/null; then
-  echo "  Hermes: $(which hermes)"
+  _ok "Hermes found: $(which hermes)"
   HAS_HERMES=true
 fi
 if command -v opencode &>/dev/null; then
-  echo "  OpenCode: $(which opencode)"
+  _ok "OpenCode found: $(which opencode)"
   HAS_OPENCODE=true
 fi
 if command -v gemini &>/dev/null; then
-  echo "  Gemini: $(which gemini)"
+  _ok "Gemini found: $(which gemini)"
   HAS_GEMINI=true
 fi
 if command -v kiro-cli &>/dev/null; then
-  echo "  Kiro:   $(which kiro-cli)"
+  _ok "Kiro found: $(which kiro-cli)"
   HAS_KIRO=true
 fi
 if command -v copilot &>/dev/null; then
-  echo "  Copilot: $(which copilot)"
+  _ok "Copilot found: $(which copilot)"
   HAS_COPILOT=true
 fi
 if command -v pi &>/dev/null; then
-  echo "  Pi:      $(which pi)"
+  _ok "Pi: $(which pi)"
   HAS_PI=true
 fi
 
@@ -199,6 +270,9 @@ RUNTIME_COUNT=0
 
 # Map a runtime name to (EXTRAS, RUNTIME) pair.
 # Used after explicit/preserved runtime resolution to derive install extras.
+# Keep this table boring and explicit: agents reading this installer should be
+# able to see why Claude/Hermes pull MCP dependencies while file-based runtimes
+# only need the base CLI.
 _runtime_to_extras() {
   case "$1" in
     claude)  EXTRAS="[mcp,claude]"; RUNTIME="claude" ;;
@@ -212,7 +286,8 @@ _runtime_to_extras() {
     all)     EXTRAS="[all]"; RUNTIME="" ;;
     "")      EXTRAS=""; RUNTIME="" ;;
     *)
-      echo "Error: unsupported runtime '$1' (expected: claude, codex, opencode, hermes, gemini, kiro, copilot, pi, all)"
+      _err "unsupported runtime '$1'"
+      _info "Expected one of: claude, codex, opencode, hermes, gemini, kiro, copilot, pi, all"
       exit 1
       ;;
   esac
@@ -246,28 +321,29 @@ except Exception:
 fi
 
 if [ -n "$EXPLICIT_RUNTIME" ]; then
-  echo
-  echo "  Runtime: $EXPLICIT_RUNTIME (from --runtime / OUROBOROS_INSTALL_RUNTIME)"
+  _blank
+  _ok "Runtime: $EXPLICIT_RUNTIME (from --runtime / OUROBOROS_INSTALL_RUNTIME)"
   _runtime_to_extras "$EXPLICIT_RUNTIME"
 elif [ -n "$EXISTING_RUNTIME" ]; then
-  echo
-  echo "  Runtime: $EXISTING_RUNTIME (preserved from $EXISTING_CONFIG)"
-  echo "           [dim]Re-run with --reconfigure to choose again.[/dim]"
+  _blank
+  _ok "Runtime: $EXISTING_RUNTIME (preserved from $EXISTING_CONFIG)"
+  _info "Re-run with --reconfigure to choose again."
   _runtime_to_extras "$EXISTING_RUNTIME"
 elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
-    echo
-    echo "Multiple runtimes detected. Which runtime do you want to use?"
-    echo "  [1] Claude   (pip install ${PACKAGE_NAME}[mcp,claude])"
-    echo "  [2] Codex    (pip install ${PACKAGE_NAME})"
-    echo "  [3] Hermes   (pip install ${PACKAGE_NAME}[mcp])"
-    echo "  [4] OpenCode (pip install ${PACKAGE_NAME})"
-    echo "  [5] Gemini   (pip install ${PACKAGE_NAME})"
-    echo "  [6] Kiro     (pip install ${PACKAGE_NAME})"
-    echo "  [7] Copilot  (pip install ${PACKAGE_NAME})"
-    echo "  [8] Pi       (pip install ${PACKAGE_NAME})"
-    echo "  [9] All      (pip install ${PACKAGE_NAME}[all])"
-    read -rp "Select [1]: " choice
+    _blank
+    _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
+    _choice 1 "Claude" "Claude Code plugin + MCP server (${PACKAGE_NAME}[mcp,claude])"
+    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME})"
+    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp])"
+    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME})"
+    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME})"
+    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME})"
+    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME})"
+    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME})"
+    _choice 9 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _prompt "Select [1]: "
+    read -r choice
     case "${choice:-1}" in
       2) _runtime_to_extras "codex" ;;
       3) _runtime_to_extras "hermes" ;;
@@ -281,6 +357,7 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
     esac
   else
     # Pipe mode: default to claude when multiple runtimes exist
+    _warn "Multiple runtimes detected in non-interactive mode; defaulting to Claude."
     _runtime_to_extras "claude"
   fi
 elif [ "$HAS_CLAUDE" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
@@ -303,19 +380,20 @@ else
   # No runtime CLI on PATH yet — first install. Always prompt when interactive
   # so the user picks deliberately rather than silently defaulting to claude.
   if [ -t 0 ]; then
-    echo
-    echo "No runtime CLI detected. Which runtime will you use?"
-    echo "  [1] Claude   (pip install ${PACKAGE_NAME}[mcp,claude])  ← recommended"
-    echo "  [2] Codex    (pip install ${PACKAGE_NAME})"
-    echo "  [3] Hermes   (pip install ${PACKAGE_NAME}[mcp])"
-    echo "  [4] OpenCode (pip install ${PACKAGE_NAME})"
-    echo "  [5] Gemini   (pip install ${PACKAGE_NAME})"
-    echo "  [6] Kiro     (pip install ${PACKAGE_NAME})"
-    echo "  [7] Copilot  (pip install ${PACKAGE_NAME})"
-    echo "  [8] Pi       (pip install ${PACKAGE_NAME})"
-    echo "  [9] All      (pip install ${PACKAGE_NAME}[all])"
-    echo "  [0] None     (install base package only — pick a backend later)"
-    read -rp "Select [1]: " choice
+    _blank
+    _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
+    _choice 1 "Claude" "Recommended: plugin + MCP server (${PACKAGE_NAME}[mcp,claude])"
+    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME})"
+    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp])"
+    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME})"
+    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME})"
+    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME})"
+    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME})"
+    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME})"
+    _choice 9 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _choice 0 "None" "Base CLI only; choose a backend later"
+    _prompt "Select [1]: "
+    read -r choice
     case "${choice:-1}" in
       0) _runtime_to_extras "" ;;
       2) _runtime_to_extras "codex" ;;
@@ -330,23 +408,32 @@ else
     esac
   else
     # Pipe mode (curl | bash): install base package, skip runtime-specific setup.
-    echo
-    echo "  No runtime detected (non-interactive: installing base package)"
-    echo "  Pick a backend afterwards with: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
+    _blank
+    _warn "No runtime detected in non-interactive mode; installing the base package."
+    _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
     _runtime_to_extras ""
   fi
 fi
 
+if [ -n "$RUNTIME" ]; then
+  _ok "Selected backend: $RUNTIME"
+elif [ "$EXTRAS" = "[all]" ]; then
+  _ok "Selected backend: all"
+else
+  _info "Selected backend: none yet"
+fi
+
 INSTALL_SPEC="${PACKAGE_NAME}${EXTRAS}"
 
-echo
-echo "Installing ${INSTALL_SPEC} ..."
+_step "3/4  Installing Ouroboros" "Package: ${INSTALL_SPEC}"
+_say "Installing ${INSTALL_SPEC} ..."
 
 # 3. Install (or upgrade if already installed)
 # uv tool install has issues with [extras] syntax — use --with for reliability.
 INSTALL_METHOD=""
 if [ "$HAS_UV" = true ]; then
   INSTALL_METHOD="uv"
+  _info "Install method: uv tool install"
   # `click` is also declared in pyproject, but keep this explicit so the
   # installer can repair already-published wheels whose metadata missed it.
   UV_ARGS=(tool install --upgrade --python ">=3.12" "$PACKAGE_NAME" --with "$CLICK_SPEC")
@@ -383,6 +470,7 @@ if [ "$HAS_UV" = true ]; then
   uv "${UV_ARGS[@]}"
 elif [ "$HAS_PIPX" = true ]; then
   INSTALL_METHOD="pipx"
+  _info "Install method: pipx"
   if [ -n "$PRE_FLAG" ]; then
     pipx install --force --python "$PYTHON" --pip-args='--pre' "$INSTALL_SPEC"
   else
@@ -392,6 +480,7 @@ elif [ "$HAS_PIPX" = true ]; then
   pipx inject "ouroboros-ai" "$CLICK_SPEC"
 else
   INSTALL_METHOD="pip"
+  _info "Install method: pip --user"
   if [ -n "$PRE_FLAG" ]; then
     $PYTHON -m pip install --user --upgrade --pre "$INSTALL_SPEC" "$CLICK_SPEC"
   else
@@ -410,18 +499,22 @@ if ! command -v ouroboros &>/dev/null; then
 fi
 
 # 4. Setup (ouroboros CLI configures runtime-specific integration)
+_step "4/4  Wiring local integrations" "Creates config and runtime-specific files when a backend was selected."
 if [ -n "$RUNTIME" ] && command -v ouroboros &>/dev/null; then
-  echo
-  echo "Running setup..."
+  _info "Running: ouroboros setup --runtime $RUNTIME --non-interactive"
   ouroboros setup --runtime "$RUNTIME" --non-interactive || true
+elif [ -n "$RUNTIME" ]; then
+  _warn "ouroboros command is not on PATH yet; run setup after your shell sees the installed binary."
+else
+  _info "No backend selected; skipping runtime setup."
 fi
 
 # 5. Claude Code integration (MCP + skills)
 # Only apply Claude-specific integration when Claude was the selected runtime,
 # or when the user explicitly asked for the all-runtimes install.
 if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" = "[all]" ]; }; then
-  echo
-  echo "Setting up Claude Code integration..."
+  _blank
+  _say "${BLUE}◆${RESET} ${BOLD}Claude Code extras${RESET}"
 
   # 5a. Register MCP server in ~/.claude/mcp.json
   # (ouroboros setup may have done this already, but we ensure it with timeout)
@@ -469,9 +562,9 @@ with open(mcp_file, 'w') as f:
     json.dump(data, f, indent=2)
 print('merged')
 " 2>/dev/null; then
-        echo "  MCP: merged into existing $MCP_FILE"
+        _ok "MCP merged into existing $MCP_FILE"
       else
-        echo "  MCP: could not merge — check $MCP_FILE manually"
+        _warn "MCP could not merge; check $MCP_FILE manually."
       fi
     else
       if MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
@@ -482,36 +575,33 @@ data = {'mcpServers': {'ouroboros': entry}}
 with open(mcp_file, 'w') as f:
     json.dump(data, f, indent=2)
 " 2>/dev/null; then
-        echo "  MCP: created $MCP_FILE"
+        _ok "MCP created at $MCP_FILE"
       else
-        echo "  MCP: could not create — check $MCP_FILE manually"
+        _warn "MCP could not create; check $MCP_FILE manually."
       fi
     fi
   else
-    echo "  MCP: skipped (no python3 found — add manually to $MCP_FILE)"
+    _warn "MCP skipped: no python3 found. Add the entry manually to $MCP_FILE."
   fi
 
   # 5b. Install/update Ouroboros skills (claude plugin)
-  echo "  Installing Ouroboros skills..."
+  _info "Installing Ouroboros skills via Claude plugin marketplace..."
   claude plugin marketplace add Q00/ouroboros 2>/dev/null || true
   claude plugin marketplace update ouroboros 2>/dev/null || true
   if claude plugin install ouroboros@ouroboros 2>/dev/null; then
-    echo "  Skills: installed"
+    _ok "Skills installed"
   else
-    echo "  Skills: skipped (install manually: claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros)"
+    _warn "Skills skipped. Manual install: claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros"
   fi
 fi
 
-echo
-echo "Done! Get started:"
-echo
-echo "  Open your AI coding agent and run:"
-echo '    > ooo interview "your idea here"'
-echo
-echo "  Or from the terminal:"
-echo '    ouroboros init start "your idea here"'
-echo
+_blank
+_say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"
+_blank
+_say "${BOLD}Get started${RESET}"
+_info 'Open your AI coding agent and run: > ooo interview "your idea here"'
+_info 'Or from the terminal: ouroboros init start "your idea here"'
 if [ -n "$RUNTIME" ]; then
-  echo "  Current backend: $RUNTIME"
+  _info "Current backend: $RUNTIME"
 fi
-echo "  Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
+_info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
