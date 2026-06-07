@@ -1,6 +1,6 @@
 """Milestone-transition lateral review advisory tests for #817."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
@@ -8,6 +8,7 @@ from ouroboros.core.types import Result
 from ouroboros.events.interview import interview_lateral_review_recommended
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
+    _build_interview_lateral_review_orchestration,
     _maybe_record_lateral_review_advisory,
 )
 
@@ -198,11 +199,88 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     assert tool_args["personas"] == ["researcher", "contrarian", "simplifier"]
     assert "Milestone: initial -> progress" in tool_args["problem_context"]
     assert "Next interview question: What edge case remains?" in tool_args["problem_context"]
+    orchestration = result.value.meta["lateral_review_orchestration"]
+    assert orchestration["kind"] == "mcp_directive"
+    assert orchestration["directive"] == "run_lateral_persona_panel"
+    assert orchestration["mcp_tool"] == "ouroboros_lateral_think"
+    assert orchestration["tool_args"] == tool_args
+
+    panel = orchestration["panel"]
+    assert panel["panel_id"] == "lateral_persona_panel.v1"
+    assert panel["mcp_tool"] == "ouroboros_lateral_think"
+    assert panel["dispatch_modes"] == ["plugin", "inline_fallback"]
+    assert panel["parallel_preference"] == "parallel_when_runtime_supports_subagents"
+    assert panel["sequential_fallback"] == {
+        "supported": True,
+        "mode": "sequential_persona_payload_dispatch",
+        "trigger": "runtime_has_no_native_parallel_subagent_primitive",
+    }
+    assert [persona["persona_id"] for persona in panel["personas"]] == [
+        "researcher",
+        "contrarian",
+        "simplifier",
+    ]
+    assert panel["response_payload_refs"]["requires_prose_parsing"] is False
+    assert "structured payload" in panel["runtime_instruction"]
+
+    runtime_handling = orchestration["runtime_handling"]
+    assert runtime_handling == {
+        "call_mcp_tool_first": True,
+        "parallel_capable_execution_mode": "parallel_subagent_panel",
+        "sequential_fallback_mode": "sequential_persona_payload_dispatch",
+        "sequential_fallback_trigger": "runtime_has_no_native_parallel_subagent_primitive",
+        "result_correlation_key": "context.persona",
+        "requires_prose_parsing": False,
+        "synthesize_before_interview_continuation": True,
+    }
     content_text = result.value.content[0].text
     assert content_text.startswith("Lateral review queued:")
     assert "Session sess-817" in content_text
     assert state.lateral_review_advised_milestones == ["progress"]
     handler._emit_event_bg.assert_called()
+
+
+def test_lateral_orchestration_falls_back_to_skill_prose_when_panel_metadata_absent() -> None:
+    tool_args = {
+        "problem_context": (
+            "Session sess-legacy\n"
+            "Milestone: initial -> progress\n"
+            "Next interview question: What edge case remains?"
+        ),
+        "current_approach": "Route the next interview turn.",
+        "personas": ["researcher", "contrarian", "simplifier"],
+        "failed_attempts": [],
+    }
+
+    with patch(
+        "ouroboros.mcp.tools.authoring_handlers."
+        "lateral_persona_panel_metadata_from_capability_definitions",
+        return_value={},
+    ):
+        orchestration = _build_interview_lateral_review_orchestration(
+            tool_args=tool_args
+        )
+
+    assert orchestration["kind"] == "mcp_directive"
+    assert orchestration["directive"] == "run_lateral_persona_panel"
+    assert orchestration["mcp_tool"] == "ouroboros_lateral_think"
+    assert orchestration["tool_args"] == tool_args
+    assert orchestration["structured_lateral_panel_metadata_available"] is False
+    assert orchestration["fallback"] == "skill_prose_instructions"
+    assert orchestration["prose_instruction_source"] == "skills/interview/SKILL.md"
+    assert "call ouroboros_lateral_think with meta.lateral_review_tool_args" in (
+        orchestration["prose_instruction"]
+    )
+    assert 'personas=["researcher","contrarian","simplifier"]' in (
+        orchestration["prose_instruction"]
+    )
+    assert "panel" not in orchestration
+    assert orchestration["runtime_handling"] == {
+        "call_mcp_tool_first": True,
+        "result_correlation_key": None,
+        "requires_prose_parsing": True,
+        "synthesize_before_interview_continuation": True,
+    }
 
 
 async def test_handler_does_not_record_advisory_before_auto_completion() -> None:

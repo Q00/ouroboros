@@ -2,8 +2,10 @@
 
 from ouroboros.backends.capabilities import (
     BackendCapability,
+    RuntimeSubagentOrchestrationContract,
     SkillExecutionCapability,
     backend_supports_tool_envelope,
+    build_runtime_subagent_orchestration_contract,
     get_backend_capability,
     interview_driver_backend_choices,
     llm_backend_choices,
@@ -18,8 +20,10 @@ from ouroboros.backends.capabilities import (
 
 __all__ = [
     "BackendCapability",
+    "RuntimeSubagentOrchestrationContract",
     "SkillExecutionCapability",
     "backend_supports_tool_envelope",
+    "build_runtime_subagent_orchestration_contract",
     "get_backend_capability",
     "interview_driver_backend_choices",
     "llm_backend_choices",

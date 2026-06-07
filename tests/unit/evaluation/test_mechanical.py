@@ -1,5 +1,6 @@
 """Tests for Stage 1 mechanical verification."""
 
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -135,6 +136,23 @@ class TestRunCommand:
         assert result.return_code == -1
         assert "not found" in result.stderr.lower() or "Command not found" in result.stderr
 
+    @pytest.mark.asyncio
+    async def test_command_strips_nested_mcp_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Mechanical checks should not inherit the MCP server recursion sentinel."""
+        monkeypatch.setenv("_OUROBOROS_NESTED", "1")
+
+        result = await run_command(
+            (
+                sys.executable,
+                "-c",
+                "import os; print(os.environ.get('_OUROBOROS_NESTED', 'missing'))",
+            ),
+            timeout=5,
+        )
+
+        assert result.return_code == 0
+        assert result.stdout.strip() == "missing"
+
 
 class TestMechanicalVerifier:
     """Tests for MechanicalVerifier class."""
@@ -201,6 +219,30 @@ class TestMechanicalVerifier:
             mech_result, _ = result.value
             assert mech_result.passed is False
             assert len(mech_result.failed_checks) == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_failed_check_preserves_command_and_output_tail(self) -> None:
+        """Failed checks keep tail diagnostics instead of only the noisy prefix."""
+        with patch(
+            "ouroboros.evaluation.mechanical.run_command",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            mock_run.return_value = CommandResult(
+                1,
+                "prefix\n" + ("." * 700) + "\nFAILED tests/test_example.py::test_case",
+                "stderr prefix\n" + ("x" * 700) + "\nAssertionError: boom",
+            )
+
+            verifier = MechanicalVerifier(_TEST_CONFIG)
+            result = await verifier.verify("exec-1", checks=[CheckType.TEST])
+
+            assert result.is_ok
+            mech_result, _ = result.value
+            details = mech_result.checks[0].details
+            assert details["command"] == ["echo", "test-ok"]
+            assert "FAILED tests/test_example.py::test_case" in details["stdout_tail"]
+            assert "AssertionError: boom" in details["stderr_tail"]
+            assert "FAILED tests/test_example.py::test_case" not in details["stdout_preview"]
 
     @pytest.mark.asyncio
     async def test_verify_coverage_below_threshold(self) -> None:

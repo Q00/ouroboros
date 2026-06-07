@@ -17,6 +17,14 @@ import json
 import pytest
 
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
+from ouroboros.mcp.tools.subagent import (
+    continue_interview_after_lateral_persona_synthesis,
+    lateral_persona_panel_metadata_from_capability_definitions,
+    lateral_review_response_to_interview_orchestration_entries,
+    lateral_review_response_to_interview_orchestration_metadata,
+    synthesize_lateral_persona_panel_when_complete,
+)
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 
 @pytest.mark.asyncio
@@ -40,11 +48,566 @@ async def test_multi_persona_plugin_mode_emits_subagents_envelope() -> None:
     assert payload.meta is not None
     # Envelope is present on meta and as JSON text.
     assert "_subagents" in payload.meta
-    assert len(payload.meta["_subagents"]) == 2
+    subagents = payload.meta["_subagents"]
+    assert len(subagents) == 2
+    assert [subagent["agent"] for subagent in subagents] == ["hacker", "contrarian"]
+    assert [subagent["title"] for subagent in subagents] == [
+        "Lateral (hacker)",
+        "Lateral (contrarian)",
+    ]
+    assert [subagent["context"]["persona"] for subagent in subagents] == [
+        "hacker",
+        "contrarian",
+    ]
     text = payload.content[0].text
     decoded = json.loads(text)
     assert "_subagents" in decoded
-    assert len(decoded["_subagents"]) == 2
+    assert [
+        (subagent["agent"], subagent["context"]["persona"])
+        for subagent in decoded["_subagents"]
+    ] == [("hacker", "hacker"), ("contrarian", "contrarian")]
+
+
+@pytest.mark.asyncio
+async def test_plugin_lateral_response_converts_to_interview_persona_panel_entries() -> None:
+    """Plugin lateral-review responses become per-persona interview metadata."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview crossed a milestone",
+            "current_approach": "continue with the next question",
+            "personas": ["researcher", "contrarian", "simplifier"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        payload,
+        session_id="sess-panel",
+        runtime_supports_parallel_subagents=True,
+    )
+
+    assert [entry["persona_id"] for entry in entries] == [
+        "researcher",
+        "contrarian",
+        "simplifier",
+    ]
+    assert {entry["panel_id"] for entry in entries} == {"lateral_persona_panel.v1"}
+    assert {entry["mcp_tool"] for entry in entries} == {"ouroboros_lateral_think"}
+    assert {entry["dispatch_mode"] for entry in entries} == {"plugin"}
+    assert {entry["response_payload_source"] for entry in entries} == {"meta"}
+    assert {entry["execution_mode"] for entry in entries} == {"parallel_subagent_panel"}
+    assert all(entry["requires_prose_parsing"] is False for entry in entries)
+    assert all(entry["sequential_fallback_used"] is False for entry in entries)
+    assert [entry["execution_order"] for entry in entries] == [1, 2, 3]
+    for entry in entries:
+        assert entry["session_id"] == "sess-panel"
+        assert entry["parallel_group"] == "sess-panel:lateral_persona_panel.v1"
+        assert entry["prompt"]
+        assert entry["context"]["persona"] == entry["persona_id"]
+        assert entry["persona_role"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_lateral_synthesis_waits_for_all_persona_outputs() -> None:
+    """Parallel persona collection gates synthesis until every output is present."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview crossed a milestone",
+            "current_approach": "continue only after lateral synthesis",
+            "personas": ["researcher", "contrarian", "simplifier"],
+        }
+    )
+
+    assert result.is_ok, result
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        result.unwrap(),
+        session_id="sess-aggregate",
+        runtime_supports_parallel_subagents=True,
+    )
+    assert [entry["persona_id"] for entry in entries] == [
+        "researcher",
+        "contrarian",
+        "simplifier",
+    ]
+
+    synthesis_calls = []
+
+    def synthesize(aggregated_outputs: list[dict]) -> dict:
+        synthesis_calls.append(aggregated_outputs)
+        return {
+            "persona_ids": [item["persona_id"] for item in aggregated_outputs],
+            "combined": "\n".join(str(item["output"]) for item in aggregated_outputs),
+        }
+
+    partial = synthesize_lateral_persona_panel_when_complete(
+        entries,
+        {
+            "contrarian": "challenge the assumption",
+            "researcher": "verify the current implementation",
+        },
+        synthesize,
+    )
+
+    assert partial["ready_for_synthesis"] is False
+    assert partial["missing_personas"] == ["simplifier"]
+    assert [item["persona_id"] for item in partial["aggregated_outputs"]] == [
+        "researcher",
+        "contrarian",
+    ]
+    assert partial["synthesis"] is None
+    assert synthesis_calls == []
+
+    complete = synthesize_lateral_persona_panel_when_complete(
+        entries,
+        {
+            "contrarian": "challenge the assumption",
+            "simplifier": "reduce the next question",
+            "researcher": "verify the current implementation",
+        },
+        synthesize,
+    )
+
+    assert complete["ready_for_synthesis"] is True
+    assert complete["missing_personas"] == []
+    assert complete["synthesis"] == {
+        "persona_ids": ["researcher", "contrarian", "simplifier"],
+        "combined": (
+            "verify the current implementation\n"
+            "challenge the assumption\n"
+            "reduce the next question"
+        ),
+    }
+    assert len(synthesis_calls) == 1
+    assert [item["persona_id"] for item in synthesis_calls[0]] == [
+        "researcher",
+        "contrarian",
+        "simplifier",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_lateral_synthesis_precedes_interview_continuation() -> None:
+    """Parallel persona results are synthesized before the interview turn resumes."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview crossed a milestone",
+            "current_approach": "continue only after synthesized lateral review",
+            "personas": ["researcher", "contrarian", "simplifier"],
+        }
+    )
+
+    assert result.is_ok, result
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        result.unwrap(),
+        session_id="sess-continuation-order",
+        runtime_supports_parallel_subagents=True,
+    )
+
+    timeline: list[str] = []
+
+    def synthesize(aggregated_outputs: list[dict]) -> dict:
+        timeline.append("synthesis")
+        return {
+            "persona_ids": [item["persona_id"] for item in aggregated_outputs],
+            "summary": "lateral review is ready",
+        }
+
+    def continue_interview(synthesis: dict) -> dict:
+        assert timeline == ["synthesis"]
+        assert synthesis["persona_ids"] == ["researcher", "contrarian", "simplifier"]
+        timeline.append("interview_continuation")
+        return {
+            "next_question": "What risk should we clarify next?",
+            "lateral_synthesis": synthesis,
+        }
+
+    partial = continue_interview_after_lateral_persona_synthesis(
+        entries,
+        {
+            "researcher": "verify current implementation",
+            "contrarian": "challenge milestone assumption",
+        },
+        synthesize,
+        continue_interview,
+    )
+
+    assert partial["ready_for_synthesis"] is False
+    assert partial["continued_interview"] is False
+    assert partial["interview_continuation"] is None
+    assert timeline == []
+
+    complete = continue_interview_after_lateral_persona_synthesis(
+        entries,
+        {
+            "simplifier": "reduce follow-up scope",
+            "contrarian": "challenge milestone assumption",
+            "researcher": "verify current implementation",
+        },
+        synthesize,
+        continue_interview,
+    )
+
+    assert complete["ready_for_synthesis"] is True
+    assert complete["continued_interview"] is True
+    assert complete["interview_continuation"] == {
+        "next_question": "What risk should we clarify next?",
+        "lateral_synthesis": complete["synthesis"],
+    }
+    assert timeline == ["synthesis", "interview_continuation"]
+
+
+@pytest.mark.asyncio
+async def test_interview_orchestration_reader_uses_capability_panel_metadata() -> None:
+    """Panel identity, roles, and fallback mode come from capability metadata."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview crossed a milestone",
+            "current_approach": "continue with the next question",
+            "personas": ["researcher", "contrarian"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    capability_panel = lateral_persona_panel_metadata_from_capability_definitions()
+
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        payload,
+        session_id="sess-capability",
+        runtime_supports_parallel_subagents=True,
+        lateral_panel_metadata=capability_panel,
+    )
+
+    assert entries
+    assert {entry["panel_id"] for entry in entries} == {capability_panel["panel_id"]}
+    assert {entry["mcp_tool"] for entry in entries} == {capability_panel["mcp_tool"]}
+    assert {entry["parallel_group"] for entry in entries} == {
+        f"sess-capability:{capability_panel['panel_id']}"
+    }
+    roles_by_id = {
+        persona["persona_id"]: persona["role"] for persona in capability_panel["personas"]
+    }
+    for entry in entries:
+        assert entry["persona_role"] == roles_by_id[entry["persona_id"]]
+        assert (
+            entry["requires_prose_parsing"]
+            is capability_panel["response_payload_refs"]["requires_prose_parsing"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_interview_orchestration_reader_honors_custom_capability_metadata() -> None:
+    """Regression guard against hard-coded lateral panel metadata in the reader."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview needs a lightweight review",
+            "current_approach": "ask the next Socratic question",
+            "personas": ["researcher"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    custom_panel = {
+        "panel_id": "custom_lateral_panel.v9",
+        "mcp_tool": "custom_lateral_tool",
+        "sequential_fallback": {
+            "supported": True,
+            "mode": "custom_sequential_mode",
+            "trigger": "test_runtime_without_parallel_subagents",
+        },
+        "personas": [
+            {"persona_id": "researcher", "role": "Custom research role"},
+        ],
+        "response_payload_refs": {"requires_prose_parsing": True},
+    }
+
+    metadata = lateral_review_response_to_interview_orchestration_metadata(
+        payload,
+        session_id="sess-custom",
+        runtime_supports_parallel_subagents=False,
+        lateral_panel_metadata=custom_panel,
+    )
+
+    panel = metadata["lateral_panel"]
+    entries = panel["entries"]
+    assert panel["panel_id"] == "custom_lateral_panel.v9"
+    assert panel["mcp_tool"] == "custom_lateral_tool"
+    assert panel["execution_mode"] == "custom_sequential_mode"
+    assert panel["requires_prose_parsing"] is True
+    assert entries[0]["panel_id"] == "custom_lateral_panel.v9"
+    assert entries[0]["mcp_tool"] == "custom_lateral_tool"
+    assert entries[0]["persona_role"] == "Custom research role"
+    assert entries[0]["execution_mode"] == "custom_sequential_mode"
+    assert entries[0]["parallel_group"] == "sess-custom:custom_lateral_panel.v9"
+
+
+@pytest.mark.asyncio
+async def test_inline_lateral_content_converts_to_sequential_persona_panel_entries() -> None:
+    """Content-only inline fallback still yields structured panel entries."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview needs a lightweight review",
+            "current_approach": "ask the next Socratic question",
+            "personas": ["researcher", "simplifier"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    # Simulate an MCP transport that preserved only visible content and dropped meta.
+    content_only = MCPToolResult(
+        content=(MCPContentItem(type=ContentType.TEXT, text=payload.text_content),),
+        is_error=False,
+        meta={},
+    )
+
+    metadata = lateral_review_response_to_interview_orchestration_metadata(
+        content_only,
+        session_id="sess-inline",
+        runtime_supports_parallel_subagents=False,
+    )
+
+    panel = metadata["lateral_panel"]
+    entries = panel["entries"]
+    assert panel["panel_id"] == "lateral_persona_panel.v1"
+    assert panel["mcp_tool"] == "ouroboros_lateral_think"
+    assert panel["entry_count"] == 2
+    assert panel["execution_mode"] == "sequential_persona_payload_dispatch"
+    assert panel["requires_prose_parsing"] is False
+    assert [entry["persona_id"] for entry in entries] == ["researcher", "simplifier"]
+    assert {entry["dispatch_mode"] for entry in entries} == {"inline_fallback"}
+    assert {entry["response_payload_source"] for entry in entries} == {"inline_content"}
+    assert {entry["execution_mode"] for entry in entries} == {"sequential_persona_payload_dispatch"}
+    assert all(entry["sequential_fallback_used"] is True for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_sequential_lateral_consumer_receives_persona_payloads_in_order() -> None:
+    """Sequential fallback consumers receive persona payloads in request order."""
+    requested_personas = ["simplifier", "hacker", "researcher"]
+    handler = LateralThinkHandler(
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview needs ordered persona review",
+            "current_approach": "dispatch sequentially when parallel panes are unavailable",
+            "personas": requested_personas,
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        payload,
+        session_id="sess-sequential-consumer",
+        runtime_supports_parallel_subagents=False,
+    )
+
+    sequential_consumer_received = []
+    for entry in entries:
+        assert entry["execution_mode"] == "sequential_persona_payload_dispatch"
+        assert entry["sequential_fallback_used"] is True
+        sequential_consumer_received.append(
+            {
+                "execution_order": entry["execution_order"],
+                "persona_id": entry["persona_id"],
+                "agent": entry["agent"],
+                "context_persona": entry["context"]["persona"],
+                "prompt": entry["prompt"],
+            }
+        )
+
+    assert [item["execution_order"] for item in sequential_consumer_received] == [1, 2, 3]
+    assert [item["persona_id"] for item in sequential_consumer_received] == requested_personas
+    assert [item["agent"] for item in sequential_consumer_received] == requested_personas
+    assert [item["context_persona"] for item in sequential_consumer_received] == requested_personas
+    for item in sequential_consumer_received:
+        assert f"**{item['persona_id']}** persona" in item["prompt"]
+        assert "Task for you (subagent)" in item["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_sequential_lateral_synthesis_waits_for_configured_sequence_outputs() -> None:
+    """Sequential fallback gates synthesis until every ordered persona output arrives."""
+    requested_personas = ["simplifier", "hacker", "researcher"]
+    handler = LateralThinkHandler(
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview needs ordered persona synthesis",
+            "current_approach": "continue only after sequential review completes",
+            "personas": requested_personas,
+        }
+    )
+
+    assert result.is_ok, result
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        result.unwrap(),
+        session_id="sess-sequential-aggregate",
+        runtime_supports_parallel_subagents=False,
+    )
+    assert [entry["persona_id"] for entry in entries] == requested_personas
+    assert {entry["execution_mode"] for entry in entries} == {
+        "sequential_persona_payload_dispatch"
+    }
+    assert all(entry["sequential_fallback_used"] is True for entry in entries)
+
+    synthesis_calls = []
+
+    def synthesize(aggregated_outputs: list[dict]) -> dict:
+        synthesis_calls.append(aggregated_outputs)
+        return {
+            "persona_ids": [item["persona_id"] for item in aggregated_outputs],
+            "combined": "\n".join(str(item["output"]) for item in aggregated_outputs),
+        }
+
+    consumed_outputs: dict[str, str] = {}
+    for index, persona_id in enumerate(requested_personas[:-1], start=1):
+        consumed_outputs[persona_id] = f"{persona_id} output"
+        partial = synthesize_lateral_persona_panel_when_complete(
+            entries,
+            consumed_outputs,
+            synthesize,
+        )
+
+        assert partial["ready_for_synthesis"] is False
+        assert partial["missing_personas"] == requested_personas[index:]
+        assert [item["persona_id"] for item in partial["aggregated_outputs"]] == (
+            requested_personas[:index]
+        )
+        assert partial["synthesis"] is None
+        assert synthesis_calls == []
+
+    consumed_outputs[requested_personas[-1]] = "researcher output"
+    complete = synthesize_lateral_persona_panel_when_complete(
+        entries,
+        consumed_outputs,
+        synthesize,
+    )
+
+    assert complete["ready_for_synthesis"] is True
+    assert complete["missing_personas"] == []
+    assert complete["synthesis"] == {
+        "persona_ids": requested_personas,
+        "combined": "simplifier output\nhacker output\nresearcher output",
+    }
+    assert len(synthesis_calls) == 1
+    assert [item["persona_id"] for item in synthesis_calls[0]] == requested_personas
+
+
+@pytest.mark.asyncio
+async def test_sequential_lateral_synthesis_precedes_interview_continuation() -> None:
+    """Sequential fallback also synthesizes before the interview turn resumes."""
+    requested_personas = ["simplifier", "hacker", "researcher"]
+    handler = LateralThinkHandler(
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview needs ordered persona review",
+            "current_approach": "continue only after sequential synthesis",
+            "personas": requested_personas,
+        }
+    )
+
+    assert result.is_ok, result
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        result.unwrap(),
+        session_id="sess-sequential-continuation-order",
+        runtime_supports_parallel_subagents=False,
+    )
+    assert all(entry["sequential_fallback_used"] is True for entry in entries)
+
+    timeline: list[str] = []
+
+    def synthesize(aggregated_outputs: list[dict]) -> dict:
+        timeline.append("synthesis")
+        return {
+            "persona_ids": [item["persona_id"] for item in aggregated_outputs],
+            "summary": "ordered lateral synthesis is ready",
+        }
+
+    def continue_interview(synthesis: dict) -> dict:
+        assert timeline == ["synthesis"]
+        assert synthesis["persona_ids"] == requested_personas
+        timeline.append("interview_continuation")
+        return {
+            "next_question": "Which assumption remains unclear?",
+            "lateral_synthesis": synthesis,
+        }
+
+    incomplete = continue_interview_after_lateral_persona_synthesis(
+        entries,
+        {
+            "simplifier": "reduce follow-up scope",
+            "hacker": "identify workaround risk",
+        },
+        synthesize,
+        continue_interview,
+    )
+
+    assert incomplete["ready_for_synthesis"] is False
+    assert incomplete["continued_interview"] is False
+    assert timeline == []
+
+    complete = continue_interview_after_lateral_persona_synthesis(
+        entries,
+        {
+            "researcher": "verify implementation facts",
+            "hacker": "identify workaround risk",
+            "simplifier": "reduce follow-up scope",
+        },
+        synthesize,
+        continue_interview,
+    )
+
+    assert complete["ready_for_synthesis"] is True
+    assert complete["continued_interview"] is True
+    assert complete["interview_continuation"] == {
+        "next_question": "Which assumption remains unclear?",
+        "lateral_synthesis": complete["synthesis"],
+    }
+    assert timeline == ["synthesis", "interview_continuation"]
 
 
 @pytest.mark.asyncio
@@ -306,6 +869,7 @@ async def test_inline_fallback_carries_dispatch_block_in_content() -> None:
     assert len(payloads) == 2
 
     for persona_name, persona_payload in zip(["hacker", "contrarian"], payloads, strict=True):
+        assert persona_payload["agent"] == persona_name
         assert persona_payload["title"] == f"Lateral ({persona_name})"
         # The canonical prompt carries the "Task for you (subagent)" wrapper
         # that plugin mode also dispatches — same builder, same prompt.

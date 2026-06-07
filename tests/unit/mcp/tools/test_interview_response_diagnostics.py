@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
 import pytest
 
 from ouroboros.bigbang.interview import (
@@ -28,6 +29,11 @@ from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+from ouroboros.mcp.tools.subagent import synthesize_code_investigation_when_complete
+from ouroboros.orchestrator.capabilities import (
+    interview_code_investigation_answer_contract,
+    stable_code_investigation_question_identity,
+)
 
 
 @dataclass(slots=True)
@@ -58,6 +64,7 @@ class _StubInterviewEngine:
     next_question: str = "What is the primary user persona?"
     initial_state: InterviewState | None = None
     saved_states: list[InterviewState] = field(default_factory=list)
+    record_calls: list[dict[str, str]] = field(default_factory=list)
 
     async def start_interview(
         self,
@@ -83,6 +90,7 @@ class _StubInterviewEngine:
         user_response: str,
         question: str,
     ) -> Result[InterviewState, MCPServerError]:
+        self.record_calls.append({"question": question, "answer": user_response})
         state.rounds.append(
             InterviewRound(
                 round_number=state.current_round_number,
@@ -132,6 +140,273 @@ def _assert_reasoning_meta(meta: dict[str, Any], *, phase: str, session_id: str)
     assert f"session: {session_id}" in meta["internal_reasoning"]
 
 
+def _assert_code_investigation_request(
+    meta: dict[str, Any],
+    *,
+    session_id: str,
+    question: str,
+) -> None:
+    request = meta["code_investigation_request"]
+    assert request["session_id"] == session_id
+    assert request["question"] == question
+    assert request["question_identity"] == stable_code_investigation_question_identity(
+        question
+    )
+    assert request["investigation_goal"] == "describe_current_state_from_code"
+    assert request["investigation_targets"] == [
+        {"target_type": "workspace", "scope": "active"}
+    ]
+    assert "configuration" in request["fact_categories"]
+    assert request["allowed_capabilities"] == ["inspect_code"]
+    repo_tool_capabilities = request["repo_inspection_tool_capabilities"]
+    repo_tool_by_name = {tool["tool_name"]: tool for tool in repo_tool_capabilities}
+    assert set(repo_tool_by_name) == {"Read", "Glob", "Grep"}
+    for tool_name, tool_capability in repo_tool_by_name.items():
+        assert tool_capability["stable_id"] == f"builtin:{tool_name}"
+        assert tool_capability["source_kind"] == "builtin"
+        assert tool_capability["execution_mode"] == "repo_inspection"
+        assert tool_capability["logical_capability"] == "inspect_code"
+        assert tool_capability["mutation_class"] == "read_only"
+        assert tool_capability["side_effects"] == ["side_effect_free"]
+        assert tool_capability["fallback_used"] is False
+        Draft202012Validator.check_schema(tool_capability["input_schema"])
+    assert repo_tool_by_name["Read"]["input_schema"]["required"] == ["file_path"]
+    assert repo_tool_by_name["Glob"]["input_schema"]["required"] == ["pattern"]
+    assert repo_tool_by_name["Grep"]["input_schema"]["required"] == ["pattern"]
+    assert request["answer_prefixes"] == ["[from-code]", "[from-code][auto-confirmed]"]
+    assert request["answer_contract"] == interview_code_investigation_answer_contract()
+    capability = request["mcp_tool_capability"]
+    assert capability["tool_name"] == "ouroboros_interview"
+    assert capability["source_kind"] == "attached_mcp"
+    assert capability["source_name"] == "ouroboros"
+    assert capability["fallback_used"] is False
+    assert capability["execution_mode"] == "subagent_orchestration"
+    assert set(capability) >= {
+        "input_schema",
+        "execution_mode",
+        "companions",
+        "required_context_keys",
+        "side_effects",
+        "retry",
+        "interrupt",
+        "cancel",
+    }
+    request_schema = capability["orchestration"]["code_investigation"][
+        "request_model_schema"
+    ]
+    Draft202012Validator(request_schema).validate(request)
+
+
+@pytest.mark.asyncio
+async def test_code_investigation_results_are_collected_before_synthesis(
+    tmp_path: Path,
+) -> None:
+    """Code-fact subagent output is collected and passed to synthesis."""
+    engine = _StubInterviewEngine(state_dir=tmp_path)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=_CapturingEventStore(),
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {"initial_context": "Build a CLI", "cwd": str(tmp_path)},
+    )
+    assert outcome.is_ok
+    request = outcome.value.meta["code_investigation_request"]
+    response_schema = request["answer_contract"]["response_model_schema"]
+    code_fact_output = {
+        "session_id": request["session_id"],
+        "question_identity": request["question_identity"],
+        "answer_prefix": "[from-code][auto-confirmed]",
+        "answer_text": "The current project is a Python package managed by pyproject.toml.",
+        "confidence": "high_exact_match",
+        "evidence": [
+            {
+                "source": "pyproject.toml",
+                "locator": "project.name",
+                "claim": "The manifest declares the Python project metadata.",
+            }
+        ],
+        "requires_user_confirmation": False,
+    }
+    Draft202012Validator(response_schema).validate(code_fact_output)
+
+    synthesis_calls: list[list[dict[str, Any]]] = []
+
+    def synthesize(aggregated_outputs: list[dict[str, Any]]) -> dict[str, Any]:
+        synthesis_calls.append(aggregated_outputs)
+        collected = aggregated_outputs[0]["output"]
+        return {
+            "answer": f"{collected['answer_prefix']} {collected['answer_text']}",
+            "evidence_sources": [
+                evidence["source"] for evidence in collected["evidence"]
+            ],
+        }
+
+    partial = synthesize_code_investigation_when_complete(
+        request,
+        {
+            "code_facts": {
+                **code_fact_output,
+                "question_identity": stable_code_investigation_question_identity(
+                    "a different question"
+                ),
+            }
+        },
+        synthesize,
+    )
+    assert partial["ready_for_synthesis"] is False
+    assert partial["missing_result_ids"] == ["code_facts"]
+    assert partial["aggregated_outputs"] == []
+    assert partial["synthesis"] is None
+    assert synthesis_calls == []
+
+    complete = synthesize_code_investigation_when_complete(
+        request,
+        {"code_facts": code_fact_output},
+        synthesize,
+    )
+    assert complete["ready_for_synthesis"] is True
+    assert complete["missing_result_ids"] == []
+    assert complete["aggregated_outputs"] == [
+        {"result_id": "code_facts", "output": code_fact_output}
+    ]
+    assert complete["synthesis"] == {
+        "answer": (
+            "[from-code][auto-confirmed] The current project is a Python "
+            "package managed by pyproject.toml."
+        ),
+        "evidence_sources": ["pyproject.toml"],
+    }
+    assert synthesis_calls == [[{"result_id": "code_facts", "output": code_fact_output}]]
+
+
+@pytest.mark.asyncio
+async def test_interview_answer_records_only_after_code_investigation_synthesis(
+    tmp_path: Path,
+) -> None:
+    """The parent runtime must submit an interview answer only after synthesis.
+
+    ``InterviewHandler`` exposes code-investigation metadata and records whatever
+    answer the parent runtime later submits. This test pins the orchestration
+    boundary: incomplete investigation output does not call the answer path, and
+    the eventual recorded answer is the synthesized code-fact answer.
+    """
+    engine = _StubInterviewEngine(state_dir=tmp_path, next_question="Which framework is used?")
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=_CapturingEventStore(),
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    start = await handler.handle({"initial_context": "Audit the current app"})
+    assert start.is_ok
+    request = start.value.meta["code_investigation_request"]
+    request["required_result_ids"] = ["manifest", "router"]
+
+    contract = request["answer_contract"]
+    response_schema = contract["response_model_schema"]
+    manifest_output = {
+        "session_id": request["session_id"],
+        "question_identity": request["question_identity"],
+        "answer_prefix": "[from-code][auto-confirmed]",
+        "answer_text": "The manifest declares a Python package.",
+        "confidence": "high_exact_match",
+        "evidence": [
+            {
+                "source": "pyproject.toml",
+                "locator": "project.name",
+                "claim": "The project metadata is declared in pyproject.toml.",
+            }
+        ],
+        "requires_user_confirmation": False,
+    }
+    router_output = {
+        "session_id": request["session_id"],
+        "question_identity": request["question_identity"],
+        "answer_prefix": "[from-code]",
+        "answer_text": "No web router is present in the inspected files.",
+        "confidence": "medium_inferred",
+        "evidence": [
+            {
+                "source": "rg --files",
+                "locator": "workspace root",
+                "claim": "No frontend router file was found in the fixture workspace.",
+            }
+        ],
+        "requires_user_confirmation": True,
+        "user_confirmation_prompt": (
+            "Confirm whether the missing web router means this is not a web app."
+        ),
+    }
+    Draft202012Validator(response_schema).validate(manifest_output)
+    Draft202012Validator(response_schema).validate(router_output)
+
+    ordering: list[str] = []
+
+    def synthesize(aggregated_outputs: list[dict[str, Any]]) -> dict[str, Any]:
+        ordering.append("synthesized")
+        answer_lines = [
+            item["output"]["answer_text"]
+            for item in aggregated_outputs
+        ]
+        return {
+            "answer": "[from-code] " + " ".join(answer_lines),
+            "evidence_sources": [
+                evidence["source"]
+                for item in aggregated_outputs
+                for evidence in item["output"]["evidence"]
+            ],
+        }
+
+    partial = synthesize_code_investigation_when_complete(
+        request,
+        {"manifest": manifest_output},
+        synthesize,
+    )
+    assert partial["ready_for_synthesis"] is False
+    assert partial["synthesis"] is None
+    assert ordering == []
+    assert engine.record_calls == []
+
+    complete = synthesize_code_investigation_when_complete(
+        request,
+        {"manifest": manifest_output, "router": router_output},
+        synthesize,
+    )
+    assert complete["ready_for_synthesis"] is True
+    synthesized_answer = complete["synthesis"]["answer"]
+
+    state = engine.saved_states[-1]
+    engine.initial_state = state
+    engine.next_question = "What should acceptance cover?"
+    answer = await handler.handle(
+        {
+            "session_id": request["session_id"],
+            "answer": synthesized_answer,
+            "last_question": request["question"],
+        }
+    )
+
+    assert answer.is_ok
+    assert ordering == ["synthesized"]
+    assert engine.record_calls == [
+        {
+            "question": "Which framework is used?",
+            "answer": synthesized_answer,
+        }
+    ]
+    recorded_round = state.rounds[0]
+    assert recorded_round.question == "Which framework is used?"
+    assert recorded_round.user_response == synthesized_answer
+    assert "pyproject.toml" in complete["synthesis"]["evidence_sources"]
+
+
 @pytest.mark.asyncio
 async def test_start_emits_response_diagnostic_event(tmp_path: Path) -> None:
     """Start path: a normal first question emits the response.emitted event."""
@@ -151,6 +426,11 @@ async def test_start_emits_response_diagnostic_event(tmp_path: Path) -> None:
     assert outcome.is_ok
     _assert_reasoning_meta(
         outcome.value.meta, phase="start", session_id="interview_diagnostics00001"
+    )
+    _assert_code_investigation_request(
+        outcome.value.meta,
+        session_id="interview_diagnostics00001",
+        question="What is the primary user persona?",
     )
     assert outcome.value.meta["interview_reasoning"]["pending_question"] is True
     assert outcome.value.meta["interview_reasoning"]["question_chars"] == len(
@@ -194,6 +474,7 @@ async def test_start_with_length_guard_question_marks_event(tmp_path: Path) -> N
         {"initial_context": "Build a CLI", "cwd": str(tmp_path)},
     )
     assert outcome.is_ok
+    assert "code_investigation_request" not in outcome.value.meta
     await _drain_bg_tasks(handler)
 
     diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
@@ -234,6 +515,11 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
         outcome.value.meta,
         phase="resume_pending",
         session_id=pending_state.interview_id,
+    )
+    _assert_code_investigation_request(
+        outcome.value.meta,
+        session_id=pending_state.interview_id,
+        question="What is the main goal?",
     )
     assert outcome.value.meta["interview_reasoning"]["pending_question"] is True
     await _drain_bg_tasks(handler)
@@ -326,6 +612,11 @@ async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
         outcome.value.meta,
         phase="answer",
         session_id=pending_state.interview_id,
+    )
+    _assert_code_investigation_request(
+        outcome.value.meta,
+        session_id=pending_state.interview_id,
+        question="Who uses it first?",
     )
     assert outcome.value.meta["interview_reasoning"]["answered_rounds"] == 1
     assert outcome.value.content[0].text == (
