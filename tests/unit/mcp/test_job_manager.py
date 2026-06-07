@@ -4360,9 +4360,7 @@ class TestZombieJobReconciliation:
             )
             restarted = JobManager(store)
 
-            with patch.object(
-                job_manager_module, "is_process_identity_alive", return_value=False
-            ):
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
                 snapshot = await restarted.get_snapshot("job_zombie")
 
             assert snapshot.status is JobStatus.INTERRUPTED
@@ -4384,9 +4382,7 @@ class TestZombieJobReconciliation:
             )
             restarted = JobManager(store)
 
-            with patch.object(
-                job_manager_module, "is_process_identity_alive", return_value=True
-            ):
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=True):
                 snapshot = await restarted.get_snapshot("job_live")
 
             assert snapshot.status is JobStatus.RUNNING
@@ -4398,9 +4394,7 @@ class TestZombieJobReconciliation:
     async def test_legacy_job_without_owner_identity_is_not_reconciled(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         try:
-            await self._seed_running_job(
-                store, "job_legacy", owner_pid=None, owner_start_time=None
-            )
+            await self._seed_running_job(store, "job_legacy", owner_pid=None, owner_start_time=None)
             restarted = JobManager(store)
 
             with patch.object(
@@ -4424,9 +4418,7 @@ class TestZombieJobReconciliation:
             )
             restarted = JobManager(store)
 
-            with patch.object(
-                job_manager_module, "is_process_identity_alive", return_value=False
-            ):
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
                 first = await restarted.get_snapshot("job_idem")
                 second = await restarted.get_snapshot("job_idem")
 
@@ -4441,9 +4433,7 @@ class TestZombieJobReconciliation:
         finally:
             await store.close()
 
-    async def test_read_only_store_projects_interrupted_without_persisting(
-        self, tmp_path
-    ) -> None:
+    async def test_read_only_store_projects_interrupted_without_persisting(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         try:
             await self._seed_running_job(
@@ -4453,9 +4443,7 @@ class TestZombieJobReconciliation:
             await restarted._ensure_initialized()
             store._read_only = True
 
-            with patch.object(
-                job_manager_module, "is_process_identity_alive", return_value=False
-            ):
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
                 snapshot = await restarted.get_snapshot("job_ro")
 
             assert snapshot.status is JobStatus.INTERRUPTED
