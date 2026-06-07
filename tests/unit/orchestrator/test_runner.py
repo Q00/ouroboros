@@ -37,6 +37,7 @@ from ouroboros.orchestrator.runner import (
     build_system_prompt,
     build_task_prompt,
 )
+from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 
 
@@ -1476,6 +1477,54 @@ class TestOrchestratorRunner:
         assert pause.pause_kind == "usage_limit"
         assert pause.pause_seconds == 18000
         assert pause.resume_after == now + timedelta(hours=5)
+
+    def test_recoverable_failure_detects_hermes_usage_limit_exit(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Regression for issue 1.1: a hermes non-zero exit carrying a Z.AI/GLM
+        usage-limit 429 must pause, not hard-fail. Before the typed-error
+        contract the hermes path emitted only ``{"subtype","exit_code"}``, which
+        the classifier rejected for lacking runtime-error shape."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        failure_text = (
+            "API call failed after 3 retries:\n"
+            "HTTP 429: Usage limit reached for 5 hour.\n"
+            "Your limit will reset at 2026-06-07 21:41:18"
+        )
+        message = AgentMessage(
+            type="result",
+            content=f"Hermes execution failed:\n{failure_text}",
+            data=classify_subprocess_failure(failure_text, exit_code=1),
+        )
+
+        pause = runner._recoverable_failure_pause(message, now=now)
+
+        assert pause is not None
+        assert pause.pause_kind == "usage_limit"
+        assert pause.pause_seconds == 18000
+        assert pause.resume_after == now + timedelta(hours=5)
+
+    def test_recoverable_failure_ignores_ordinary_hermes_exit(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """A typed-but-ordinary hermes failure must not trigger a usage pause."""
+        message = AgentMessage(
+            type="result",
+            content="Hermes execution failed:\nTraceback: ValueError: bad config",
+            data=classify_subprocess_failure(
+                "Traceback: ValueError: bad config",
+                exit_code=1,
+            ),
+        )
+
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+        assert pause is None
 
     def test_recoverable_failure_sums_compound_retry_window(
         self,
